@@ -94,6 +94,21 @@ class MediaItem {
   );
 }
 
+@immutable
+class MediaPage {
+  final List<MediaItem> items;
+  final int page;
+  final int totalPages;
+
+  const MediaPage({
+    required this.items,
+    required this.page,
+    required this.totalPages,
+  });
+
+  bool get hasMore => page < totalPages;
+}
+
 /// A resolved, playable stream: the URL plus any HTTP headers the player must
 /// send (User-Agent, Referer, etc.). Stalker and Xtream often need a MAG
 /// User-Agent here; M3U usually needs nothing.
@@ -166,6 +181,20 @@ abstract class Source {
     MediaItem? parent,
     int? maxPages,
   }) async => const [];
+
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async {
+    final items = await mediaItems(
+      kind,
+      categoryId: categoryId,
+      parent: parent,
+    );
+    return MediaPage(items: items, page: page, totalPages: page);
+  }
 
   Future<MediaItem> mediaDetails(MediaItem item) async => item;
 

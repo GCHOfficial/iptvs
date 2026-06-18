@@ -305,6 +305,35 @@ class StalkerSource implements Source {
   }
 
   @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async {
+    if (kind != ContentKind.movie && kind != ContentKind.series) {
+      return MediaPage(items: const [], page: page, totalPages: page);
+    }
+    final raw = await _getOrderedListPage(
+      type: 'vod',
+      category: categoryId,
+      page: page,
+    );
+    final items = raw.rows
+        .where((m) {
+          final isSeries = '${m['is_series']}' == '1';
+          return kind == ContentKind.series ? isSeries : !isSeries;
+        })
+        .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
+        .toList();
+    return MediaPage(
+      items: items,
+      page: page,
+      totalPages: raw.totalPages < page ? page : raw.totalPages,
+    );
+  }
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     if (item.kind != ContentKind.movie && item.kind != ContentKind.series) {
       return item;
@@ -463,9 +492,14 @@ class StalkerSource implements Source {
     final js = r['js'];
     final rows = _extractListData(js);
     final totalItems = _parseInt(js is Map ? js['total_items'] : null);
+    final maxPageItems = _parseInt(js is Map ? js['max_page_items'] : null);
     return _OrderedListPage(
       rows: rows,
-      totalPages: _inferTotalPages(totalItems, rows.length),
+      totalPages: _inferTotalPages(
+        totalItems: totalItems,
+        itemsOnPage: rows.length,
+        maxPageItems: maxPageItems,
+      ),
     );
   }
 
@@ -492,10 +526,17 @@ class StalkerSource implements Source {
     return out;
   }
 
-  int _inferTotalPages(int? totalItems, int itemsOnFirstPage) {
-    if (totalItems == null || totalItems <= itemsOnFirstPage) return 1;
-    if (itemsOnFirstPage <= 0) return 1;
-    return (totalItems / itemsOnFirstPage).ceil();
+  int _inferTotalPages({
+    required int? totalItems,
+    required int itemsOnPage,
+    required int? maxPageItems,
+  }) {
+    if (totalItems == null || totalItems <= 0) return 1;
+    final pageSize = (maxPageItems != null && maxPageItems > 0)
+        ? maxPageItems
+        : itemsOnPage;
+    if (pageSize <= 0 || totalItems <= pageSize) return 1;
+    return (totalItems / pageSize).ceil();
   }
 
   int? _parseInt(dynamic value) {

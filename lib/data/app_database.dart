@@ -25,7 +25,7 @@ class AppDatabase {
 
     final db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE sources (
@@ -74,6 +74,10 @@ class AppDatabase {
         if (oldV < 3) {
           await _createMediaTables(db);
         }
+        if (oldV >= 3 && oldV < 4) {
+          await _addMediaPagingColumns(db);
+          await _createMediaEnrichment(db);
+        }
       },
     );
     return AppDatabase._(db);
@@ -101,6 +105,8 @@ class AppDatabase {
         source_id TEXT NOT NULL,
         kind      TEXT NOT NULL,
         synced_at INTEGER NOT NULL,
+        loaded_pages INTEGER NOT NULL DEFAULT 1,
+        total_pages INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (source_id, kind)
       )
     ''');
@@ -133,6 +139,37 @@ class AppDatabase {
     await db.execute(
       'CREATE INDEX idx_media_items_source_kind_cat ON media_items(source_id, kind, category_id)',
     );
+    await _createMediaEnrichment(db);
+  }
+
+  static Future<void> _addMediaPagingColumns(Database db) async {
+    await db.execute(
+      'ALTER TABLE media_sync ADD COLUMN loaded_pages INTEGER NOT NULL DEFAULT 1',
+    );
+    await db.execute(
+      'ALTER TABLE media_sync ADD COLUMN total_pages INTEGER NOT NULL DEFAULT 1',
+    );
+  }
+
+  static Future<void> _createMediaEnrichment(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS media_enrichment (
+        source_id     TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        media_id      TEXT NOT NULL,
+        provider      TEXT NOT NULL,
+        provider_id   TEXT,
+        title         TEXT,
+        overview      TEXT,
+        poster        TEXT,
+        backdrop      TEXT,
+        year          TEXT,
+        rating        REAL,
+        payload       TEXT,
+        refreshed_at  INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, media_id, provider)
+      )
+    ''');
   }
 
   // ── channels / categories ───────────────────────────────────────────────
@@ -189,6 +226,22 @@ class AppDatabase {
     );
     if (rows.isEmpty) return null;
     return DateTime.fromMillisecondsSinceEpoch(rows.first['synced_at'] as int);
+  }
+
+  Future<({DateTime syncedAt, int loadedPages, int totalPages})?>
+  mediaSyncState(String sourceId, ContentKind kind) async {
+    final rows = await _db.query(
+      'media_sync',
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.first;
+    return (
+      syncedAt: DateTime.fromMillisecondsSinceEpoch(row['synced_at'] as int),
+      loadedPages: row['loaded_pages'] as int? ?? 1,
+      totalPages: row['total_pages'] as int? ?? 1,
+    );
   }
 
   Future<List<MediaCategory>> readMediaCategories(
@@ -250,8 +303,10 @@ class AppDatabase {
     String sourceId,
     ContentKind kind,
     List<MediaCategory> categories,
-    List<MediaItem> items,
-  ) async {
+    List<MediaItem> items, {
+    int loadedPages = 1,
+    int totalPages = 1,
+  }) async {
     await _db.transaction((txn) async {
       await txn.delete(
         'media_categories',
@@ -290,6 +345,41 @@ class AppDatabase {
         'source_id': sourceId,
         'kind': kind.name,
         'synced_at': DateTime.now().millisecondsSinceEpoch,
+        'loaded_pages': loadedPages,
+        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<void> appendMediaItems(
+    String sourceId,
+    ContentKind kind,
+    List<MediaItem> items, {
+    required int loadedPages,
+    required int totalPages,
+  }) async {
+    await _db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final item in items) {
+        batch.insert('media_items', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'id': item.id,
+          'title': item.title,
+          'category_id': item.categoryId,
+          'poster': item.poster,
+          'description': item.description,
+          'year': item.year,
+          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      batch.insert('media_sync', {
+        'source_id': sourceId,
+        'kind': kind.name,
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+        'loaded_pages': loadedPages,
+        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
       }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
     });

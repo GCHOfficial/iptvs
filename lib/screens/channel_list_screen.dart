@@ -33,6 +33,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final Map<ContentKind, MediaLibrarySnapshot> _media = {};
   final Map<ContentKind, String?> _mediaCategoryId = {};
   final Map<ContentKind, bool> _mediaLoading = {};
+  final Map<ContentKind, bool> _mediaLoadingMore = {};
   final Map<ContentKind, String?> _mediaError = {};
   Map<String, Programme> _now = const {};
   Map<String, Programme> _next = const {};
@@ -119,6 +120,28 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       setState(() {
         _mediaError[kind] = '$e';
         _mediaLoading[kind] = false;
+      });
+    }
+  }
+
+  Future<void> _loadMoreMedia(ContentKind kind) async {
+    if (_mediaLoadingMore[kind] == true) return;
+    setState(() {
+      _mediaLoadingMore[kind] = true;
+      _mediaError[kind] = null;
+    });
+    try {
+      final snap = await widget.repo.loadMoreMedia(kind);
+      if (!mounted) return;
+      setState(() {
+        _media[kind] = snap;
+        _mediaLoadingMore[kind] = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _mediaError[kind] = '$e';
+        _mediaLoadingMore[kind] = false;
       });
     }
   }
@@ -242,6 +265,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final snap = _media[kind];
     final label = kind == ContentKind.movie ? 'movies' : 'series';
     final b = StringBuffer('Showing ${_fmt(count)} $label');
+    if (snap != null && snap.totalPages > 1) {
+      b.write(' · pages ${snap.loadedPages}/${snap.totalPages}');
+    }
     if (snap?.syncedAt != null) {
       b.write(
         snap!.fromCache
@@ -404,8 +430,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   Widget _mediaBody(ContentKind kind) {
     final loading = _mediaLoading[kind] == true;
+    final loadingMore = _mediaLoadingMore[kind] == true;
     final error = _mediaError[kind];
     final visible = _visibleMedia(kind);
+    final showLoadMore = loadingMore || _media[kind]?.hasMore == true;
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
       return Center(
@@ -444,12 +472,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           return ListView.builder(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
             scrollCacheExtent: const ScrollCacheExtent.pixels(800),
-            itemCount: visible.length,
-            itemBuilder: (context, i) => _MediaListTile(
-              item: visible[i],
-              autofocus: i == 0,
-              onTap: () => _openMedia(visible[i]),
-            ),
+            itemCount: visible.length + (showLoadMore ? 1 : 0),
+            itemBuilder: (context, i) {
+              if (i == visible.length) {
+                return _MediaLoadMoreTile(
+                  snapshot: _media[kind],
+                  loading: loadingMore,
+                  onPressed: () => _loadMoreMedia(kind),
+                );
+              }
+              return _MediaListTile(
+                item: visible[i],
+                autofocus: i == 0,
+                onTap: () => _openMedia(visible[i]),
+              );
+            },
           );
         }
         final columns = constraints.maxWidth >= 1280 ? 6 : 4;
@@ -462,12 +499,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             mainAxisSpacing: 12,
             childAspectRatio: 0.64,
           ),
-          itemCount: visible.length,
-          itemBuilder: (context, i) => _MediaGridTile(
-            item: visible[i],
-            autofocus: i == 0,
-            onTap: () => _openMedia(visible[i]),
-          ),
+          itemCount: visible.length + (showLoadMore ? 1 : 0),
+          itemBuilder: (context, i) {
+            if (i == visible.length) {
+              return _MediaLoadMoreCard(
+                snapshot: _media[kind],
+                loading: loadingMore,
+                onPressed: () => _loadMoreMedia(kind),
+              );
+            }
+            return _MediaGridTile(
+              item: visible[i],
+              autofocus: i == 0,
+              onTap: () => _openMedia(visible[i]),
+            );
+          },
         );
       },
     );
@@ -1025,6 +1071,92 @@ class _MediaGridTile extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textLo, fontSize: 12),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaLoadMoreTile extends StatelessWidget {
+  final MediaLibrarySnapshot? snapshot;
+  final bool loading;
+  final VoidCallback onPressed;
+
+  const _MediaLoadMoreTile({
+    required this.snapshot,
+    required this.loading,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final canLoad = snapshot?.hasMore == true;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Center(
+        child: FilledButton.icon(
+          onPressed: canLoad && !loading ? onPressed : null,
+          icon: loading
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.expand_more_rounded),
+          label: Text(
+            loading
+                ? 'Loading'
+                : canLoad
+                ? 'Load more'
+                : 'All loaded',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaLoadMoreCard extends StatelessWidget {
+  final MediaLibrarySnapshot? snapshot;
+  final bool loading;
+  final VoidCallback onPressed;
+
+  const _MediaLoadMoreCard({
+    required this.snapshot,
+    required this.loading,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final canLoad = snapshot?.hasMore == true;
+    return FocusableCard(
+      autofocus: false,
+      onTap: canLoad && !loading ? onPressed : () {},
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loading)
+              const SizedBox.square(
+                dimension: 28,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(
+                canLoad ? Icons.expand_more_rounded : Icons.check_rounded,
+                color: canLoad ? AppColors.accent : AppColors.textLo,
+                size: 32,
+              ),
+            const SizedBox(height: 8),
+            Text(
+              loading
+                  ? 'Loading'
+                  : canLoad
+                  ? 'Load more'
+                  : 'All loaded',
+              style: const TextStyle(color: AppColors.textLo),
+            ),
           ],
         ),
       ),

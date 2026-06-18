@@ -157,6 +157,19 @@ class XtreamSource implements Source {
   }
 
   @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async {
+    final items = page == 1
+        ? await mediaItems(kind, categoryId: categoryId, parent: parent)
+        : const <MediaItem>[];
+    return MediaPage(items: items, page: page, totalPages: 1);
+  }
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     final action = switch (item.kind) {
       ContentKind.movie => 'get_vod_info',

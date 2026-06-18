@@ -21,6 +21,8 @@ class MediaLibrarySnapshot {
   final List<MediaItem> items;
   final bool fromCache;
   final DateTime? syncedAt;
+  final int loadedPages;
+  final int totalPages;
 
   const MediaLibrarySnapshot({
     required this.kind,
@@ -28,7 +30,11 @@ class MediaLibrarySnapshot {
     required this.items,
     required this.fromCache,
     required this.syncedAt,
+    this.loadedPages = 1,
+    this.totalPages = 1,
   });
+
+  bool get hasMore => loadedPages < totalPages;
 }
 
 /// Sits between a [Source] and the [AppDatabase]: serves channels from cache
@@ -114,8 +120,8 @@ class LibraryRepository {
   }) async {
     await source.connect();
     if (!forceRefresh) {
-      final synced = await db.lastMediaSynced(source.id, kind);
-      if (synced != null) {
+      final sync = await db.mediaSyncState(source.id, kind);
+      if (sync != null) {
         final items = await db.readMediaItems(source.id, kind);
         if (items.isNotEmpty) {
           return MediaLibrarySnapshot(
@@ -123,39 +129,56 @@ class LibraryRepository {
             categories: await db.readMediaCategories(source.id, kind),
             items: items,
             fromCache: true,
-            syncedAt: synced,
+            syncedAt: sync.syncedAt,
+            loadedPages: sync.loadedPages,
+            totalPages: sync.totalPages,
           );
         }
       }
     }
 
     final categories = await source.mediaCategories(kind);
-    final items = await _fetchMediaItems(kind, categories);
-    await db.replaceMediaLibrary(source.id, kind, categories, items);
+    final fetched = await _fetchMediaItems(kind, categories);
+    await db.replaceMediaLibrary(
+      source.id,
+      kind,
+      categories,
+      fetched.items,
+      loadedPages: fetched.loadedPages,
+      totalPages: fetched.totalPages,
+    );
     return MediaLibrarySnapshot(
       kind: kind,
       categories: categories,
-      items: items,
+      items: fetched.items,
       fromCache: false,
       syncedAt: DateTime.now(),
+      loadedPages: fetched.loadedPages,
+      totalPages: fetched.totalPages,
     );
   }
 
-  Future<List<MediaItem>> _fetchMediaItems(
-    ContentKind kind,
-    List<MediaCategory> categories,
-  ) async {
+  Future<({List<MediaItem> items, int loadedPages, int totalPages})>
+  _fetchMediaItems(ContentKind kind, List<MediaCategory> categories) async {
     final out = <MediaItem>[];
     final seen = <String>{};
+    var loadedPages = 1;
+    var totalPages = 1;
     void addAll(List<MediaItem> items) {
       for (final item in items) {
         if (item.id.isNotEmpty && seen.add(item.id)) out.add(item);
       }
     }
 
-    addAll(await source.mediaItems(kind, maxPages: _initialMediaPages));
+    for (var page = 1; page <= _initialMediaPages; page++) {
+      final fetched = await source.mediaItemsPage(kind, page: page);
+      totalPages = fetched.totalPages;
+      loadedPages = page;
+      addAll(fetched.items);
+      if (!fetched.hasMore) break;
+    }
     if (out.isNotEmpty || categories.isEmpty) {
-      return out;
+      return (items: out, loadedPages: loadedPages, totalPages: totalPages);
     }
 
     for (final category in categories) {
@@ -168,7 +191,44 @@ class LibraryRepository {
       );
       if (out.length >= 200) break;
     }
-    return out;
+    return (items: out, loadedPages: 1, totalPages: 1);
+  }
+
+  Future<MediaLibrarySnapshot> loadMoreMedia(ContentKind kind) async {
+    await source.connect();
+    final sync = await db.mediaSyncState(source.id, kind);
+    if (sync == null || sync.loadedPages >= sync.totalPages) {
+      return MediaLibrarySnapshot(
+        kind: kind,
+        categories: await db.readMediaCategories(source.id, kind),
+        items: await db.readMediaItems(source.id, kind),
+        fromCache: true,
+        syncedAt: sync?.syncedAt,
+        loadedPages: sync?.loadedPages ?? 1,
+        totalPages: sync?.totalPages ?? 1,
+      );
+    }
+
+    final page = sync.loadedPages + 1;
+    final fetched = await source.mediaItemsPage(kind, page: page);
+    final loadedPages = fetched.page;
+    final totalPages = fetched.totalPages;
+    await db.appendMediaItems(
+      source.id,
+      kind,
+      fetched.items,
+      loadedPages: loadedPages,
+      totalPages: totalPages,
+    );
+    return MediaLibrarySnapshot(
+      kind: kind,
+      categories: await db.readMediaCategories(source.id, kind),
+      items: await db.readMediaItems(source.id, kind),
+      fromCache: false,
+      syncedAt: DateTime.now(),
+      loadedPages: loadedPages,
+      totalPages: totalPages,
+    );
   }
 
   Future<MediaItem> mediaDetails(MediaItem item) => source.mediaDetails(item);

@@ -85,6 +85,14 @@ class M3uSource implements Source {
   }) async => const [];
 
   @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async => MediaPage(items: const [], page: page, totalPages: page);
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async => item;
 
   @override
