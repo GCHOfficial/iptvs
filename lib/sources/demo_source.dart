@@ -87,6 +87,7 @@ class DemoSource implements Source {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    int? maxPages,
   }) async => const [];
 
   @override

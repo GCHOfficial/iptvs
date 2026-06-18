@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import 'source.dart';
 
@@ -193,10 +194,13 @@ class StalkerSource implements Source {
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
-    final cmd = channel.extra['cmd']?.toString();
+    final cmd = _liveCommand(channel);
     if (cmd == null || cmd.isEmpty) {
       throw StalkerException('Channel "${channel.name}" has no cmd to resolve');
     }
+    _debug(
+      'resolve live id=${channel.id} name=${channel.name} cmd=${_commandShape(cmd)}',
+    );
     final r = await _call({
       'type': 'itv',
       'action': 'create_link',
@@ -207,8 +211,10 @@ class StalkerSource implements Source {
     final js = r['js'];
     final raw = js is Map ? _firstString(js, ['url', 'cmd']) : null;
     if (raw == null) throw StalkerException('create_link returned no URL');
+    final url = _normalizeLiveStreamUrl(raw, channel);
+    _debug('resolved live id=${channel.id} url=${_redactUrl(url)}');
     return StreamInfo(
-      url: _stripStreamPrefix(raw),
+      url: url,
       // Some portals gate the stream fetch on the MAG UA too.
       headers: {'User-Agent': profile.userAgent},
     );
@@ -279,11 +285,16 @@ class StalkerSource implements Source {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    int? maxPages,
   }) async {
     if (kind != ContentKind.movie && kind != ContentKind.series) {
       return const [];
     }
-    final rows = await _getOrderedList(type: 'vod', category: categoryId);
+    final rows = await _getOrderedList(
+      type: 'vod',
+      category: categoryId,
+      maxPages: maxPages,
+    );
     return rows
         .where((m) {
           final isSeries = '${m['is_series']}' == '1';
@@ -493,17 +504,22 @@ class StalkerSource implements Source {
     return int.tryParse(value.toString());
   }
 
-  Channel _mapChannel(Map<String, dynamic> ch) => Channel(
-    id: _firstString(ch, ['id', 'ch_id', 'channel_id']) ?? '${ch['name']}',
-    name: _firstString(ch, ['name', 'title']) ?? 'Untitled',
-    number: int.tryParse('${ch['number'] ?? ch['num'] ?? ''}'),
-    logo: _firstString(ch, ['logo', 'icon', 'stream_icon']),
-    categoryId: _firstString(ch, ['tv_genre_id', 'genre_id', 'category_id']),
-    extra: {
-      if (_firstString(ch, ['cmd', 'url']) != null)
-        'cmd': _firstString(ch, ['cmd', 'url']),
-    },
-  );
+  Channel _mapChannel(Map<String, dynamic> ch) {
+    final id =
+        _firstString(ch, ['id', 'ch_id', 'channel_id', 'stream_id']) ??
+        '${ch['name']}';
+    final cmd = _firstString(ch, ['cmd', 'url']);
+    final extra = <String, dynamic>{'streamId': id, 'raw': ch};
+    if (cmd != null) extra['cmd'] = cmd;
+    return Channel(
+      id: id,
+      name: _firstString(ch, ['name', 'title']) ?? 'Untitled',
+      number: int.tryParse('${ch['number'] ?? ch['num'] ?? ''}'),
+      logo: _firstString(ch, ['logo', 'icon', 'stream_icon']),
+      categoryId: _firstString(ch, ['tv_genre_id', 'genre_id', 'category_id']),
+      extra: extra,
+    );
+  }
 
   MediaItem _mapMediaItem(
     Map<String, dynamic> item, {
@@ -541,6 +557,76 @@ class StalkerSource implements Source {
       throw StalkerException('Movie "${item.title}" has no stream id');
     }
     return '/media/file_$streamId.mpg';
+  }
+
+  String? _liveCommand(Channel channel) {
+    final streamId = _liveStreamId(channel);
+    final direct = channel.extra['cmd']?.toString().trim();
+    if (direct != null && direct.isNotEmpty) {
+      final repaired = _replaceEmptyQueryValue(direct, 'stream', streamId);
+      if (!_hasEmptyQueryValue(repaired, 'stream')) return repaired;
+    }
+    if (streamId == null || streamId.isEmpty) return direct;
+    return '/play/live.php?mac=$mac&stream=$streamId&extension=ts';
+  }
+
+  String _normalizeLiveStreamUrl(String raw, Channel channel) {
+    final streamId = _liveStreamId(channel);
+    final stripped = _stripStreamPrefix(raw);
+    final repaired = _replaceEmptyQueryValue(stripped, 'stream', streamId);
+    if (_hasEmptyQueryValue(repaired, 'stream')) {
+      throw StalkerException(
+        'Resolved stream URL for "${channel.name}" has an empty stream id. '
+        'channel_id=${channel.id} cmd=${_commandShape(channel.extra['cmd']?.toString() ?? '')}',
+      );
+    }
+    return repaired;
+  }
+
+  String? _liveStreamId(Channel channel) {
+    final fromExtra = _firstString(channel.extra, [
+      'streamId',
+      'id',
+      'ch_id',
+      'channel_id',
+      'stream_id',
+    ]);
+    if (fromExtra != null) return fromExtra;
+    return channel.id.isEmpty ? null : channel.id;
+  }
+
+  String _replaceEmptyQueryValue(
+    String value,
+    String key,
+    String? replacement,
+  ) {
+    if (replacement == null || replacement.isEmpty) return value;
+    final uri = Uri.tryParse(value);
+    if (uri != null && uri.hasQuery) {
+      final params = Map<String, String>.from(uri.queryParameters);
+      if (params.containsKey(key) &&
+          (params[key] == null || params[key]!.isEmpty)) {
+        params[key] = replacement;
+        return uri.replace(queryParameters: params).toString();
+      }
+    }
+    final escapedKey = RegExp.escape(key);
+    return value.replaceAllMapped(
+      RegExp(r'([?&]' + escapedKey + r'=)(?=&|$)', caseSensitive: false),
+      (m) => '${m[1]}$replacement',
+    );
+  }
+
+  bool _hasEmptyQueryValue(String value, String key) {
+    final uri = Uri.tryParse(value);
+    if (uri != null && uri.hasQuery && uri.queryParameters.containsKey(key)) {
+      return uri.queryParameters[key]?.isEmpty ?? true;
+    }
+    final escapedKey = RegExp.escape(key);
+    return RegExp(
+      r'([?&]' + escapedKey + r'=)(?=&|$)',
+      caseSensitive: false,
+    ).hasMatch(value);
   }
 
   String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
@@ -813,8 +899,19 @@ class StalkerSource implements Source {
     return uri.replace(query: '').toString();
   }
 
+  String _commandShape(String value) {
+    if (value.isEmpty) return '<empty>';
+    final cleaned = redactStalkerDiagnostic(value);
+    final hasEmptyStream = _hasEmptyQueryValue(value, 'stream');
+    final uri = Uri.tryParse(value);
+    final path = uri?.path.isNotEmpty == true ? uri!.path : '<non-url>';
+    return 'path=$path emptyStream=$hasEmptyStream len=${value.length} value=${cleaned.length > 220 ? '${cleaned.substring(0, 220)}...' : cleaned}';
+  }
+
   void _debug(String message) {
     if (!diagnostics) return;
-    developer.log(redactStalkerDiagnostic(message), name: 'iptvs.stalker');
+    final redacted = redactStalkerDiagnostic(message);
+    developer.log(redacted, name: 'iptvs.stalker');
+    debugPrint('[iptvs.stalker] $redacted');
   }
 }

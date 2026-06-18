@@ -280,6 +280,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _logPlayback(String message) {
     developer.log(message, name: 'iptvs.player');
+    debugPrint('[iptvs.player] $message');
   }
 }
 

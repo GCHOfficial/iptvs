@@ -81,6 +81,7 @@ class M3uSource implements Source {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    int? maxPages,
   }) async => const [];
 
   @override

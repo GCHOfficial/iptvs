@@ -40,6 +40,8 @@ class LibraryRepository {
 
   /// EPG is re-fetched if older than this (or on a forced refresh).
   static const _epgMaxAge = Duration(hours: 3);
+  static const _initialMediaPages = 4;
+  static const _fallbackCategoryPages = 1;
 
   LibraryRepository({required this.source, required this.db});
 
@@ -145,19 +147,26 @@ class LibraryRepository {
   ) async {
     final out = <MediaItem>[];
     final seen = <String>{};
-    if (categories.isEmpty) {
-      final items = await source.mediaItems(kind);
+    void addAll(List<MediaItem> items) {
       for (final item in items) {
-        if (seen.add(item.id)) out.add(item);
+        if (item.id.isNotEmpty && seen.add(item.id)) out.add(item);
       }
+    }
+
+    addAll(await source.mediaItems(kind, maxPages: _initialMediaPages));
+    if (out.isNotEmpty || categories.isEmpty) {
       return out;
     }
 
     for (final category in categories) {
-      final items = await source.mediaItems(kind, categoryId: category.id);
-      for (final item in items) {
-        if (seen.add(item.id)) out.add(item);
-      }
+      addAll(
+        await source.mediaItems(
+          kind,
+          categoryId: category.id,
+          maxPages: _fallbackCategoryPages,
+        ),
+      );
+      if (out.length >= 200) break;
     }
     return out;
   }

@@ -164,6 +164,7 @@ abstract class Source {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    int? maxPages,
   }) async => const [];
 
   Future<MediaItem> mediaDetails(MediaItem item) async => item;

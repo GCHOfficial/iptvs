@@ -138,6 +138,7 @@ class XtreamSource implements Source {
     ContentKind kind, {
     String? categoryId,
     MediaItem? parent,
+    int? maxPages,
   }) async {
     final action = switch (kind) {
       ContentKind.movie => 'get_vod_streams',

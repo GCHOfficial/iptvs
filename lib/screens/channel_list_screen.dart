@@ -241,7 +241,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   String _mediaStatusLine(ContentKind kind, int count) {
     final snap = _media[kind];
     final label = kind == ContentKind.movie ? 'movies' : 'series';
-    final b = StringBuffer('${_fmt(count)} $label');
+    final b = StringBuffer('Showing ${_fmt(count)} $label');
     if (snap?.syncedAt != null) {
       b.write(
         snap!.fromCache
@@ -385,8 +385,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
       scrollCacheExtent: const ScrollCacheExtent.pixels(
-        800,
-      ), // keep neighbours built so D-pad can reach them
+        400,
+      ), // keep nearby rows built for D-pad without over-prefetching logos
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final c = visible[i];
@@ -680,13 +680,33 @@ class _ChannelTile extends StatelessWidget {
   }
 }
 
-class _Logo extends StatelessWidget {
+class _Logo extends StatefulWidget {
   final Channel channel;
   const _Logo({required this.channel});
 
   @override
+  State<_Logo> createState() => _LogoState();
+}
+
+class _LogoState extends State<_Logo> {
+  late final DisposableBuildContext<_LogoState> _scrollContext;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollContext = DisposableBuildContext(this);
+  }
+
+  @override
+  void dispose() {
+    _scrollContext.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     const size = 48.0;
+    final cacheSize = _imageCacheSize(context, size);
     final fallback = Container(
       width: size,
       height: size,
@@ -696,8 +716,10 @@ class _Logo extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
-        channel.number?.toString() ??
-            (channel.name.isEmpty ? '?' : channel.name.characters.first),
+        widget.channel.number?.toString() ??
+            (widget.channel.name.isEmpty
+                ? '?'
+                : widget.channel.name.characters.first),
         style: const TextStyle(
           color: AppColors.textLo,
           fontWeight: FontWeight.w600,
@@ -705,21 +727,37 @@ class _Logo extends StatelessWidget {
       ),
     );
 
-    final logo = channel.logo;
+    final logo = widget.channel.logo;
     if (logo == null || logo.isEmpty) return fallback;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
-      child: Image.network(
-        logo,
+      child: Image(
+        image: ScrollAwareImageProvider(
+          context: _scrollContext,
+          imageProvider: ResizeImage.resizeIfNeeded(
+            cacheSize,
+            cacheSize,
+            NetworkImage(logo),
+          ),
+        ),
         width: size,
         height: size,
         fit: BoxFit.cover,
+        filterQuality: FilterQuality.low,
         errorBuilder: (_, _, _) => fallback,
-        loadingBuilder: (_, child, p) => p == null ? child : fallback,
+        frameBuilder: (_, child, frame, wasSynchronouslyLoaded) {
+          if (wasSynchronouslyLoaded || frame != null) return child;
+          return fallback;
+        },
       ),
     );
   }
+}
+
+int _imageCacheSize(BuildContext context, double logicalSize) {
+  final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
+  return (logicalSize * dpr).round();
 }
 
 class _LivePill extends StatelessWidget {
