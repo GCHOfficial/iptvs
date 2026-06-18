@@ -140,6 +140,12 @@ class XtreamSource implements Source {
     MediaItem? parent,
     int? maxPages,
   }) async {
+    if (kind == ContentKind.season && parent != null) {
+      return _seriesSeasons(parent);
+    }
+    if (kind == ContentKind.episode && parent != null) {
+      return _seasonEpisodes(parent);
+    }
     final action = switch (kind) {
       ContentKind.movie => 'get_vod_streams',
       ContentKind.series => 'get_series',
@@ -248,6 +254,75 @@ class XtreamSource implements Source {
     return builder.takeBytes();
   }
 
+  Future<List<MediaItem>> _seriesSeasons(MediaItem series) async {
+    final details = await _seriesDetails(series);
+    final episodes = details['episodes'];
+    if (episodes is! Map) return const [];
+    final infoSeasons = details['seasons'] is List
+        ? (details['seasons'] as List).whereType<Map>().toList()
+        : const <Map>[];
+    return episodes.keys.map((key) {
+      final seasonNumber = int.tryParse(key.toString());
+      final info = infoSeasons
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((e) => '${e['season_number'] ?? e['season']}' == '$key')
+          .cast<Map<String, dynamic>?>()
+          .firstWhere((e) => e != null, orElse: () => null);
+      final title =
+          _firstString(info ?? const {}, ['name', 'title']) ??
+          'Season ${seasonNumber ?? key}';
+      return MediaItem(
+        id: '${series.id}:season:$key',
+        title: title,
+        kind: ContentKind.season,
+        parentId: series.id,
+        poster:
+            _firstString(info ?? const {}, ['cover', 'cover_big']) ??
+            series.poster,
+        seasonNumber: seasonNumber,
+        extra: {
+          'seriesId': series.id,
+          'seasonId': '$key',
+          'episodes': episodes[key],
+          'details': details,
+        },
+      );
+    }).toList();
+  }
+
+  List<MediaItem> _seasonEpisodes(MediaItem season) {
+    final raw = season.extra['episodes'];
+    if (raw is! List) return const [];
+    return raw.whereType<Map>().map((entry) {
+      final m = Map<String, dynamic>.from(entry);
+      final id = _firstString(m, ['id', 'episode_id']) ?? '';
+      return MediaItem(
+        id: id,
+        title: _firstString(m, ['title', 'name']) ?? 'Episode',
+        kind: ContentKind.episode,
+        parentId: season.id,
+        poster:
+            _firstString(m, ['movie_image', 'cover', 'cover_big']) ??
+            season.poster,
+        description: _firstString(m, ['plot', 'description']),
+        year: _firstString(m, ['releasedate', 'release_date', 'year']),
+        durationSeconds: _parseDurationSeconds(
+          _firstString(m, ['duration', 'time', 'length']),
+        ),
+        seasonNumber: season.seasonNumber,
+        episodeNumber: _parseInt(m['episode_num'] ?? m['episode_number']),
+        extra: m,
+      );
+    }).toList();
+  }
+
+  Future<Map<String, dynamic>> _seriesDetails(MediaItem series) async {
+    final existing = series.extra['details'];
+    if (existing is Map) return Map<String, dynamic>.from(existing);
+    final r = await _api({'action': 'get_series_info', 'series_id': series.id});
+    return r is Map ? Map<String, dynamic>.from(r) : const {};
+  }
+
   MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
     final idKey = kind == ContentKind.movie ? 'stream_id' : 'series_id';
     return MediaItem(
@@ -256,10 +331,35 @@ class XtreamSource implements Source {
       kind: kind,
       categoryId: m['category_id']?.toString(),
       poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
+      backdrop: _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
       description: _firstString(m, ['plot', 'description']),
       year: _firstString(m, ['year', 'releaseDate', 'release_date']),
+      rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
+      providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
       extra: m,
     );
+  }
+
+  int? _parseInt(dynamic value) {
+    if (value is int) return value;
+    if (value == null) return null;
+    return int.tryParse(value.toString());
+  }
+
+  double? _parseDouble(String? value) {
+    if (value == null) return null;
+    return double.tryParse(value.replaceAll(',', '.'));
+  }
+
+  int? _parseDurationSeconds(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final direct = int.tryParse(value);
+    if (direct != null) return direct;
+    final parts = value.split(':').map(int.tryParse).toList();
+    if (parts.any((part) => part == null)) return null;
+    if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+    if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
+    return null;
   }
 
   String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {

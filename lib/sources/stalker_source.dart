@@ -287,20 +287,26 @@ class StalkerSource implements Source {
     MediaItem? parent,
     int? maxPages,
   }) async {
-    if (kind != ContentKind.movie && kind != ContentKind.series) {
+    if (!_supportsVodListKind(kind)) {
       return const [];
     }
     final rows = await _getOrderedList(
       type: 'vod',
       category: categoryId,
+      movieId: _parentMovieId(kind, parent),
+      seasonId: _parentSeasonId(kind, parent),
       maxPages: maxPages,
     );
     return rows
-        .where((m) {
-          final isSeries = '${m['is_series']}' == '1';
-          return kind == ContentKind.series ? isSeries : !isSeries;
-        })
-        .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
+        .where((m) => _matchesVodListKind(m, kind))
+        .map(
+          (m) => _mapMediaItem(
+            m,
+            kind: kind,
+            categoryId: categoryId,
+            parent: parent,
+          ),
+        )
         .toList();
   }
 
@@ -311,20 +317,26 @@ class StalkerSource implements Source {
     MediaItem? parent,
     int page = 1,
   }) async {
-    if (kind != ContentKind.movie && kind != ContentKind.series) {
+    if (!_supportsVodListKind(kind)) {
       return MediaPage(items: const [], page: page, totalPages: page);
     }
     final raw = await _getOrderedListPage(
       type: 'vod',
       category: categoryId,
+      movieId: _parentMovieId(kind, parent),
+      seasonId: _parentSeasonId(kind, parent),
       page: page,
     );
     final items = raw.rows
-        .where((m) {
-          final isSeries = '${m['is_series']}' == '1';
-          return kind == ContentKind.series ? isSeries : !isSeries;
-        })
-        .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
+        .where((m) => _matchesVodListKind(m, kind))
+        .map(
+          (m) => _mapMediaItem(
+            m,
+            kind: kind,
+            categoryId: categoryId,
+            parent: parent,
+          ),
+        )
         .toList();
     return MediaPage(
       items: items,
@@ -351,10 +363,7 @@ class StalkerSource implements Source {
       page: 1,
     );
     return raw.rows
-        .where((m) {
-          final isSeries = '${m['is_series']}' == '1';
-          return kind == ContentKind.series ? isSeries : !isSeries;
-        })
+        .where((m) => _matchesVodListKind(m, kind))
         .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
         .toList();
   }
@@ -607,22 +616,89 @@ class StalkerSource implements Source {
     Map<String, dynamic> item, {
     required ContentKind kind,
     String? categoryId,
+    MediaItem? parent,
   }) {
     final id =
-        _firstString(item, ['id', 'movie_id', 'video_id', 'stream_id']) ?? '';
+        _firstString(item, [
+          'id',
+          'movie_id',
+          'video_id',
+          'stream_id',
+          'season_id',
+          'episode_id',
+        ]) ??
+        '';
     return MediaItem(
       id: id,
       title: _firstString(item, ['name', 'title']) ?? 'Untitled',
       kind: kind,
+      parentId: parent?.id ?? _firstString(item, ['parent_id', 'series_id']),
       categoryId: categoryId ?? _firstString(item, ['category_id']),
       poster: _firstString(item, ['screenshot_uri', 'poster', 'cover']),
+      backdrop: _firstString(item, ['backdrop', 'background', 'cover_big']),
       description: _firstString(item, ['description', 'descr', 'plot']),
       year: _firstString(item, ['year', 'released']),
+      rating: _parseDouble(
+        _firstString(item, ['rating_imdb', 'rating_kinopoisk', 'rating']),
+      ),
+      durationSeconds: _parseDurationSeconds(
+        _firstString(item, ['duration', 'time', 'length']),
+      ),
+      seasonNumber: _parseInt(item['season_number'] ?? item['season']),
+      episodeNumber: _parseInt(item['episode_number'] ?? item['episode']),
+      providerId: _firstString(item, ['tmdb_id', 'imdb_id', 'kinopoisk_id']),
       extra: {
         ...item,
         'movieId': _firstString(item, ['movie_id', 'id']) ?? id,
+        if (parent != null) 'parentId': parent.id,
+        if (kind == ContentKind.season)
+          'seasonId': _firstString(item, ['season_id', 'id']) ?? id,
+        if (kind == ContentKind.episode)
+          'episodeId': _firstString(item, ['episode_id', 'id']) ?? id,
       },
     );
+  }
+
+  bool _supportsVodListKind(ContentKind kind) =>
+      kind == ContentKind.movie ||
+      kind == ContentKind.series ||
+      kind == ContentKind.season ||
+      kind == ContentKind.episode;
+
+  bool _matchesVodListKind(Map<String, dynamic> item, ContentKind kind) {
+    final isSeries = '${item['is_series']}' == '1';
+    if (kind == ContentKind.movie) return !isSeries;
+    if (kind == ContentKind.series) return isSeries;
+    return true;
+  }
+
+  String? _parentMovieId(ContentKind kind, MediaItem? parent) {
+    if (parent == null) return null;
+    if (kind != ContentKind.season && kind != ContentKind.episode) return null;
+    return _firstString(parent.extra, ['movieId', 'series_id', 'id']) ??
+        parent.id;
+  }
+
+  String? _parentSeasonId(ContentKind kind, MediaItem? parent) {
+    if (parent == null || kind != ContentKind.episode) return null;
+    return _firstString(parent.extra, ['seasonId', 'season_id', 'id']) ??
+        parent.id;
+  }
+
+  double? _parseDouble(String? value) {
+    if (value == null) return null;
+    return double.tryParse(value.replaceAll(',', '.'));
+  }
+
+  int? _parseDurationSeconds(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final direct = int.tryParse(value);
+    if (direct != null) return direct;
+    final parts = value.split(':').map(int.tryParse).toList();
+    if (parts.any((part) => part == null)) return null;
+    if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+    if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
+    return null;
   }
 
   String _vodCommand(MediaItem item) {

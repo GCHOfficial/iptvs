@@ -17,6 +17,11 @@ class DemoSource implements Source {
   String get name => 'Demo · public test streams';
 
   static const _category = Category(id: 'test', title: 'Test streams');
+  static const _mediaCategory = MediaCategory(
+    id: 'demo-series',
+    title: 'Demo series',
+    kind: ContentKind.series,
+  );
 
   static const _channels = <Channel>[
     Channel(
@@ -55,6 +60,56 @@ class DemoSource implements Source {
         'https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8',
   };
 
+  static const _series = MediaItem(
+    id: 'demo-series-1',
+    title: 'Codec Test Series',
+    kind: ContentKind.series,
+    categoryId: 'demo-series',
+    description: 'Public test streams grouped as a demo series.',
+    year: '2026',
+  );
+
+  static const _season = MediaItem(
+    id: 'demo-series-1:season:1',
+    title: 'Season 1',
+    kind: ContentKind.season,
+    parentId: 'demo-series-1',
+    seasonNumber: 1,
+  );
+
+  static const _episodes = <MediaItem>[
+    MediaItem(
+      id: 'bbb',
+      title: 'Big Buck Bunny',
+      kind: ContentKind.episode,
+      parentId: 'demo-series-1:season:1',
+      seasonNumber: 1,
+      episodeNumber: 1,
+      description: 'H.264 baseline HLS test stream.',
+      extra: {'urlKey': 'bbb'},
+    ),
+    MediaItem(
+      id: 'bipbop',
+      title: 'Apple BipBop',
+      kind: ContentKind.episode,
+      parentId: 'demo-series-1:season:1',
+      seasonNumber: 1,
+      episodeNumber: 2,
+      description: 'Apple fMP4 HLS test stream.',
+      extra: {'urlKey': 'bipbop'},
+    ),
+    MediaItem(
+      id: 'tos',
+      title: 'Tears of Steel',
+      kind: ContentKind.episode,
+      parentId: 'demo-series-1:season:1',
+      seasonNumber: 1,
+      episodeNumber: 3,
+      description: 'Open movie HLS test stream.',
+      extra: {'urlKey': 'tos'},
+    ),
+  ];
+
   @override
   Future<void> connect() async {}
 
@@ -80,7 +135,7 @@ class DemoSource implements Source {
 
   @override
   Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
-      const [];
+      kind == ContentKind.series ? const [_mediaCategory] : const [];
 
   @override
   Future<List<MediaItem>> mediaItems(
@@ -88,7 +143,16 @@ class DemoSource implements Source {
     String? categoryId,
     MediaItem? parent,
     int? maxPages,
-  }) async => const [];
+  }) async {
+    if (kind == ContentKind.series) return const [_series];
+    if (kind == ContentKind.season && parent?.id == _series.id) {
+      return const [_season];
+    }
+    if (kind == ContentKind.episode && parent?.id == _season.id) {
+      return _episodes;
+    }
+    return const [];
+  }
 
   @override
   Future<MediaPage> mediaItemsPage(
@@ -96,21 +160,40 @@ class DemoSource implements Source {
     String? categoryId,
     MediaItem? parent,
     int page = 1,
-  }) async => MediaPage(items: const [], page: page, totalPages: page);
+  }) async {
+    final items = page == 1
+        ? await mediaItems(kind, categoryId: categoryId, parent: parent)
+        : const <MediaItem>[];
+    return MediaPage(items: items, page: page, totalPages: 1);
+  }
 
   @override
   Future<List<MediaItem>> searchMedia(
     ContentKind kind,
     String query, {
     String? categoryId,
-  }) async => const [];
+  }) async {
+    if (kind != ContentKind.series) return const [];
+    return _series.title.toLowerCase().contains(query.trim().toLowerCase())
+        ? const [_series]
+        : const [];
+  }
 
   @override
   Future<MediaItem> mediaDetails(MediaItem item) async => item;
 
   @override
-  Future<StreamInfo> resolveMedia(MediaItem item) async =>
-      throw UnsupportedError('Demo source only supports live channels');
+  Future<StreamInfo> resolveMedia(MediaItem item) async {
+    if (item.kind != ContentKind.episode) {
+      throw UnsupportedError('Demo source only supports episode playback');
+    }
+    final urlKey = item.extra['urlKey']?.toString() ?? item.id;
+    final url = _urls[urlKey];
+    if (url == null) {
+      throw StateError('No stream URL for episode "${item.id}"');
+    }
+    return StreamInfo(url: url, isLive: false);
+  }
 
   @override
   Future<void> dispose() async {}

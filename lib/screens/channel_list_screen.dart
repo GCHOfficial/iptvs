@@ -284,6 +284,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       backgroundColor: AppColors.panel,
       constraints: const BoxConstraints(maxWidth: 720),
       builder: (context) => _MediaDetailsSheet(
+        repo: widget.repo,
         item: item,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
@@ -1318,11 +1319,48 @@ class _Poster extends StatelessWidget {
   }
 }
 
-class _MediaDetailsSheet extends StatelessWidget {
+class _MediaDetailsSheet extends StatefulWidget {
+  final LibraryRepository repo;
   final MediaItem item;
   final VoidCallback? onPlay;
 
-  const _MediaDetailsSheet({required this.item, required this.onPlay});
+  const _MediaDetailsSheet({
+    required this.repo,
+    required this.item,
+    required this.onPlay,
+  });
+
+  @override
+  State<_MediaDetailsSheet> createState() => _MediaDetailsSheetState();
+}
+
+class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
+  late final Future<List<MediaItem>>? _seasonsFuture = _loadSeasonsIfNeeded();
+  final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
+
+  Future<List<MediaItem>>? _loadSeasonsIfNeeded() {
+    if (widget.item.kind != ContentKind.series) return null;
+    return widget.repo
+        .loadMedia(ContentKind.season, parent: widget.item)
+        .then((snapshot) => snapshot.items);
+  }
+
+  Future<List<MediaItem>> _episodes(MediaItem season) =>
+      _episodeFutures.putIfAbsent(
+        season.id,
+        () => widget.repo
+            .loadMedia(ContentKind.episode, parent: season)
+            .then((snapshot) => snapshot.items),
+      );
+
+  void _play(MediaItem item) {
+    Navigator.of(context).pop();
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _DeferredMediaPlayer(repo: widget.repo, item: item),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1332,40 +1370,49 @@ class _MediaDetailsSheet extends StatelessWidget {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final narrow = constraints.maxWidth < 520;
-            final poster = _Poster(item: item, width: 124, height: 180);
+            final poster = _Poster(item: widget.item, width: 124, height: 180);
+            final seasonsFuture = _seasonsFuture;
             final details = Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  item.title,
+                  widget.item.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                if (item.year != null) ...[
+                if (widget.item.year != null) ...[
                   const SizedBox(height: 6),
                   Text(
-                    item.year!,
+                    widget.item.year!,
                     style: const TextStyle(color: AppColors.textLo),
                   ),
                 ],
-                if (item.description != null) ...[
+                if (widget.item.description != null) ...[
                   const SizedBox(height: 12),
                   Text(
-                    item.description!,
+                    widget.item.description!,
                     maxLines: 8,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: AppColors.textLo),
                   ),
                 ],
                 const SizedBox(height: 16),
-                if (onPlay != null)
+                if (widget.onPlay != null)
                   FilledButton.icon(
-                    onPressed: onPlay,
+                    onPressed: widget.onPlay,
                     icon: const Icon(Icons.play_arrow_rounded),
                     label: const Text('Play'),
                   ),
+                if (seasonsFuture != null) ...[
+                  const SizedBox(height: 18),
+                  _SeriesBrowser(
+                    seasons: seasonsFuture,
+                    episodesFor: _episodes,
+                    onPlayEpisode: _play,
+                  ),
+                ],
               ],
             );
             if (narrow) {
@@ -1393,6 +1440,179 @@ class _MediaDetailsSheet extends StatelessWidget {
           },
         ),
       ),
+    );
+  }
+}
+
+class _SeriesBrowser extends StatelessWidget {
+  final Future<List<MediaItem>> seasons;
+  final Future<List<MediaItem>> Function(MediaItem season) episodesFor;
+  final ValueChanged<MediaItem> onPlayEpisode;
+
+  const _SeriesBrowser({
+    required this.seasons,
+    required this.episodesFor,
+    required this.onPlayEpisode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<MediaItem>>(
+      future: seasons,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+        if (snapshot.hasError) {
+          return Text(
+            'Could not load seasons: ${snapshot.error}',
+            style: const TextStyle(color: AppColors.textLo),
+          );
+        }
+        final seasons = snapshot.data ?? const <MediaItem>[];
+        if (seasons.isEmpty) {
+          return const Text(
+            'No seasons found',
+            style: TextStyle(color: AppColors.textLo),
+          );
+        }
+        return Column(
+          children: [
+            for (final season in seasons)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                title: Text(season.title),
+                subtitle: season.seasonNumber == null
+                    ? null
+                    : Text(
+                        'Season ${season.seasonNumber}',
+                        style: const TextStyle(color: AppColors.textLo),
+                      ),
+                children: [
+                  FutureBuilder<List<MediaItem>>(
+                    future: episodesFor(season),
+                    builder: (context, episodeSnapshot) {
+                      if (episodeSnapshot.connectionState !=
+                          ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: LinearProgressIndicator(minHeight: 2),
+                        );
+                      }
+                      if (episodeSnapshot.hasError) {
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Could not load episodes: ${episodeSnapshot.error}',
+                            style: const TextStyle(color: AppColors.textLo),
+                          ),
+                        );
+                      }
+                      final episodes =
+                          episodeSnapshot.data ?? const <MediaItem>[];
+                      if (episodes.isEmpty) {
+                        return const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'No episodes found',
+                            style: TextStyle(color: AppColors.textLo),
+                          ),
+                        );
+                      }
+                      return Column(
+                        children: [
+                          for (final episode in episodes)
+                            ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.play_arrow_rounded),
+                              title: Text(
+                                episode.episodeNumber == null
+                                    ? episode.title
+                                    : '${episode.episodeNumber}. ${episode.title}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: episode.description == null
+                                  ? null
+                                  : Text(
+                                      episode.description!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                              onTap: () => onPlayEpisode(episode),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _DeferredMediaPlayer extends StatefulWidget {
+  final LibraryRepository repo;
+  final MediaItem item;
+
+  const _DeferredMediaPlayer({required this.repo, required this.item});
+
+  @override
+  State<_DeferredMediaPlayer> createState() => _DeferredMediaPlayerState();
+}
+
+class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
+  late final Future<StreamInfo> _stream = widget.repo.resolveMedia(widget.item);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<StreamInfo>(
+      future: _stream,
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          return PlayerScreen(title: widget.item.title, stream: snapshot.data!);
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            appBar: AppBar(title: Text(widget.item.title)),
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Could not play: ${snapshot.error}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: AppColors.textLo),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.arrow_back),
+                      label: const Text('Back'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return Scaffold(
+          appBar: AppBar(title: Text(widget.item.title)),
+          body: const Center(child: CircularProgressIndicator()),
+        );
+      },
     );
   }
 }

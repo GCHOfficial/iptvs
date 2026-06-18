@@ -25,7 +25,7 @@ class AppDatabase {
 
     final db = await openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE sources (
@@ -84,6 +84,11 @@ class AppDatabase {
         if (oldV >= 3 && oldV < 6) {
           await _addMediaDisplayOrderColumn(db);
         }
+        if (oldV >= 3 && oldV < 7) {
+          await _addMediaHierarchyColumns(db);
+          await _addMediaPageParentColumn(db);
+          await _createExternalMetadata(db);
+        }
       },
     );
     return AppDatabase._(db);
@@ -131,10 +136,17 @@ class AppDatabase {
         kind        TEXT NOT NULL,
         id          TEXT NOT NULL,
         title       TEXT NOT NULL,
+        parent_id   TEXT,
         category_id TEXT,
         poster      TEXT,
+        backdrop    TEXT,
         description TEXT,
         year        TEXT,
+        rating      REAL,
+        duration_seconds INTEGER,
+        season_number INTEGER,
+        episode_number INTEGER,
+        provider_id TEXT,
         extra       TEXT,
         display_order INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (source_id, kind, id)
@@ -185,11 +197,12 @@ class AppDatabase {
       CREATE TABLE IF NOT EXISTS media_page_state (
         source_id   TEXT NOT NULL,
         kind        TEXT NOT NULL,
+        parent_id   TEXT NOT NULL DEFAULT '',
         category_id TEXT NOT NULL DEFAULT '',
         synced_at   INTEGER NOT NULL,
         loaded_pages INTEGER NOT NULL DEFAULT 1,
         total_pages INTEGER NOT NULL DEFAULT 1,
-        PRIMARY KEY (source_id, kind, category_id)
+        PRIMARY KEY (source_id, kind, parent_id, category_id)
       )
     ''');
   }
@@ -197,6 +210,93 @@ class AppDatabase {
   static Future<void> _addMediaDisplayOrderColumn(Database db) async {
     await db.execute(
       'ALTER TABLE media_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0',
+    );
+  }
+
+  static Future<void> _addMediaHierarchyColumns(Database db) async {
+    Future<void> add(String sql) async {
+      try {
+        await db.execute(sql);
+      } on DatabaseException catch (e) {
+        if (!_isDuplicateColumn(e)) rethrow;
+      }
+    }
+
+    await add('ALTER TABLE media_items ADD COLUMN parent_id TEXT');
+    await add('ALTER TABLE media_items ADD COLUMN backdrop TEXT');
+    await add('ALTER TABLE media_items ADD COLUMN rating REAL');
+    await add('ALTER TABLE media_items ADD COLUMN duration_seconds INTEGER');
+    await add('ALTER TABLE media_items ADD COLUMN season_number INTEGER');
+    await add('ALTER TABLE media_items ADD COLUMN episode_number INTEGER');
+    await add('ALTER TABLE media_items ADD COLUMN provider_id TEXT');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_media_items_parent ON media_items(source_id, kind, parent_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_media_items_provider ON media_items(source_id, kind, provider_id)',
+    );
+  }
+
+  static Future<void> _addMediaPageParentColumn(Database db) async {
+    try {
+      await db.execute(
+        'ALTER TABLE media_page_state ADD COLUMN parent_id TEXT NOT NULL DEFAULT ""',
+      );
+    } on DatabaseException catch (e) {
+      if (!_isDuplicateColumn(e)) rethrow;
+    }
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS media_page_state_v7 (
+        source_id   TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        parent_id   TEXT NOT NULL DEFAULT '',
+        category_id TEXT NOT NULL DEFAULT '',
+        synced_at   INTEGER NOT NULL,
+        loaded_pages INTEGER NOT NULL DEFAULT 1,
+        total_pages INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (source_id, kind, parent_id, category_id)
+      )
+    ''');
+    await db.execute('''
+      INSERT OR REPLACE INTO media_page_state_v7
+      (source_id, kind, parent_id, category_id, synced_at, loaded_pages, total_pages)
+      SELECT source_id, kind, COALESCE(parent_id, ''), category_id,
+             synced_at, loaded_pages, total_pages
+      FROM media_page_state
+    ''');
+    await db.execute('DROP TABLE media_page_state');
+    await db.execute(
+      'ALTER TABLE media_page_state_v7 RENAME TO media_page_state',
+    );
+  }
+
+  static bool _isDuplicateColumn(DatabaseException e) {
+    final message = e.toString().toLowerCase();
+    return message.contains('duplicate column') ||
+        message.contains('duplicate column name');
+  }
+
+  static Future<void> _createExternalMetadata(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS external_metadata (
+        source_id    TEXT NOT NULL,
+        media_kind   TEXT NOT NULL,
+        media_id     TEXT NOT NULL,
+        provider     TEXT NOT NULL,
+        provider_key TEXT NOT NULL,
+        title        TEXT,
+        overview     TEXT,
+        poster       TEXT,
+        backdrop     TEXT,
+        year         TEXT,
+        rating       REAL,
+        payload      TEXT,
+        refreshed_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, media_kind, media_id, provider)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_external_metadata_provider ON external_metadata(provider, provider_key)',
     );
   }
 
@@ -261,12 +361,14 @@ class AppDatabase {
     String sourceId,
     ContentKind kind, {
     String? categoryId,
+    String? parentId,
   }) async {
     final categoryKey = categoryId ?? '';
+    final parentKey = parentId ?? '';
     final pageRows = await _db.query(
       'media_page_state',
-      where: 'source_id = ? AND kind = ? AND category_id = ?',
-      whereArgs: [sourceId, kind.name, categoryKey],
+      where: 'source_id = ? AND kind = ? AND parent_id = ? AND category_id = ?',
+      whereArgs: [sourceId, kind.name, parentKey, categoryKey],
     );
     if (pageRows.isNotEmpty) {
       final row = pageRows.first;
@@ -276,7 +378,7 @@ class AppDatabase {
         totalPages: row['total_pages'] as int? ?? 1,
       );
     }
-    if (categoryId != null) return null;
+    if (categoryId != null || parentId != null) return null;
     final rows = await _db.query(
       'media_sync',
       where: 'source_id = ? AND kind = ?',
@@ -316,12 +418,17 @@ class AppDatabase {
     String sourceId,
     ContentKind kind, {
     String? categoryId,
+    String? parentId,
   }) async {
     final where = StringBuffer('source_id = ? AND kind = ?');
     final args = <Object?>[sourceId, kind.name];
     if (categoryId != null) {
       where.write(' AND category_id = ?');
       args.add(categoryId);
+    }
+    if (parentId != null) {
+      where.write(' AND parent_id = ?');
+      args.add(parentId);
     }
     final rows = await _db.query(
       'media_items',
@@ -337,14 +444,34 @@ class AppDatabase {
         id: r['id'] as String,
         title: r['title'] as String,
         kind: kind,
+        parentId: r['parent_id'] as String?,
         categoryId: r['category_id'] as String?,
         poster: r['poster'] as String?,
+        backdrop: r['backdrop'] as String?,
         description: r['description'] as String?,
         year: r['year'] as String?,
+        rating: _readDouble(r['rating']),
+        durationSeconds: _readInt(r['duration_seconds']),
+        seasonNumber: _readInt(r['season_number']),
+        episodeNumber: _readInt(r['episode_number']),
+        providerId: r['provider_id'] as String?,
         extra: r['extra'] != null
             ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
             : const {},
       );
+
+  int? _readInt(Object? value) {
+    if (value is int) return value;
+    if (value == null) return null;
+    return int.tryParse(value.toString());
+  }
+
+  double? _readDouble(Object? value) {
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value == null) return null;
+    return double.tryParse(value.toString());
+  }
 
   Future<void> replaceMediaLibrary(
     String sourceId,
@@ -352,11 +479,12 @@ class AppDatabase {
     List<MediaCategory> categories,
     List<MediaItem> items, {
     String? categoryId,
+    String? parentId,
     int loadedPages = 1,
     int totalPages = 1,
   }) async {
     await _db.transaction((txn) async {
-      if (categoryId == null) {
+      if (categoryId == null && parentId == null) {
         await txn.delete(
           'media_categories',
           where: 'source_id = ? AND kind = ?',
@@ -368,10 +496,20 @@ class AppDatabase {
           whereArgs: [sourceId, kind.name],
         );
       } else {
+        final where = StringBuffer('source_id = ? AND kind = ?');
+        final args = <Object?>[sourceId, kind.name];
+        if (categoryId != null) {
+          where.write(' AND category_id = ?');
+          args.add(categoryId);
+        }
+        if (parentId != null) {
+          where.write(' AND parent_id = ?');
+          args.add(parentId);
+        }
         await txn.delete(
           'media_items',
-          where: 'source_id = ? AND kind = ? AND category_id = ?',
-          whereArgs: [sourceId, kind.name, categoryId],
+          where: where.toString(),
+          whereArgs: args,
         );
       }
 
@@ -393,10 +531,17 @@ class AppDatabase {
           'kind': kind.name,
           'id': item.id,
           'title': item.title,
+          'parent_id': item.parentId ?? parentId,
           'category_id': item.categoryId,
           'poster': item.poster,
+          'backdrop': item.backdrop,
           'description': item.description,
           'year': item.year,
+          'rating': item.rating,
+          'duration_seconds': item.durationSeconds,
+          'season_number': item.seasonNumber,
+          'episode_number': item.episodeNumber,
+          'provider_id': item.providerId,
           'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
           'display_order': i,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
@@ -411,6 +556,7 @@ class AppDatabase {
       batch.insert('media_page_state', {
         'source_id': sourceId,
         'kind': kind.name,
+        'parent_id': parentId ?? '',
         'category_id': categoryId ?? '',
         'synced_at': DateTime.now().millisecondsSinceEpoch,
         'loaded_pages': loadedPages,
@@ -425,6 +571,7 @@ class AppDatabase {
     ContentKind kind,
     List<MediaItem> items, {
     String? categoryId,
+    String? parentId,
     required int loadedPages,
     required int totalPages,
   }) async {
@@ -434,7 +581,9 @@ class AppDatabase {
         sourceId,
         kind,
         categoryId,
+        parentId,
       );
+
       final batch = txn.batch();
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
@@ -443,10 +592,17 @@ class AppDatabase {
           'kind': kind.name,
           'id': item.id,
           'title': item.title,
+          'parent_id': item.parentId ?? parentId,
           'category_id': item.categoryId,
           'poster': item.poster,
+          'backdrop': item.backdrop,
           'description': item.description,
           'year': item.year,
+          'rating': item.rating,
+          'duration_seconds': item.durationSeconds,
+          'season_number': item.seasonNumber,
+          'episode_number': item.episodeNumber,
+          'provider_id': item.providerId,
           'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
           'display_order': startOrder + i,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
@@ -461,6 +617,7 @@ class AppDatabase {
       batch.insert('media_page_state', {
         'source_id': sourceId,
         'kind': kind.name,
+        'parent_id': parentId ?? '',
         'category_id': categoryId ?? '',
         'synced_at': DateTime.now().millisecondsSinceEpoch,
         'loaded_pages': loadedPages,
@@ -475,12 +632,17 @@ class AppDatabase {
     String sourceId,
     ContentKind kind,
     String? categoryId,
+    String? parentId,
   ) async {
     final where = StringBuffer('source_id = ? AND kind = ?');
     final args = <Object?>[sourceId, kind.name];
     if (categoryId != null) {
       where.write(' AND category_id = ?');
       args.add(categoryId);
+    }
+    if (parentId != null) {
+      where.write(' AND parent_id = ?');
+      args.add(parentId);
     }
     final rows = await txn.query(
       'media_items',
@@ -491,6 +653,62 @@ class AppDatabase {
     final max = rows.first['max_order'] as int?;
     return max == null ? 0 : max + 1;
   }
+
+  Future<ExternalMetadata?> readExternalMetadata(
+    String sourceId,
+    MediaItem item,
+    String provider,
+  ) async {
+    final rows = await _db.query(
+      'external_metadata',
+      where:
+          'source_id = ? AND media_kind = ? AND media_id = ? AND provider = ?',
+      whereArgs: [sourceId, item.kind.name, item.id, provider],
+    );
+    if (rows.isEmpty) return null;
+    return _rowToExternalMetadata(rows.first);
+  }
+
+  Future<void> cacheExternalMetadata(
+    String sourceId,
+    MediaItem item,
+    ExternalMetadata metadata,
+  ) async {
+    await _db.insert('external_metadata', {
+      'source_id': sourceId,
+      'media_kind': item.kind.name,
+      'media_id': item.id,
+      'provider': metadata.provider,
+      'provider_key': metadata.providerKey,
+      'title': metadata.title,
+      'overview': metadata.overview,
+      'poster': metadata.poster,
+      'backdrop': metadata.backdrop,
+      'year': metadata.year,
+      'rating': metadata.rating,
+      'payload': metadata.payload.isEmpty ? null : jsonEncode(metadata.payload),
+      'refreshed_at': metadata.refreshedAt.millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  ExternalMetadata _rowToExternalMetadata(Map<String, Object?> row) =>
+      ExternalMetadata(
+        provider: row['provider'] as String,
+        providerKey: row['provider_key'] as String,
+        title: row['title'] as String?,
+        overview: row['overview'] as String?,
+        poster: row['poster'] as String?,
+        backdrop: row['backdrop'] as String?,
+        year: row['year'] as String?,
+        rating: _readDouble(row['rating']),
+        payload: row['payload'] == null
+            ? const {}
+            : (jsonDecode(row['payload'] as String) as Map)
+                  .cast<String, dynamic>(),
+        refreshedAt: DateTime.fromMillisecondsSinceEpoch(
+          row['refreshed_at'] as int,
+        ),
+      );
 
   Channel _rowToChannel(Map<String, Object?> r) => Channel(
     id: r['id'] as String,

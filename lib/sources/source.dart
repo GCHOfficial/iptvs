@@ -56,20 +56,34 @@ class MediaItem {
   final String id;
   final String title;
   final ContentKind kind;
+  final String? parentId;
   final String? categoryId;
   final String? poster;
+  final String? backdrop;
   final String? description;
   final String? year;
+  final double? rating;
+  final int? durationSeconds;
+  final int? seasonNumber;
+  final int? episodeNumber;
+  final String? providerId;
   final Map<String, dynamic> extra;
 
   const MediaItem({
     required this.id,
     required this.title,
     required this.kind,
+    this.parentId,
     this.categoryId,
     this.poster,
+    this.backdrop,
     this.description,
     this.year,
+    this.rating,
+    this.durationSeconds,
+    this.seasonNumber,
+    this.episodeNumber,
+    this.providerId,
     this.extra = const {},
   });
 
@@ -77,19 +91,33 @@ class MediaItem {
     String? id,
     String? title,
     ContentKind? kind,
+    String? parentId,
     String? categoryId,
     String? poster,
+    String? backdrop,
     String? description,
     String? year,
+    double? rating,
+    int? durationSeconds,
+    int? seasonNumber,
+    int? episodeNumber,
+    String? providerId,
     Map<String, dynamic>? extra,
   }) => MediaItem(
     id: id ?? this.id,
     title: title ?? this.title,
     kind: kind ?? this.kind,
+    parentId: parentId ?? this.parentId,
     categoryId: categoryId ?? this.categoryId,
     poster: poster ?? this.poster,
+    backdrop: backdrop ?? this.backdrop,
     description: description ?? this.description,
     year: year ?? this.year,
+    rating: rating ?? this.rating,
+    durationSeconds: durationSeconds ?? this.durationSeconds,
+    seasonNumber: seasonNumber ?? this.seasonNumber,
+    episodeNumber: episodeNumber ?? this.episodeNumber,
+    providerId: providerId ?? this.providerId,
     extra: extra ?? this.extra,
   );
 }
@@ -107,6 +135,33 @@ class MediaPage {
   });
 
   bool get hasMore => page < totalPages;
+}
+
+@immutable
+class ExternalMetadata {
+  final String provider;
+  final String providerKey;
+  final String? title;
+  final String? overview;
+  final String? poster;
+  final String? backdrop;
+  final String? year;
+  final double? rating;
+  final Map<String, dynamic> payload;
+  final DateTime refreshedAt;
+
+  const ExternalMetadata({
+    required this.provider,
+    required this.providerKey,
+    this.title,
+    this.overview,
+    this.poster,
+    this.backdrop,
+    this.year,
+    this.rating,
+    this.payload = const {},
+    required this.refreshedAt,
+  });
 }
 
 /// A resolved, playable stream: the URL plus any HTTP headers the player must

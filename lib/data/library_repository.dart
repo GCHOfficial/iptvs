@@ -18,6 +18,7 @@ class LibrarySnapshot {
 class MediaLibrarySnapshot {
   final ContentKind kind;
   final String? categoryId;
+  final String? parentId;
   final List<MediaCategory> categories;
   final List<MediaItem> items;
   final bool fromCache;
@@ -28,6 +29,7 @@ class MediaLibrarySnapshot {
   const MediaLibrarySnapshot({
     required this.kind,
     this.categoryId,
+    this.parentId,
     required this.categories,
     required this.items,
     required this.fromCache,
@@ -121,25 +123,30 @@ class LibraryRepository {
   Future<MediaLibrarySnapshot> loadMedia(
     ContentKind kind, {
     String? categoryId,
+    MediaItem? parent,
     bool forceRefresh = false,
   }) async {
     await source.connect();
+    final parentId = parent?.id;
     if (!forceRefresh) {
       final sync = await db.mediaSyncState(
         source.id,
         kind,
         categoryId: categoryId,
+        parentId: parentId,
       );
       if (sync != null) {
         final items = await db.readMediaItems(
           source.id,
           kind,
           categoryId: categoryId,
+          parentId: parentId,
         );
         if (items.isNotEmpty) {
           return MediaLibrarySnapshot(
             kind: kind,
             categoryId: categoryId,
+            parentId: parentId,
             categories: await db.readMediaCategories(source.id, kind),
             items: items,
             fromCache: true,
@@ -156,6 +163,7 @@ class LibraryRepository {
       kind,
       categories,
       categoryId: categoryId,
+      parent: parent,
     );
     await db.replaceMediaLibrary(
       source.id,
@@ -163,12 +171,14 @@ class LibraryRepository {
       categories,
       fetched.items,
       categoryId: categoryId,
+      parentId: parentId,
       loadedPages: fetched.loadedPages,
       totalPages: fetched.totalPages,
     );
     return MediaLibrarySnapshot(
       kind: kind,
       categoryId: categoryId,
+      parentId: parentId,
       categories: categories,
       items: fetched.items,
       fromCache: false,
@@ -183,6 +193,7 @@ class LibraryRepository {
     ContentKind kind,
     List<MediaCategory> categories, {
     String? categoryId,
+    MediaItem? parent,
   }) async {
     final out = <MediaItem>[];
     final seen = <String>{};
@@ -198,6 +209,7 @@ class LibraryRepository {
       final fetched = await source.mediaItemsPage(
         kind,
         categoryId: categoryId,
+        parent: parent,
         page: page,
       );
       totalPages = fetched.totalPages;
@@ -217,6 +229,7 @@ class LibraryRepository {
         await source.mediaItems(
           kind,
           categoryId: category.id,
+          parent: parent,
           maxPages: _fallbackCategoryPages,
         ),
       );
@@ -253,19 +266,28 @@ class LibraryRepository {
   Future<MediaLibrarySnapshot> loadMoreMedia(
     ContentKind kind, {
     String? categoryId,
+    MediaItem? parent,
   }) async {
     await source.connect();
+    final parentId = parent?.id;
     final sync = await db.mediaSyncState(
       source.id,
       kind,
       categoryId: categoryId,
+      parentId: parentId,
     );
     if (sync == null || sync.loadedPages >= sync.totalPages) {
       return MediaLibrarySnapshot(
         kind: kind,
         categoryId: categoryId,
+        parentId: parentId,
         categories: await db.readMediaCategories(source.id, kind),
-        items: await db.readMediaItems(source.id, kind, categoryId: categoryId),
+        items: await db.readMediaItems(
+          source.id,
+          kind,
+          categoryId: categoryId,
+          parentId: parentId,
+        ),
         fromCache: true,
         syncedAt: sync?.syncedAt,
         loadedPages: sync?.loadedPages ?? 1,
@@ -280,6 +302,7 @@ class LibraryRepository {
       final fetched = await source.mediaItemsPage(
         kind,
         categoryId: categoryId,
+        parent: parent,
         page: loadedPages + 1,
       );
       loadedPages = fetched.page;
@@ -292,14 +315,21 @@ class LibraryRepository {
       kind,
       items,
       categoryId: categoryId,
+      parentId: parentId,
       loadedPages: loadedPages,
       totalPages: totalPages,
     );
     return MediaLibrarySnapshot(
       kind: kind,
       categoryId: categoryId,
+      parentId: parentId,
       categories: await db.readMediaCategories(source.id, kind),
-      items: await db.readMediaItems(source.id, kind, categoryId: categoryId),
+      items: await db.readMediaItems(
+        source.id,
+        kind,
+        categoryId: categoryId,
+        parentId: parentId,
+      ),
       fromCache: false,
       syncedAt: DateTime.now(),
       loadedPages: loadedPages,
@@ -308,6 +338,16 @@ class LibraryRepository {
   }
 
   Future<MediaItem> mediaDetails(MediaItem item) => source.mediaDetails(item);
+
+  Future<ExternalMetadata?> cachedExternalMetadata(
+    MediaItem item,
+    String provider,
+  ) => db.readExternalMetadata(source.id, item, provider);
+
+  Future<void> cacheExternalMetadata(
+    MediaItem item,
+    ExternalMetadata metadata,
+  ) => db.cacheExternalMetadata(source.id, item, metadata);
 
   Future<List<MediaItem>> searchMedia(
     ContentKind kind,
