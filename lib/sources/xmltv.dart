@@ -1,0 +1,74 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:xml/xml.dart';
+import 'package:xml/xml_events.dart';
+
+import 'source.dart';
+
+/// Parse XMLTV [bytes] (gzip-aware) into [Programme]s, keeping only programmes
+/// whose XMLTV `channel` id maps — via [tvgIdToChannelId] — to one of our
+/// channels. Used by M3U and Xtream sources.
+Future<List<Programme>> parseXmltv(
+  Uint8List bytes,
+  Map<String, String> tvgIdToChannelId,
+) async {
+  // A .xml.gz file arrives as raw gzip (magic 0x1f 0x8b) with no transfer
+  // encoding, so decompress it ourselves.
+  final data = (bytes.length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
+      ? gzip.decode(bytes)
+      : bytes;
+  final xmlString = utf8.decode(data, allowMalformed: true);
+
+  final out = <Programme>[];
+  await Stream<String>.value(xmlString)
+      .toXmlEvents()
+      .normalizeEvents()
+      .selectSubtreeEvents((e) => e.name == 'programme')
+      .toXmlNodes()
+      .expand((nodes) => nodes)
+      .forEach((node) {
+    if (node is! XmlElement) return;
+    final tvgId = node.getAttribute('channel');
+    if (tvgId == null) return;
+    final channelId = tvgIdToChannelId[tvgId];
+    if (channelId == null) return; // not one of our channels
+    final start = parseXmltvTime(node.getAttribute('start'));
+    final stop = parseXmltvTime(node.getAttribute('stop'));
+    if (start == null || stop == null) return;
+    out.add(Programme(
+      channelId: channelId,
+      start: start,
+      stop: stop,
+      title: node.getElement('title')?.innerText.trim() ?? '',
+      description: node.getElement('desc')?.innerText.trim(),
+    ));
+  });
+  return out;
+}
+
+/// Parse an XMLTV timestamp ("YYYYMMDDHHMMSS +0100") into an absolute instant.
+DateTime? parseXmltvTime(String? s) {
+  if (s == null || s.length < 14) return null;
+  try {
+    var dt = DateTime.utc(
+      int.parse(s.substring(0, 4)),
+      int.parse(s.substring(4, 6)),
+      int.parse(s.substring(6, 8)),
+      int.parse(s.substring(8, 10)),
+      int.parse(s.substring(10, 12)),
+      int.parse(s.substring(12, 14)),
+    );
+    final tz = s.length > 14 ? s.substring(14).trim() : '';
+    if (tz.length >= 5 && (tz[0] == '+' || tz[0] == '-')) {
+      final sign = tz[0] == '-' ? -1 : 1;
+      final oh = int.parse(tz.substring(1, 3));
+      final om = int.parse(tz.substring(3, 5));
+      dt = dt.subtract(Duration(hours: sign * oh, minutes: sign * om));
+    }
+    return dt;
+  } catch (_) {
+    return null;
+  }
+}
