@@ -52,7 +52,7 @@ class DemoSource implements Source {
     if (url == null) {
       throw StateError('No stream URL for channel "${channel.id}"');
     }
-    return StreamInfo(url: url);
+    return StreamInfo(url: url, isLive: false);
   }
 
   @override

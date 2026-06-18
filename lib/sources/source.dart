@@ -39,11 +39,20 @@ class Channel {
 /// A resolved, playable stream: the URL plus any HTTP headers the player must
 /// send (User-Agent, Referer, etc.). Stalker and Xtream often need a MAG
 /// User-Agent here; M3U usually needs nothing.
+///
+/// [isLive] is set by the owning [Source] — liveness is provider metadata, not
+/// something to infer from the stream (an HLS live window reports a finite
+/// duration, which looks just like VOD). Live streams get no seek bar; VOD does.
 @immutable
 class StreamInfo {
   final String url;
   final Map<String, String> headers;
-  const StreamInfo({required this.url, this.headers = const {}});
+  final bool isLive;
+  const StreamInfo({
+    required this.url,
+    this.headers = const {},
+    this.isLive = true,
+  });
 }
 
 @immutable

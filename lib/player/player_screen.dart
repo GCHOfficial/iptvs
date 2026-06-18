@@ -31,6 +31,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   late final VideoController _controller = VideoController(_player);
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
+  late final bool _isLive = widget.stream.isLive;
 
   @override
   void initState() {
@@ -83,6 +84,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (Navigator.of(context).canPop()) Navigator.of(context).pop();
   }
 
+  void _seekBy(int seconds) {
+    if (_isLive) return; // live has no meaningful timeline to seek
+    final pos = _player.state.position + Duration(seconds: seconds);
+    _player.seek(pos < Duration.zero ? Duration.zero : pos);
+  }
+
   Widget _title() => Flexible(
         child: Text(
           widget.title,
@@ -99,9 +106,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
   List<Widget> _desktopBottomBar() => [
         const MaterialDesktopPlayOrPauseButton(),
         const MaterialDesktopVolumeButton(),
-        const MaterialDesktopPositionIndicator(),
+        if (!_isLive) const MaterialDesktopPositionIndicator(),
         const Spacer(),
         const MaterialDesktopFullscreenButton(),
+      ];
+
+  List<Widget> _topBar({required bool desktop}) => [
+        desktop
+            ? MaterialDesktopCustomButton(
+                onPressed: _back, icon: const Icon(Icons.arrow_back))
+            : MaterialCustomButton(
+                onPressed: _back, icon: const Icon(Icons.arrow_back)),
+        const SizedBox(width: 8),
+        _title(),
+        if (_isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
+        const Spacer(),
       ];
 
   @override
@@ -111,6 +130,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
       body: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): _back,
+          const SingleActivator(LogicalKeyboardKey.space): () =>
+              _player.playOrPause(),
+          const SingleActivator(LogicalKeyboardKey.select): () =>
+              _player.playOrPause(),
+          const SingleActivator(LogicalKeyboardKey.enter): () =>
+              _player.playOrPause(),
+          const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () =>
+              _player.playOrPause(),
+          const SingleActivator(LogicalKeyboardKey.mediaPlay): () =>
+              _player.play(),
+          const SingleActivator(LogicalKeyboardKey.mediaPause): () =>
+              _player.pause(),
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+              _seekBy(-10),
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+              _seekBy(10),
         },
         child: Focus(
           autofocus: true,
@@ -131,21 +166,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         seekBarThumbColor: AppColors.accent,
         seekBarPositionColor: AppColors.accent,
         toggleFullscreenOnDoublePress: true,
-        topButtonBar: [
-          MaterialDesktopCustomButton(
-            onPressed: _back,
-            icon: const Icon(Icons.arrow_back),
-          ),
-          const SizedBox(width: 8),
-          _title(),
-          const Spacer(),
-        ],
+        displaySeekBar: !_isLive,
+        topButtonBar: _topBar(desktop: true),
         bottomButtonBar: _desktopBottomBar(),
       ),
       fullscreen: MaterialDesktopVideoControlsThemeData(
         seekBarThumbColor: AppColors.accent,
         seekBarPositionColor: AppColors.accent,
         toggleFullscreenOnDoublePress: true,
+        displaySeekBar: !_isLive,
+        topButtonBar: _topBar(desktop: true),
         bottomButtonBar: _desktopBottomBar(),
       ),
       child: MaterialVideoControlsTheme(
@@ -153,23 +183,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
           seekBarThumbColor: AppColors.accent,
           seekBarPositionColor: AppColors.accent,
           buttonBarButtonColor: Colors.white,
+          displaySeekBar: !_isLive,
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
-          topButtonBar: [
-            MaterialCustomButton(
-              onPressed: _back,
-              icon: const Icon(Icons.arrow_back),
-            ),
-            const SizedBox(width: 8),
-            _title(),
-            const Spacer(),
-          ],
+          topButtonBar: _topBar(desktop: false),
         ),
-        fullscreen: const MaterialVideoControlsThemeData(
+        fullscreen: MaterialVideoControlsThemeData(
           seekBarThumbColor: AppColors.accent,
           seekBarPositionColor: AppColors.accent,
+          displaySeekBar: !_isLive,
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
+          topButtonBar: _topBar(desktop: false),
         ),
         child: Video(controller: _controller),
       ),
@@ -193,6 +218,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
           const SizedBox(height: 16),
           FilledButton(onPressed: _open, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+}
+
+class _LiveBadge extends StatelessWidget {
+  const _LiveBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.live,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
+          SizedBox(width: 5),
+          Text('LIVE',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5)),
         ],
       ),
     );

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/library_repository.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/focusable_card.dart';
 import '../player/player_screen.dart';
 
 /// Lists a source's channels with in-memory search + category filtering, plus
@@ -244,6 +245,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      cacheExtent: 800, // keep neighbours built so D-pad can reach them
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final c = visible[i];
@@ -252,6 +254,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           now: _now[c.id],
           next: _next[c.id],
           enabled: !_resolving,
+          autofocus: i == 0,
           onTap: () => _play(c),
         );
       },
@@ -264,6 +267,7 @@ class _ChannelTile extends StatelessWidget {
   final Programme? now;
   final Programme? next;
   final bool enabled;
+  final bool autofocus;
   final VoidCallback onTap;
 
   const _ChannelTile({
@@ -271,6 +275,7 @@ class _ChannelTile extends StatelessWidget {
     required this.now,
     required this.next,
     required this.enabled,
+    required this.autofocus,
     required this.onTap,
   });
 
@@ -284,77 +289,68 @@ class _ChannelTile extends StatelessWidget {
       progress = total <= 0 ? null : (elapsed / total).clamp(0.0, 1.0);
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Material(
-        color: AppColors.panel,
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          hoverColor: AppColors.panelHi,
-          focusColor: AppColors.panelHi,
-          onTap: enabled ? onTap : null,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                _Logo(channel: channel),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        channel.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      if (current != null) ...[
-                        const SizedBox(height: 6),
-                        Row(
-                          children: [
-                            const _LivePill(),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                current.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: AppColors.textLo, fontSize: 13),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(3),
-                          child: LinearProgressIndicator(
-                              value: progress, minHeight: 3),
-                        ),
-                        if (next != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6),
-                            child: Text(
-                              'Next · ${next!.title}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  color: AppColors.textLo, fontSize: 12),
-                            ),
-                          ),
-                      ],
-                    ],
+    return FocusableCard(
+      autofocus: autofocus,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            _Logo(channel: channel),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    channel.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                ),
-                const SizedBox(width: 8),
-                Icon(Icons.play_arrow_rounded,
-                    color: enabled ? AppColors.accent : AppColors.textLo),
-              ],
+                  if (current != null) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const _LivePill(),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            current.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: AppColors.textLo, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                          value: progress, minHeight: 3),
+                    ),
+                    if (next != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Next · ${next!.title}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppColors.textLo, fontSize: 12),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
             ),
-          ),
+            const SizedBox(width: 8),
+            Icon(Icons.play_arrow_rounded,
+                color: enabled ? AppColors.accent : AppColors.textLo),
+          ],
         ),
       ),
     );
