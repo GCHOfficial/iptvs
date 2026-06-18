@@ -63,6 +63,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }),
     );
     _subs.add(
+      _player.stream.track.listen((track) {
+        _logPlayback(
+          'selected tracks video=${_trackSummary(track.video)} '
+          'audio=${_trackSummary(track.audio)}',
+        );
+      }),
+    );
+    _subs.add(
+      _player.stream.tracks.listen((tracks) {
+        final audio = tracks.audio
+            .where((track) => track.id != 'auto' && track.id != 'no')
+            .map(_trackSummary)
+            .join('; ');
+        final video = tracks.video
+            .where((track) => track.id != 'auto' && track.id != 'no')
+            .map(_trackSummary)
+            .join('; ');
+        _logPlayback(
+          'available tracks video=[${video.isEmpty ? 'none' : video}] '
+          'audio=[${audio.isEmpty ? 'none' : audio}]',
+        );
+      }),
+    );
+    _subs.add(
       _player.stream.videoParams.listen((params) {
         _logPlayback(
           'video format=${params.hwPixelformat ?? params.pixelformat} '
@@ -91,7 +115,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // already-downloaded data. (Forward cache comes from bufferSize above.)
     final platform = _player.platform;
     if (platform is NativePlayer) {
-      await platform.setProperty('demuxer-max-back-bytes', '48MiB');
+      await _configureNativePlayer(platform);
     }
 
     // headers carry things like a MAG User-Agent for Stalker; empty for plain HLS.
@@ -105,6 +129,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     // Insurance against a muted/zero-volume default.
     await _player.setVolume(100);
+  }
+
+  Future<void> _configureNativePlayer(NativePlayer platform) async {
+    final options = _isLive
+        ? const <String, String>{
+            // IPTV live streams do not benefit from a disk file cache, and it
+            // can fail on restricted temp/cache paths before playback starts.
+            'cache-on-disk': 'no',
+            'demuxer-max-back-bytes': '0',
+            'network-timeout': '15',
+            'demuxer-lavf-analyzeduration': '3',
+            'demuxer-lavf-probesize': '10000000',
+            'demuxer-lavf-o':
+                'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
+                'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
+                'analyzeduration=3000000,probesize=10000000',
+          }
+        : const <String, String>{
+            'cache-on-disk': 'yes',
+            'demuxer-max-back-bytes': '48MiB',
+            'network-timeout': '15',
+          };
+
+    for (final entry in options.entries) {
+      try {
+        await platform.setProperty(entry.key, entry.value);
+      } catch (error) {
+        _logPlayback('warn mpv option ${entry.key} failed: $error');
+      }
+    }
   }
 
   @override
@@ -266,21 +320,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String _redactPlayback(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null) return value;
+    if (!uri.hasAuthority && !value.contains('/')) return value;
     final cleanSegments = uri.pathSegments.map((segment) {
       final looksSecret =
           segment.length > 18 ||
           RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
       return looksSecret ? '<redacted>' : segment;
     }).toList();
-    return uri
-        .replace(query: '', pathSegments: cleanSegments)
-        .toString()
-        .replaceAll(RegExp(r'//+'), '//');
+    final path = cleanSegments.join('/');
+    final authority = uri.hasAuthority
+        ? '${uri.scheme}://${uri.authority}'
+        : '';
+    final prefix = authority.isNotEmpty
+        ? authority
+        : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');
+    return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
   }
 
   void _logPlayback(String message) {
     developer.log(message, name: 'iptvs.player');
     debugPrint('[iptvs.player] $message');
+  }
+
+  String _trackSummary(dynamic track) {
+    final codec = track.codec == null ? '' : ' codec=${track.codec}';
+    final decoder = track.decoder == null ? '' : ' decoder=${track.decoder}';
+    final channels = track.channels == null
+        ? ''
+        : ' channels=${track.channels}';
+    final rate = track.samplerate == null ? '' : ' rate=${track.samplerate}';
+    final size = track.w == null || track.h == null
+        ? ''
+        : ' ${track.w}x${track.h}';
+    return '${track.id}$codec$decoder$channels$rate$size';
   }
 }
 
