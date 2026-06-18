@@ -115,7 +115,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // already-downloaded data. (Forward cache comes from bufferSize above.)
     final platform = _player.platform;
     if (platform is NativePlayer) {
-      await _configureNativePlayer(platform);
+      await platform.setProperty('demuxer-max-back-bytes', '48MiB');
     }
 
     // headers carry things like a MAG User-Agent for Stalker; empty for plain HLS.
@@ -129,36 +129,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     // Insurance against a muted/zero-volume default.
     await _player.setVolume(100);
-  }
-
-  Future<void> _configureNativePlayer(NativePlayer platform) async {
-    final options = _isLive
-        ? const <String, String>{
-            // IPTV live streams do not benefit from a disk file cache, and it
-            // can fail on restricted temp/cache paths before playback starts.
-            'cache-on-disk': 'no',
-            'demuxer-max-back-bytes': '0',
-            'network-timeout': '15',
-            'demuxer-lavf-analyzeduration': '3',
-            'demuxer-lavf-probesize': '10000000',
-            'demuxer-lavf-o':
-                'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
-                'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
-                'analyzeduration=3000000,probesize=10000000',
-          }
-        : const <String, String>{
-            'cache-on-disk': 'yes',
-            'demuxer-max-back-bytes': '48MiB',
-            'network-timeout': '15',
-          };
-
-    for (final entry in options.entries) {
-      try {
-        await platform.setProperty(entry.key, entry.value);
-      } catch (error) {
-        _logPlayback('warn mpv option ${entry.key} failed: $error');
-      }
-    }
   }
 
   @override
@@ -318,6 +288,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   String _redactPlayback(String value) {
+    final urlMatch = RegExp(
+      r'https?://\S+',
+      caseSensitive: false,
+    ).firstMatch(value);
+    if (urlMatch != null) {
+      final redactedUrl = _redactPlaybackUrl(urlMatch.group(0)!);
+      return value.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
+    }
+    return _redactPlaybackUrl(value);
+  }
+
+  String _redactPlaybackUrl(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null) return value;
     if (!uri.hasAuthority && !value.contains('/')) return value;
