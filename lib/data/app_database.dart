@@ -25,7 +25,7 @@ class AppDatabase {
 
     final db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE sources (
@@ -56,16 +56,23 @@ class AppDatabase {
           )
         ''');
         await _createProgrammes(db);
+        await _createMediaTables(db);
         await db.execute(
-            'CREATE INDEX idx_channels_source ON channels(source_id)');
+          'CREATE INDEX idx_channels_source ON channels(source_id)',
+        );
         await db.execute(
-            'CREATE INDEX idx_channels_source_cat ON channels(source_id, category_id)');
+          'CREATE INDEX idx_channels_source_cat ON channels(source_id, category_id)',
+        );
       },
       onUpgrade: (db, oldV, newV) async {
         if (oldV < 2) {
           await db.execute(
-              'ALTER TABLE sources ADD COLUMN epg_synced_at INTEGER');
+            'ALTER TABLE sources ADD COLUMN epg_synced_at INTEGER',
+          );
           await _createProgrammes(db);
+        }
+        if (oldV < 3) {
+          await _createMediaTables(db);
         }
       },
     );
@@ -84,7 +91,48 @@ class AppDatabase {
       )
     ''');
     await db.execute(
-        'CREATE INDEX idx_prog_lookup ON programmes(source_id, channel_id, start)');
+      'CREATE INDEX idx_prog_lookup ON programmes(source_id, channel_id, start)',
+    );
+  }
+
+  static Future<void> _createMediaTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE media_sync (
+        source_id TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        synced_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE media_categories (
+        source_id TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        id        TEXT NOT NULL,
+        title     TEXT NOT NULL,
+        PRIMARY KEY (source_id, kind, id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE media_items (
+        source_id   TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        id          TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        category_id TEXT,
+        poster      TEXT,
+        description TEXT,
+        year        TEXT,
+        extra       TEXT,
+        PRIMARY KEY (source_id, kind, id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX idx_media_items_source_kind ON media_items(source_id, kind)',
+    );
+    await db.execute(
+      'CREATE INDEX idx_media_items_source_kind_cat ON media_items(source_id, kind, category_id)',
+    );
   }
 
   // ── channels / categories ───────────────────────────────────────────────
@@ -96,37 +144,167 @@ class AppDatabase {
       _readTime('epg_synced_at', sourceId);
 
   Future<DateTime?> _readTime(String column, String sourceId) async {
-    final rows = await _db.query('sources',
-        columns: [column], where: 'id = ?', whereArgs: [sourceId]);
+    final rows = await _db.query(
+      'sources',
+      columns: [column],
+      where: 'id = ?',
+      whereArgs: [sourceId],
+    );
     final v = rows.isEmpty ? null : rows.first[column];
     return v == null ? null : DateTime.fromMillisecondsSinceEpoch(v as int);
   }
 
   Future<List<Category>> readCategories(String sourceId) async {
-    final rows = await _db.query('categories',
-        where: 'source_id = ?', whereArgs: [sourceId], orderBy: 'title');
+    final rows = await _db.query(
+      'categories',
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+      orderBy: 'title',
+    );
     return rows
-        .map((r) =>
-            Category(id: r['id'] as String, title: r['title'] as String))
+        .map(
+          (r) => Category(id: r['id'] as String, title: r['title'] as String),
+        )
         .toList();
   }
 
   Future<List<Channel>> readChannels(String sourceId) async {
-    final rows = await _db.query('channels',
-        where: 'source_id = ?', whereArgs: [sourceId], orderBy: 'number, name');
+    final rows = await _db.query(
+      'channels',
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+      orderBy: 'number, name',
+    );
     return rows.map(_rowToChannel).toList();
   }
 
-  Channel _rowToChannel(Map<String, Object?> r) => Channel(
+  // ── movies / series / generic media ──────────────────────────────────────
+
+  Future<DateTime?> lastMediaSynced(String sourceId, ContentKind kind) async {
+    final rows = await _db.query(
+      'media_sync',
+      columns: ['synced_at'],
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+    );
+    if (rows.isEmpty) return null;
+    return DateTime.fromMillisecondsSinceEpoch(rows.first['synced_at'] as int);
+  }
+
+  Future<List<MediaCategory>> readMediaCategories(
+    String sourceId,
+    ContentKind kind,
+  ) async {
+    final rows = await _db.query(
+      'media_categories',
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+      orderBy: 'title',
+    );
+    return rows
+        .map(
+          (r) => MediaCategory(
+            id: r['id'] as String,
+            title: r['title'] as String,
+            kind: kind,
+          ),
+        )
+        .toList();
+  }
+
+  Future<List<MediaItem>> readMediaItems(
+    String sourceId,
+    ContentKind kind, {
+    String? categoryId,
+  }) async {
+    final where = StringBuffer('source_id = ? AND kind = ?');
+    final args = <Object?>[sourceId, kind.name];
+    if (categoryId != null) {
+      where.write(' AND category_id = ?');
+      args.add(categoryId);
+    }
+    final rows = await _db.query(
+      'media_items',
+      where: where.toString(),
+      whereArgs: args,
+      orderBy: 'title',
+    );
+    return rows.map((r) => _rowToMediaItem(r, kind)).toList();
+  }
+
+  MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
+      MediaItem(
         id: r['id'] as String,
-        name: r['name'] as String,
-        number: r['number'] as int?,
-        logo: r['logo'] as String?,
+        title: r['title'] as String,
+        kind: kind,
         categoryId: r['category_id'] as String?,
+        poster: r['poster'] as String?,
+        description: r['description'] as String?,
+        year: r['year'] as String?,
         extra: r['extra'] != null
             ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
             : const {},
       );
+
+  Future<void> replaceMediaLibrary(
+    String sourceId,
+    ContentKind kind,
+    List<MediaCategory> categories,
+    List<MediaItem> items,
+  ) async {
+    await _db.transaction((txn) async {
+      await txn.delete(
+        'media_categories',
+        where: 'source_id = ? AND kind = ?',
+        whereArgs: [sourceId, kind.name],
+      );
+      await txn.delete(
+        'media_items',
+        where: 'source_id = ? AND kind = ?',
+        whereArgs: [sourceId, kind.name],
+      );
+
+      final batch = txn.batch();
+      for (final c in categories) {
+        batch.insert('media_categories', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'id': c.id,
+          'title': c.title,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      for (final item in items) {
+        batch.insert('media_items', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'id': item.id,
+          'title': item.title,
+          'category_id': item.categoryId,
+          'poster': item.poster,
+          'description': item.description,
+          'year': item.year,
+          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      batch.insert('media_sync', {
+        'source_id': sourceId,
+        'kind': kind.name,
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Channel _rowToChannel(Map<String, Object?> r) => Channel(
+    id: r['id'] as String,
+    name: r['name'] as String,
+    number: r['number'] as int?,
+    logo: r['logo'] as String?,
+    categoryId: r['category_id'] as String?,
+    extra: r['extra'] != null
+        ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
+        : const {},
+  );
 
   /// Replace all cached channels/categories for a source in one transaction.
   Future<void> replaceLibrary(
@@ -136,43 +314,41 @@ class AppDatabase {
     List<Channel> channels,
   ) async {
     await _db.transaction((txn) async {
-      await txn
-          .delete('categories', where: 'source_id = ?', whereArgs: [sourceId]);
-      await txn
-          .delete('channels', where: 'source_id = ?', whereArgs: [sourceId]);
+      await txn.delete(
+        'categories',
+        where: 'source_id = ?',
+        whereArgs: [sourceId],
+      );
+      await txn.delete(
+        'channels',
+        where: 'source_id = ?',
+        whereArgs: [sourceId],
+      );
 
       final batch = txn.batch();
       for (final c in categories) {
-        batch.insert(
-          'categories',
-          {'source_id': sourceId, 'id': c.id, 'title': c.title},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        batch.insert('categories', {
+          'source_id': sourceId,
+          'id': c.id,
+          'title': c.title,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       for (final ch in channels) {
-        batch.insert(
-          'channels',
-          {
-            'source_id': sourceId,
-            'id': ch.id,
-            'name': ch.name,
-            'number': ch.number,
-            'logo': ch.logo,
-            'category_id': ch.categoryId,
-            'extra': ch.extra.isEmpty ? null : jsonEncode(ch.extra),
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        batch.insert('channels', {
+          'source_id': sourceId,
+          'id': ch.id,
+          'name': ch.name,
+          'number': ch.number,
+          'logo': ch.logo,
+          'category_id': ch.categoryId,
+          'extra': ch.extra.isEmpty ? null : jsonEncode(ch.extra),
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
-      batch.insert(
-        'sources',
-        {
-          'id': sourceId,
-          'name': name,
-          'synced_at': DateTime.now().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      batch.insert('sources', {
+        'id': sourceId,
+        'name': name,
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
     });
   }
@@ -181,8 +357,11 @@ class AppDatabase {
 
   Future<void> replaceEpg(String sourceId, List<Programme> programmes) async {
     await _db.transaction((txn) async {
-      await txn
-          .delete('programmes', where: 'source_id = ?', whereArgs: [sourceId]);
+      await txn.delete(
+        'programmes',
+        where: 'source_id = ?',
+        whereArgs: [sourceId],
+      );
       final batch = txn.batch();
       for (final p in programmes) {
         batch.insert('programmes', {
@@ -206,7 +385,9 @@ class AppDatabase {
 
   /// Current and next programme per channel at time [at].
   Future<({Map<String, Programme> now, Map<String, Programme> next})> nowNext(
-      String sourceId, DateTime at) async {
+    String sourceId,
+    DateTime at,
+  ) async {
     final t = at.millisecondsSinceEpoch;
     final now = <String, Programme>{};
     final next = <String, Programme>{};
@@ -233,12 +414,12 @@ class AppDatabase {
   }
 
   Programme _rowToProgramme(Map<String, Object?> r) => Programme(
-        channelId: r['channel_id'] as String,
-        start: DateTime.fromMillisecondsSinceEpoch(r['start'] as int),
-        stop: DateTime.fromMillisecondsSinceEpoch(r['stop'] as int),
-        title: r['title'] as String,
-        description: r['description'] as String?,
-      );
+    channelId: r['channel_id'] as String,
+    start: DateTime.fromMillisecondsSinceEpoch(r['start'] as int),
+    stop: DateTime.fromMillisecondsSinceEpoch(r['stop'] as int),
+    title: r['title'] as String,
+    description: r['description'] as String?,
+  );
 
   Future<void> close() => _db.close();
 }

@@ -53,10 +53,12 @@ class XtreamSource implements Source {
     if (r is! List) return const [];
     return r
         .whereType<Map>()
-        .map((c) => Category(
-              id: '${c['category_id']}',
-              title: '${c['category_name']}',
-            ))
+        .map(
+          (c) => Category(
+            id: '${c['category_id']}',
+            title: '${c['category_name']}',
+          ),
+        )
         .toList();
   }
 
@@ -74,7 +76,8 @@ class XtreamSource implements Source {
         id: streamId,
         name: '${m['name']}',
         number: int.tryParse('${m['num']}'),
-        logo: (m['stream_icon'] is String &&
+        logo:
+            (m['stream_icon'] is String &&
                 (m['stream_icon'] as String).isNotEmpty)
             ? m['stream_icon'] as String
             : null,
@@ -104,9 +107,93 @@ class XtreamSource implements Source {
     }
     if (map.isEmpty) return const [];
     final uri = Uri.parse(
-        '$_base/xmltv.php?username=$username&password=$password');
+      '$_base/xmltv.php?username=$username&password=$password',
+    );
     final bytes = await _download(uri);
     return parseXmltv(bytes, map);
+  }
+
+  @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async {
+    final action = switch (kind) {
+      ContentKind.movie => 'get_vod_categories',
+      ContentKind.series => 'get_series_categories',
+      _ => null,
+    };
+    if (action == null) return const [];
+    final r = await _api({'action': action});
+    if (r is! List) return const [];
+    return r.whereType<Map>().map((c) {
+      final m = Map<String, dynamic>.from(c);
+      return MediaCategory(
+        id: '${m['category_id']}',
+        title: '${m['category_name']}',
+        kind: kind,
+      );
+    }).toList();
+  }
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+  }) async {
+    final action = switch (kind) {
+      ContentKind.movie => 'get_vod_streams',
+      ContentKind.series => 'get_series',
+      _ => null,
+    };
+    if (action == null) return const [];
+    final params = {'action': action};
+    if (categoryId != null) params['category_id'] = categoryId;
+    final r = await _api(params);
+    if (r is! List) return const [];
+    return r
+        .whereType<Map>()
+        .map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind))
+        .toList();
+  }
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async {
+    final action = switch (item.kind) {
+      ContentKind.movie => 'get_vod_info',
+      ContentKind.series => 'get_series_info',
+      _ => null,
+    };
+    if (action == null) return item;
+    final idParam = item.kind == ContentKind.movie ? 'vod_id' : 'series_id';
+    final r = await _api({'action': action, idParam: item.id});
+    final details = r is Map ? Map<String, dynamic>.from(r) : const {};
+    final info = details['info'] is Map
+        ? Map<String, dynamic>.from(details['info'] as Map)
+        : details;
+    return item.copyWith(
+      poster:
+          _firstString(info, ['movie_image', 'cover', 'cover_big']) ??
+          item.poster,
+      description:
+          _firstString(info, ['description', 'plot']) ?? item.description,
+      year:
+          _firstString(info, ['releasedate', 'release_date', 'year']) ??
+          item.year,
+      extra: {...item.extra, 'details': details},
+    );
+  }
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async {
+    if (item.kind != ContentKind.movie && item.kind != ContentKind.episode) {
+      throw UnsupportedError('${item.kind.name} is not directly playable yet');
+    }
+    final ext = item.extra['container_extension']?.toString();
+    final extension = ext == null || ext.isEmpty ? 'mp4' : ext;
+    final path = item.kind == ContentKind.movie ? 'movie' : 'series';
+    return StreamInfo(
+      url: '$_base/$path/$username/$password/${item.id}.$extension',
+      isLive: false,
+    );
   }
 
   @override
@@ -115,11 +202,9 @@ class XtreamSource implements Source {
   // ── http ──────────────────────────────────────────────────────────────
 
   Future<dynamic> _api(Map<String, String> params) async {
-    final uri = Uri.parse('$_base/player_api.php').replace(queryParameters: {
-      'username': username,
-      'password': password,
-      ...params,
-    });
+    final uri = Uri.parse('$_base/player_api.php').replace(
+      queryParameters: {'username': username, 'password': password, ...params},
+    );
     final bytes = await _download(uri);
     return jsonDecode(utf8.decode(bytes, allowMalformed: true));
   }
@@ -135,5 +220,29 @@ class XtreamSource implements Source {
       builder.add(chunk);
     }
     return builder.takeBytes();
+  }
+
+  MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
+    final idKey = kind == ContentKind.movie ? 'stream_id' : 'series_id';
+    return MediaItem(
+      id: '${m[idKey]}',
+      title: '${m['name']}',
+      kind: kind,
+      categoryId: m['category_id']?.toString(),
+      poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
+      description: _firstString(m, ['plot', 'description']),
+      year: _firstString(m, ['year', 'releaseDate', 'release_date']),
+      extra: m,
+    );
+  }
+
+  String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
+    for (final key in keys) {
+      final value = map[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty && text != 'null') return text;
+    }
+    return null;
   }
 }

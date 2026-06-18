@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/library_repository.dart';
 import '../sources/source.dart';
@@ -13,7 +14,11 @@ import '../player/player_screen.dart';
 class ChannelListScreen extends StatefulWidget {
   final LibraryRepository repo;
   final VoidCallback? onManageSources;
-  const ChannelListScreen({super.key, required this.repo, this.onManageSources});
+  const ChannelListScreen({
+    super.key,
+    required this.repo,
+    this.onManageSources,
+  });
 
   @override
   State<ChannelListScreen> createState() => _ChannelListScreenState();
@@ -22,8 +27,13 @@ class ChannelListScreen extends StatefulWidget {
 class _ChannelListScreenState extends State<ChannelListScreen> {
   final _searchController = TextEditingController();
 
+  ContentKind _tab = ContentKind.live;
   List<Category> _categories = const [];
   List<Channel> _all = const [];
+  final Map<ContentKind, MediaLibrarySnapshot> _media = {};
+  final Map<ContentKind, String?> _mediaCategoryId = {};
+  final Map<ContentKind, bool> _mediaLoading = {};
+  final Map<ContentKind, String?> _mediaError = {};
   Map<String, Programme> _now = const {};
   Map<String, Programme> _next = const {};
   String? _categoryId;
@@ -40,8 +50,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void initState() {
     super.initState();
     _load();
-    _epgTimer =
-        Timer.periodic(const Duration(minutes: 1), (_) => _refreshNowNext());
+    _epgTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _refreshNowNext(),
+    );
   }
 
   @override
@@ -87,11 +99,46 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     } catch (_) {}
   }
 
+  Future<void> _loadMedia(ContentKind kind, {bool forceRefresh = false}) async {
+    setState(() {
+      _mediaLoading[kind] = true;
+      _mediaError[kind] = null;
+    });
+    try {
+      final snap = await widget.repo.loadMedia(
+        kind,
+        forceRefresh: forceRefresh,
+      );
+      if (!mounted) return;
+      setState(() {
+        _media[kind] = snap;
+        _mediaLoading[kind] = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _mediaError[kind] = '$e';
+        _mediaLoading[kind] = false;
+      });
+    }
+  }
+
   List<Channel> get _visible {
     final q = _query.trim().toLowerCase();
     return _all.where((c) {
       if (_categoryId != null && c.categoryId != _categoryId) return false;
       if (q.isNotEmpty && !c.name.toLowerCase().contains(q)) return false;
+      return true;
+    }).toList();
+  }
+
+  List<MediaItem> _visibleMedia(ContentKind kind) {
+    final q = _query.trim().toLowerCase();
+    final categoryId = _mediaCategoryId[kind];
+    final items = _media[kind]?.items ?? const <MediaItem>[];
+    return items.where((item) {
+      if (categoryId != null && item.categoryId != categoryId) return false;
+      if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
   }
@@ -116,9 +163,60 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
-  String _fmt(int n) => n
-      .toString()
-      .replaceAllMapped(RegExp(r'(\d)(?=(\d{3})+$)'), (m) => '${m[1]},');
+  Future<void> _openMedia(MediaItem item) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final detailed = await widget.repo.mediaDetails(item);
+      if (!mounted) return;
+      _showMediaDetails(detailed);
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not open: $e')));
+    }
+  }
+
+  Future<void> _playMedia(MediaItem item) async {
+    if (_resolving) return;
+    setState(() => _resolving = true);
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final stream = await widget.repo.resolveMedia(item);
+      if (!mounted) return;
+      await navigator.push(
+        MaterialPageRoute(
+          builder: (_) => PlayerScreen(title: item.title, stream: stream),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
+  }
+
+  void _showMediaDetails(MediaItem item) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: AppColors.panel,
+      constraints: const BoxConstraints(maxWidth: 720),
+      builder: (context) => _MediaDetailsSheet(
+        item: item,
+        onPlay:
+            item.kind == ContentKind.movie || item.kind == ContentKind.episode
+            ? () {
+                Navigator.of(context).pop();
+                _playMedia(item);
+              }
+            : null,
+      ),
+    );
+  }
+
+  String _fmt(int n) => n.toString().replaceAllMapped(
+    RegExp(r'(\d)(?=(\d{3})+$)'),
+    (m) => '${m[1]},',
+  );
 
   String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
@@ -131,11 +229,39 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   String _statusLine(int count) {
     final b = StringBuffer('${_fmt(count)} channels');
     if (_syncedAt != null) {
-      b.write(_fromCache
-          ? ' · cached, synced ${_ago(_syncedAt!)}'
-          : ' · synced ${_ago(_syncedAt!)}');
+      b.write(
+        _fromCache
+            ? ' · cached, synced ${_ago(_syncedAt!)}'
+            : ' · synced ${_ago(_syncedAt!)}',
+      );
     }
     return b.toString();
+  }
+
+  String _mediaStatusLine(ContentKind kind, int count) {
+    final snap = _media[kind];
+    final label = kind == ContentKind.movie ? 'movies' : 'series';
+    final b = StringBuffer('${_fmt(count)} $label');
+    if (snap?.syncedAt != null) {
+      b.write(
+        snap!.fromCache
+            ? ' · cached, synced ${_ago(snap.syncedAt!)}'
+            : ' · synced ${_ago(snap.syncedAt!)}',
+      );
+    }
+    return b.toString();
+  }
+
+  void _selectTab(ContentKind kind) {
+    if (_tab == kind) return;
+    setState(() {
+      _tab = kind;
+      _query = '';
+      _searchController.clear();
+    });
+    if (kind != ContentKind.live && !_media.containsKey(kind)) {
+      _loadMedia(kind);
+    }
   }
 
   @override
@@ -154,7 +280,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           IconButton(
             tooltip: 'Refresh from source',
             icon: const Icon(Icons.refresh),
-            onPressed: _loading ? null : () => _load(forceRefresh: true),
+            onPressed: _loading || _mediaLoading[_tab] == true
+                ? null
+                : () => _tab == ContentKind.live
+                      ? _load(forceRefresh: true)
+                      : _loadMedia(_tab, forceRefresh: true),
           ),
           const SizedBox(width: 4),
         ],
@@ -167,52 +297,57 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _searchController,
-                    onChanged: (v) => setState(() => _query = v),
-                    decoration: InputDecoration(
-                      hintText: 'Search channels',
-                      prefixIcon: const Icon(Icons.search, size: 20),
-                      suffixIcon: _query.isEmpty
-                          ? null
-                          : IconButton(
-                              icon: const Icon(Icons.clear, size: 18),
-                              onPressed: () {
-                                _searchController.clear();
-                                setState(() => _query = '');
-                              },
-                            ),
-                    ),
+          _ContentTabs(value: _tab, onChanged: _selectTab),
+          _Toolbar(
+            searchController: _searchController,
+            query: _query,
+            hintText: _tab == ContentKind.live
+                ? 'Search channels'
+                : _tab == ContentKind.movie
+                ? 'Search movies'
+                : 'Search series',
+            onQueryChanged: (v) => setState(() => _query = v),
+            onClearQuery: () {
+              _searchController.clear();
+              setState(() => _query = '');
+            },
+            categoryControl: _tab == ContentKind.live
+                ? _CategoryDropdown(
+                    categories: _categories,
+                    value: _categoryId,
+                    onChanged: (v) => setState(() => _categoryId = v),
+                  )
+                : _MediaCategoryDropdown(
+                    categories: _media[_tab]?.categories ?? const [],
+                    value: _mediaCategoryId[_tab],
+                    onChanged: (v) =>
+                        setState(() => _mediaCategoryId[_tab] = v),
                   ),
-                ),
-                const SizedBox(width: 12),
-                _CategoryDropdown(
-                  categories: _categories,
-                  value: _categoryId,
-                  onChanged: (v) => setState(() => _categoryId = v),
-                ),
-              ],
-            ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _loading ? '' : _statusLine(visible.length),
+                _statusText(visible.length),
                 style: const TextStyle(color: AppColors.textLo, fontSize: 12),
               ),
             ),
           ),
-          Expanded(child: _body(visible)),
+          Expanded(
+            child: _tab == ContentKind.live ? _body(visible) : _mediaBody(_tab),
+          ),
         ],
       ),
     );
+  }
+
+  String _statusText(int visibleLiveCount) {
+    if (_tab == ContentKind.live) {
+      return _loading ? '' : _statusLine(visibleLiveCount);
+    }
+    if (_mediaLoading[_tab] == true) return '';
+    return _mediaStatusLine(_tab, _visibleMedia(_tab).length);
   }
 
   Widget _body(List<Channel> visible) {
@@ -224,9 +359,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Couldn\'t load this source.\n$_error',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: AppColors.textLo)),
+              Text(
+                'Couldn\'t load this source.\n$_error',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textLo),
+              ),
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: () => _load(forceRefresh: true),
@@ -239,13 +376,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
     if (visible.isEmpty) {
       return const Center(
-        child: Text('No channels match',
-            style: TextStyle(color: AppColors.textLo)),
+        child: Text(
+          'No channels match',
+          style: TextStyle(color: AppColors.textLo),
+        ),
       );
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-      cacheExtent: 800, // keep neighbours built so D-pad can reach them
+      scrollCacheExtent: const ScrollCacheExtent.pixels(
+        800,
+      ), // keep neighbours built so D-pad can reach them
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final c = visible[i];
@@ -256,6 +397,180 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           enabled: !_resolving,
           autofocus: i == 0,
           onTap: () => _play(c),
+        );
+      },
+    );
+  }
+
+  Widget _mediaBody(ContentKind kind) {
+    final loading = _mediaLoading[kind] == true;
+    final error = _mediaError[kind];
+    final visible = _visibleMedia(kind);
+    if (loading) return const Center(child: CircularProgressIndicator());
+    if (error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Couldn\'t load ${kind == ContentKind.movie ? 'movies' : 'series'}.\n$error',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textLo),
+              ),
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: () => _loadMedia(kind, forceRefresh: true),
+                child: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (visible.isEmpty) {
+      return Center(
+        child: Text(
+          'No ${kind == ContentKind.movie ? 'movies' : 'series'} match',
+          style: const TextStyle(color: AppColors.textLo),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 860;
+        if (!wide) {
+          return ListView.builder(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+            scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+            itemCount: visible.length,
+            itemBuilder: (context, i) => _MediaListTile(
+              item: visible[i],
+              autofocus: i == 0,
+              onTap: () => _openMedia(visible[i]),
+            ),
+          );
+        }
+        final columns = constraints.maxWidth >= 1280 ? 6 : 4;
+        return GridView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+          scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            childAspectRatio: 0.64,
+          ),
+          itemCount: visible.length,
+          itemBuilder: (context, i) => _MediaGridTile(
+            item: visible[i],
+            autofocus: i == 0,
+            onTap: () => _openMedia(visible[i]),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ContentTabs extends StatelessWidget {
+  final ContentKind value;
+  final ValueChanged<ContentKind> onChanged;
+
+  const _ContentTabs({required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      scrollDirection: Axis.horizontal,
+      child: SegmentedButton<ContentKind>(
+        segments: const [
+          ButtonSegment(
+            value: ContentKind.live,
+            icon: Icon(Icons.live_tv_rounded),
+            label: Text('Live'),
+          ),
+          ButtonSegment(
+            value: ContentKind.movie,
+            icon: Icon(Icons.movie_outlined),
+            label: Text('Movies'),
+          ),
+          ButtonSegment(
+            value: ContentKind.series,
+            icon: Icon(Icons.tv_outlined),
+            label: Text('Series'),
+          ),
+        ],
+        selected: {value},
+        showSelectedIcon: false,
+        onSelectionChanged: (values) => onChanged(values.first),
+      ),
+    );
+  }
+}
+
+class _Toolbar extends StatelessWidget {
+  final TextEditingController searchController;
+  final String query;
+  final String hintText;
+  final ValueChanged<String> onQueryChanged;
+  final VoidCallback onClearQuery;
+  final Widget categoryControl;
+
+  const _Toolbar({
+    required this.searchController,
+    required this.query,
+    required this.hintText,
+    required this.onQueryChanged,
+    required this.onClearQuery,
+    required this.categoryControl,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final narrow = constraints.maxWidth < 620;
+        final search = TextField(
+          controller: searchController,
+          onChanged: onQueryChanged,
+          decoration: InputDecoration(
+            hintText: hintText,
+            prefixIcon: const Icon(Icons.search, size: 20),
+            suffixIcon: query.isEmpty
+                ? null
+                : IconButton(
+                    icon: const Icon(Icons.clear, size: 18),
+                    onPressed: onClearQuery,
+                  ),
+          ),
+        );
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: narrow
+              ? Column(
+                  children: [
+                    search,
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: categoryControl,
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: search),
+                    const SizedBox(width: 12),
+                    categoryControl,
+                  ],
+                ),
         );
       },
     );
@@ -321,7 +636,9 @@ class _ChannelTile extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                color: AppColors.textLo, fontSize: 13),
+                              color: AppColors.textLo,
+                              fontSize: 13,
+                            ),
                           ),
                         ),
                       ],
@@ -330,7 +647,9 @@ class _ChannelTile extends StatelessWidget {
                     ClipRRect(
                       borderRadius: BorderRadius.circular(3),
                       child: LinearProgressIndicator(
-                          value: progress, minHeight: 3),
+                        value: progress,
+                        minHeight: 3,
+                      ),
                     ),
                     if (next != null)
                       Padding(
@@ -340,7 +659,9 @@ class _ChannelTile extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: AppColors.textLo, fontSize: 12),
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                   ],
@@ -348,8 +669,10 @@ class _ChannelTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Icon(Icons.play_arrow_rounded,
-                color: enabled ? AppColors.accent : AppColors.textLo),
+            Icon(
+              Icons.play_arrow_rounded,
+              color: enabled ? AppColors.accent : AppColors.textLo,
+            ),
           ],
         ),
       ),
@@ -376,7 +699,9 @@ class _Logo extends StatelessWidget {
         channel.number?.toString() ??
             (channel.name.isEmpty ? '?' : channel.name.characters.first),
         style: const TextStyle(
-            color: AppColors.textLo, fontWeight: FontWeight.w600),
+          color: AppColors.textLo,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
 
@@ -390,7 +715,7 @@ class _Logo extends StatelessWidget {
         width: size,
         height: size,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => fallback,
+        errorBuilder: (_, _, _) => fallback,
         loadingBuilder: (_, child, p) => p == null ? child : fallback,
       ),
     );
@@ -415,15 +740,20 @@ class _LivePill extends StatelessWidget {
             width: 6,
             height: 6,
             decoration: const BoxDecoration(
-                color: AppColors.live, shape: BoxShape.circle),
+              color: AppColors.live,
+              shape: BoxShape.circle,
+            ),
           ),
           const SizedBox(width: 4),
-          const Text('LIVE',
-              style: TextStyle(
-                  color: AppColors.live,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5)),
+          const Text(
+            'LIVE',
+            style: TextStyle(
+              color: AppColors.live,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
         ],
       ),
     );
@@ -458,20 +788,330 @@ class _CategoryDropdown extends StatelessWidget {
           dropdownColor: AppColors.panelHi,
           borderRadius: BorderRadius.circular(AppRadius.control),
           icon: const Icon(Icons.expand_more, color: AppColors.textLo),
-          hint: const Text('All categories',
-              style: TextStyle(color: AppColors.textLo)),
+          hint: const Text(
+            'All categories',
+            style: TextStyle(color: AppColors.textLo),
+          ),
           items: [
             const DropdownMenuItem<String?>(
-                value: null, child: Text('All categories')),
+              value: null,
+              child: Text('All categories'),
+            ),
             ...categories.map(
               (c) => DropdownMenuItem<String?>(
                 value: c.id,
-                child:
-                    Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                child: Text(
+                  c.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
           ],
           onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaCategoryDropdown extends StatelessWidget {
+  final List<MediaCategory> categories;
+  final String? value;
+  final ValueChanged<String?> onChanged;
+
+  const _MediaCategoryDropdown({
+    required this.categories,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppColors.panel,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String?>(
+          isExpanded: true,
+          value: value,
+          dropdownColor: AppColors.panelHi,
+          borderRadius: BorderRadius.circular(AppRadius.control),
+          icon: const Icon(Icons.expand_more, color: AppColors.textLo),
+          hint: const Text(
+            'All categories',
+            style: TextStyle(color: AppColors.textLo),
+          ),
+          items: [
+            const DropdownMenuItem<String?>(
+              value: null,
+              child: Text('All categories'),
+            ),
+            ...categories.map(
+              (c) => DropdownMenuItem<String?>(
+                value: c.id,
+                child: Text(
+                  c.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ],
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaListTile extends StatelessWidget {
+  final MediaItem item;
+  final bool autofocus;
+  final VoidCallback onTap;
+
+  const _MediaListTile({
+    required this.item,
+    required this.autofocus,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      autofocus: autofocus,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            _Poster(item: item, width: 58, height: 84),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  if (item.year != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      item.year!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                  if (item.description != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      item.description!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              item.kind == ContentKind.movie
+                  ? Icons.play_arrow_rounded
+                  : Icons.chevron_right_rounded,
+              color: AppColors.accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaGridTile extends StatelessWidget {
+  final MediaItem item;
+  final bool autofocus;
+  final VoidCallback onTap;
+
+  const _MediaGridTile({
+    required this.item,
+    required this.autofocus,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      autofocus: autofocus,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: SizedBox.expand(
+                child: _Poster(
+                  item: item,
+                  width: double.infinity,
+                  height: double.infinity,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              item.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            if (item.year != null)
+              Text(
+                item.year!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Poster extends StatelessWidget {
+  final MediaItem item;
+  final double width;
+  final double height;
+
+  const _Poster({
+    required this.item,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = Container(
+      width: width,
+      height: height,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.panelHi,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(
+        item.kind == ContentKind.movie
+            ? Icons.movie_outlined
+            : Icons.tv_outlined,
+        color: AppColors.textLo,
+      ),
+    );
+    final poster = item.poster;
+    if (poster == null || poster.isEmpty) return fallback;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.network(
+        poster,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => fallback,
+        loadingBuilder: (_, child, progress) =>
+            progress == null ? child : fallback,
+      ),
+    );
+  }
+}
+
+class _MediaDetailsSheet extends StatelessWidget {
+  final MediaItem item;
+  final VoidCallback? onPlay;
+
+  const _MediaDetailsSheet({required this.item, required this.onPlay});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final narrow = constraints.maxWidth < 520;
+            final poster = _Poster(item: item, width: 124, height: 180);
+            final details = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  item.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                if (item.year != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    item.year!,
+                    style: const TextStyle(color: AppColors.textLo),
+                  ),
+                ],
+                if (item.description != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    item.description!,
+                    maxLines: 8,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: AppColors.textLo),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                if (onPlay != null)
+                  FilledButton.icon(
+                    onPressed: onPlay,
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: const Text('Play'),
+                  ),
+              ],
+            );
+            if (narrow) {
+              return SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(child: poster),
+                    const SizedBox(height: 14),
+                    details,
+                  ],
+                ),
+              );
+            }
+            return SingleChildScrollView(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  poster,
+                  const SizedBox(width: 18),
+                  Expanded(child: details),
+                ],
+              ),
+            );
+          },
         ),
       ),
     );

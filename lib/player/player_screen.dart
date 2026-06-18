@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -26,6 +27,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     configuration: const PlayerConfiguration(
       // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
       bufferSize: 64 * 1024 * 1024,
+      logLevel: MPVLogLevel.warn,
     ),
   );
   late final VideoController _controller = VideoController(_player);
@@ -38,20 +40,52 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.initState();
 
     // Show errors once as an overlay rather than a stream of snackbars.
-    _subs.add(_player.stream.error.listen((message) {
-      if (!mounted) return;
-      setState(() => _error = message);
-    }));
+    _subs.add(
+      _player.stream.error.listen((message) {
+        _logPlayback('error ${_redactPlayback(message)}');
+        if (!mounted) return;
+        setState(() => _error = message);
+      }),
+    );
+    _subs.add(
+      _player.stream.log.listen((entry) {
+        if (entry.level == 'warn' || entry.level == 'error') {
+          _logPlayback('${entry.level} ${entry.prefix}: ${entry.text}');
+        }
+      }),
+    );
+    _subs.add(
+      _player.stream.audioParams.listen((params) {
+        _logPlayback(
+          'audio format=${params.format} channels=${params.channels} '
+          'rate=${params.sampleRate}',
+        );
+      }),
+    );
+    _subs.add(
+      _player.stream.videoParams.listen((params) {
+        _logPlayback(
+          'video format=${params.hwPixelformat ?? params.pixelformat} '
+          'w=${params.w} h=${params.h} display=${params.dw}x${params.dh}',
+        );
+      }),
+    );
     // Clear the error overlay once playback actually starts.
-    _subs.add(_player.stream.playing.listen((playing) {
-      if (playing && _error != null && mounted) setState(() => _error = null);
-    }));
+    _subs.add(
+      _player.stream.playing.listen((playing) {
+        if (playing && _error != null && mounted) setState(() => _error = null);
+      }),
+    );
 
     _open();
   }
 
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
+    _logPlayback(
+      'open live=$_isLive url=${_redactPlayback(widget.stream.url)} '
+      'headers=${widget.stream.headers.keys.join(',')}',
+    );
 
     // Keep a backward cache so scrubbing back through a VOD doesn't refetch
     // already-downloaded data. (Forward cache comes from bufferSize above.)
@@ -64,7 +98,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _player.open(
       Media(
         widget.stream.url,
-        httpHeaders: widget.stream.headers.isEmpty ? null : widget.stream.headers,
+        httpHeaders: widget.stream.headers.isEmpty
+            ? null
+            : widget.stream.headers,
       ),
     );
     // Insurance against a muted/zero-volume default.
@@ -91,37 +127,41 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _title() => Flexible(
-        child: Text(
-          widget.title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
+    child: Text(
+      widget.title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 
   List<Widget> _desktopBottomBar() => [
-        const MaterialDesktopPlayOrPauseButton(),
-        const MaterialDesktopVolumeButton(),
-        if (!_isLive) const MaterialDesktopPositionIndicator(),
-        const Spacer(),
-        const MaterialDesktopFullscreenButton(),
-      ];
+    const MaterialDesktopPlayOrPauseButton(),
+    const MaterialDesktopVolumeButton(),
+    if (!_isLive) const MaterialDesktopPositionIndicator(),
+    const Spacer(),
+    const MaterialDesktopFullscreenButton(),
+  ];
 
   List<Widget> _topBar({required bool desktop}) => [
-        desktop
-            ? MaterialDesktopCustomButton(
-                onPressed: _back, icon: const Icon(Icons.arrow_back))
-            : MaterialCustomButton(
-                onPressed: _back, icon: const Icon(Icons.arrow_back)),
-        const SizedBox(width: 8),
-        _title(),
-        if (_isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
-        const Spacer(),
-      ];
+    desktop
+        ? MaterialDesktopCustomButton(
+            onPressed: _back,
+            icon: const Icon(Icons.arrow_back),
+          )
+        : MaterialCustomButton(
+            onPressed: _back,
+            icon: const Icon(Icons.arrow_back),
+          ),
+    const SizedBox(width: 8),
+    _title(),
+    if (_isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
+    const Spacer(),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -222,6 +262,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
     );
   }
+
+  String _redactPlayback(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return value;
+    final cleanSegments = uri.pathSegments.map((segment) {
+      final looksSecret =
+          segment.length > 18 ||
+          RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
+      return looksSecret ? '<redacted>' : segment;
+    }).toList();
+    return uri
+        .replace(query: '', pathSegments: cleanSegments)
+        .toString()
+        .replaceAll(RegExp(r'//+'), '//');
+  }
+
+  void _logPlayback(String message) {
+    developer.log(message, name: 'iptvs.player');
+  }
 }
 
 class _LiveBadge extends StatelessWidget {
@@ -240,12 +299,15 @@ class _LiveBadge extends StatelessWidget {
         children: [
           Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
           SizedBox(width: 5),
-          Text('LIVE',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5)),
+          Text(
+            'LIVE',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
         ],
       ),
     );

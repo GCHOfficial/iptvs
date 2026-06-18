@@ -15,6 +15,22 @@ class LibrarySnapshot {
   });
 }
 
+class MediaLibrarySnapshot {
+  final ContentKind kind;
+  final List<MediaCategory> categories;
+  final List<MediaItem> items;
+  final bool fromCache;
+  final DateTime? syncedAt;
+
+  const MediaLibrarySnapshot({
+    required this.kind,
+    required this.categories,
+    required this.items,
+    required this.fromCache,
+    required this.syncedAt,
+  });
+}
+
 /// Sits between a [Source] and the [AppDatabase]: serves channels from cache
 /// when available, refreshes EPG when stale, and only hits the provider for
 /// the heavy fetch on a cold start or an explicit refresh.
@@ -71,8 +87,10 @@ class LibraryRepository {
     );
   }
 
-  Future<void> _ensureEpg(List<Channel> channels,
-      {required bool forceRefresh}) async {
+  Future<void> _ensureEpg(
+    List<Channel> channels, {
+    required bool forceRefresh,
+  }) async {
     final last = await db.lastEpgSynced(source.id);
     final stale = last == null || DateTime.now().difference(last) > _epgMaxAge;
     if (!forceRefresh && !stale) return;
@@ -84,7 +102,67 @@ class LibraryRepository {
   }
 
   Future<({Map<String, Programme> now, Map<String, Programme> next})>
-      nowNext() => db.nowNext(source.id, DateTime.now());
+  nowNext() => db.nowNext(source.id, DateTime.now());
 
   Future<StreamInfo> resolve(Channel channel) => source.resolve(channel);
+
+  Future<MediaLibrarySnapshot> loadMedia(
+    ContentKind kind, {
+    bool forceRefresh = false,
+  }) async {
+    await source.connect();
+    if (!forceRefresh) {
+      final synced = await db.lastMediaSynced(source.id, kind);
+      if (synced != null) {
+        final items = await db.readMediaItems(source.id, kind);
+        if (items.isNotEmpty) {
+          return MediaLibrarySnapshot(
+            kind: kind,
+            categories: await db.readMediaCategories(source.id, kind),
+            items: items,
+            fromCache: true,
+            syncedAt: synced,
+          );
+        }
+      }
+    }
+
+    final categories = await source.mediaCategories(kind);
+    final items = await _fetchMediaItems(kind, categories);
+    await db.replaceMediaLibrary(source.id, kind, categories, items);
+    return MediaLibrarySnapshot(
+      kind: kind,
+      categories: categories,
+      items: items,
+      fromCache: false,
+      syncedAt: DateTime.now(),
+    );
+  }
+
+  Future<List<MediaItem>> _fetchMediaItems(
+    ContentKind kind,
+    List<MediaCategory> categories,
+  ) async {
+    final out = <MediaItem>[];
+    final seen = <String>{};
+    if (categories.isEmpty) {
+      final items = await source.mediaItems(kind);
+      for (final item in items) {
+        if (seen.add(item.id)) out.add(item);
+      }
+      return out;
+    }
+
+    for (final category in categories) {
+      final items = await source.mediaItems(kind, categoryId: category.id);
+      for (final item in items) {
+        if (seen.add(item.id)) out.add(item);
+      }
+    }
+    return out;
+  }
+
+  Future<MediaItem> mediaDetails(MediaItem item) => source.mediaDetails(item);
+
+  Future<StreamInfo> resolveMedia(MediaItem item) => source.resolveMedia(item);
 }

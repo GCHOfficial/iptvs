@@ -19,10 +19,30 @@ class DemoSource implements Source {
   static const _category = Category(id: 'test', title: 'Test streams');
 
   static const _channels = <Channel>[
-    Channel(id: 'bbb', name: 'Big Buck Bunny (H.264 — baseline)', categoryId: 'test', number: 1),
-    Channel(id: 'bipbop', name: 'Apple BipBop (H.264)', categoryId: 'test', number: 2),
-    Channel(id: 'tos', name: 'Tears of Steel (H.264)', categoryId: 'test', number: 3),
-    Channel(id: 'bipbop_hevc', name: 'Apple BipBop (HEVC — codec test)', categoryId: 'test', number: 4),
+    Channel(
+      id: 'bbb',
+      name: 'Big Buck Bunny (H.264 — baseline)',
+      categoryId: 'test',
+      number: 1,
+    ),
+    Channel(
+      id: 'bipbop',
+      name: 'Apple BipBop (H.264)',
+      categoryId: 'test',
+      number: 2,
+    ),
+    Channel(
+      id: 'tos',
+      name: 'Tears of Steel (H.264)',
+      categoryId: 'test',
+      number: 3,
+    ),
+    Channel(
+      id: 'bipbop_hevc',
+      name: 'Apple BipBop (HEVC — codec test)',
+      categoryId: 'test',
+      number: 4,
+    ),
   ];
 
   static const _urls = <String, String>{
@@ -57,6 +77,24 @@ class DemoSource implements Source {
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async => const [];
+
+  @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
+      const [];
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+  }) async => const [];
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async => item;
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      throw UnsupportedError('Demo source only supports live channels');
 
   @override
   Future<void> dispose() async {}

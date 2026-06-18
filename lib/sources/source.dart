@@ -13,6 +13,21 @@ class Category {
   const Category({required this.id, required this.title});
 }
 
+enum ContentKind { live, movie, series, season, episode }
+
+@immutable
+class MediaCategory {
+  final String id;
+  final String title;
+  final ContentKind kind;
+
+  const MediaCategory({
+    required this.id,
+    required this.title,
+    required this.kind,
+  });
+}
+
 @immutable
 class Channel {
   final String id;
@@ -34,6 +49,49 @@ class Channel {
     this.number,
     this.extra = const {},
   });
+}
+
+@immutable
+class MediaItem {
+  final String id;
+  final String title;
+  final ContentKind kind;
+  final String? categoryId;
+  final String? poster;
+  final String? description;
+  final String? year;
+  final Map<String, dynamic> extra;
+
+  const MediaItem({
+    required this.id,
+    required this.title,
+    required this.kind,
+    this.categoryId,
+    this.poster,
+    this.description,
+    this.year,
+    this.extra = const {},
+  });
+
+  MediaItem copyWith({
+    String? id,
+    String? title,
+    ContentKind? kind,
+    String? categoryId,
+    String? poster,
+    String? description,
+    String? year,
+    Map<String, dynamic>? extra,
+  }) => MediaItem(
+    id: id ?? this.id,
+    title: title ?? this.title,
+    kind: kind ?? this.kind,
+    categoryId: categoryId ?? this.categoryId,
+    poster: poster ?? this.poster,
+    description: description ?? this.description,
+    year: year ?? this.year,
+    extra: extra ?? this.extra,
+  );
 }
 
 /// A resolved, playable stream: the URL plus any HTTP headers the player must
@@ -98,6 +156,20 @@ abstract class Source {
   /// Stalker ignores them and keys by channel id directly). Programmes are
   /// keyed via [Programme.channelId]. Sources without EPG return an empty list.
   Future<List<Programme>> epg(List<Channel> channels) async => const [];
+
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
+      const [];
+
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+  }) async => const [];
+
+  Future<MediaItem> mediaDetails(MediaItem item) async => item;
+
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      throw UnsupportedError('This source does not support ${item.kind.name}');
 
   /// Release any held resources.
   Future<void> dispose() async {}

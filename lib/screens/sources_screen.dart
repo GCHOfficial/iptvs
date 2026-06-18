@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
@@ -79,11 +80,13 @@ class _SourcesScreenState extends State<SourcesScreen> {
         content: Text('Remove "${c.label}"?'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Delete')),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
         ],
       ),
     );
@@ -107,26 +110,28 @@ class _SourcesScreenState extends State<SourcesScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _sources.isEmpty
-              ? const Center(
-                  child: Text('No sources yet — add one',
-                      style: TextStyle(color: AppColors.textLo)),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
-                  cacheExtent: 800,
-                  itemCount: _sources.length,
-                  itemBuilder: (context, i) {
-                    final c = _sources[i];
-                    return _SourceCard(
-                      config: c,
-                      active: c.id == _activeId,
-                      autofocus: i == 0,
-                      onActivate: () => _activate(c),
-                      onEdit: () => _edit(c),
-                      onDelete: () => _delete(c),
-                    );
-                  },
-                ),
+          ? const Center(
+              child: Text(
+                'No sources yet — add one',
+                style: TextStyle(color: AppColors.textLo),
+              ),
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
+              scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+              itemCount: _sources.length,
+              itemBuilder: (context, i) {
+                final c = _sources[i];
+                return _SourceCard(
+                  config: c,
+                  active: c.id == _activeId,
+                  autofocus: i == 0,
+                  onActivate: () => _activate(c),
+                  onEdit: () => _edit(c),
+                  onDelete: () => _delete(c),
+                );
+              },
+            ),
     );
   }
 }
@@ -178,8 +183,10 @@ class _SourceCard extends StatelessWidget {
                 color: AppColors.panelHi,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Icon(_kindIcon(config.kind),
-                  color: active ? AppColors.accent : AppColors.textLo),
+              child: Icon(
+                _kindIcon(config.kind),
+                color: active ? AppColors.accent : AppColors.textLo,
+              ),
             ),
             const SizedBox(width: 14),
             Expanded(
@@ -189,10 +196,12 @@ class _SourceCard extends StatelessWidget {
                   Row(
                     children: [
                       Flexible(
-                        child: Text(config.label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleMedium),
+                        child: Text(
+                          config.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
                       ),
                       if (active) ...[
                         const SizedBox(width: 8),
@@ -201,11 +210,15 @@ class _SourceCard extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 4),
-                  Text(_subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: AppColors.textLo, fontSize: 12)),
+                  Text(
+                    _subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -235,12 +248,15 @@ class _ActivePill extends StatelessWidget {
         color: AppColors.accent.withValues(alpha: 0.16),
         borderRadius: BorderRadius.circular(4),
       ),
-      child: const Text('ACTIVE',
-          style: TextStyle(
-              color: AppColors.accent,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5)),
+      child: const Text(
+        'ACTIVE',
+        style: TextStyle(
+          color: AppColors.accent,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.5,
+        ),
+      ),
     );
   }
 }
@@ -251,8 +267,13 @@ class _FieldSpec {
   final String? hint;
   final bool required;
   final bool obscure;
-  const _FieldSpec(this.key, this.label,
-      {this.hint, this.required = true, this.obscure = false});
+  const _FieldSpec(
+    this.key,
+    this.label, {
+    this.hint,
+    this.required = true,
+    this.obscure = false,
+  });
 }
 
 /// Add or edit a single source.
@@ -286,8 +307,10 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     super.dispose();
   }
 
-  TextEditingController _controller(String key) => _fields.putIfAbsent(key,
-      () => TextEditingController(text: widget.existing?.fields[key] ?? ''));
+  TextEditingController _controller(String key) => _fields.putIfAbsent(
+    key,
+    () => TextEditingController(text: widget.existing?.fields[key] ?? ''),
+  );
 
   List<_FieldSpec> _specs(SourceKind kind) {
     switch (kind) {
@@ -304,7 +327,11 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
         ];
       case SourceKind.m3u:
         return const [
-          _FieldSpec('playlistUrl', 'Playlist URL', hint: 'http://.../list.m3u'),
+          _FieldSpec(
+            'playlistUrl',
+            'Playlist URL',
+            hint: 'http://.../list.m3u',
+          ),
           _FieldSpec('epgUrl', 'EPG / XMLTV URL (optional)', required: false),
           _FieldSpec('userAgent', 'User-Agent (optional)', required: false),
         ];
@@ -317,9 +344,9 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     final specs = _specs(_kind);
     for (final s in specs) {
       if (s.required && _controller(s.key).text.trim().isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${s.label} is required')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('${s.label} is required')));
         return;
       }
     }
@@ -328,7 +355,8 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     };
     final label = _label.text.trim().isEmpty ? _kind.name : _label.text.trim();
     final config = SourceConfig(
-      id: widget.existing?.id ??
+      id:
+          widget.existing?.id ??
           DateTime.now().microsecondsSinceEpoch.toString(),
       kind: _kind,
       label: label,
@@ -353,17 +381,18 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
             decoration: const InputDecoration(labelText: 'Type'),
             dropdownColor: AppColors.panelHi,
             items: SourceKind.values
-                .map((k) => DropdownMenuItem(
-                      value: k,
-                      child: Row(
-                        children: [
-                          Icon(_kindIcon(k),
-                              size: 18, color: AppColors.textLo),
-                          const SizedBox(width: 10),
-                          Text(k.name.toUpperCase()),
-                        ],
-                      ),
-                    ))
+                .map(
+                  (k) => DropdownMenuItem(
+                    value: k,
+                    child: Row(
+                      children: [
+                        Icon(_kindIcon(k), size: 18, color: AppColors.textLo),
+                        const SizedBox(width: 10),
+                        Text(k.name.toUpperCase()),
+                      ],
+                    ),
+                  ),
+                )
                 .toList(),
             onChanged: (k) => setState(() => _kind = k ?? _kind),
           ),
@@ -386,7 +415,9 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
           SizedBox(
             height: 48,
             child: FilledButton(
-                onPressed: _save, child: const Text('Save source')),
+              onPressed: _save,
+              child: const Text('Save source'),
+            ),
           ),
         ],
       ),

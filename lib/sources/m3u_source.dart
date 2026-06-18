@@ -73,6 +73,24 @@ class M3uSource implements Source {
   }
 
   @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
+      const [];
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+  }) async => const [];
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async => item;
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      throw UnsupportedError('M3U source only exposes playlist channels');
+
+  @override
   Future<void> dispose() async => _http.close(force: true);
 
   // ── parsing ────────────────────────────────────────────────────────────
@@ -110,17 +128,19 @@ class M3uSource implements Source {
       if (name != null) {
         final g = (group == null || group.isEmpty) ? 'Uncategorized' : group;
         categoryTitles.add(g);
-        channels.add(Channel(
-          id: (tvgId != null && tvgId.isNotEmpty) ? tvgId : line,
-          name: name,
-          number: channels.length + 1,
-          logo: (logo != null && logo.isNotEmpty) ? logo : null,
-          categoryId: g,
-          extra: {
-            'url': line,
-            if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
-          },
-        ));
+        channels.add(
+          Channel(
+            id: (tvgId != null && tvgId.isNotEmpty) ? tvgId : line,
+            name: name,
+            number: channels.length + 1,
+            logo: (logo != null && logo.isNotEmpty) ? logo : null,
+            categoryId: g,
+            extra: {
+              'url': line,
+              if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
+            },
+          ),
+        );
         name = group = logo = tvgId = null;
       }
     }
