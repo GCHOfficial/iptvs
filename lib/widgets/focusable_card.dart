@@ -11,12 +11,14 @@ class FocusableCard extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
   final bool autofocus;
+  final bool scrollOnFocus;
 
   const FocusableCard({
     super.key,
     required this.child,
     required this.onTap,
     this.autofocus = false,
+    this.scrollOnFocus = true,
   });
 
   @override
@@ -28,7 +30,7 @@ class _FocusableCardState extends State<FocusableCard> {
 
   void _onHighlight(bool value) {
     if (mounted) setState(() => _focused = value);
-    if (!value) return;
+    if (!value || !widget.scrollOnFocus) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (Scrollable.maybeOf(context) != null) {

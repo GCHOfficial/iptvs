@@ -17,6 +17,7 @@ class LibrarySnapshot {
 
 class MediaLibrarySnapshot {
   final ContentKind kind;
+  final String? categoryId;
   final List<MediaCategory> categories;
   final List<MediaItem> items;
   final bool fromCache;
@@ -26,6 +27,7 @@ class MediaLibrarySnapshot {
 
   const MediaLibrarySnapshot({
     required this.kind,
+    this.categoryId,
     required this.categories,
     required this.items,
     required this.fromCache,
@@ -46,8 +48,10 @@ class LibraryRepository {
 
   /// EPG is re-fetched if older than this (or on a forced refresh).
   static const _epgMaxAge = Duration(hours: 3);
-  static const _initialMediaPages = 4;
+  static const _initialMediaPages = 1;
+  static const _mediaPagesPerLoad = 3;
   static const _fallbackCategoryPages = 1;
+  static const _fallbackCategoryLimit = 8;
 
   LibraryRepository({required this.source, required this.db});
 
@@ -116,16 +120,26 @@ class LibraryRepository {
 
   Future<MediaLibrarySnapshot> loadMedia(
     ContentKind kind, {
+    String? categoryId,
     bool forceRefresh = false,
   }) async {
     await source.connect();
     if (!forceRefresh) {
-      final sync = await db.mediaSyncState(source.id, kind);
+      final sync = await db.mediaSyncState(
+        source.id,
+        kind,
+        categoryId: categoryId,
+      );
       if (sync != null) {
-        final items = await db.readMediaItems(source.id, kind);
+        final items = await db.readMediaItems(
+          source.id,
+          kind,
+          categoryId: categoryId,
+        );
         if (items.isNotEmpty) {
           return MediaLibrarySnapshot(
             kind: kind,
+            categoryId: categoryId,
             categories: await db.readMediaCategories(source.id, kind),
             items: items,
             fromCache: true,
@@ -138,17 +152,23 @@ class LibraryRepository {
     }
 
     final categories = await source.mediaCategories(kind);
-    final fetched = await _fetchMediaItems(kind, categories);
+    final fetched = await _fetchMediaItems(
+      kind,
+      categories,
+      categoryId: categoryId,
+    );
     await db.replaceMediaLibrary(
       source.id,
       kind,
       categories,
       fetched.items,
+      categoryId: categoryId,
       loadedPages: fetched.loadedPages,
       totalPages: fetched.totalPages,
     );
     return MediaLibrarySnapshot(
       kind: kind,
+      categoryId: categoryId,
       categories: categories,
       items: fetched.items,
       fromCache: false,
@@ -159,7 +179,11 @@ class LibraryRepository {
   }
 
   Future<({List<MediaItem> items, int loadedPages, int totalPages})>
-  _fetchMediaItems(ContentKind kind, List<MediaCategory> categories) async {
+  _fetchMediaItems(
+    ContentKind kind,
+    List<MediaCategory> categories, {
+    String? categoryId,
+  }) async {
     final out = <MediaItem>[];
     final seen = <String>{};
     var loadedPages = 1;
@@ -171,7 +195,11 @@ class LibraryRepository {
     }
 
     for (var page = 1; page <= _initialMediaPages; page++) {
-      final fetched = await source.mediaItemsPage(kind, page: page);
+      final fetched = await source.mediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        page: page,
+      );
       totalPages = fetched.totalPages;
       loadedPages = page;
       addAll(fetched.items);
@@ -180,8 +208,11 @@ class LibraryRepository {
     if (out.isNotEmpty || categories.isEmpty) {
       return (items: out, loadedPages: loadedPages, totalPages: totalPages);
     }
+    if (categoryId != null) {
+      return (items: out, loadedPages: loadedPages, totalPages: totalPages);
+    }
 
-    for (final category in categories) {
+    for (final category in _prioritizedFallbackCategories(kind, categories)) {
       addAll(
         await source.mediaItems(
           kind,
@@ -194,14 +225,47 @@ class LibraryRepository {
     return (items: out, loadedPages: 1, totalPages: 1);
   }
 
-  Future<MediaLibrarySnapshot> loadMoreMedia(ContentKind kind) async {
+  Iterable<MediaCategory> _prioritizedFallbackCategories(
+    ContentKind kind,
+    List<MediaCategory> categories,
+  ) {
+    final ordered = [...categories];
+    if (kind == ContentKind.series) {
+      int score(MediaCategory category) {
+        final title = category.title.toLowerCase();
+        if (title.contains('series') ||
+            title.contains('shows') ||
+            title.contains('episodes')) {
+          return 0;
+        }
+        if (title.contains('tv')) return 1;
+        return 2;
+      }
+
+      ordered.sort((a, b) {
+        final byScore = score(a).compareTo(score(b));
+        return byScore == 0 ? a.title.compareTo(b.title) : byScore;
+      });
+    }
+    return ordered.take(_fallbackCategoryLimit);
+  }
+
+  Future<MediaLibrarySnapshot> loadMoreMedia(
+    ContentKind kind, {
+    String? categoryId,
+  }) async {
     await source.connect();
-    final sync = await db.mediaSyncState(source.id, kind);
+    final sync = await db.mediaSyncState(
+      source.id,
+      kind,
+      categoryId: categoryId,
+    );
     if (sync == null || sync.loadedPages >= sync.totalPages) {
       return MediaLibrarySnapshot(
         kind: kind,
+        categoryId: categoryId,
         categories: await db.readMediaCategories(source.id, kind),
-        items: await db.readMediaItems(source.id, kind),
+        items: await db.readMediaItems(source.id, kind, categoryId: categoryId),
         fromCache: true,
         syncedAt: sync?.syncedAt,
         loadedPages: sync?.loadedPages ?? 1,
@@ -209,21 +273,33 @@ class LibraryRepository {
       );
     }
 
-    final page = sync.loadedPages + 1;
-    final fetched = await source.mediaItemsPage(kind, page: page);
-    final loadedPages = fetched.page;
-    final totalPages = fetched.totalPages;
+    var loadedPages = sync.loadedPages;
+    var totalPages = sync.totalPages;
+    final items = <MediaItem>[];
+    for (var i = 0; i < _mediaPagesPerLoad && loadedPages < totalPages; i++) {
+      final fetched = await source.mediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        page: loadedPages + 1,
+      );
+      loadedPages = fetched.page;
+      totalPages = fetched.totalPages;
+      items.addAll(fetched.items);
+      if (!fetched.hasMore) break;
+    }
     await db.appendMediaItems(
       source.id,
       kind,
-      fetched.items,
+      items,
+      categoryId: categoryId,
       loadedPages: loadedPages,
       totalPages: totalPages,
     );
     return MediaLibrarySnapshot(
       kind: kind,
+      categoryId: categoryId,
       categories: await db.readMediaCategories(source.id, kind),
-      items: await db.readMediaItems(source.id, kind),
+      items: await db.readMediaItems(source.id, kind, categoryId: categoryId),
       fromCache: false,
       syncedAt: DateTime.now(),
       loadedPages: loadedPages,
@@ -232,6 +308,15 @@ class LibraryRepository {
   }
 
   Future<MediaItem> mediaDetails(MediaItem item) => source.mediaDetails(item);
+
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async {
+    await source.connect();
+    return source.searchMedia(kind, query, categoryId: categoryId);
+  }
 
   Future<StreamInfo> resolveMedia(MediaItem item) => source.resolveMedia(item);
 }

@@ -14,8 +14,8 @@ class AppColors {
 }
 
 class AppRadius {
-  static const tile = 14.0;
-  static const control = 12.0;
+  static const tile = 8.0;
+  static const control = 8.0;
 }
 
 class AppTheme {
@@ -25,15 +25,11 @@ class AppTheme {
     final scheme = ColorScheme.fromSeed(
       seedColor: AppColors.accent,
       brightness: Brightness.dark,
-    ).copyWith(
-      surface: AppColors.ink,
-      primary: AppColors.accent,
-    );
+    ).copyWith(surface: AppColors.ink, primary: AppColors.accent);
 
-    final text = GoogleFonts.interTextTheme(base.textTheme).apply(
-      bodyColor: AppColors.textHi,
-      displayColor: AppColors.textHi,
-    );
+    final text = GoogleFonts.interTextTheme(
+      base.textTheme,
+    ).apply(bodyColor: AppColors.textHi, displayColor: AppColors.textHi);
 
     // Space Grotesk for titles gives the type a little personality.
     TextStyle? display(TextStyle? s) =>
@@ -54,7 +50,10 @@ class AppTheme {
         titleTextStyle: display(base.textTheme.titleLarge),
       ),
       dividerTheme: const DividerThemeData(
-          color: AppColors.line, thickness: 1, space: 1),
+        color: AppColors.line,
+        thickness: 1,
+        space: 1,
+      ),
       iconTheme: const IconThemeData(color: AppColors.textLo),
       progressIndicatorTheme: const ProgressIndicatorThemeData(
         color: AppColors.accent,
@@ -66,7 +65,10 @@ class AppTheme {
         fillColor: AppColors.panel,
         hintStyle: const TextStyle(color: AppColors.textLo),
         prefixIconColor: AppColors.textLo,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 12,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.control),
           borderSide: BorderSide.none,
@@ -84,14 +86,82 @@ class AppTheme {
         style: FilledButton.styleFrom(
           backgroundColor: AppColors.accent,
           foregroundColor: Colors.white,
+          minimumSize: const Size(44, 42),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          textStyle: const TextStyle(fontWeight: FontWeight.w700),
           shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(AppRadius.control)),
+            borderRadius: BorderRadius.circular(AppRadius.control),
+          ),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.textHi,
+          side: const BorderSide(color: AppColors.line),
+          minimumSize: const Size(44, 42),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          textStyle: const TextStyle(fontWeight: FontWeight.w700),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.control),
+          ),
+        ),
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.textHi,
+          minimumSize: const Size(44, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.control),
+          ),
+        ),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? AppColors.panelHi
+                : AppColors.panel,
+          ),
+          foregroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? AppColors.textHi
+                : AppColors.textLo,
+          ),
+          iconColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? AppColors.accent
+                : AppColors.textLo,
+          ),
+          side: WidgetStateProperty.resolveWith(
+            (states) => BorderSide(
+              color: states.contains(WidgetState.selected)
+                  ? AppColors.accent
+                  : AppColors.line,
+            ),
+          ),
+          shape: WidgetStatePropertyAll(
+            RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.control),
+            ),
+          ),
+          padding: const WidgetStatePropertyAll(
+            EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          ),
         ),
       ),
       popupMenuTheme: PopupMenuThemeData(
         color: AppColors.panelHi,
         shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.control)),
+          borderRadius: BorderRadius.circular(AppRadius.control),
+        ),
+      ),
+      floatingActionButtonTheme: const FloatingActionButtonThemeData(
+        backgroundColor: AppColors.accent,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(AppRadius.control)),
+        ),
       ),
       listTileTheme: const ListTileThemeData(iconColor: AppColors.textLo),
     );

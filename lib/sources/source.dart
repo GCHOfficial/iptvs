@@ -196,6 +196,19 @@ abstract class Source {
     return MediaPage(items: items, page: page, totalPages: page);
   }
 
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final page = await mediaItemsPage(kind, categoryId: categoryId);
+    return page.items
+        .where((item) => item.title.toLowerCase().contains(q))
+        .toList();
+  }
+
   Future<MediaItem> mediaDetails(MediaItem item) async => item;
 
   Future<StreamInfo> resolveMedia(MediaItem item) async =>

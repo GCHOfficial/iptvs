@@ -102,8 +102,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
       appBar: AppBar(title: const Text('Sources')),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _add,
-        backgroundColor: AppColors.accent,
-        foregroundColor: Colors.white,
         icon: const Icon(Icons.add),
         label: const Text('Add source'),
       ),

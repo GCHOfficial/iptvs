@@ -334,16 +334,50 @@ class StalkerSource implements Source {
   }
 
   @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async {
+    final q = query.trim();
+    if (q.isEmpty ||
+        (kind != ContentKind.movie && kind != ContentKind.series)) {
+      return const [];
+    }
+    final raw = await _getOrderedListPage(
+      type: 'vod',
+      category: categoryId,
+      search: q,
+      page: 1,
+    );
+    return raw.rows
+        .where((m) {
+          final isSeries = '${m['is_series']}' == '1';
+          return kind == ContentKind.series ? isSeries : !isSeries;
+        })
+        .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
+        .toList();
+  }
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     if (item.kind != ContentKind.movie && item.kind != ContentKind.series) {
       return item;
     }
     final movieId = item.extra['movieId']?.toString() ?? item.id;
-    final r = await _call({
-      'type': 'vod',
-      'action': 'get_movie_details',
-      'movie_id': movieId,
-    });
+    final Map<String, dynamic> r;
+    try {
+      r = await _call({
+        'type': 'vod',
+        'action': 'get_movie_details',
+        'movie_id': movieId,
+      });
+    } on StalkerException catch (e) {
+      _debug(
+        'get_movie_details unavailable for id=$movieId; using list metadata: ${e.message}',
+      );
+      return item;
+    }
     final js = r['js'];
     final details = js is Map ? Map<String, dynamic>.from(js) : const {};
     return item.copyWith(
@@ -434,6 +468,7 @@ class StalkerSource implements Source {
     String? movieId,
     String? seasonId,
     String? episodeId,
+    String? search,
     int? maxPages,
   }) async {
     final first = await _getOrderedListPage(
@@ -443,6 +478,7 @@ class StalkerSource implements Source {
       movieId: movieId,
       seasonId: seasonId,
       episodeId: episodeId,
+      search: search,
       page: 1,
     );
     final totalPages = maxPages == null
@@ -457,6 +493,7 @@ class StalkerSource implements Source {
         movieId: movieId,
         seasonId: seasonId,
         episodeId: episodeId,
+        search: search,
         page: page,
       );
       rows.addAll(next.rows);
@@ -472,6 +509,7 @@ class StalkerSource implements Source {
     String? movieId,
     String? seasonId,
     String? episodeId,
+    String? search,
   }) async {
     final params = <String, String>{
       'type': type,
@@ -487,6 +525,9 @@ class StalkerSource implements Source {
     add('movie_id', movieId);
     add('season_id', seasonId);
     add('episode_id', episodeId);
+    add('search', search);
+    add('query', search);
+    add('search_string', search);
 
     final r = await _call(params);
     final js = r['js'];

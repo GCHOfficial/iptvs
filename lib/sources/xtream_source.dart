@@ -170,6 +170,18 @@ class XtreamSource implements Source {
   }
 
   @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final items = await mediaItems(kind, categoryId: categoryId);
+    return items.where((item) => item.title.toLowerCase().contains(q)).toList();
+  }
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     final action = switch (item.kind) {
       ContentKind.movie => 'get_vod_info',

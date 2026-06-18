@@ -9,6 +9,8 @@ import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../player/player_screen.dart';
 
+const _toolbarControlHeight = 40.0;
+
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
 class ChannelListScreen extends StatefulWidget {
@@ -34,7 +36,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final Map<ContentKind, String?> _mediaCategoryId = {};
   final Map<ContentKind, bool> _mediaLoading = {};
   final Map<ContentKind, bool> _mediaLoadingMore = {};
+  final Map<ContentKind, bool> _mediaSearching = {};
   final Map<ContentKind, String?> _mediaError = {};
+  final Map<ContentKind, List<MediaItem>> _mediaSearchResults = {};
+  final Map<ContentKind, String> _mediaSearchQuery = {};
   Map<String, Programme> _now = const {};
   Map<String, Programme> _next = const {};
   String? _categoryId;
@@ -46,6 +51,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   DateTime? _syncedAt;
   bool _fromCache = false;
   Timer? _epgTimer;
+  Timer? _searchTimer;
 
   @override
   void initState() {
@@ -60,6 +66,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   @override
   void dispose() {
     _epgTimer?.cancel();
+    _searchTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -101,6 +108,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   Future<void> _loadMedia(ContentKind kind, {bool forceRefresh = false}) async {
+    final categoryId = _mediaCategoryId[kind];
     setState(() {
       _mediaLoading[kind] = true;
       _mediaError[kind] = null;
@@ -108,6 +116,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     try {
       final snap = await widget.repo.loadMedia(
         kind,
+        categoryId: categoryId,
         forceRefresh: forceRefresh,
       );
       if (!mounted) return;
@@ -126,12 +135,16 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   Future<void> _loadMoreMedia(ContentKind kind) async {
     if (_mediaLoadingMore[kind] == true) return;
+    final categoryId = _mediaCategoryId[kind];
     setState(() {
       _mediaLoadingMore[kind] = true;
       _mediaError[kind] = null;
     });
     try {
-      final snap = await widget.repo.loadMoreMedia(kind);
+      final snap = await widget.repo.loadMoreMedia(
+        kind,
+        categoryId: categoryId,
+      );
       if (!mounted) return;
       setState(() {
         _media[kind] = snap;
@@ -142,6 +155,52 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       setState(() {
         _mediaError[kind] = '$e';
         _mediaLoadingMore[kind] = false;
+      });
+    }
+  }
+
+  void _setQuery(String value) {
+    setState(() => _query = value);
+    _searchTimer?.cancel();
+    if (_tab == ContentKind.live) return;
+    final query = value.trim();
+    if (query.length < 2) {
+      setState(() {
+        _mediaSearching[_tab] = false;
+        _mediaSearchResults.remove(_tab);
+        _mediaSearchQuery.remove(_tab);
+      });
+      return;
+    }
+    _searchTimer = Timer(
+      const Duration(milliseconds: 450),
+      () => _searchMedia(_tab, query),
+    );
+  }
+
+  Future<void> _searchMedia(ContentKind kind, String query) async {
+    final categoryId = _mediaCategoryId[kind];
+    setState(() {
+      _mediaSearching[kind] = true;
+      _mediaError[kind] = null;
+    });
+    try {
+      final results = await widget.repo.searchMedia(
+        kind,
+        query,
+        categoryId: categoryId,
+      );
+      if (!mounted || _tab != kind || _query.trim() != query) return;
+      setState(() {
+        _mediaSearchResults[kind] = results;
+        _mediaSearchQuery[kind] = query;
+        _mediaSearching[kind] = false;
+      });
+    } catch (e) {
+      if (!mounted || _tab != kind || _query.trim() != query) return;
+      setState(() {
+        _mediaError[kind] = '$e';
+        _mediaSearching[kind] = false;
       });
     }
   }
@@ -157,10 +216,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   List<MediaItem> _visibleMedia(ContentKind kind) {
     final q = _query.trim().toLowerCase();
-    final categoryId = _mediaCategoryId[kind];
+    if (q.length >= 2 && _mediaSearchQuery[kind] == _query.trim()) {
+      return _mediaSearchResults[kind] ?? const <MediaItem>[];
+    }
     final items = _media[kind]?.items ?? const <MediaItem>[];
     return items.where((item) {
-      if (categoryId != null && item.categoryId != categoryId) return false;
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
@@ -264,7 +324,23 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   String _mediaStatusLine(ContentKind kind, int count) {
     final snap = _media[kind];
     final label = kind == ContentKind.movie ? 'movies' : 'series';
-    final b = StringBuffer('Showing ${_fmt(count)} $label');
+    final searching = _query.trim().length >= 2;
+    final b = StringBuffer(
+      searching
+          ? 'Found ${_fmt(count)} $label'
+          : 'Showing ${_fmt(count)} $label',
+    );
+    final categoryId = _mediaCategoryId[kind];
+    if (categoryId != null) {
+      MediaCategory? category;
+      for (final candidate in snap?.categories ?? const <MediaCategory>[]) {
+        if (candidate.id == categoryId) {
+          category = candidate;
+          break;
+        }
+      }
+      if (category != null) b.write(' in ${category.title}');
+    }
     if (snap != null && snap.totalPages > 1) {
       b.write(' · pages ${snap.loadedPages}/${snap.totalPages}');
     }
@@ -280,10 +356,15 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   void _selectTab(ContentKind kind) {
     if (_tab == kind) return;
+    final previous = _tab;
     setState(() {
       _tab = kind;
       _query = '';
       _searchController.clear();
+      _searchTimer?.cancel();
+      _mediaSearchResults.remove(previous);
+      _mediaSearchQuery.remove(previous);
+      _mediaSearching[previous] = false;
     });
     if (kind != ContentKind.live && !_media.containsKey(kind)) {
       _loadMedia(kind);
@@ -332,10 +413,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 : _tab == ContentKind.movie
                 ? 'Search movies'
                 : 'Search series',
-            onQueryChanged: (v) => setState(() => _query = v),
+            onQueryChanged: _setQuery,
             onClearQuery: () {
               _searchController.clear();
-              setState(() => _query = '');
+              _setQuery('');
             },
             categoryControl: _tab == ContentKind.live
                 ? _CategoryDropdown(
@@ -346,8 +427,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 : _MediaCategoryDropdown(
                     categories: _media[_tab]?.categories ?? const [],
                     value: _mediaCategoryId[_tab],
-                    onChanged: (v) =>
-                        setState(() => _mediaCategoryId[_tab] = v),
+                    onChanged: (v) {
+                      setState(() {
+                        _mediaCategoryId[_tab] = v;
+                        _mediaSearchResults.remove(_tab);
+                        _mediaSearchQuery.remove(_tab);
+                      });
+                      _loadMedia(_tab);
+                      if (_query.trim().length >= 2) {
+                        _searchTimer?.cancel();
+                        _searchTimer = Timer(
+                          const Duration(milliseconds: 250),
+                          () => _searchMedia(_tab, _query.trim()),
+                        );
+                      }
+                    },
                   ),
           ),
           Padding(
@@ -373,6 +467,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       return _loading ? '' : _statusLine(visibleLiveCount);
     }
     if (_mediaLoading[_tab] == true) return '';
+    if (_mediaSearching[_tab] == true) return 'Searching provider...';
     return _mediaStatusLine(_tab, _visibleMedia(_tab).length);
   }
 
@@ -411,8 +506,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
       scrollCacheExtent: const ScrollCacheExtent.pixels(
-        400,
+        120,
       ), // keep nearby rows built for D-pad without over-prefetching logos
+      itemExtent: 124,
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final c = visible[i];
@@ -433,7 +529,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final loadingMore = _mediaLoadingMore[kind] == true;
     final error = _mediaError[kind];
     final visible = _visibleMedia(kind);
-    final showLoadMore = loadingMore || _media[kind]?.hasMore == true;
+    final showingSearch = _query.trim().length >= 2;
+    final showLoadMore =
+        !showingSearch && (loadingMore || _media[kind]?.hasMore == true);
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
       return Center(
@@ -579,18 +677,24 @@ class _Toolbar extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final narrow = constraints.maxWidth < 620;
-        final search = TextField(
-          controller: searchController,
-          onChanged: onQueryChanged,
-          decoration: InputDecoration(
-            hintText: hintText,
-            prefixIcon: const Icon(Icons.search, size: 20),
-            suffixIcon: query.isEmpty
-                ? null
-                : IconButton(
-                    icon: const Icon(Icons.clear, size: 18),
-                    onPressed: onClearQuery,
-                  ),
+        final search = SizedBox(
+          height: _toolbarControlHeight,
+          child: TextField(
+            controller: searchController,
+            onChanged: onQueryChanged,
+            decoration: InputDecoration(
+              constraints: const BoxConstraints.tightFor(
+                height: _toolbarControlHeight,
+              ),
+              hintText: hintText,
+              prefixIcon: const Icon(Icons.search, size: 20),
+              suffixIcon: query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: onClearQuery,
+                    ),
+            ),
           ),
         );
 
@@ -652,6 +756,7 @@ class _ChannelTile extends StatelessWidget {
 
     return FocusableCard(
       autofocus: autofocus,
+      scrollOnFocus: false,
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -858,7 +963,8 @@ class _CategoryDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(maxWidth: 200),
+      height: _toolbarControlHeight,
+      constraints: const BoxConstraints(maxWidth: 220),
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
         color: AppColors.panel,
@@ -867,6 +973,7 @@ class _CategoryDropdown extends StatelessWidget {
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String?>(
+          isDense: true,
           isExpanded: true,
           value: value,
           dropdownColor: AppColors.panelHi,
@@ -913,6 +1020,7 @@ class _MediaCategoryDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      height: _toolbarControlHeight,
       constraints: const BoxConstraints(maxWidth: 220),
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
@@ -922,6 +1030,7 @@ class _MediaCategoryDropdown extends StatelessWidget {
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String?>(
+          isDense: true,
           isExpanded: true,
           value: value,
           dropdownColor: AppColors.panelHi,

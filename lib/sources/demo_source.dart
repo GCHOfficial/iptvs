@@ -99,6 +99,13 @@ class DemoSource implements Source {
   }) async => MediaPage(items: const [], page: page, totalPages: page);
 
   @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async => const [];
+
+  @override
   Future<MediaItem> mediaDetails(MediaItem item) async => item;
 
   @override

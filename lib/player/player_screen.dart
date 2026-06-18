@@ -311,7 +311,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
             style: const TextStyle(color: AppColors.textLo),
           ),
           const SizedBox(height: 16),
-          FilledButton(onPressed: _open, child: const Text('Retry')),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            alignment: WrapAlignment.center,
+            children: [
+              FilledButton.icon(
+                onPressed: _back,
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Back'),
+              ),
+              FilledButton.icon(
+                onPressed: _open,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
         ],
       ),
     );

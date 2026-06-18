@@ -25,7 +25,7 @@ class AppDatabase {
 
     final db = await openDatabase(
       path,
-      version: 4,
+      version: 6,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE sources (
@@ -77,6 +77,12 @@ class AppDatabase {
         if (oldV >= 3 && oldV < 4) {
           await _addMediaPagingColumns(db);
           await _createMediaEnrichment(db);
+        }
+        if (oldV < 5) {
+          await _createMediaPageState(db);
+        }
+        if (oldV >= 3 && oldV < 6) {
+          await _addMediaDisplayOrderColumn(db);
         }
       },
     );
@@ -130,6 +136,7 @@ class AppDatabase {
         description TEXT,
         year        TEXT,
         extra       TEXT,
+        display_order INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (source_id, kind, id)
       )
     ''');
@@ -140,6 +147,7 @@ class AppDatabase {
       'CREATE INDEX idx_media_items_source_kind_cat ON media_items(source_id, kind, category_id)',
     );
     await _createMediaEnrichment(db);
+    await _createMediaPageState(db);
   }
 
   static Future<void> _addMediaPagingColumns(Database db) async {
@@ -170,6 +178,26 @@ class AppDatabase {
         PRIMARY KEY (source_id, kind, media_id, provider)
       )
     ''');
+  }
+
+  static Future<void> _createMediaPageState(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS media_page_state (
+        source_id   TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        category_id TEXT NOT NULL DEFAULT '',
+        synced_at   INTEGER NOT NULL,
+        loaded_pages INTEGER NOT NULL DEFAULT 1,
+        total_pages INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (source_id, kind, category_id)
+      )
+    ''');
+  }
+
+  static Future<void> _addMediaDisplayOrderColumn(Database db) async {
+    await db.execute(
+      'ALTER TABLE media_items ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0',
+    );
   }
 
   // ── channels / categories ───────────────────────────────────────────────
@@ -229,7 +257,26 @@ class AppDatabase {
   }
 
   Future<({DateTime syncedAt, int loadedPages, int totalPages})?>
-  mediaSyncState(String sourceId, ContentKind kind) async {
+  mediaSyncState(
+    String sourceId,
+    ContentKind kind, {
+    String? categoryId,
+  }) async {
+    final categoryKey = categoryId ?? '';
+    final pageRows = await _db.query(
+      'media_page_state',
+      where: 'source_id = ? AND kind = ? AND category_id = ?',
+      whereArgs: [sourceId, kind.name, categoryKey],
+    );
+    if (pageRows.isNotEmpty) {
+      final row = pageRows.first;
+      return (
+        syncedAt: DateTime.fromMillisecondsSinceEpoch(row['synced_at'] as int),
+        loadedPages: row['loaded_pages'] as int? ?? 1,
+        totalPages: row['total_pages'] as int? ?? 1,
+      );
+    }
+    if (categoryId != null) return null;
     final rows = await _db.query(
       'media_sync',
       where: 'source_id = ? AND kind = ?',
@@ -280,7 +327,7 @@ class AppDatabase {
       'media_items',
       where: where.toString(),
       whereArgs: args,
-      orderBy: 'title',
+      orderBy: 'display_order, title',
     );
     return rows.map((r) => _rowToMediaItem(r, kind)).toList();
   }
@@ -304,31 +351,43 @@ class AppDatabase {
     ContentKind kind,
     List<MediaCategory> categories,
     List<MediaItem> items, {
+    String? categoryId,
     int loadedPages = 1,
     int totalPages = 1,
   }) async {
     await _db.transaction((txn) async {
-      await txn.delete(
-        'media_categories',
-        where: 'source_id = ? AND kind = ?',
-        whereArgs: [sourceId, kind.name],
-      );
-      await txn.delete(
-        'media_items',
-        where: 'source_id = ? AND kind = ?',
-        whereArgs: [sourceId, kind.name],
-      );
+      if (categoryId == null) {
+        await txn.delete(
+          'media_categories',
+          where: 'source_id = ? AND kind = ?',
+          whereArgs: [sourceId, kind.name],
+        );
+        await txn.delete(
+          'media_items',
+          where: 'source_id = ? AND kind = ?',
+          whereArgs: [sourceId, kind.name],
+        );
+      } else {
+        await txn.delete(
+          'media_items',
+          where: 'source_id = ? AND kind = ? AND category_id = ?',
+          whereArgs: [sourceId, kind.name, categoryId],
+        );
+      }
 
       final batch = txn.batch();
-      for (final c in categories) {
-        batch.insert('media_categories', {
-          'source_id': sourceId,
-          'kind': kind.name,
-          'id': c.id,
-          'title': c.title,
-        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      if (categoryId == null) {
+        for (final c in categories) {
+          batch.insert('media_categories', {
+            'source_id': sourceId,
+            'kind': kind.name,
+            'id': c.id,
+            'title': c.title,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+        }
       }
-      for (final item in items) {
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
         batch.insert('media_items', {
           'source_id': sourceId,
           'kind': kind.name,
@@ -339,11 +398,20 @@ class AppDatabase {
           'description': item.description,
           'year': item.year,
           'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+          'display_order': i,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       batch.insert('media_sync', {
         'source_id': sourceId,
         'kind': kind.name,
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+        'loaded_pages': loadedPages,
+        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      batch.insert('media_page_state', {
+        'source_id': sourceId,
+        'kind': kind.name,
+        'category_id': categoryId ?? '',
         'synced_at': DateTime.now().millisecondsSinceEpoch,
         'loaded_pages': loadedPages,
         'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
@@ -356,12 +424,20 @@ class AppDatabase {
     String sourceId,
     ContentKind kind,
     List<MediaItem> items, {
+    String? categoryId,
     required int loadedPages,
     required int totalPages,
   }) async {
     await _db.transaction((txn) async {
+      final startOrder = await _nextMediaDisplayOrder(
+        txn,
+        sourceId,
+        kind,
+        categoryId,
+      );
       final batch = txn.batch();
-      for (final item in items) {
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
         batch.insert('media_items', {
           'source_id': sourceId,
           'kind': kind.name,
@@ -372,6 +448,7 @@ class AppDatabase {
           'description': item.description,
           'year': item.year,
           'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+          'display_order': startOrder + i,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       batch.insert('media_sync', {
@@ -381,8 +458,38 @@ class AppDatabase {
         'loaded_pages': loadedPages,
         'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
       }, conflictAlgorithm: ConflictAlgorithm.replace);
+      batch.insert('media_page_state', {
+        'source_id': sourceId,
+        'kind': kind.name,
+        'category_id': categoryId ?? '',
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+        'loaded_pages': loadedPages,
+        'total_pages': totalPages < loadedPages ? loadedPages : totalPages,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
     });
+  }
+
+  Future<int> _nextMediaDisplayOrder(
+    Transaction txn,
+    String sourceId,
+    ContentKind kind,
+    String? categoryId,
+  ) async {
+    final where = StringBuffer('source_id = ? AND kind = ?');
+    final args = <Object?>[sourceId, kind.name];
+    if (categoryId != null) {
+      where.write(' AND category_id = ?');
+      args.add(categoryId);
+    }
+    final rows = await txn.query(
+      'media_items',
+      columns: ['MAX(display_order) AS max_order'],
+      where: where.toString(),
+      whereArgs: args,
+    );
+    final max = rows.first['max_order'] as int?;
+    return max == null ? 0 : max + 1;
   }
 
   Channel _rowToChannel(Map<String, Object?> r) => Channel(
