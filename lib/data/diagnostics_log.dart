@@ -39,10 +39,16 @@ class DiagnosticsLog extends ChangeNotifier {
     notifyListeners();
   }
 
-  String asText() => _entries
-      .map(
+  String asText() {
+    final lines = <String>[
+      'iptvs diagnostics exported ${DateTime.now().toIso8601String()}',
+      'entries=${_entries.length}',
+      '',
+      ..._entries.map(
         (entry) =>
             '${entry.time.toIso8601String()} [${entry.scope}] ${entry.message}',
-      )
-      .join('\n');
+      ),
+    ];
+    return lines.join('\n');
+  }
 }

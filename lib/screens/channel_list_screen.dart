@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
+import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../sources/source.dart';
 import '../theme.dart';
@@ -83,6 +84,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     try {
       final snap = await widget.repo.load(forceRefresh: forceRefresh);
       if (!mounted) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'loaded live source=${widget.repo.source.name} channels=${snap.channels.length} force=$forceRefresh cache=${snap.fromCache}',
+      );
       setState(() {
         _categories = snap.categories;
         _all = snap.channels;
@@ -125,6 +130,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         forceRefresh: forceRefresh,
       );
       if (!mounted) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'loaded ${kind.name} source=${widget.repo.source.name} items=${snap.items.length} category=${categoryId ?? '<all>'} force=$forceRefresh cache=${snap.fromCache} pages=${snap.loadedPages}/${snap.totalPages}',
+      );
       setState(() {
         _media[kind] = snap;
         _mediaLoading[kind] = false;
@@ -155,6 +164,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         categoryId: categoryId,
       );
       if (!mounted) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'load more ${kind.name} source=${widget.repo.source.name} items=${snap.items.length} category=${categoryId ?? '<all>'} pages=${snap.loadedPages}/${snap.totalPages}',
+      );
       setState(() {
         _media[kind] = snap;
         _mediaLoadingMore[kind] = false;
@@ -290,6 +303,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         categoryId: categoryId,
       );
       if (!mounted || _tab != kind || _query.trim() != query) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'search ${kind.name} source=${widget.repo.source.name} query="$query" results=${results.length} category=${categoryId ?? '<all>'}',
+      );
       setState(() {
         _mediaSearchResults[kind] = results;
         _mediaSearchQuery[kind] = query;
@@ -334,6 +351,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     try {
+      DiagnosticsLog.instance.add(
+        'library',
+        'resolve live source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
+      );
       final stream = await widget.repo.resolve(channel);
       if (!mounted) return;
       await navigator.push(
@@ -351,6 +372,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _openMedia(MediaItem item) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
+      DiagnosticsLog.instance.add(
+        'library',
+        'open ${item.kind.name} source=${widget.repo.source.name} title=${item.title} id=${item.id}',
+      );
       final detailed = await widget.repo.mediaDetails(item);
       if (!mounted) return;
       _replaceMediaItem(detailed);
@@ -374,6 +399,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     try {
+      DiagnosticsLog.instance.add(
+        'library',
+        'resolve ${item.kind.name} source=${widget.repo.source.name} title=${item.title} id=${item.id}',
+      );
       final stream = await widget.repo.resolveMedia(item);
       if (!mounted) return;
       await navigator.push(
@@ -480,6 +509,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _mediaSearching[previous] = false;
       _cancelMediaEnrichment(previous);
     });
+    DiagnosticsLog.instance.add(
+      'library',
+      'tab source=${widget.repo.source.name} ${previous.name}->${kind.name}',
+    );
     if (kind != ContentKind.live && !_media.containsKey(kind)) {
       _loadMedia(kind);
     }
@@ -1484,16 +1517,41 @@ List<String> _sourceHints(MediaItem item) {
 
   add('Multi audio', RegExp(r'\b(MULTI|MULTIAUDIO|MULTI-AUDIO)\b'));
   add('Dual audio', RegExp(r'\b(DUAL|DUALAUDIO|DUAL-AUDIO)\b'));
-  add('Subtitles', RegExp(r'\b(SUB|SUBS|SUBBED|VOST|VOSTFR|VOSE)\b'));
-  add('Romanian', RegExp(r'\b(RO|ROM|RON|ROMANIAN|ROMANA)\b'));
-  add('English', RegExp(r'\b(EN|ENG|ENGLISH)\b'));
-  add('French', RegExp(r'\b(FR|FRE|FRENCH|TRUEFRENCH|VOSTFR)\b'));
-  add('Spanish', RegExp(r'\b(ES|ESP|SPA|SPANISH|CASTELLANO|LATINO)\b'));
-  add('German', RegExp(r'\b(DE|GER|DEU|GERMAN)\b'));
-  add('Italian', RegExp(r'\b(IT|ITA|ITALIAN)\b'));
-  add('Polish', RegExp(r'\b(PL|POL|POLISH)\b'));
-  add('Turkish', RegExp(r'\b(TR|TUR|TURKISH)\b'));
-  add('Russian', RegExp(r'\b(RU|RUS|RUSSIAN)\b'));
+  add('Dubbed', RegExp(r'\b(DUB|DUBBED|DUBLAT|DUBLADO)\b'));
+  add(
+    'Subtitles',
+    RegExp(r'\b(SUB|SUBS|SUBBED|SUBTITLE|SUBTITLES|VOST|VOSTFR|VOSE)\b'),
+  );
+  const languages = {
+    'Romanian': ['RO', 'ROM', 'RON', 'RUM', 'ROMANIAN', 'ROMANA'],
+    'English': ['EN', 'ENG', 'ENGLISH'],
+    'French': ['FR', 'FRE', 'FRA', 'FRENCH', 'TRUEFRENCH', 'VOSTFR'],
+    'Spanish': ['ES', 'ESP', 'SPA', 'SPANISH', 'CASTELLANO', 'LATINO'],
+    'German': ['DE', 'GER', 'DEU', 'GERMAN'],
+    'Italian': ['IT', 'ITA', 'ITALIAN'],
+    'Polish': ['PL', 'POL', 'POLISH'],
+    'Turkish': ['TR', 'TUR', 'TURKISH'],
+    'Russian': ['RU', 'RUS', 'RUSSIAN'],
+    'Tajik': ['TG', 'TGK', 'TAJIK'],
+    'Arabic': ['AR', 'ARA', 'ARABIC'],
+    'Bulgarian': ['BG', 'BUL', 'BULGARIAN'],
+    'Czech': ['CZ', 'CS', 'CES', 'CZE', 'CZECH'],
+    'Dutch': ['NL', 'DUT', 'NLD', 'DUTCH'],
+    'Greek': ['GR', 'EL', 'ELL', 'GRE', 'GREEK'],
+    'Hindi': ['HI', 'HIN', 'HINDI'],
+    'Hungarian': ['HU', 'HUN', 'HUNGARIAN'],
+    'Japanese': ['JA', 'JP', 'JPN', 'JAPANESE'],
+    'Korean': ['KO', 'KR', 'KOR', 'KOREAN'],
+    'Portuguese': ['PT', 'POR', 'PORTUGUESE', 'BR', 'BRA', 'BRASIL'],
+    'Serbian': ['SR', 'SRP', 'SERBIAN'],
+    'Ukrainian': ['UK', 'UKR', 'UA', 'UKRAINIAN'],
+  };
+  for (final entry in languages.entries) {
+    add(
+      entry.key,
+      RegExp('\\b(${entry.value.map(RegExp.escape).join('|')})\\b'),
+    );
+  }
   return hints;
 }
 

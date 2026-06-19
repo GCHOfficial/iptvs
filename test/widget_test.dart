@@ -185,10 +185,32 @@ void main() {
       expect(config.normalizedTmdbCredential, config.tmdbApiKey);
       expect(config.hasTmdb, isTrue);
       expect(config.toJson(), {
+        'provider': 'tmdb',
         'tmdbApiKey': 'eyJhbGciOiJIUzI1Ni.fake.token',
+        'tvdbApiKey': '',
+        'tvdbPin': '',
+        'mdblistApiKey': '',
         'autoEnrich': true,
       });
       expect(config.autoEnrich, isTrue);
+    });
+
+    test('stores alternate provider credentials', () {
+      final config = MetadataConfig.fromJson({
+        'provider': 'tvdb',
+        'tvdbApiKey': ' tvdb-key ',
+        'tvdbPin': ' pin ',
+        'mdblistApiKey': ' mdb-key ',
+        'autoEnrich': false,
+      });
+
+      expect(config.provider, 'tvdb');
+      expect(config.tvdbApiKey, 'tvdb-key');
+      expect(config.tvdbPin, 'pin');
+      expect(config.mdblistApiKey, 'mdb-key');
+      expect(config.hasTvdb, isTrue);
+      expect(config.hasMdblist, isTrue);
+      expect(config.autoEnrich, isFalse);
     });
 
     test('keeps v3 API keys as api_key auth', () {

@@ -690,6 +690,18 @@ class AppDatabase {
     await batch.commit(noResult: true);
   }
 
+  Future<void> clearExternalMetadata({String? sourceId}) async {
+    if (sourceId == null) {
+      await _db.delete('external_metadata');
+      return;
+    }
+    await _db.delete(
+      'external_metadata',
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+    );
+  }
+
   Future<ExternalMetadata?> readExternalMetadata(
     String sourceId,
     MediaItem item,

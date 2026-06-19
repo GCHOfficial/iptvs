@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
+import '../data/app_database.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
@@ -23,7 +24,8 @@ IconData _kindIcon(SourceKind k) {
 /// Lists saved providers; lets you add, edit, delete, and pick the active one.
 class SourcesScreen extends StatefulWidget {
   final SourceStore store;
-  const SourcesScreen({super.key, required this.store});
+  final AppDatabase db;
+  const SourcesScreen({super.key, required this.store, required this.db});
 
   @override
   State<SourcesScreen> createState() => _SourcesScreenState();
@@ -108,7 +110,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
             icon: const Icon(Icons.auto_awesome_outlined),
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => MetadataSettingsScreen(store: widget.store),
+                builder: (_) =>
+                    MetadataSettingsScreen(store: widget.store, db: widget.db),
               ),
             ),
           ),
@@ -440,8 +443,13 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
 
 class MetadataSettingsScreen extends StatefulWidget {
   final SourceStore store;
+  final AppDatabase db;
 
-  const MetadataSettingsScreen({super.key, required this.store});
+  const MetadataSettingsScreen({
+    super.key,
+    required this.store,
+    required this.db,
+  });
 
   @override
   State<MetadataSettingsScreen> createState() => _MetadataSettingsScreenState();
@@ -449,6 +457,10 @@ class MetadataSettingsScreen extends StatefulWidget {
 
 class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   final _tmdb = TextEditingController();
+  final _tvdb = TextEditingController();
+  final _tvdbPin = TextEditingController();
+  final _mdblist = TextEditingController();
+  String _provider = 'tmdb';
   bool _autoEnrich = true;
   bool _loading = true;
   bool _saving = false;
@@ -462,6 +474,9 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   @override
   void dispose() {
     _tmdb.dispose();
+    _tvdb.dispose();
+    _tvdbPin.dispose();
+    _mdblist.dispose();
     super.dispose();
   }
 
@@ -469,7 +484,11 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     final config = await widget.store.metadataConfig();
     if (!mounted) return;
     setState(() {
+      _provider = config.provider;
       _tmdb.text = config.tmdbApiKey;
+      _tvdb.text = config.tvdbApiKey;
+      _tvdbPin.text = config.tvdbPin;
+      _mdblist.text = config.mdblistApiKey;
       _autoEnrich = config.autoEnrich;
       _loading = false;
     });
@@ -479,7 +498,11 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     setState(() => _saving = true);
     await widget.store.saveMetadataConfig(
       MetadataConfig(
+        provider: _provider,
         tmdbApiKey: MetadataConfig.normalizeTmdbCredential(_tmdb.text),
+        tvdbApiKey: _tvdb.text.trim(),
+        tvdbPin: _tvdbPin.text.trim(),
+        mdblistApiKey: _mdblist.text.trim(),
         autoEnrich: _autoEnrich,
       ),
     );
@@ -488,6 +511,35 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Metadata settings saved')));
+  }
+
+  Future<void> _clearMetadataCache() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.panelHi,
+        title: const Text('Clear metadata cache?'),
+        content: const Text(
+          'This removes cached external metadata. Refresh the source afterward if you want provider titles/posters restored before re-enrichment.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await widget.db.clearExternalMetadata();
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Metadata cache cleared')));
   }
 
   @override
@@ -499,11 +551,25 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                Text('TMDB', style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  'Metadata provider',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Used to enrich movies and series with posters, backdrops, descriptions, years, and ratings. Accepts a TMDB v3 API key or v4 Read Access Token.',
+                  'Used to enrich movies and series with posters, backdrops, descriptions, years, and ratings.',
                   style: TextStyle(color: AppColors.textLo),
+                ),
+                const SizedBox(height: 16),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'tmdb', label: Text('TMDB')),
+                    ButtonSegment(value: 'tvdb', label: Text('TVDB')),
+                    ButtonSegment(value: 'mdblist', label: Text('MDBList')),
+                  ],
+                  selected: {_provider},
+                  onSelectionChanged: (value) =>
+                      setState(() => _provider = value.first),
                 ),
                 const SizedBox(height: 16),
                 TextField(
@@ -514,6 +580,39 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   decoration: const InputDecoration(
                     labelText: 'TMDB API credential',
                     hintText: 'Paste a v3 API key or v4 Read Access Token',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _tvdb,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'TVDB API key',
+                    hintText: 'Used when TVDB is selected',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _tvdbPin,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'TVDB PIN',
+                    hintText: 'Optional user-supported key PIN',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _mdblist,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'MDBList API key',
+                    hintText: 'Saved for upcoming ratings provider support',
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -531,6 +630,12 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                     style: TextStyle(color: AppColors.textLo),
                   ),
                   onChanged: (value) => setState(() => _autoEnrich = value),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _clearMetadataCache,
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  label: const Text('Clear metadata cache'),
                 ),
                 const SizedBox(height: 24),
                 SizedBox(

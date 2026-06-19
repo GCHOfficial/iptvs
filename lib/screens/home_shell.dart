@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/library_repository.dart';
+import '../data/metadata_provider.dart';
 import '../data/source_store.dart';
 import '../data/tmdb_client.dart';
+import '../data/tvdb_client.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import 'channel_list_screen.dart';
@@ -23,7 +25,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   SourceConfig? _config;
   Source? _source;
-  TmdbClient? _tmdb;
+  MetadataProvider? _metadataProvider;
   LibraryRepository? _repo;
   bool _loading = true;
 
@@ -36,7 +38,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _source?.dispose();
-    _tmdb?.close();
+    _metadataProvider?.close();
     super.dispose();
   }
 
@@ -44,29 +46,34 @@ class _HomeShellState extends State<HomeShell> {
     if (mounted) setState(() => _loading = true);
     final cfg = await widget.store.activeConfig();
     await _source?.dispose();
-    _tmdb?.close();
+    _metadataProvider?.close();
     final metadata = await widget.store.metadataConfig();
-    final tmdb = metadata.hasTmdb
-        ? TmdbClient(apiKey: metadata.tmdbApiKey)
-        : null;
+    final provider = switch (metadata.provider) {
+      'tvdb' when metadata.hasTvdb => TvdbClient(
+        apiKey: metadata.tvdbApiKey,
+        pin: metadata.tvdbPin,
+      ),
+      _ when metadata.hasTmdb => TmdbClient(apiKey: metadata.tmdbApiKey),
+      _ => null,
+    };
     debugPrint(
-      '[iptvs.metadata] TMDB enabled=${tmdb != null} auth=${tmdb?.authMode ?? 'none'} keyLength=${metadata.normalizedTmdbCredential.length}',
+      '[iptvs.metadata] provider=${provider?.provider ?? 'none'} enabled=${provider != null} auth=${provider?.authMode ?? 'none'}',
     );
     final src = cfg?.build();
     if (!mounted) {
-      tmdb?.close();
+      provider?.close();
       return;
     }
     setState(() {
       _config = cfg;
       _source = src;
-      _tmdb = tmdb;
+      _metadataProvider = provider;
       _repo = src == null
           ? null
           : LibraryRepository(
               source: src,
               db: widget.db,
-              metadataProvider: tmdb,
+              metadataProvider: provider,
               autoEnrichMetadata: metadata.autoEnrich,
             );
       _loading = false;
@@ -75,7 +82,9 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _manageSources() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SourcesScreen(store: widget.store)),
+      MaterialPageRoute(
+        builder: (_) => SourcesScreen(store: widget.store, db: widget.db),
+      ),
     );
     await _loadActive(); // active selection may have changed
   }
