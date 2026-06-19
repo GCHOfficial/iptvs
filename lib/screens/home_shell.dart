@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/app_database.dart';
 import '../data/library_repository.dart';
 import '../data/source_store.dart';
+import '../data/tmdb_client.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import 'channel_list_screen.dart';
@@ -22,6 +23,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   SourceConfig? _config;
   Source? _source;
+  TmdbClient? _tmdb;
   LibraryRepository? _repo;
   bool _loading = true;
 
@@ -34,6 +36,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _source?.dispose();
+    _tmdb?.close();
     super.dispose();
   }
 
@@ -41,12 +44,31 @@ class _HomeShellState extends State<HomeShell> {
     if (mounted) setState(() => _loading = true);
     final cfg = await widget.store.activeConfig();
     await _source?.dispose();
+    _tmdb?.close();
+    final metadata = await widget.store.metadataConfig();
+    final tmdb = metadata.hasTmdb
+        ? TmdbClient(apiKey: metadata.tmdbApiKey)
+        : null;
+    debugPrint(
+      '[iptvs.metadata] TMDB enabled=${tmdb != null} auth=${tmdb?.authMode ?? 'none'} keyLength=${metadata.normalizedTmdbCredential.length}',
+    );
     final src = cfg?.build();
-    if (!mounted) return;
+    if (!mounted) {
+      tmdb?.close();
+      return;
+    }
     setState(() {
       _config = cfg;
       _source = src;
-      _repo = src == null ? null : LibraryRepository(source: src, db: widget.db);
+      _tmdb = tmdb;
+      _repo = src == null
+          ? null
+          : LibraryRepository(
+              source: src,
+              db: widget.db,
+              metadataProvider: tmdb,
+              autoEnrichMetadata: metadata.autoEnrich,
+            );
       _loading = false;
     });
   }
@@ -59,8 +81,14 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _useDemo() async {
-    await widget.store.save(const SourceConfig(
-        id: 'demo', kind: SourceKind.demo, label: 'Demo', fields: {}));
+    await widget.store.save(
+      const SourceConfig(
+        id: 'demo',
+        kind: SourceKind.demo,
+        label: 'Demo',
+        fields: {},
+      ),
+    );
     await widget.store.setActive('demo');
     await _loadActive();
   }
@@ -88,8 +116,9 @@ class _HomeShellState extends State<HomeShell> {
               ),
               const SizedBox(height: 8),
               TextButton(
-                  onPressed: _useDemo,
-                  child: const Text('Use demo streams')),
+                onPressed: _useDemo,
+                child: const Text('Use demo streams'),
+              ),
             ],
           ),
         ),

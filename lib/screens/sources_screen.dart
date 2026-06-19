@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
+import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
@@ -99,7 +100,21 @@ class _SourcesScreenState extends State<SourcesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Sources')),
+      appBar: AppBar(
+        title: const Text('Sources'),
+        actions: [
+          IconButton(
+            tooltip: 'Metadata',
+            icon: const Icon(Icons.auto_awesome_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => MetadataSettingsScreen(store: widget.store),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _add,
         icon: const Icon(Icons.add),
@@ -419,6 +434,120 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class MetadataSettingsScreen extends StatefulWidget {
+  final SourceStore store;
+
+  const MetadataSettingsScreen({super.key, required this.store});
+
+  @override
+  State<MetadataSettingsScreen> createState() => _MetadataSettingsScreenState();
+}
+
+class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
+  final _tmdb = TextEditingController();
+  bool _autoEnrich = true;
+  bool _loading = true;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _tmdb.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final config = await widget.store.metadataConfig();
+    if (!mounted) return;
+    setState(() {
+      _tmdb.text = config.tmdbApiKey;
+      _autoEnrich = config.autoEnrich;
+      _loading = false;
+    });
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    await widget.store.saveMetadataConfig(
+      MetadataConfig(
+        tmdbApiKey: MetadataConfig.normalizeTmdbCredential(_tmdb.text),
+        autoEnrich: _autoEnrich,
+      ),
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Metadata settings saved')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Metadata')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Text('TMDB', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                const Text(
+                  'Used to enrich movies and series with posters, backdrops, descriptions, years, and ratings. Accepts a TMDB v3 API key or v4 Read Access Token.',
+                  style: TextStyle(color: AppColors.textLo),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _tmdb,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: const InputDecoration(
+                    labelText: 'TMDB API credential',
+                    hintText: 'Paste a v3 API key or v4 Read Access Token',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Changes apply after returning to the library.',
+                  style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                ),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  value: _autoEnrich,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Auto-enrich loaded lists'),
+                  subtitle: const Text(
+                    'Fetch metadata in the background after movies or series load.',
+                    style: TextStyle(color: AppColors.textLo),
+                  ),
+                  onChanged: (value) => setState(() => _autoEnrich = value),
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : _save,
+                    icon: _saving
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(_saving ? 'Saving' : 'Save'),
+                  ),
+                ),
+              ],
+            ),
     );
   }
 }

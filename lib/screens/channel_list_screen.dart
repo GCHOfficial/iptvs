@@ -8,6 +8,7 @@ import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../player/player_screen.dart';
+import 'diagnostics_screen.dart';
 
 const _toolbarControlHeight = 40.0;
 
@@ -36,6 +37,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final Map<ContentKind, String?> _mediaCategoryId = {};
   final Map<ContentKind, bool> _mediaLoading = {};
   final Map<ContentKind, bool> _mediaLoadingMore = {};
+  final Map<ContentKind, bool> _mediaEnriching = {};
+  final Map<ContentKind, int> _mediaEnrichmentGeneration = {};
+  final Map<ContentKind, ({int done, int total})> _mediaEnrichmentProgress = {};
   final Map<ContentKind, bool> _mediaSearching = {};
   final Map<ContentKind, String?> _mediaError = {};
   final Map<ContentKind, List<MediaItem>> _mediaSearchResults = {};
@@ -110,6 +114,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _loadMedia(ContentKind kind, {bool forceRefresh = false}) async {
     final categoryId = _mediaCategoryId[kind];
     setState(() {
+      _cancelMediaEnrichment(kind);
       _mediaLoading[kind] = true;
       _mediaError[kind] = null;
     });
@@ -124,6 +129,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _media[kind] = snap;
         _mediaLoading[kind] = false;
       });
+      if (widget.repo.autoEnrichMetadata) {
+        unawaited(_enrichMediaItems(kind, snap.items));
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -137,6 +145,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (_mediaLoadingMore[kind] == true) return;
     final categoryId = _mediaCategoryId[kind];
     setState(() {
+      _cancelMediaEnrichment(kind);
       _mediaLoadingMore[kind] = true;
       _mediaError[kind] = null;
     });
@@ -150,6 +159,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _media[kind] = snap;
         _mediaLoadingMore[kind] = false;
       });
+      if (widget.repo.autoEnrichMetadata) {
+        unawaited(_enrichMediaItems(kind, snap.items));
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -159,13 +171,99 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
+  Future<void> _enrichVisibleMedia(ContentKind kind) =>
+      _enrichMediaItems(kind, _visibleMedia(kind), showErrors: true);
+
+  void _cancelMediaEnrichment(ContentKind kind) {
+    _mediaEnrichmentGeneration[kind] =
+        (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
+    _mediaEnriching[kind] = false;
+    _mediaEnrichmentProgress.remove(kind);
+  }
+
+  Future<void> _enrichMediaItems(
+    ContentKind kind,
+    List<MediaItem> items, {
+    bool showErrors = false,
+  }) async {
+    final generation = (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
+    _mediaEnrichmentGeneration[kind] = generation;
+    final targets = items
+        .where(
+          (item) =>
+              item.kind == ContentKind.movie ||
+              item.kind == ContentKind.series ||
+              item.kind == ContentKind.episode,
+        )
+        .toList();
+    if (targets.isEmpty) return;
+    setState(() {
+      _mediaEnriching[kind] = true;
+      _mediaEnrichmentProgress[kind] = (done: 0, total: targets.length);
+    });
+    var done = 0;
+    try {
+      const chunkSize = 20;
+      for (var start = 0; start < targets.length; start += chunkSize) {
+        if (_mediaEnrichmentGeneration[kind] != generation) return;
+        final chunk = targets.skip(start).take(chunkSize).toList();
+        final enriched = await widget.repo.enrichMediaMetadata(chunk);
+        if (!mounted || _mediaEnrichmentGeneration[kind] != generation) return;
+        done += chunk.length;
+        final enrichedById = {for (final item in enriched) item.id: item};
+        setState(() {
+          _replaceMediaItemsInState(kind, enrichedById);
+          _mediaEnrichmentProgress[kind] = (done: done, total: targets.length);
+        });
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (!mounted || _mediaEnrichmentGeneration[kind] != generation) return;
+      setState(() {
+        _mediaEnriching[kind] = false;
+        _mediaEnrichmentProgress.remove(kind);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      if (_mediaEnrichmentGeneration[kind] != generation) return;
+      setState(() => _mediaEnriching[kind] = false);
+      if (showErrors) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Metadata enrichment failed: $e')),
+        );
+      }
+    }
+  }
+
+  void _replaceMediaItemsInState(
+    ContentKind kind,
+    Map<String, MediaItem> replacements,
+  ) {
+    if (replacements.isEmpty) return;
+    final snapshot = _media[kind];
+    if (snapshot != null) {
+      _media[kind] = snapshot.copyWith(
+        items: [
+          for (final item in snapshot.items) replacements[item.id] ?? item,
+        ],
+      );
+    }
+    final searchResults = _mediaSearchResults[kind];
+    if (searchResults != null) {
+      _mediaSearchResults[kind] = [
+        for (final item in searchResults) replacements[item.id] ?? item,
+      ];
+    }
+  }
+
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
     if (_tab == ContentKind.live) return;
+    _cancelMediaEnrichment(_tab);
     final query = value.trim();
     if (query.length < 2) {
       setState(() {
+        _cancelMediaEnrichment(_tab);
         _mediaSearching[_tab] = false;
         _mediaSearchResults.remove(_tab);
         _mediaSearchQuery.remove(_tab);
@@ -181,6 +279,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _searchMedia(ContentKind kind, String query) async {
     final categoryId = _mediaCategoryId[kind];
     setState(() {
+      _cancelMediaEnrichment(kind);
       _mediaSearching[kind] = true;
       _mediaError[kind] = null;
     });
@@ -196,6 +295,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _mediaSearchQuery[kind] = query;
         _mediaSearching[kind] = false;
       });
+      if (widget.repo.autoEnrichMetadata) {
+        unawaited(_enrichMediaItems(kind, results));
+      }
     } catch (e) {
       if (!mounted || _tab != kind || _query.trim() != query) return;
       setState(() {
@@ -251,10 +353,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     try {
       final detailed = await widget.repo.mediaDetails(item);
       if (!mounted) return;
+      _replaceMediaItem(detailed);
       _showMediaDetails(detailed);
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not open: $e')));
     }
+  }
+
+  void _replaceMediaItem(MediaItem replacement) {
+    setState(() {
+      _replaceMediaItemsInState(replacement.kind, {
+        replacement.id: replacement,
+      });
+    });
   }
 
   Future<void> _playMedia(MediaItem item) async {
@@ -286,6 +397,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       builder: (context) => _MediaDetailsSheet(
         repo: widget.repo,
         item: item,
+        onChanged: _replaceMediaItem,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
             ? () {
@@ -366,6 +478,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _mediaSearchResults.remove(previous);
       _mediaSearchQuery.remove(previous);
       _mediaSearching[previous] = false;
+      _cancelMediaEnrichment(previous);
     });
     if (kind != ContentKind.live && !_media.containsKey(kind)) {
       _loadMedia(kind);
@@ -385,6 +498,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               icon: const Icon(Icons.dns_outlined),
               onPressed: widget.onManageSources,
             ),
+          IconButton(
+            tooltip: 'Diagnostics',
+            icon: const Icon(Icons.bug_report_outlined),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+            ),
+          ),
           IconButton(
             tooltip: 'Refresh from source',
             icon: const Icon(Icons.refresh),
@@ -444,6 +564,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                       }
                     },
                   ),
+            actionControl:
+                _tab == ContentKind.live || !widget.repo.canEnrichMetadata
+                ? null
+                : _ToolbarIconButton(
+                    tooltip: _mediaEnriching[_tab] == true
+                        ? 'Refreshing metadata'
+                        : 'Refresh displayed metadata',
+                    busy: _mediaEnriching[_tab] == true,
+                    icon: Icons.auto_awesome_outlined,
+                    onPressed:
+                        _mediaLoading[_tab] == true ||
+                            _mediaSearching[_tab] == true
+                        ? null
+                        : () => _enrichVisibleMedia(_tab),
+                  ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
@@ -469,6 +604,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
     if (_mediaLoading[_tab] == true) return '';
     if (_mediaSearching[_tab] == true) return 'Searching provider...';
+    if (_mediaEnriching[_tab] == true) {
+      final progress = _mediaEnrichmentProgress[_tab];
+      if (progress != null) {
+        return 'Refreshing metadata ${_fmt(progress.done)}/${_fmt(progress.total)}...';
+      }
+      return 'Refreshing metadata...';
+    }
     return _mediaStatusLine(_tab, _visibleMedia(_tab).length);
   }
 
@@ -663,6 +805,7 @@ class _Toolbar extends StatelessWidget {
   final ValueChanged<String> onQueryChanged;
   final VoidCallback onClearQuery;
   final Widget categoryControl;
+  final Widget? actionControl;
 
   const _Toolbar({
     required this.searchController,
@@ -671,6 +814,7 @@ class _Toolbar extends StatelessWidget {
     required this.onQueryChanged,
     required this.onClearQuery,
     required this.categoryControl,
+    this.actionControl,
   });
 
   @override
@@ -698,6 +842,7 @@ class _Toolbar extends StatelessWidget {
             ),
           ),
         );
+        final action = actionControl;
 
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -710,7 +855,15 @@ class _Toolbar extends StatelessWidget {
                       alignment: Alignment.centerLeft,
                       child: SizedBox(
                         width: double.infinity,
-                        child: categoryControl,
+                        child: action == null
+                            ? categoryControl
+                            : Row(
+                                children: [
+                                  Expanded(child: categoryControl),
+                                  const SizedBox(width: 8),
+                                  action,
+                                ],
+                              ),
                       ),
                     ),
                   ],
@@ -720,10 +873,54 @@ class _Toolbar extends StatelessWidget {
                     Expanded(child: search),
                     const SizedBox(width: 12),
                     categoryControl,
+                    if (action != null) ...[const SizedBox(width: 8), action],
                   ],
                 ),
         );
       },
+    );
+  }
+}
+
+class _ToolbarIconButton extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final bool busy;
+  final VoidCallback? onPressed;
+
+  const _ToolbarIconButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+    this.busy = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: SizedBox.square(
+        dimension: _toolbarControlHeight,
+        child: IconButton.filledTonal(
+          style: IconButton.styleFrom(
+            backgroundColor: AppColors.panel,
+            foregroundColor: AppColors.textHi,
+            disabledBackgroundColor: AppColors.panel,
+            disabledForegroundColor: AppColors.textLo,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppRadius.control),
+              side: const BorderSide(color: AppColors.line),
+            ),
+          ),
+          onPressed: busy ? null : onPressed,
+          icon: busy
+              ? const SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(icon, size: 20),
+        ),
+      ),
     );
   }
 }
@@ -1108,6 +1305,10 @@ class _MediaListTile extends StatelessWidget {
                       ),
                     ),
                   ],
+                  if (_sourceHints(item).isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    _SourceHints(item: item),
+                  ],
                   if (item.description != null) ...[
                     const SizedBox(height: 6),
                     Text(
@@ -1181,11 +1382,119 @@ class _MediaGridTile extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textLo, fontSize: 12),
               ),
+            if (_sourceHints(item).isNotEmpty) ...[
+              const SizedBox(height: 5),
+              _SourceHints(item: item, compact: true),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+class _SourceHints extends StatelessWidget {
+  final MediaItem item;
+  final bool compact;
+
+  const _SourceHints({required this.item, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final hints = _sourceHints(item);
+    if (hints.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 5,
+      runSpacing: 5,
+      children: [
+        for (final hint in hints.take(compact ? 2 : 4))
+          Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 5 : 6,
+              vertical: compact ? 2 : 3,
+            ),
+            decoration: BoxDecoration(
+              color: AppColors.panelHi,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: AppColors.line),
+            ),
+            child: Text(
+              hint,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: AppColors.textLo,
+                fontSize: compact ? 10 : 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+String? _providerTitle(MediaItem item) {
+  final value =
+      item.extra['providerTitle'] ??
+      item.extra['sourceTitle'] ??
+      item.extra['name'] ??
+      item.extra['title'];
+  final text = value?.toString().trim();
+  if (text == null || text.isEmpty || text == item.title) return null;
+  return text;
+}
+
+List<String> _sourceHints(MediaItem item) {
+  final providerTitle = _providerTitle(item);
+  final explicitFields = [
+    item.extra['audio_language'],
+    item.extra['audio_lang'],
+    item.extra['language'],
+    item.extra['lang'],
+    item.extra['subtitle_language'],
+    item.extra['subtitles'],
+  ].whereType<Object>().map((v) => v.toString()).join(' ');
+  final markerFields = <String>[];
+  if (providerTitle != null) {
+    markerFields.addAll(
+      RegExp(
+        r'[\[(]([^\])]+)[\])]',
+      ).allMatches(providerTitle).map((m) => m.group(1) ?? ''),
+    );
+    final pipe = providerTitle.indexOf('|');
+    if (pipe > 0 && pipe <= 24) {
+      markerFields.add(providerTitle.substring(0, pipe));
+    }
+    final dash = providerTitle.indexOf(' - ');
+    if (dash > 0 && dash <= 24) {
+      markerFields.add(providerTitle.substring(0, dash));
+    }
+  }
+  final fields = '$explicitFields ${markerFields.join(' ')}';
+  if (fields.trim().isEmpty) return const [];
+  final text = fields.toUpperCase();
+  final hints = <String>[];
+
+  void add(String label, Pattern pattern) {
+    if (!hints.contains(label) && pattern.allMatches(text).isNotEmpty) {
+      hints.add(label);
+    }
+  }
+
+  add('Multi audio', RegExp(r'\b(MULTI|MULTIAUDIO|MULTI-AUDIO)\b'));
+  add('Dual audio', RegExp(r'\b(DUAL|DUALAUDIO|DUAL-AUDIO)\b'));
+  add('Subtitles', RegExp(r'\b(SUB|SUBS|SUBBED|VOST|VOSTFR|VOSE)\b'));
+  add('Romanian', RegExp(r'\b(RO|ROM|RON|ROMANIAN|ROMANA)\b'));
+  add('English', RegExp(r'\b(EN|ENG|ENGLISH)\b'));
+  add('French', RegExp(r'\b(FR|FRE|FRENCH|TRUEFRENCH|VOSTFR)\b'));
+  add('Spanish', RegExp(r'\b(ES|ESP|SPA|SPANISH|CASTELLANO|LATINO)\b'));
+  add('German', RegExp(r'\b(DE|GER|DEU|GERMAN)\b'));
+  add('Italian', RegExp(r'\b(IT|ITA|ITALIAN)\b'));
+  add('Polish', RegExp(r'\b(PL|POL|POLISH)\b'));
+  add('Turkish', RegExp(r'\b(TR|TUR|TURKISH)\b'));
+  add('Russian', RegExp(r'\b(RU|RUS|RUSSIAN)\b'));
+  return hints;
 }
 
 class _MediaLoadMoreTile extends StatelessWidget {
@@ -1323,11 +1632,13 @@ class _MediaDetailsSheet extends StatefulWidget {
   final LibraryRepository repo;
   final MediaItem item;
   final VoidCallback? onPlay;
+  final ValueChanged<MediaItem>? onChanged;
 
   const _MediaDetailsSheet({
     required this.repo,
     required this.item,
     required this.onPlay,
+    this.onChanged,
   });
 
   @override
@@ -1335,13 +1646,16 @@ class _MediaDetailsSheet extends StatefulWidget {
 }
 
 class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
+  late MediaItem _item = widget.item;
+  late Future<ExternalMetadata?> _metadataFuture = _loadMetadata();
   late final Future<List<MediaItem>>? _seasonsFuture = _loadSeasonsIfNeeded();
   final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
+  bool _refreshingMetadata = false;
 
   Future<List<MediaItem>>? _loadSeasonsIfNeeded() {
-    if (widget.item.kind != ContentKind.series) return null;
+    if (_item.kind != ContentKind.series) return null;
     return widget.repo
-        .loadMedia(ContentKind.season, parent: widget.item)
+        .loadMedia(ContentKind.season, parent: _item)
         .then((snapshot) => snapshot.items);
   }
 
@@ -1352,6 +1666,32 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
             .loadMedia(ContentKind.episode, parent: season)
             .then((snapshot) => snapshot.items),
       );
+
+  Future<ExternalMetadata?> _loadMetadata() =>
+      widget.repo.cachedExternalMetadata(_item, 'tmdb');
+
+  Future<void> _refreshMetadata() async {
+    if (_refreshingMetadata) return;
+    setState(() => _refreshingMetadata = true);
+    try {
+      final metadata = await widget.repo.refreshExternalMetadata(_item);
+      if (!mounted) return;
+      setState(() {
+        if (metadata != null) {
+          _item = widget.repo.mergeExternalMetadata(_item, metadata);
+          widget.onChanged?.call(_item);
+        }
+        _metadataFuture = _loadMetadata();
+        _refreshingMetadata = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _refreshingMetadata = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Metadata refresh failed: $error')),
+      );
+    }
+  }
 
   void _play(MediaItem item) {
     Navigator.of(context).pop();
@@ -1370,29 +1710,45 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final narrow = constraints.maxWidth < 520;
-            final poster = _Poster(item: widget.item, width: 124, height: 180);
+            final poster = _Poster(item: _item, width: 124, height: 180);
             final seasonsFuture = _seasonsFuture;
             final details = Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  widget.item.title,
+                  _item.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                if (widget.item.year != null) ...[
+                if (_item.year != null) ...[
                   const SizedBox(height: 6),
                   Text(
-                    widget.item.year!,
+                    _item.year!,
                     style: const TextStyle(color: AppColors.textLo),
                   ),
                 ],
-                if (widget.item.description != null) ...[
+                if (_sourceHints(_item).isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  _SourceHints(item: _item),
+                ],
+                if (_providerTitle(_item) case final sourceTitle?) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    'Source title: $sourceTitle',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+                if (_item.description != null) ...[
                   const SizedBox(height: 12),
                   Text(
-                    widget.item.description!,
+                    _item.description!,
                     maxLines: 8,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: AppColors.textLo),
@@ -1405,6 +1761,12 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
                     icon: const Icon(Icons.play_arrow_rounded),
                     label: const Text('Play'),
                   ),
+                const SizedBox(height: 12),
+                _MetadataStatus(
+                  metadata: _metadataFuture,
+                  refreshing: _refreshingMetadata,
+                  onRefresh: _refreshMetadata,
+                ),
                 if (seasonsFuture != null) ...[
                   const SizedBox(height: 18),
                   _SeriesBrowser(
@@ -1441,6 +1803,78 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
         ),
       ),
     );
+  }
+}
+
+class _MetadataStatus extends StatelessWidget {
+  final Future<ExternalMetadata?> metadata;
+  final bool refreshing;
+  final VoidCallback onRefresh;
+
+  const _MetadataStatus({
+    required this.metadata,
+    required this.refreshing,
+    required this.onRefresh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<ExternalMetadata?>(
+      future: metadata,
+      builder: (context, snapshot) {
+        final value = snapshot.data;
+        final label = value == null
+            ? 'Provider metadata'
+            : '${value.provider.toUpperCase()} · ${_ago(value.refreshedAt)}';
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: AppColors.panelHi,
+            borderRadius: BorderRadius.circular(AppRadius.control),
+            border: Border.all(color: AppColors.line),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                value == null
+                    ? Icons.auto_awesome_outlined
+                    : Icons.check_circle_outline,
+                color: value == null ? AppColors.textLo : AppColors.accent,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Refresh metadata',
+                visualDensity: VisualDensity.compact,
+                onPressed: refreshing ? null : onRefresh,
+                icon: refreshing
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh, size: 18),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _ago(DateTime time) {
+    final diff = DateTime.now().difference(time);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
   }
 }
 

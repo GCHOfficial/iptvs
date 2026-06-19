@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'metadata_config.dart';
 import '../sources/source_config.dart';
 
 /// Persists provider configurations (credentials included) in the OS keychain
@@ -11,9 +12,10 @@ class SourceStore {
 
   static const _kSources = 'sources';
   static const _kActive = 'active_source';
+  static const _kMetadata = 'metadata_config';
 
   SourceStore([FlutterSecureStorage? storage])
-      : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? const FlutterSecureStorage();
 
   Future<List<SourceConfig>> list() async {
     final raw = await _storage.read(key: _kSources);
@@ -60,14 +62,20 @@ class SourceStore {
     final id = await activeId();
     final all = await list();
     if (all.isEmpty) return null;
-    return all.firstWhere(
-      (c) => c.id == id,
-      orElse: () => all.first,
-    );
+    return all.firstWhere((c) => c.id == id, orElse: () => all.first);
   }
 
+  Future<MetadataConfig> metadataConfig() async {
+    final raw = await _storage.read(key: _kMetadata);
+    if (raw == null || raw.isEmpty) return const MetadataConfig();
+    return MetadataConfig.fromJson(Map<String, dynamic>.from(jsonDecode(raw)));
+  }
+
+  Future<void> saveMetadataConfig(MetadataConfig config) =>
+      _storage.write(key: _kMetadata, value: jsonEncode(config.toJson()));
+
   Future<void> _writeAll(List<SourceConfig> all) => _storage.write(
-        key: _kSources,
-        value: jsonEncode(all.map((e) => e.toJson()).toList()),
-      );
+    key: _kSources,
+    value: jsonEncode(all.map((e) => e.toJson()).toList()),
+  );
 }

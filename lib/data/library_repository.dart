@@ -1,5 +1,11 @@
+import 'dart:developer' as developer;
+
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../sources/source.dart';
 import 'app_database.dart';
+import 'diagnostics_log.dart';
+import 'metadata_provider.dart';
 
 class LibrarySnapshot {
   final List<Category> categories;
@@ -39,6 +45,19 @@ class MediaLibrarySnapshot {
   });
 
   bool get hasMore => loadedPages < totalPages;
+
+  MediaLibrarySnapshot copyWith({List<MediaItem>? items}) =>
+      MediaLibrarySnapshot(
+        kind: kind,
+        categoryId: categoryId,
+        parentId: parentId,
+        categories: categories,
+        items: items ?? this.items,
+        fromCache: fromCache,
+        syncedAt: syncedAt,
+        loadedPages: loadedPages,
+        totalPages: totalPages,
+      );
 }
 
 /// Sits between a [Source] and the [AppDatabase]: serves channels from cache
@@ -47,6 +66,8 @@ class MediaLibrarySnapshot {
 class LibraryRepository {
   final Source source;
   final AppDatabase db;
+  final MetadataProvider? metadataProvider;
+  final bool autoEnrichMetadata;
 
   /// EPG is re-fetched if older than this (or on a forced refresh).
   static const _epgMaxAge = Duration(hours: 3);
@@ -55,7 +76,14 @@ class LibraryRepository {
   static const _fallbackCategoryPages = 1;
   static const _fallbackCategoryLimit = 8;
 
-  LibraryRepository({required this.source, required this.db});
+  LibraryRepository({
+    required this.source,
+    required this.db,
+    this.metadataProvider,
+    this.autoEnrichMetadata = true,
+  });
+
+  bool get canEnrichMetadata => metadataProvider != null;
 
   Future<LibrarySnapshot> load({bool forceRefresh = false}) async {
     // Always connect: cheap auth, and resolve()/playback/EPG need it.
@@ -148,7 +176,7 @@ class LibraryRepository {
             categoryId: categoryId,
             parentId: parentId,
             categories: await db.readMediaCategories(source.id, kind),
-            items: items,
+            items: await _mergeCachedMetadata(items),
             fromCache: true,
             syncedAt: sync.syncedAt,
             loadedPages: sync.loadedPages,
@@ -180,7 +208,7 @@ class LibraryRepository {
       categoryId: categoryId,
       parentId: parentId,
       categories: categories,
-      items: fetched.items,
+      items: await _mergeCachedMetadata(fetched.items),
       fromCache: false,
       syncedAt: DateTime.now(),
       loadedPages: fetched.loadedPages,
@@ -282,8 +310,7 @@ class LibraryRepository {
         categoryId: categoryId,
         parentId: parentId,
         categories: await db.readMediaCategories(source.id, kind),
-        items: await db.readMediaItems(
-          source.id,
+        items: await _readMergedMediaItems(
           kind,
           categoryId: categoryId,
           parentId: parentId,
@@ -324,8 +351,7 @@ class LibraryRepository {
       categoryId: categoryId,
       parentId: parentId,
       categories: await db.readMediaCategories(source.id, kind),
-      items: await db.readMediaItems(
-        source.id,
+      items: await _readMergedMediaItems(
         kind,
         categoryId: categoryId,
         parentId: parentId,
@@ -337,7 +363,116 @@ class LibraryRepository {
     );
   }
 
-  Future<MediaItem> mediaDetails(MediaItem item) => source.mediaDetails(item);
+  Future<MediaItem> mediaDetails(MediaItem item) async {
+    final details = await source.mediaDetails(item);
+    final provider = metadataProvider;
+    if (provider == null ||
+        (details.kind != ContentKind.movie &&
+            details.kind != ContentKind.series &&
+            details.kind != ContentKind.episode)) {
+      return details;
+    }
+    final cached = await cachedExternalMetadata(details, provider.provider);
+    if (cached != null) {
+      _logMetadata(
+        'cache hit ${details.kind.name}:${details.id} -> ${cached.providerKey}',
+      );
+      final merged = _mergeMetadata(details, cached);
+      await db.updateMediaDisplayFields(source.id, [merged]);
+      return merged;
+    }
+    try {
+      final metadata = await provider.search(details);
+      if (metadata == null) {
+        _logMetadata(
+          'no match ${details.kind.name}:${details.id} title=${details.title}',
+        );
+        return details;
+      }
+      await cacheExternalMetadata(details, metadata);
+      _logMetadata(
+        'matched ${details.kind.name}:${details.id} -> ${metadata.providerKey}',
+      );
+      final merged = _mergeMetadata(details, metadata);
+      await db.updateMediaDisplayFields(source.id, [merged]);
+      return merged;
+    } catch (error) {
+      _logMetadata('error ${details.kind.name}:${details.id}: $error');
+      return details;
+    }
+  }
+
+  Future<List<MediaItem>> _readMergedMediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    String? parentId,
+  }) async {
+    final items = await db.readMediaItems(
+      source.id,
+      kind,
+      categoryId: categoryId,
+      parentId: parentId,
+    );
+    return _mergeCachedMetadata(items);
+  }
+
+  Future<List<MediaItem>> _mergeCachedMetadata(List<MediaItem> items) async {
+    if (items.isEmpty) return items;
+    final provider = metadataProvider;
+    if (provider == null) return items;
+    final metadata = await db.readExternalMetadataForItems(
+      source.id,
+      items,
+      provider.provider,
+    );
+    if (metadata.isEmpty) return items;
+    return [
+      for (final item in items)
+        if (metadata[item.id] case final itemMetadata?)
+          _mergeMetadata(item, itemMetadata)
+        else
+          item,
+    ];
+  }
+
+  MediaItem _mergeMetadata(MediaItem item, ExternalMetadata metadata) {
+    final existingMetadata = item.extra['metadata'];
+    final providerTitle =
+        item.extra['providerTitle'] ??
+        item.extra['sourceTitle'] ??
+        item.extra['name'] ??
+        item.extra['title'] ??
+        item.title;
+    return item.copyWith(
+      title: metadata.title == null || metadata.title!.isEmpty
+          ? null
+          : metadata.title,
+      poster: metadata.poster ?? item.poster,
+      backdrop: metadata.backdrop ?? item.backdrop,
+      description: metadata.overview == null || metadata.overview!.isEmpty
+          ? item.description
+          : metadata.overview,
+      year: metadata.year ?? item.year,
+      rating: metadata.rating ?? item.rating,
+      providerId: metadata.providerKey.isEmpty
+          ? item.providerId
+          : metadata.providerKey,
+      extra: {
+        ...item.extra,
+        'providerTitle': providerTitle,
+        'metadata': {
+          if (existingMetadata is Map) ...existingMetadata,
+          metadata.provider: metadata.payload,
+        },
+      },
+    );
+  }
+
+  void _logMetadata(String message) {
+    DiagnosticsLog.instance.add('metadata', message);
+    developer.log(message, name: 'iptvs.metadata');
+    debugPrint('[iptvs.metadata] $message');
+  }
 
   Future<ExternalMetadata?> cachedExternalMetadata(
     MediaItem item,
@@ -348,6 +483,89 @@ class LibraryRepository {
     MediaItem item,
     ExternalMetadata metadata,
   ) => db.cacheExternalMetadata(source.id, item, metadata);
+
+  Future<ExternalMetadata?> refreshExternalMetadata(MediaItem item) async {
+    final provider = metadataProvider;
+    if (provider == null ||
+        (item.kind != ContentKind.movie &&
+            item.kind != ContentKind.series &&
+            item.kind != ContentKind.episode)) {
+      return null;
+    }
+    try {
+      final metadata = await provider.search(item);
+      if (metadata == null) {
+        _logMetadata(
+          'refresh no match ${item.kind.name}:${item.id} title=${item.title}',
+        );
+        return null;
+      }
+      await cacheExternalMetadata(item, metadata);
+      _logMetadata(
+        'refresh matched ${item.kind.name}:${item.id} -> ${metadata.providerKey}',
+      );
+      await db.updateMediaDisplayFields(source.id, [
+        _mergeMetadata(item, metadata),
+      ]);
+      return metadata;
+    } catch (error) {
+      _logMetadata('refresh error ${item.kind.name}:${item.id}: $error');
+      rethrow;
+    }
+  }
+
+  MediaItem mergeExternalMetadata(MediaItem item, ExternalMetadata metadata) =>
+      _mergeMetadata(item, metadata);
+
+  Future<List<MediaItem>> enrichMediaMetadata(
+    List<MediaItem> items, {
+    int? limit,
+  }) async {
+    final provider = metadataProvider;
+    if (provider == null || items.isEmpty || (limit != null && limit <= 0)) {
+      return items;
+    }
+    final out = [...items];
+    final cached = await db.readExternalMetadataForItems(
+      source.id,
+      out,
+      provider.provider,
+    );
+    var checked = 0;
+    for (var i = 0; i < out.length; i++) {
+      if (limit != null && checked >= limit) break;
+      final item = out[i];
+      if (item.kind != ContentKind.movie &&
+          item.kind != ContentKind.series &&
+          item.kind != ContentKind.episode) {
+        continue;
+      }
+      checked++;
+      final cachedMetadata = cached[item.id];
+      if (cachedMetadata != null) {
+        out[i] = _mergeMetadata(item, cachedMetadata);
+        continue;
+      }
+      try {
+        final metadata = await provider.search(item);
+        if (metadata == null) {
+          _logMetadata(
+            'prefetch no match ${item.kind.name}:${item.id} title=${item.title}',
+          );
+          continue;
+        }
+        await cacheExternalMetadata(item, metadata);
+        _logMetadata(
+          'prefetch matched ${item.kind.name}:${item.id} -> ${metadata.providerKey}',
+        );
+        out[i] = _mergeMetadata(item, metadata);
+      } catch (error) {
+        _logMetadata('prefetch error ${item.kind.name}:${item.id}: $error');
+      }
+    }
+    await db.updateMediaDisplayFields(source.id, out);
+    return out;
+  }
 
   Future<List<MediaItem>> searchMedia(
     ContentKind kind,

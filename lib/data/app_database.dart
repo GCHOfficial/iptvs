@@ -526,25 +526,17 @@ class AppDatabase {
       }
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
-        batch.insert('media_items', {
-          'source_id': sourceId,
-          'kind': kind.name,
-          'id': item.id,
-          'title': item.title,
-          'parent_id': item.parentId ?? parentId,
-          'category_id': item.categoryId,
-          'poster': item.poster,
-          'backdrop': item.backdrop,
-          'description': item.description,
-          'year': item.year,
-          'rating': item.rating,
-          'duration_seconds': item.durationSeconds,
-          'season_number': item.seasonNumber,
-          'episode_number': item.episodeNumber,
-          'provider_id': item.providerId,
-          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
-          'display_order': i,
-        }, conflictAlgorithm: ConflictAlgorithm.replace);
+        batch.insert(
+          'media_items',
+          _mediaItemRow(
+            sourceId,
+            kind,
+            item,
+            parentId: parentId,
+            displayOrder: i,
+          ),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
       }
       batch.insert('media_sync', {
         'source_id': sourceId,
@@ -587,25 +579,17 @@ class AppDatabase {
       final batch = txn.batch();
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
-        batch.insert('media_items', {
-          'source_id': sourceId,
-          'kind': kind.name,
-          'id': item.id,
-          'title': item.title,
-          'parent_id': item.parentId ?? parentId,
-          'category_id': item.categoryId,
-          'poster': item.poster,
-          'backdrop': item.backdrop,
-          'description': item.description,
-          'year': item.year,
-          'rating': item.rating,
-          'duration_seconds': item.durationSeconds,
-          'season_number': item.seasonNumber,
-          'episode_number': item.episodeNumber,
-          'provider_id': item.providerId,
-          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
-          'display_order': startOrder + i,
-        }, conflictAlgorithm: ConflictAlgorithm.replace);
+        batch.insert(
+          'media_items',
+          _mediaItemRow(
+            sourceId,
+            kind,
+            item,
+            parentId: parentId,
+            displayOrder: startOrder + i,
+          ),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
       }
       batch.insert('media_sync', {
         'source_id': sourceId,
@@ -654,6 +638,58 @@ class AppDatabase {
     return max == null ? 0 : max + 1;
   }
 
+  Map<String, Object?> _mediaItemRow(
+    String sourceId,
+    ContentKind kind,
+    MediaItem item, {
+    String? parentId,
+    required int displayOrder,
+  }) => {
+    'source_id': sourceId,
+    'kind': kind.name,
+    'id': item.id,
+    'title': item.title,
+    'parent_id': item.parentId ?? parentId,
+    'category_id': item.categoryId,
+    'poster': item.poster,
+    'backdrop': item.backdrop,
+    'description': item.description,
+    'year': item.year,
+    'rating': item.rating,
+    'duration_seconds': item.durationSeconds,
+    'season_number': item.seasonNumber,
+    'episode_number': item.episodeNumber,
+    'provider_id': item.providerId,
+    'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+    'display_order': displayOrder,
+  };
+
+  Future<void> updateMediaDisplayFields(
+    String sourceId,
+    List<MediaItem> items,
+  ) async {
+    if (items.isEmpty) return;
+    final batch = _db.batch();
+    for (final item in items) {
+      batch.update(
+        'media_items',
+        {
+          'title': item.title,
+          'poster': item.poster,
+          'backdrop': item.backdrop,
+          'description': item.description,
+          'year': item.year,
+          'rating': item.rating,
+          'provider_id': item.providerId,
+          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+        },
+        where: 'source_id = ? AND kind = ? AND id = ?',
+        whereArgs: [sourceId, item.kind.name, item.id],
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
   Future<ExternalMetadata?> readExternalMetadata(
     String sourceId,
     MediaItem item,
@@ -667,6 +703,30 @@ class AppDatabase {
     );
     if (rows.isEmpty) return null;
     return _rowToExternalMetadata(rows.first);
+  }
+
+  Future<Map<String, ExternalMetadata>> readExternalMetadataForItems(
+    String sourceId,
+    List<MediaItem> items,
+    String provider,
+  ) async {
+    if (items.isEmpty) return const {};
+    final out = <String, ExternalMetadata>{};
+    final ids = items.map((item) => item.id).where((id) => id.isNotEmpty);
+    final uniqueIds = ids.toSet().toList();
+    for (var start = 0; start < uniqueIds.length; start += 500) {
+      final chunk = uniqueIds.skip(start).take(500).toList();
+      final placeholders = List.filled(chunk.length, '?').join(',');
+      final rows = await _db.query(
+        'external_metadata',
+        where: 'source_id = ? AND provider = ? AND media_id IN ($placeholders)',
+        whereArgs: [sourceId, provider, ...chunk],
+      );
+      for (final row in rows) {
+        out[row['media_id'] as String] = _rowToExternalMetadata(row);
+      }
+    }
+    return out;
   }
 
   Future<void> cacheExternalMetadata(

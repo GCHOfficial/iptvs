@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../data/diagnostics_log.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 
@@ -366,6 +367,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _logPlayback(String message) {
+    DiagnosticsLog.instance.add('player', message);
     developer.log(message, name: 'iptvs.player');
     debugPrint('[iptvs.player] $message');
   }

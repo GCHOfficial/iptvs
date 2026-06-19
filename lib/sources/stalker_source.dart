@@ -3,8 +3,9 @@ import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
+import '../data/diagnostics_log.dart';
 import 'source.dart';
 
 /// A MAG set-top-box profile emulated to the portal.
@@ -338,6 +339,12 @@ class StalkerSource implements Source {
           ),
         )
         .toList();
+    if (items.isEmpty && parent != null) {
+      final detailsItems = await _mediaItemsFromDetails(kind, parent);
+      if (detailsItems.isNotEmpty) {
+        return MediaPage(items: detailsItems, page: page, totalPages: page);
+      }
+    }
     return MediaPage(
       items: items,
       page: page,
@@ -657,6 +664,208 @@ class StalkerSource implements Source {
           'episodeId': _firstString(item, ['episode_id', 'id']) ?? id,
       },
     );
+  }
+
+  Future<List<MediaItem>> _mediaItemsFromDetails(
+    ContentKind kind,
+    MediaItem parent,
+  ) async {
+    if (kind != ContentKind.season && kind != ContentKind.episode) {
+      return const [];
+    }
+    final details = await _movieDetails(parent);
+    if (details.isEmpty) return const [];
+    if (kind == ContentKind.season) return _seasonsFromDetails(parent, details);
+    return _episodesFromDetails(parent, details);
+  }
+
+  @visibleForTesting
+  List<MediaItem> debugSeasonsFromDetails(
+    MediaItem series,
+    Map<String, dynamic> details,
+  ) => _seasonsFromDetails(series, details);
+
+  @visibleForTesting
+  List<MediaItem> debugEpisodesFromDetails(
+    MediaItem parent,
+    Map<String, dynamic> details,
+  ) => _episodesFromDetails(parent, details);
+
+  Future<Map<String, dynamic>> _movieDetails(MediaItem item) async {
+    final existing = item.extra['details'];
+    if (existing is Map) return Map<String, dynamic>.from(existing);
+    final movieId = item.extra['movieId']?.toString() ?? item.id;
+    try {
+      final r = await _call({
+        'type': 'vod',
+        'action': 'get_movie_details',
+        'movie_id': movieId,
+      });
+      final js = r['js'];
+      if (js is Map) return Map<String, dynamic>.from(js);
+    } on StalkerException catch (e) {
+      _debug(
+        'get_movie_details unavailable for id=$movieId; series fallback skipped: ${e.message}',
+      );
+    }
+    return const {};
+  }
+
+  List<MediaItem> _seasonsFromDetails(
+    MediaItem series,
+    Map<String, dynamic> details,
+  ) {
+    final explicitSeasons = _listFromAny(
+      details['seasons'] ?? details['season'],
+    );
+    final groupedEpisodes = _episodesGroupedBySeason(details);
+    final seasonKeys = <String>{
+      for (final season in explicitSeasons) ?_seasonKey(season),
+      ...groupedEpisodes.keys,
+    }.toList()..sort(_compareSeasonKeys);
+    return [
+      for (final key in seasonKeys)
+        _seasonFromDetails(
+          series,
+          key,
+          explicitSeasons
+              .where((season) => _seasonKey(season) == key)
+              .cast<Map<String, dynamic>?>()
+              .firstWhere((season) => season != null, orElse: () => null),
+          groupedEpisodes[key] ?? const [],
+          details,
+        ),
+    ];
+  }
+
+  MediaItem _seasonFromDetails(
+    MediaItem series,
+    String seasonKey,
+    Map<String, dynamic>? info,
+    List<Map<String, dynamic>> episodes,
+    Map<String, dynamic> details,
+  ) {
+    final seasonNumber = int.tryParse(seasonKey);
+    return MediaItem(
+      id: '${series.id}:season:$seasonKey',
+      title:
+          _firstString(info ?? const {}, ['name', 'title']) ??
+          'Season ${seasonNumber ?? seasonKey}',
+      kind: ContentKind.season,
+      parentId: series.id,
+      poster:
+          _firstString(info ?? const {}, [
+            'screenshot_uri',
+            'poster',
+            'cover',
+          ]) ??
+          series.poster,
+      backdrop:
+          _firstString(info ?? const {}, ['backdrop', 'background']) ??
+          series.backdrop,
+      seasonNumber: seasonNumber,
+      extra: {
+        'movieId': series.extra['movieId']?.toString() ?? series.id,
+        'seasonId': seasonKey,
+        'episodes': episodes,
+        'details': details,
+      },
+    );
+  }
+
+  List<MediaItem> _episodesFromDetails(
+    MediaItem parent,
+    Map<String, dynamic> details,
+  ) {
+    final episodes = parent.kind == ContentKind.season
+        ? _listFromAny(parent.extra['episodes'])
+        : _episodesGroupedBySeason(details).values.expand((e) => e).toList();
+    return [
+      for (final episode in episodes)
+        _episodeFromDetails(parent, episode, details),
+    ];
+  }
+
+  MediaItem _episodeFromDetails(
+    MediaItem parent,
+    Map<String, dynamic> episode,
+    Map<String, dynamic> details,
+  ) {
+    final id =
+        _firstString(episode, ['id', 'episode_id', 'video_id', 'stream_id']) ??
+        '${parent.id}:episode:${_firstString(episode, ['episode', 'number', 'name', 'title']) ?? ''}';
+    return MediaItem(
+      id: id,
+      title: _firstString(episode, ['name', 'title']) ?? 'Episode',
+      kind: ContentKind.episode,
+      parentId: parent.id,
+      poster:
+          _firstString(episode, ['screenshot_uri', 'poster', 'cover']) ??
+          parent.poster,
+      backdrop:
+          _firstString(episode, ['backdrop', 'background']) ?? parent.backdrop,
+      description: _firstString(episode, ['description', 'descr', 'plot']),
+      year: _firstString(episode, ['year', 'released']),
+      durationSeconds: _parseDurationSeconds(
+        _firstString(episode, ['duration', 'time', 'length']),
+      ),
+      seasonNumber:
+          parent.seasonNumber ??
+          _parseInt(episode['season_number'] ?? episode['season']),
+      episodeNumber: _parseInt(
+        episode['episode_number'] ?? episode['episode'] ?? episode['number'],
+      ),
+      extra: {
+        ...episode,
+        'movieId':
+            _firstString(episode, ['movie_id', 'series_id']) ??
+            parent.extra['movieId']?.toString(),
+        'episodeId': id,
+        'details': details,
+      },
+    );
+  }
+
+  Map<String, List<Map<String, dynamic>>> _episodesGroupedBySeason(
+    Map<String, dynamic> details,
+  ) {
+    final grouped = <String, List<Map<String, dynamic>>>{};
+    final raw = details['episodes'] ?? details['episode'] ?? details['series'];
+    if (raw is Map) {
+      raw.forEach((key, value) {
+        final rows = _listFromAny(value);
+        if (rows.isNotEmpty) grouped['$key'] = rows;
+      });
+    } else {
+      for (final episode in _listFromAny(raw)) {
+        final key = _seasonKey(episode) ?? '1';
+        grouped.putIfAbsent(key, () => []).add(episode);
+      }
+    }
+    return grouped;
+  }
+
+  List<Map<String, dynamic>> _listFromAny(dynamic value) {
+    if (value is List) {
+      return value
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList();
+    }
+    if (value is Map && value['data'] is List) {
+      return _listFromAny(value['data']);
+    }
+    return const [];
+  }
+
+  String? _seasonKey(Map<String, dynamic> value) =>
+      _firstString(value, ['season_id', 'season_number', 'season', 'number']);
+
+  int _compareSeasonKeys(String a, String b) {
+    final ai = int.tryParse(a);
+    final bi = int.tryParse(b);
+    if (ai != null && bi != null) return ai.compareTo(bi);
+    return a.compareTo(b);
   }
 
   bool _supportsVodListKind(ContentKind kind) =>
@@ -1069,6 +1278,7 @@ class StalkerSource implements Source {
   void _debug(String message) {
     if (!diagnostics) return;
     final redacted = redactStalkerDiagnostic(message);
+    DiagnosticsLog.instance.add('stalker', redacted);
     developer.log(redacted, name: 'iptvs.stalker');
     debugPrint('[iptvs.stalker] $redacted');
   }
