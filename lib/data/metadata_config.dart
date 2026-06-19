@@ -21,8 +21,11 @@ class MetadataConfig {
   bool get hasTvdb => tvdbApiKey.trim().isNotEmpty;
   bool get hasMdblist => mdblistApiKey.trim().isNotEmpty;
 
+  String get preferredVisualProvider =>
+      provider == 'tvdb' || provider == 'tmdb' ? provider : 'tmdb';
+
   Map<String, dynamic> toJson() => {
-    'provider': provider,
+    'provider': preferredVisualProvider,
     'tmdbApiKey': normalizedTmdbCredential,
     'tvdbApiKey': tvdbApiKey.trim(),
     'tvdbPin': tvdbPin.trim(),
@@ -31,7 +34,7 @@ class MetadataConfig {
   };
 
   factory MetadataConfig.fromJson(Map<String, dynamic> json) => MetadataConfig(
-    provider: json['provider'] as String? ?? 'tmdb',
+    provider: _normalizeProvider(json['provider'] as String?),
     tmdbApiKey: normalizeTmdbCredential(json['tmdbApiKey'] as String?),
     tvdbApiKey: (json['tvdbApiKey'] as String? ?? '').trim(),
     tvdbPin: (json['tvdbPin'] as String? ?? '').trim(),
@@ -46,4 +49,7 @@ class MetadataConfig {
     }
     return raw;
   }
+
+  static String _normalizeProvider(String? value) =>
+      value == 'tvdb' ? 'tvdb' : 'tmdb';
 }

@@ -29,6 +29,9 @@ class TmdbClient implements MetadataProvider {
   String get authMode => usesBearerToken ? 'bearer' : 'api_key';
 
   @override
+  bool get ratingsOnly => false;
+
+  @override
   Future<ExternalMetadata?> search(MediaItem item) async {
     final type = item.kind == ContentKind.movie ? 'movie' : 'tv';
     final directId = _tmdbId(item);

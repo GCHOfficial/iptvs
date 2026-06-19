@@ -484,7 +484,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     final config = await widget.store.metadataConfig();
     if (!mounted) return;
     setState(() {
-      _provider = config.provider;
+      _provider = config.preferredVisualProvider;
       _tmdb.text = config.tmdbApiKey;
       _tvdb.text = config.tvdbApiKey;
       _tvdbPin.text = config.tvdbPin;
@@ -542,6 +542,36 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     ).showSnackBar(const SnackBar(content: Text('Metadata cache cleared')));
   }
 
+  Future<void> _resetMetadataAndDisplay() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.panelHi,
+        title: const Text('Reset enriched display?'),
+        content: const Text(
+          'This clears external metadata and restores cached movie/series display fields from source-provided data where possible.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await widget.db.clearExternalMetadata();
+    await widget.db.resetEnrichedMediaDisplayFields();
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Metadata display reset')));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -557,7 +587,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Used to enrich movies and series with posters, backdrops, descriptions, years, and ratings.',
+                  'Pick the preferred poster/details provider. The other configured visual provider is used as fallback; MDBList adds ratings when possible.',
                   style: TextStyle(color: AppColors.textLo),
                 ),
                 const SizedBox(height: 16),
@@ -565,7 +595,6 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   segments: const [
                     ButtonSegment(value: 'tmdb', label: Text('TMDB')),
                     ButtonSegment(value: 'tvdb', label: Text('TVDB')),
-                    ButtonSegment(value: 'mdblist', label: Text('MDBList')),
                   ],
                   selected: {_provider},
                   onSelectionChanged: (value) =>
@@ -590,7 +619,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   enableSuggestions: false,
                   decoration: const InputDecoration(
                     labelText: 'TVDB API key',
-                    hintText: 'Used when TVDB is selected',
+                    hintText: 'Used as preferred or fallback visual provider',
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -612,7 +641,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   enableSuggestions: false,
                   decoration: const InputDecoration(
                     labelText: 'MDBList API key',
-                    hintText: 'Saved for upcoming ratings provider support',
+                    hintText: 'Optional ratings enrichment',
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -636,6 +665,12 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   onPressed: _clearMetadataCache,
                   icon: const Icon(Icons.delete_sweep_outlined),
                   label: const Text('Clear metadata cache'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _resetMetadataAndDisplay,
+                  icon: const Icon(Icons.restore_outlined),
+                  label: const Text('Reset enriched display'),
                 ),
                 const SizedBox(height: 24),
                 SizedBox(

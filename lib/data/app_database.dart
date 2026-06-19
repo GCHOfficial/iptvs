@@ -702,6 +702,72 @@ class AppDatabase {
     );
   }
 
+  Future<void> resetEnrichedMediaDisplayFields({String? sourceId}) async {
+    final rows = await _db.query(
+      'media_items',
+      where: sourceId == null ? null : 'source_id = ?',
+      whereArgs: sourceId == null ? null : [sourceId],
+    );
+    if (rows.isEmpty) return;
+    final batch = _db.batch();
+    for (final row in rows) {
+      final item = _rowToMediaItem(
+        row,
+        ContentKind.values.byName(row['kind'] as String),
+      );
+      final raw = item.extra;
+      final title =
+          _firstString(raw, [
+            'providerTitle',
+            'sourceTitle',
+            'name',
+            'title',
+          ]) ??
+          item.title;
+      batch.update(
+        'media_items',
+        {
+          'title': title,
+          'poster': _firstString(raw, [
+            'screenshot_uri',
+            'poster',
+            'cover',
+            'stream_icon',
+            'movie_image',
+            'cover_big',
+          ]),
+          'backdrop': _firstString(raw, [
+            'backdrop',
+            'background',
+            'cover_big',
+          ]),
+          'description': _firstString(raw, ['description', 'descr', 'plot']),
+          'year': _firstString(raw, ['year', 'released', 'release_date']),
+          'rating': _readDouble(raw['rating_imdb'] ?? raw['rating']),
+          'provider_id': _firstString(raw, [
+            'tmdb_id',
+            'imdb_id',
+            'kinopoisk_id',
+          ]),
+          'extra': raw.isEmpty ? null : jsonEncode(raw),
+        },
+        where: 'source_id = ? AND kind = ? AND id = ?',
+        whereArgs: [row['source_id'], row['kind'], row['id']],
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
+  String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
+    for (final key in keys) {
+      final value = map[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty && text != 'null') return text;
+    }
+    return null;
+  }
+
   Future<ExternalMetadata?> readExternalMetadata(
     String sourceId,
     MediaItem item,

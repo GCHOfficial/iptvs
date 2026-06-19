@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/library_repository.dart';
+import '../data/mdblist_client.dart';
+import '../data/metadata_config.dart';
 import '../data/metadata_provider.dart';
 import '../data/source_store.dart';
 import '../data/tmdb_client.dart';
@@ -25,7 +27,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   SourceConfig? _config;
   Source? _source;
-  MetadataProvider? _metadataProvider;
+  List<MetadataProvider> _metadataProviders = const [];
   LibraryRepository? _repo;
   bool _loading = true;
 
@@ -38,7 +40,9 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _source?.dispose();
-    _metadataProvider?.close();
+    for (final provider in _metadataProviders) {
+      provider.close();
+    }
     super.dispose();
   }
 
@@ -46,38 +50,58 @@ class _HomeShellState extends State<HomeShell> {
     if (mounted) setState(() => _loading = true);
     final cfg = await widget.store.activeConfig();
     await _source?.dispose();
-    _metadataProvider?.close();
+    for (final provider in _metadataProviders) {
+      provider.close();
+    }
     final metadata = await widget.store.metadataConfig();
-    final provider = switch (metadata.provider) {
-      'tvdb' when metadata.hasTvdb => TvdbClient(
-        apiKey: metadata.tvdbApiKey,
-        pin: metadata.tvdbPin,
-      ),
-      _ when metadata.hasTmdb => TmdbClient(apiKey: metadata.tmdbApiKey),
-      _ => null,
-    };
+    final providers = _buildMetadataProviders(metadata);
     debugPrint(
-      '[iptvs.metadata] provider=${provider?.provider ?? 'none'} enabled=${provider != null} auth=${provider?.authMode ?? 'none'}',
+      '[iptvs.metadata] providers=${providers.map((p) => '${p.provider}:${p.authMode}').join(',')}',
     );
     final src = cfg?.build();
     if (!mounted) {
-      provider?.close();
+      for (final provider in providers) {
+        provider.close();
+      }
       return;
     }
     setState(() {
       _config = cfg;
       _source = src;
-      _metadataProvider = provider;
+      _metadataProviders = providers;
       _repo = src == null
           ? null
           : LibraryRepository(
               source: src,
               db: widget.db,
-              metadataProvider: provider,
+              metadataProviders: providers,
               autoEnrichMetadata: metadata.autoEnrich,
             );
       _loading = false;
     });
+  }
+
+  List<MetadataProvider> _buildMetadataProviders(MetadataConfig metadata) {
+    final visual = <MetadataProvider>[];
+    if (metadata.preferredVisualProvider == 'tvdb') {
+      if (metadata.hasTvdb) {
+        visual.add(
+          TvdbClient(apiKey: metadata.tvdbApiKey, pin: metadata.tvdbPin),
+        );
+      }
+      if (metadata.hasTmdb) visual.add(TmdbClient(apiKey: metadata.tmdbApiKey));
+    } else {
+      if (metadata.hasTmdb) visual.add(TmdbClient(apiKey: metadata.tmdbApiKey));
+      if (metadata.hasTvdb) {
+        visual.add(
+          TvdbClient(apiKey: metadata.tvdbApiKey, pin: metadata.tvdbPin),
+        );
+      }
+    }
+    return [
+      ...visual,
+      if (metadata.hasMdblist) MdblistClient(apiKey: metadata.mdblistApiKey),
+    ];
   }
 
   Future<void> _manageSources() async {

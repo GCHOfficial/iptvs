@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/source_hint_parser.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -602,14 +603,18 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 ? null
                 : _ToolbarIconButton(
                     tooltip: _mediaEnriching[_tab] == true
-                        ? 'Refreshing metadata'
+                        ? 'Cancel metadata refresh'
                         : 'Refresh displayed metadata',
                     busy: _mediaEnriching[_tab] == true,
-                    icon: Icons.auto_awesome_outlined,
+                    icon: _mediaEnriching[_tab] == true
+                        ? Icons.stop_rounded
+                        : Icons.auto_awesome_outlined,
                     onPressed:
                         _mediaLoading[_tab] == true ||
                             _mediaSearching[_tab] == true
                         ? null
+                        : _mediaEnriching[_tab] == true
+                        ? () => setState(() => _cancelMediaEnrichment(_tab))
                         : () => _enrichVisibleMedia(_tab),
                   ),
           ),
@@ -640,9 +645,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (_mediaEnriching[_tab] == true) {
       final progress = _mediaEnrichmentProgress[_tab];
       if (progress != null) {
-        return 'Refreshing metadata ${_fmt(progress.done)}/${_fmt(progress.total)}...';
+        return 'Refreshing metadata ${_fmt(progress.done)}/${_fmt(progress.total)} · press stop to cancel';
       }
-      return 'Refreshing metadata...';
+      return 'Refreshing metadata · press stop to cancel';
     }
     return _mediaStatusLine(_tab, _visibleMedia(_tab).length);
   }
@@ -945,13 +950,8 @@ class _ToolbarIconButton extends StatelessWidget {
               side: const BorderSide(color: AppColors.line),
             ),
           ),
-          onPressed: busy ? null : onPressed,
-          icon: busy
-              ? const SizedBox.square(
-                  dimension: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(icon, size: 20),
+          onPressed: onPressed,
+          icon: Icon(icon, size: 20),
         ),
       ),
     );
@@ -1338,7 +1338,7 @@ class _MediaListTile extends StatelessWidget {
                       ),
                     ),
                   ],
-                  if (_sourceHints(item).isNotEmpty) ...[
+                  if (sourceHintLabels(item).isNotEmpty) ...[
                     const SizedBox(height: 6),
                     _SourceHints(item: item),
                   ],
@@ -1415,7 +1415,7 @@ class _MediaGridTile extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textLo, fontSize: 12),
               ),
-            if (_sourceHints(item).isNotEmpty) ...[
+            if (sourceHintLabels(item).isNotEmpty) ...[
               const SizedBox(height: 5),
               _SourceHints(item: item, compact: true),
             ],
@@ -1434,7 +1434,7 @@ class _SourceHints extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hints = _sourceHints(item);
+    final hints = sourceHintLabels(item);
     if (hints.isEmpty) return const SizedBox.shrink();
     return Wrap(
       spacing: 5,
@@ -1465,94 +1465,6 @@ class _SourceHints extends StatelessWidget {
       ],
     );
   }
-}
-
-String? _providerTitle(MediaItem item) {
-  final value =
-      item.extra['providerTitle'] ??
-      item.extra['sourceTitle'] ??
-      item.extra['name'] ??
-      item.extra['title'];
-  final text = value?.toString().trim();
-  if (text == null || text.isEmpty || text == item.title) return null;
-  return text;
-}
-
-List<String> _sourceHints(MediaItem item) {
-  final providerTitle = _providerTitle(item);
-  final explicitFields = [
-    item.extra['audio_language'],
-    item.extra['audio_lang'],
-    item.extra['language'],
-    item.extra['lang'],
-    item.extra['subtitle_language'],
-    item.extra['subtitles'],
-  ].whereType<Object>().map((v) => v.toString()).join(' ');
-  final markerFields = <String>[];
-  if (providerTitle != null) {
-    markerFields.addAll(
-      RegExp(
-        r'[\[(]([^\])]+)[\])]',
-      ).allMatches(providerTitle).map((m) => m.group(1) ?? ''),
-    );
-    final pipe = providerTitle.indexOf('|');
-    if (pipe > 0 && pipe <= 24) {
-      markerFields.add(providerTitle.substring(0, pipe));
-    }
-    final dash = providerTitle.indexOf(' - ');
-    if (dash > 0 && dash <= 24) {
-      markerFields.add(providerTitle.substring(0, dash));
-    }
-  }
-  final fields = '$explicitFields ${markerFields.join(' ')}';
-  if (fields.trim().isEmpty) return const [];
-  final text = fields.toUpperCase();
-  final hints = <String>[];
-
-  void add(String label, Pattern pattern) {
-    if (!hints.contains(label) && pattern.allMatches(text).isNotEmpty) {
-      hints.add(label);
-    }
-  }
-
-  add('Multi audio', RegExp(r'\b(MULTI|MULTIAUDIO|MULTI-AUDIO)\b'));
-  add('Dual audio', RegExp(r'\b(DUAL|DUALAUDIO|DUAL-AUDIO)\b'));
-  add('Dubbed', RegExp(r'\b(DUB|DUBBED|DUBLAT|DUBLADO)\b'));
-  add(
-    'Subtitles',
-    RegExp(r'\b(SUB|SUBS|SUBBED|SUBTITLE|SUBTITLES|VOST|VOSTFR|VOSE)\b'),
-  );
-  const languages = {
-    'Romanian': ['RO', 'ROM', 'RON', 'RUM', 'ROMANIAN', 'ROMANA'],
-    'English': ['EN', 'ENG', 'ENGLISH'],
-    'French': ['FR', 'FRE', 'FRA', 'FRENCH', 'TRUEFRENCH', 'VOSTFR'],
-    'Spanish': ['ES', 'ESP', 'SPA', 'SPANISH', 'CASTELLANO', 'LATINO'],
-    'German': ['DE', 'GER', 'DEU', 'GERMAN'],
-    'Italian': ['IT', 'ITA', 'ITALIAN'],
-    'Polish': ['PL', 'POL', 'POLISH'],
-    'Turkish': ['TR', 'TUR', 'TURKISH'],
-    'Russian': ['RU', 'RUS', 'RUSSIAN'],
-    'Tajik': ['TG', 'TGK', 'TAJIK'],
-    'Arabic': ['AR', 'ARA', 'ARABIC'],
-    'Bulgarian': ['BG', 'BUL', 'BULGARIAN'],
-    'Czech': ['CZ', 'CS', 'CES', 'CZE', 'CZECH'],
-    'Dutch': ['NL', 'DUT', 'NLD', 'DUTCH'],
-    'Greek': ['GR', 'EL', 'ELL', 'GRE', 'GREEK'],
-    'Hindi': ['HI', 'HIN', 'HINDI'],
-    'Hungarian': ['HU', 'HUN', 'HUNGARIAN'],
-    'Japanese': ['JA', 'JP', 'JPN', 'JAPANESE'],
-    'Korean': ['KO', 'KR', 'KOR', 'KOREAN'],
-    'Portuguese': ['PT', 'POR', 'PORTUGUESE', 'BR', 'BRA', 'BRASIL'],
-    'Serbian': ['SR', 'SRP', 'SERBIAN'],
-    'Ukrainian': ['UK', 'UKR', 'UA', 'UKRAINIAN'],
-  };
-  for (final entry in languages.entries) {
-    add(
-      entry.key,
-      RegExp('\\b(${entry.value.map(RegExp.escape).join('|')})\\b'),
-    );
-  }
-  return hints;
 }
 
 class _MediaLoadMoreTile extends StatelessWidget {
@@ -1787,11 +1699,11 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
                     style: const TextStyle(color: AppColors.textLo),
                   ),
                 ],
-                if (_sourceHints(_item).isNotEmpty) ...[
+                if (sourceHintLabels(_item).isNotEmpty) ...[
                   const SizedBox(height: 10),
                   _SourceHints(item: _item),
                 ],
-                if (_providerTitle(_item) case final sourceTitle?) ...[
+                if (providerSourceTitle(_item) case final sourceTitle?) ...[
                   const SizedBox(height: 10),
                   Text(
                     'Source title: $sourceTitle',

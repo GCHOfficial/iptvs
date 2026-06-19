@@ -24,6 +24,9 @@ class TvdbClient implements MetadataProvider {
   String get authMode => 'bearer-login';
 
   @override
+  bool get ratingsOnly => false;
+
+  @override
   Future<ExternalMetadata?> search(MediaItem item) async {
     final title = _cleanTitle(item.title);
     if (title.isEmpty) return null;

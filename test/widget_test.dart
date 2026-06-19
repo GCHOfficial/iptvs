@@ -6,6 +6,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/metadata_config.dart';
+import 'package:iptvs/data/source_hint_parser.dart';
 import 'package:iptvs/data/tmdb_client.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source.dart';
@@ -213,6 +214,13 @@ void main() {
       expect(config.autoEnrich, isFalse);
     });
 
+    test('normalizes ratings-only provider selection to visual default', () {
+      final config = MetadataConfig.fromJson({'provider': 'mdblist'});
+
+      expect(config.provider, 'tmdb');
+      expect(config.preferredVisualProvider, 'tmdb');
+    });
+
     test('keeps v3 API keys as api_key auth', () {
       final client = TmdbClient(apiKey: 'abc123');
       addTearDown(client.close);
@@ -227,6 +235,69 @@ void main() {
 
       expect(client.usesBearerToken, isTrue);
       expect(client.authMode, 'bearer');
+    });
+  });
+
+  group('source hint parsing', () {
+    test('does not mark Arabic AR sources as Spanish', () {
+      const item = MediaItem(
+        id: 'movie-1',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'AR | Clean Movie Title'},
+      );
+
+      final hints = sourceHintLabels(item);
+
+      expect(hints, contains('Arabic'));
+      expect(hints, isNot(contains('Spanish')));
+    });
+
+    test('detects Persian and Turkmen country-style source tags', () {
+      const persian = MediaItem(
+        id: 'movie-2',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': '[IR] Clean Movie Title'},
+      );
+      const turkmen = MediaItem(
+        id: 'movie-3',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'TM - Clean Movie Title'},
+      );
+
+      expect(sourceHintLabels(persian), contains('Persian'));
+      expect(sourceHintLabels(turkmen), contains('Turkmen'));
+    });
+
+    test('ignores ambiguous shared country tags by themselves', () {
+      const item = MediaItem(
+        id: 'movie-4',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'UK | Clean Movie Title'},
+      );
+
+      final hints = sourceHintLabels(item);
+
+      expect(hints, isNot(contains('English')));
+      expect(hints, isNot(contains('Ukrainian')));
+    });
+
+    test('keeps weak country hints opt-in', () {
+      const item = MediaItem(
+        id: 'movie-5',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'AUDIO US | Clean Movie Title'},
+      );
+
+      expect(sourceHintLabels(item), isNot(contains('Audio: English')));
+      expect(
+        sourceHintLabels(item, includeWeak: true),
+        contains('Audio: English'),
+      );
     });
   });
 }
