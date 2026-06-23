@@ -23,6 +23,7 @@ import androidx.media3.ui.PlayerView
 class HdrPlayerActivity : Activity() {
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
+    private var controllerVisible = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,6 +43,7 @@ class HdrPlayerActivity : Activity() {
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
             setControllerVisibilityListener(
                 PlayerView.ControllerVisibilityListener { visibility ->
+                    controllerVisible = visibility == View.VISIBLE
                     if (visibility == View.GONE) hideSystemUi()
                 },
             )
@@ -100,10 +102,15 @@ class HdrPlayerActivity : Activity() {
         if (exoPlayer != null) {
             when (keyCode) {
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER,
                 KeyEvent.KEYCODE_SPACE -> {
                     if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER -> {
+                    if (controllerVisible) return super.onKeyDown(keyCode, event)
+                    playerView.showController()
                     return true
                 }
 
@@ -118,13 +125,37 @@ class HdrPlayerActivity : Activity() {
                 }
 
                 KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (controllerVisible) return super.onKeyDown(keyCode, event)
+                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
+                        exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
+                    }
+                    playerView.showController()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (controllerVisible) return super.onKeyDown(keyCode, event)
+                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
+                        exoPlayer.seekTo(exoPlayer.currentPosition + 10_000)
+                    }
+                    playerView.showController()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (!controllerVisible) playerView.showController()
+                    return super.onKeyDown(keyCode, event)
+                }
+
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
                     if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
                         exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
                     }
                     return true
                 }
 
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                     if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
                         exoPlayer.seekTo(exoPlayer.currentPosition + 10_000)
                     }

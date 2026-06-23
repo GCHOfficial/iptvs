@@ -6,12 +6,15 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private lateinit var nativeHdrChannel: MethodChannel
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(
+        nativeHdrChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "iptvs/native_hdr_player",
-        ).setMethodCallHandler { call, result ->
+        )
+        nativeHdrChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "open" -> {
                     val args = call.arguments as? Map<*, *>
@@ -35,12 +38,24 @@ class MainActivity : FlutterActivity() {
                             ArrayList(headers.values.map { it?.toString() ?: "" }),
                         )
                     }
-                    startActivity(intent)
+                    startActivityForResult(intent, REQUEST_NATIVE_PLAYER)
                     result.success(true)
                 }
 
                 else -> result.notImplemented()
             }
         }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_NATIVE_PLAYER && ::nativeHdrChannel.isInitialized) {
+            nativeHdrChannel.invokeMethod("nativeClosed", null)
+        }
+    }
+
+    companion object {
+        private const val REQUEST_NATIVE_PLAYER = 4120
     }
 }

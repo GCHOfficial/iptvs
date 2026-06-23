@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -16,15 +17,25 @@ class XtreamSource implements Source {
   final String username;
   final String password;
   final String streamExtension; // 'ts' (most compatible) or 'm3u8'
+  @visibleForTesting
+  final Future<dynamic> Function(Map<String, String> params)? debugApi;
 
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 15);
+  final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
+
+  // Stalker portals usually return compact provider pages, often around
+  // 14 rows. Xtream's common API does not expose equivalent paging, so keep
+  // the app-facing page small and let category filters/search carry discovery.
+  static const _mediaPageSize = 14;
+  static const _searchResultLimit = 120;
 
   XtreamSource({
     required this.host,
     required this.username,
     required this.password,
     this.streamExtension = 'ts',
+    this.debugApi,
   });
 
   String get _base {
@@ -150,18 +161,19 @@ class XtreamSource implements Source {
     if (kind == ContentKind.episode && parent != null) {
       return _seasonEpisodes(parent);
     }
-    final action = switch (kind) {
-      ContentKind.movie => 'get_vod_streams',
-      ContentKind.series => 'get_series',
-      _ => null,
-    };
-    if (action == null) return const [];
-    final params = {'action': action};
-    if (categoryId != null) params['category_id'] = categoryId;
-    final r = await _api(params);
-    return _listFromAny(
-      r,
-    ).map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind)).toList();
+    final pagesToLoad = maxPages ?? 1;
+    final out = <MediaItem>[];
+    for (var page = 1; page <= pagesToLoad; page++) {
+      final fetched = await mediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        page: page,
+      );
+      out.addAll(fetched.items);
+      if (!fetched.hasMore) break;
+    }
+    return out;
   }
 
   @override
@@ -171,10 +183,28 @@ class XtreamSource implements Source {
     MediaItem? parent,
     int page = 1,
   }) async {
-    final items = page == 1
-        ? await mediaItems(kind, categoryId: categoryId, parent: parent)
-        : const <MediaItem>[];
-    return MediaPage(items: items, page: page, totalPages: 1);
+    if (kind == ContentKind.season && parent != null) {
+      return MediaPage(
+        items: await _seriesSeasons(parent),
+        page: page,
+        totalPages: page,
+      );
+    }
+    if (kind == ContentKind.episode && parent != null) {
+      return MediaPage(
+        items: _seasonEpisodes(parent),
+        page: page,
+        totalPages: page,
+      );
+    }
+    if (kind != ContentKind.movie && kind != ContentKind.series) {
+      return MediaPage(items: const [], page: page, totalPages: page);
+    }
+    if (categoryId == null) {
+      return _aggregateMediaPage(kind, page: page);
+    }
+    final items = await _fetchMediaList(kind, categoryId: categoryId);
+    return _sliceMediaPage(items, page: page);
   }
 
   @override
@@ -185,8 +215,35 @@ class XtreamSource implements Source {
   }) async {
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return const [];
-    final items = await mediaItems(kind, categoryId: categoryId);
-    return items.where((item) => item.title.toLowerCase().contains(q)).toList();
+    if (kind != ContentKind.movie && kind != ContentKind.series) {
+      return const [];
+    }
+    if (categoryId != null) {
+      return (await _fetchMediaList(kind, categoryId: categoryId))
+          .where((item) => item.title.toLowerCase().contains(q))
+          .take(_searchResultLimit)
+          .toList();
+    }
+    final results = <MediaItem>[];
+    final seen = <String>{};
+    final categories = await mediaCategories(kind);
+    if (categories.isEmpty) {
+      final items = await _fetchMediaList(kind);
+      return items
+          .where((item) => item.title.toLowerCase().contains(q))
+          .take(_searchResultLimit)
+          .toList();
+    }
+    for (final category in categories) {
+      final items = await _fetchMediaList(kind, categoryId: category.id);
+      for (final item in items) {
+        if (!item.title.toLowerCase().contains(q)) continue;
+        if (item.id.isNotEmpty && !seen.add(item.id)) continue;
+        results.add(item);
+        if (results.length >= _searchResultLimit) return results;
+      }
+    }
+    return results;
   }
 
   @override
@@ -237,6 +294,8 @@ class XtreamSource implements Source {
   // ── http ──────────────────────────────────────────────────────────────
 
   Future<dynamic> _api(Map<String, String> params) async {
+    final override = debugApi;
+    if (override != null) return override(params);
     final uri = Uri.parse('$_base/player_api.php').replace(
       queryParameters: {'username': username, 'password': password, ...params},
     );
@@ -255,6 +314,81 @@ class XtreamSource implements Source {
       builder.add(chunk);
     }
     return builder.takeBytes();
+  }
+
+  Future<MediaPage> _aggregateMediaPage(
+    ContentKind kind, {
+    required int page,
+  }) async {
+    final categories = await mediaCategories(kind);
+    if (categories.isEmpty) {
+      final items = await _fetchMediaList(kind);
+      return _sliceMediaPage(items, page: page);
+    }
+
+    final start = (page - 1) * _mediaPageSize;
+    var skipped = 0;
+    final pageItems = <MediaItem>[];
+    final seen = <String>{};
+
+    for (final category in categories) {
+      final items = await _fetchMediaList(kind, categoryId: category.id);
+      if (skipped + items.length <= start) {
+        skipped += items.length;
+        continue;
+      }
+
+      final startInCategory = math.max(0, start - skipped);
+      for (var i = startInCategory; i < items.length; i++) {
+        final item = items[i];
+        if (item.id.isNotEmpty && !seen.add(item.id)) continue;
+        pageItems.add(item);
+        if (pageItems.length >= _mediaPageSize) {
+          return MediaPage(items: pageItems, page: page, totalPages: page + 1);
+        }
+      }
+      skipped += items.length;
+    }
+
+    return MediaPage(items: pageItems, page: page, totalPages: page);
+  }
+
+  MediaPage _sliceMediaPage(List<MediaItem> items, {required int page}) {
+    final totalPages = items.isEmpty
+        ? page
+        : (items.length / _mediaPageSize).ceil();
+    final start = (page - 1) * _mediaPageSize;
+    if (start >= items.length) {
+      return MediaPage(items: const [], page: page, totalPages: page);
+    }
+    final end = math.min(start + _mediaPageSize, items.length);
+    return MediaPage(
+      items: items.sublist(start, end),
+      page: page,
+      totalPages: totalPages < page ? page : totalPages,
+    );
+  }
+
+  Future<List<MediaItem>> _fetchMediaList(
+    ContentKind kind, {
+    String? categoryId,
+  }) {
+    final key = '${kind.name}:${categoryId ?? ''}';
+    return _mediaListCache.putIfAbsent(key, () async {
+      final action = switch (kind) {
+        ContentKind.movie => 'get_vod_streams',
+        ContentKind.series => 'get_series',
+        _ => null,
+      };
+      if (action == null) return const <MediaItem>[];
+      final params = {'action': action};
+      if (categoryId != null) params['category_id'] = categoryId;
+      final r = await _api(params);
+      return _listFromAny(r)
+          .map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind))
+          .where((item) => item.id.isNotEmpty)
+          .toList();
+    });
   }
 
   Future<List<MediaItem>> _seriesSeasons(MediaItem series) async {

@@ -349,6 +349,119 @@ void main() {
       expect(stream.url, endsWith('/movie/user/pass/movie-1.mkv'));
       expect(stream.headers['user-agent'], contains('VLC'));
     });
+
+    test('returns bounded category pages for large VOD lists', () async {
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        debugApi: (params) async {
+          expect(params['action'], 'get_vod_streams');
+          expect(params['category_id'], 'cat-a');
+          return List.generate(
+            75,
+            (i) => {
+              'stream_id': 'movie-$i',
+              'name': 'Movie $i',
+              'category_id': 'cat-a',
+            },
+          );
+        },
+      );
+
+      final first = await source.mediaItemsPage(
+        ContentKind.movie,
+        categoryId: 'cat-a',
+      );
+      final second = await source.mediaItemsPage(
+        ContentKind.movie,
+        categoryId: 'cat-a',
+        page: 2,
+      );
+
+      expect(first.items.length, 14);
+      expect(first.totalPages, 6);
+      expect(second.items.length, 14);
+      expect(second.totalPages, 6);
+    });
+
+    test(
+      'builds all-category pages without calling the unfiltered VOD list',
+      () async {
+        var unfilteredVodCalls = 0;
+        final source = XtreamSource(
+          host: 'http://example.invalid',
+          username: 'user',
+          password: 'pass',
+          debugApi: (params) async {
+            if (params['action'] == 'get_vod_categories') {
+              return [
+                {'category_id': 'cat-a', 'category_name': 'A'},
+                {'category_id': 'cat-b', 'category_name': 'B'},
+              ];
+            }
+            if (params['action'] == 'get_vod_streams') {
+              final categoryId = params['category_id'];
+              if (categoryId == null) unfilteredVodCalls++;
+              return List.generate(
+                categoryId == 'cat-a' ? 75 : 10,
+                (i) => {
+                  'stream_id': '$categoryId-movie-$i',
+                  'name': 'Movie $i',
+                  'category_id': categoryId,
+                },
+              );
+            }
+            return const [];
+          },
+        );
+
+        final page = await source.mediaItemsPage(ContentKind.movie);
+
+        expect(page.items.length, 14);
+        expect(page.items.first.categoryId, 'cat-a');
+        expect(unfilteredVodCalls, 0);
+      },
+    );
+
+    test(
+      'searches Xtream categories without fetching the unfiltered catalog',
+      () async {
+        var unfilteredVodCalls = 0;
+        final source = XtreamSource(
+          host: 'http://example.invalid',
+          username: 'user',
+          password: 'pass',
+          debugApi: (params) async {
+            if (params['action'] == 'get_vod_categories') {
+              return [
+                {'category_id': 'cat-a', 'category_name': 'A'},
+                {'category_id': 'cat-b', 'category_name': 'B'},
+              ];
+            }
+            if (params['action'] == 'get_vod_streams') {
+              final categoryId = params['category_id'];
+              if (categoryId == null) unfilteredVodCalls++;
+              return [
+                {
+                  'stream_id': '$categoryId-1',
+                  'name': categoryId == 'cat-b'
+                      ? 'Needle Movie'
+                      : 'Other Movie',
+                  'category_id': categoryId,
+                },
+              ];
+            }
+            return const [];
+          },
+        );
+
+        final results = await source.searchMedia(ContentKind.movie, 'needle');
+
+        expect(results.single.id, 'cat-b-1');
+        expect(unfilteredVodCalls, 0);
+      },
+    );
   });
 
   group('MetadataConfig', () {

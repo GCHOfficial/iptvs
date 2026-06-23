@@ -293,6 +293,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } else if (call.method == 'nativeControl') {
       final command = call.arguments?.toString();
       if (command != null) await _handleNativeControlCommand(command);
+    } else if (call.method == 'nativeClosed') {
+      await _finishAndroidNativePlayback();
+    }
+  }
+
+  Future<void> _finishAndroidNativePlayback() async {
+    if (!Platform.isAndroid || !mounted) return;
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() => _nativePlaybackLaunched = false);
     }
   }
 

@@ -13,6 +13,7 @@ import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
 
 const _toolbarControlHeight = 40.0;
+const _autoMetadataEnrichmentLimit = 40;
 
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
@@ -140,7 +141,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _mediaLoading[kind] = false;
       });
       if (widget.repo.autoEnrichMetadata) {
-        unawaited(_enrichMediaItems(kind, snap.items));
+        unawaited(_autoEnrichMediaItems(kind, snap.items));
       }
     } catch (e) {
       if (!mounted) return;
@@ -154,6 +155,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _loadMoreMedia(ContentKind kind) async {
     if (_mediaLoadingMore[kind] == true) return;
     final categoryId = _mediaCategoryId[kind];
+    final existingIds = {
+      for (final item in _media[kind]?.items ?? const <MediaItem>[]) item.id,
+    };
     setState(() {
       _cancelMediaEnrichment(kind);
       _mediaLoadingMore[kind] = true;
@@ -174,7 +178,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _mediaLoadingMore[kind] = false;
       });
       if (widget.repo.autoEnrichMetadata) {
-        unawaited(_enrichMediaItems(kind, snap.items));
+        final newlyLoaded = snap.items
+            .where((item) => !existingIds.contains(item.id))
+            .toList();
+        unawaited(_autoEnrichMediaItems(kind, newlyLoaded));
       }
     } catch (e) {
       if (!mounted) return;
@@ -188,6 +195,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _enrichVisibleMedia(ContentKind kind) =>
       _enrichMediaItems(kind, _visibleMedia(kind), showErrors: true);
 
+  Future<void> _autoEnrichMediaItems(ContentKind kind, List<MediaItem> items) =>
+      _enrichMediaItems(kind, items, maxItems: _autoMetadataEnrichmentLimit);
+
   void _cancelMediaEnrichment(ContentKind kind) {
     _mediaEnrichmentGeneration[kind] =
         (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
@@ -199,6 +209,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     ContentKind kind,
     List<MediaItem> items, {
     bool showErrors = false,
+    int? maxItems,
   }) async {
     final generation = (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
     _mediaEnrichmentGeneration[kind] = generation;
@@ -209,6 +220,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               item.kind == ContentKind.series ||
               item.kind == ContentKind.episode,
         )
+        .take(maxItems ?? items.length)
         .toList();
     if (targets.isEmpty) return;
     setState(() {
@@ -314,7 +326,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _mediaSearching[kind] = false;
       });
       if (widget.repo.autoEnrichMetadata) {
-        unawaited(_enrichMediaItems(kind, results));
+        unawaited(_autoEnrichMediaItems(kind, results));
       }
     } catch (e) {
       if (!mounted || _tab != kind || _query.trim() != query) return;
