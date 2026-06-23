@@ -1,6 +1,7 @@
 package com.example.iptvs
 
 import android.app.Activity
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
@@ -9,6 +10,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
@@ -41,6 +43,9 @@ class HdrPlayerActivity : Activity() {
             useController = true
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+            setControllerAutoShow(true)
+            setControllerHideOnTouch(true)
+            setControllerShowTimeoutMs(if (intent.getBooleanExtra(EXTRA_IS_LIVE, false)) 4500 else 3500)
             setControllerVisibilityListener(
                 PlayerView.ControllerVisibilityListener { visibility ->
                     controllerVisible = visibility == View.VISIBLE
@@ -86,7 +91,7 @@ class HdrPlayerActivity : Activity() {
                         ).show()
                     }
                 })
-                exoPlayer.setMediaItem(MediaItem.fromUri(url))
+                exoPlayer.setMediaItem(mediaItem(url))
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
             }
@@ -166,6 +171,16 @@ class HdrPlayerActivity : Activity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (controllerVisible) {
+            playerView.hideController()
+            hideSystemUi()
+            return
+        }
+        super.onBackPressed()
+    }
+
     override fun onStop() {
         super.onStop()
         player?.pause()
@@ -187,6 +202,41 @@ class HdrPlayerActivity : Activity() {
         }.toMap()
     }
 
+    private fun mediaItem(url: String): MediaItem {
+        val subtitles = subtitleConfigurations()
+        return MediaItem.Builder()
+            .setUri(url)
+            .setSubtitleConfigurations(subtitles)
+            .build()
+    }
+
+    private fun subtitleConfigurations(): List<MediaItem.SubtitleConfiguration> {
+        val urls = intent.getStringArrayListExtra(EXTRA_SUBTITLE_URLS).orEmpty()
+        val labels = intent.getStringArrayListExtra(EXTRA_SUBTITLE_LABELS).orEmpty()
+        val languages = intent.getStringArrayListExtra(EXTRA_SUBTITLE_LANGUAGES).orEmpty()
+        return urls.mapIndexedNotNull { index, url ->
+            if (url.isBlank()) {
+                null
+            } else {
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
+                    .setMimeType(subtitleMimeType(url))
+                    .setLabel(labels.getOrNull(index)?.ifBlank { null })
+                    .setLanguage(languages.getOrNull(index)?.ifBlank { null })
+                    .build()
+            }
+        }
+    }
+
+    private fun subtitleMimeType(url: String): String {
+        val clean = url.substringBefore('?').substringBefore('#').lowercase()
+        return when {
+            clean.endsWith(".vtt") || clean.endsWith(".webvtt") -> MimeTypes.TEXT_VTT
+            clean.endsWith(".ssa") || clean.endsWith(".ass") -> MimeTypes.TEXT_SSA
+            clean.endsWith(".ttml") || clean.endsWith(".dfxp") -> MimeTypes.APPLICATION_TTML
+            else -> MimeTypes.APPLICATION_SUBRIP
+        }
+    }
+
     private fun hideSystemUi() {
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -203,6 +253,9 @@ class HdrPlayerActivity : Activity() {
         const val EXTRA_IS_LIVE = "is_live"
         const val EXTRA_HEADER_KEYS = "header_keys"
         const val EXTRA_HEADER_VALUES = "header_values"
+        const val EXTRA_SUBTITLE_URLS = "subtitle_urls"
+        const val EXTRA_SUBTITLE_LABELS = "subtitle_labels"
+        const val EXTRA_SUBTITLE_LANGUAGES = "subtitle_languages"
         private const val TAG = "iptvs.hdr"
     }
 }

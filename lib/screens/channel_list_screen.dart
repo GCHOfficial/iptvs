@@ -1493,6 +1493,7 @@ class _MediaLoadMoreTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final canLoad = snapshot?.hasMore == true;
+    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Center(
@@ -1508,7 +1509,9 @@ class _MediaLoadMoreTile extends StatelessWidget {
             loading
                 ? 'Loading'
                 : canLoad
-                ? 'Load more'
+                ? nextPage == null
+                      ? 'Load more'
+                      : 'Load page $nextPage'
                 : 'All loaded',
           ),
         ),
@@ -1531,6 +1534,7 @@ class _MediaLoadMoreCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final canLoad = snapshot?.hasMore == true;
+    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
     return FocusableCard(
       autofocus: false,
       onTap: canLoad && !loading ? onPressed : () {},
@@ -1554,7 +1558,9 @@ class _MediaLoadMoreCard extends StatelessWidget {
               loading
                   ? 'Loading'
                   : canLoad
-                  ? 'Load more'
+                  ? nextPage == null
+                        ? 'Load more'
+                        : 'Load page $nextPage'
                   : 'All loaded',
               style: const TextStyle(color: AppColors.textLo),
             ),

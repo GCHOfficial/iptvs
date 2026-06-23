@@ -199,6 +199,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         'title': widget.title,
         'headers': widget.stream.headers,
         'isLive': widget.stream.isLive,
+        'subtitles': widget.stream.subtitles
+            .map(
+              (subtitle) => {
+                'url': subtitle.url,
+                'label': subtitle.label,
+                if (subtitle.language != null) 'language': subtitle.language,
+              },
+            )
+            .toList(growable: false),
       });
       _logPlayback(
         opened == true

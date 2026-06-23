@@ -25,17 +25,47 @@ class MainActivity : FlutterActivity() {
                     }
 
                     val headers = args["headers"] as? Map<*, *> ?: emptyMap<Any, Any>()
+                    val headerPairs = headers.entries.mapNotNull { entry ->
+                        val key = entry.key as? String
+                        if (key.isNullOrBlank()) null else key to entry.value.toString()
+                    }
+                    val subtitles = args["subtitles"] as? List<*> ?: emptyList<Any>()
+                    val subtitleRows = subtitles.mapNotNull { entry ->
+                        val map = entry as? Map<*, *> ?: return@mapNotNull null
+                        val url = map["url"] as? String
+                        if (url.isNullOrBlank()) {
+                            null
+                        } else {
+                            Triple(
+                                url,
+                                map["label"]?.toString() ?: "",
+                                map["language"]?.toString() ?: "",
+                            )
+                        }
+                    }
                     val intent = Intent(this, HdrPlayerActivity::class.java).apply {
                         putExtra(HdrPlayerActivity.EXTRA_URL, url)
                         putExtra(HdrPlayerActivity.EXTRA_TITLE, args["title"] as? String ?: "")
                         putExtra(HdrPlayerActivity.EXTRA_IS_LIVE, args["isLive"] as? Boolean ?: false)
                         putStringArrayListExtra(
                             HdrPlayerActivity.EXTRA_HEADER_KEYS,
-                            ArrayList(headers.keys.mapNotNull { it as? String }),
+                            ArrayList(headerPairs.map { it.first }),
                         )
                         putStringArrayListExtra(
                             HdrPlayerActivity.EXTRA_HEADER_VALUES,
-                            ArrayList(headers.values.map { it?.toString() ?: "" }),
+                            ArrayList(headerPairs.map { it.second }),
+                        )
+                        putStringArrayListExtra(
+                            HdrPlayerActivity.EXTRA_SUBTITLE_URLS,
+                            ArrayList(subtitleRows.map { it.first }),
+                        )
+                        putStringArrayListExtra(
+                            HdrPlayerActivity.EXTRA_SUBTITLE_LABELS,
+                            ArrayList(subtitleRows.map { it.second }),
+                        )
+                        putStringArrayListExtra(
+                            HdrPlayerActivity.EXTRA_SUBTITLE_LANGUAGES,
+                            ArrayList(subtitleRows.map { it.third }),
                         )
                     }
                     startActivityForResult(intent, REQUEST_NATIVE_PLAYER)
