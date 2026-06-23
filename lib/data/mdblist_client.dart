@@ -44,6 +44,18 @@ class MdblistClient implements MetadataProvider {
     );
   }
 
+  @override
+  Future<ExternalMetadata?> seasonMetadata(
+    MediaItem series,
+    MediaItem season,
+  ) async => null;
+
+  @override
+  Future<ExternalMetadata?> episodeMetadata(
+    MediaItem season,
+    MediaItem episode,
+  ) async => null;
+
   Future<dynamic> _get(Uri uri) async {
     final request = await _http.getUrl(uri);
     final response = await request.close();

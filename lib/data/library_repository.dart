@@ -172,12 +172,21 @@ class LibraryRepository {
           parentId: parentId,
         );
         if (items.isNotEmpty) {
+          var mergedItems = await _mergeCachedMetadata(items);
+          if (parent != null) {
+            mergedItems = await _applyChildExternalMetadata(
+              parent,
+              mergedItems,
+              action: 'cache-child',
+            );
+            await db.updateMediaDisplayFields(source.id, mergedItems);
+          }
           return MediaLibrarySnapshot(
             kind: kind,
             categoryId: categoryId,
             parentId: parentId,
             categories: await db.readMediaCategories(source.id, kind),
-            items: await _mergeCachedMetadata(items),
+            items: mergedItems,
             fromCache: true,
             syncedAt: sync.syncedAt,
             loadedPages: sync.loadedPages,
@@ -194,11 +203,18 @@ class LibraryRepository {
       categoryId: categoryId,
       parent: parent,
     );
+    final fetchedItems = parent == null
+        ? fetched.items
+        : await _applyChildExternalMetadata(
+            parent,
+            fetched.items,
+            action: 'load-child',
+          );
     await db.replaceMediaLibrary(
       source.id,
       kind,
       categories,
-      fetched.items,
+      fetchedItems,
       categoryId: categoryId,
       parentId: parentId,
       loadedPages: fetched.loadedPages,
@@ -209,7 +225,7 @@ class LibraryRepository {
       categoryId: categoryId,
       parentId: parentId,
       categories: categories,
-      items: await _mergeCachedMetadata(fetched.items),
+      items: await _mergeCachedMetadata(fetchedItems),
       fromCache: false,
       syncedAt: DateTime.now(),
       loadedPages: fetched.loadedPages,
@@ -335,7 +351,15 @@ class LibraryRepository {
       );
       loadedPages = fetched.page;
       totalPages = fetched.totalPages;
-      items.addAll(fetched.items);
+      items.addAll(
+        parent == null
+            ? fetched.items
+            : await _applyChildExternalMetadata(
+                parent,
+                fetched.items,
+                action: 'load-more-child',
+              ),
+      );
       if (!fetched.hasMore) break;
     }
     await db.appendMediaItems(
@@ -413,9 +437,76 @@ class LibraryRepository {
     return out;
   }
 
+  Future<List<MediaItem>> _applyChildExternalMetadata(
+    MediaItem parent,
+    List<MediaItem> items, {
+    required String action,
+  }) async {
+    if (metadataProviders.isEmpty || items.isEmpty) return items;
+    if (items.first.kind != ContentKind.season &&
+        items.first.kind != ContentKind.episode) {
+      return items;
+    }
+    final enrichedParent = (await _mergeCachedMetadata([parent])).first;
+    final out = <MediaItem>[];
+    for (final item in items) {
+      out.add(
+        await _applyOneChildExternalMetadata(enrichedParent, item, action),
+      );
+    }
+    return out;
+  }
+
+  Future<MediaItem> _applyOneChildExternalMetadata(
+    MediaItem parent,
+    MediaItem item,
+    String action,
+  ) async {
+    if (item.kind != ContentKind.season && item.kind != ContentKind.episode) {
+      return item;
+    }
+    var out = item;
+    var visualMatched = false;
+    for (final provider in metadataProviders) {
+      if (provider.ratingsOnly && !visualMatched) continue;
+      final cached = await cachedExternalMetadata(out, provider.provider);
+      if (cached != null) {
+        _logMetadata(
+          '$action cache hit ${provider.provider} ${out.kind.name}:${out.id} -> ${cached.providerKey}',
+        );
+        out = _mergeMetadata(out, cached, ratingsOnly: provider.ratingsOnly);
+        if (!provider.ratingsOnly) visualMatched = true;
+        continue;
+      }
+      try {
+        final metadata = out.kind == ContentKind.season
+            ? await provider.seasonMetadata(parent, out)
+            : await provider.episodeMetadata(parent, out);
+        if (metadata == null) {
+          _logMetadata(
+            '$action no match ${provider.provider} ${out.kind.name}:${out.id} title=${out.title}',
+          );
+          continue;
+        }
+        await cacheExternalMetadata(out, metadata);
+        _logMetadata(
+          '$action matched ${provider.provider} ${out.kind.name}:${out.id} -> ${metadata.providerKey}',
+        );
+        out = _mergeMetadata(out, metadata, ratingsOnly: provider.ratingsOnly);
+        if (!provider.ratingsOnly) visualMatched = true;
+      } catch (error) {
+        _logMetadata(
+          '$action error ${provider.provider} ${out.kind.name}:${out.id}: $error',
+        );
+      }
+    }
+    return out;
+  }
+
   bool _supportsMetadata(MediaItem item) =>
       metadataProviders.isNotEmpty &&
       (item.kind == ContentKind.movie ||
+          item.kind == ContentKind.season ||
           item.kind == ContentKind.series ||
           item.kind == ContentKind.episode);
 

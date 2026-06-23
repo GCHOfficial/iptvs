@@ -172,14 +172,25 @@ class ExternalMetadata {
 /// something to infer from the stream (an HLS live window reports a finite
 /// duration, which looks just like VOD). Live streams get no seek bar; VOD does.
 @immutable
+class StreamSubtitle {
+  final String url;
+  final String label;
+  final String? language;
+
+  const StreamSubtitle({required this.url, required this.label, this.language});
+}
+
+@immutable
 class StreamInfo {
   final String url;
   final Map<String, String> headers;
   final bool isLive;
+  final List<StreamSubtitle> subtitles;
   const StreamInfo({
     required this.url,
     this.headers = const {},
     this.isLive = true,
+    this.subtitles = const [],
   });
 }
 

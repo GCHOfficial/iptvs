@@ -247,6 +247,10 @@ const _languages = {
   ),
   'Russian': _LanguageAliases(strong: ['RU', 'RUS', 'RUSSIAN']),
   'Serbian': _LanguageAliases(strong: ['SR', 'SRP', 'SERBIAN'], weak: ['RS']),
+  'Seychellois Creole': _LanguageAliases(
+    strong: ['CRS', 'SEYCHELLOIS'],
+    weak: ['SC'],
+  ),
   'Slovak': _LanguageAliases(strong: ['SK', 'SLK', 'SLO', 'SLOVAK']),
   'Slovenian': _LanguageAliases(strong: ['SI', 'SL', 'SLV', 'SLOVENIAN']),
   'Spanish': _LanguageAliases(

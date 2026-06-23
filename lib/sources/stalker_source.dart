@@ -153,6 +153,9 @@ class StalkerSource implements Source {
   String? _referer;
   String? _token;
   List<Channel>? _channelCache;
+  final Map<String, String> _vodCategoryTitles = {};
+  Future<void>? _connectFuture;
+  bool _profileLoaded = false;
 
   StalkerSource({
     required this.portal,
@@ -171,8 +174,22 @@ class StalkerSource implements Source {
 
   @override
   Future<void> connect() async {
+    if (_profileLoaded) return;
+    final pending = _connectFuture;
+    if (pending != null) return pending;
+    final future = _connect();
+    _connectFuture = future;
+    try {
+      await future;
+    } finally {
+      _connectFuture = null;
+    }
+  }
+
+  Future<void> _connect() async {
     await _resolveEndpoint(); // handshake happens here and sets _token
     await _getProfile();
+    _profileLoaded = true;
   }
 
   @override
@@ -214,11 +231,7 @@ class StalkerSource implements Source {
     if (raw == null) throw StalkerException('create_link returned no URL');
     final url = _normalizeLiveStreamUrl(raw, channel);
     _debug('resolved live id=${channel.id} url=${_redactUrl(url)}');
-    return StreamInfo(
-      url: url,
-      // Some portals gate the stream fetch on the MAG UA too.
-      headers: {'User-Agent': profile.userAgent},
-    );
+    return StreamInfo(url: url, headers: _playbackHeaders());
   }
 
   @override
@@ -264,19 +277,44 @@ class StalkerSource implements Source {
     if (kind != ContentKind.movie && kind != ContentKind.series) {
       return const [];
     }
-    final r = await _call({'type': 'vod', 'action': 'get_categories'});
+    if (kind == ContentKind.series) {
+      final seriesCategories = await _mediaCategoriesForType('series', kind);
+      if (seriesCategories.isNotEmpty) return seriesCategories;
+    }
+    return _mediaCategoriesForType('vod', kind);
+  }
+
+  Future<List<MediaCategory>> _mediaCategoriesForType(
+    String type,
+    ContentKind kind,
+  ) async {
+    final Map<String, dynamic> r;
+    try {
+      r = await _call({'type': type, 'action': 'get_categories'});
+    } on StalkerException catch (e) {
+      if (type != 'vod') {
+        _debug('$type:get_categories unavailable: ${e.message}');
+        return const [];
+      }
+      rethrow;
+    }
     final js = r['js'];
     if (js is! List) return const [];
     return js
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
-        .map(
-          (c) => MediaCategory(
+        .map((c) {
+          final category = MediaCategory(
             id: '${c['id']}',
             title: '${c['title'] ?? c['name'] ?? ''}',
             kind: kind,
-          ),
-        )
+          );
+          if (category.id.isNotEmpty && category.title.isNotEmpty) {
+            _vodCategoryTitles['$type:${category.id}'] = category.title;
+            _vodCategoryTitles[category.id] = category.title;
+          }
+          return category;
+        })
         .where((c) => c.title.isNotEmpty)
         .toList();
   }
@@ -291,6 +329,63 @@ class StalkerSource implements Source {
     if (!_supportsVodListKind(kind)) {
       return const [];
     }
+    if (kind == ContentKind.episode && parent != null) {
+      final embedded = _episodesFromEmbeddedSeason(parent);
+      if (embedded.isNotEmpty) return embedded;
+    }
+    final type = _stalkerListType(kind, parent);
+    final List<Map<String, dynamic>> rows;
+    try {
+      rows = await _getOrderedList(
+        type: type,
+        category: categoryId,
+        movieId: _parentMovieId(kind, parent),
+        seasonId: _parentSeasonId(kind, parent),
+        maxPages: maxPages,
+      );
+    } on StalkerException catch (e) {
+      if (type == 'vod') rethrow;
+      _debug('$type:get_ordered_list unavailable: ${e.message}');
+      return _vodMediaItems(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        maxPages: maxPages,
+      );
+    }
+    final filtered = _filterMediaRows(
+      rows,
+      kind,
+      type: type,
+      categoryId: categoryId,
+    );
+    if (filtered.isEmpty && kind == ContentKind.series && type != 'vod') {
+      return _vodMediaItems(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        maxPages: maxPages,
+      );
+    }
+    return filtered
+        .map(
+          (m) => _mapMediaItem(
+            m,
+            kind: kind,
+            categoryId: categoryId,
+            parent: parent,
+            stalkerType: type,
+          ),
+        )
+        .toList();
+  }
+
+  Future<List<MediaItem>> _vodMediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int? maxPages,
+  }) async {
     final rows = await _getOrderedList(
       type: 'vod',
       category: categoryId,
@@ -298,14 +393,14 @@ class StalkerSource implements Source {
       seasonId: _parentSeasonId(kind, parent),
       maxPages: maxPages,
     );
-    return rows
-        .where((m) => _matchesVodListKind(m, kind))
+    return _filterMediaRows(rows, kind, type: 'vod', categoryId: categoryId)
         .map(
           (m) => _mapMediaItem(
             m,
             kind: kind,
             categoryId: categoryId,
             parent: parent,
+            stalkerType: 'vod',
           ),
         )
         .toList();
@@ -321,21 +416,54 @@ class StalkerSource implements Source {
     if (!_supportsVodListKind(kind)) {
       return MediaPage(items: const [], page: page, totalPages: page);
     }
-    final raw = await _getOrderedListPage(
-      type: 'vod',
-      category: categoryId,
-      movieId: _parentMovieId(kind, parent),
-      seasonId: _parentSeasonId(kind, parent),
-      page: page,
+    if (kind == ContentKind.episode && parent != null) {
+      final embedded = _episodesFromEmbeddedSeason(parent);
+      if (embedded.isNotEmpty) {
+        return MediaPage(items: embedded, page: page, totalPages: page);
+      }
+    }
+    final type = _stalkerListType(kind, parent);
+    final _OrderedListPage raw;
+    try {
+      raw = await _getOrderedListPage(
+        type: type,
+        category: categoryId,
+        movieId: _parentMovieId(kind, parent),
+        seasonId: _parentSeasonId(kind, parent),
+        page: page,
+      );
+    } on StalkerException catch (e) {
+      if (type == 'vod') rethrow;
+      _debug('$type:get_ordered_list unavailable: ${e.message}');
+      return _vodMediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        page: page,
+      );
+    }
+    final filtered = _filterMediaRows(
+      raw.rows,
+      kind,
+      type: type,
+      categoryId: categoryId,
     );
-    final items = raw.rows
-        .where((m) => _matchesVodListKind(m, kind))
+    if (filtered.isEmpty && kind == ContentKind.series && type != 'vod') {
+      return _vodMediaItemsPage(
+        kind,
+        categoryId: categoryId,
+        parent: parent,
+        page: page,
+      );
+    }
+    final items = filtered
         .map(
           (m) => _mapMediaItem(
             m,
             kind: kind,
             categoryId: categoryId,
             parent: parent,
+            stalkerType: type,
           ),
         )
         .toList();
@@ -345,6 +473,38 @@ class StalkerSource implements Source {
         return MediaPage(items: detailsItems, page: page, totalPages: page);
       }
     }
+    return MediaPage(
+      items: items,
+      page: page,
+      totalPages: raw.totalPages < page ? page : raw.totalPages,
+    );
+  }
+
+  Future<MediaPage> _vodMediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async {
+    final raw = await _getOrderedListPage(
+      type: 'vod',
+      category: categoryId,
+      movieId: _parentMovieId(kind, parent),
+      seasonId: _parentSeasonId(kind, parent),
+      page: page,
+    );
+    final items =
+        _filterMediaRows(raw.rows, kind, type: 'vod', categoryId: categoryId)
+            .map(
+              (m) => _mapMediaItem(
+                m,
+                kind: kind,
+                categoryId: categoryId,
+                parent: parent,
+                stalkerType: 'vod',
+              ),
+            )
+            .toList();
     return MediaPage(
       items: items,
       page: page,
@@ -363,15 +523,71 @@ class StalkerSource implements Source {
         (kind != ContentKind.movie && kind != ContentKind.series)) {
       return const [];
     }
-    final raw = await _getOrderedListPage(
-      type: 'vod',
-      category: categoryId,
-      search: q,
-      page: 1,
+    final type = kind == ContentKind.series ? 'series' : 'vod';
+    final _OrderedListPage raw;
+    try {
+      raw = await _getOrderedListPage(
+        type: type,
+        category: categoryId,
+        search: q,
+        page: 1,
+      );
+    } on StalkerException catch (e) {
+      if (type == 'vod') rethrow;
+      _debug('$type:get_ordered_list search unavailable: ${e.message}');
+      final fallback = await _getOrderedListPage(
+        type: 'vod',
+        category: categoryId,
+        search: q,
+        page: 1,
+      );
+      return _filterMediaRows(
+            fallback.rows,
+            kind,
+            type: 'vod',
+            categoryId: categoryId,
+          )
+          .map(
+            (m) => _mapMediaItem(
+              m,
+              kind: kind,
+              categoryId: categoryId,
+              stalkerType: 'vod',
+            ),
+          )
+          .toList();
+    }
+    final filtered = _filterMediaRows(
+      raw.rows,
+      kind,
+      type: type,
+      categoryId: categoryId,
     );
-    return raw.rows
-        .where((m) => _matchesVodListKind(m, kind))
-        .map((m) => _mapMediaItem(m, kind: kind, categoryId: categoryId))
+    final rows = filtered.isNotEmpty || kind != ContentKind.series
+        ? (rows: filtered, type: type)
+        : (
+            rows: _filterMediaRows(
+              (await _getOrderedListPage(
+                type: 'vod',
+                category: categoryId,
+                search: q,
+                page: 1,
+              )).rows,
+              kind,
+              type: 'vod',
+              categoryId: categoryId,
+            ),
+            type: 'vod',
+          );
+    return rows.rows
+        .map(
+          (m) => _mapMediaItem(
+            m,
+            kind: kind,
+            categoryId: categoryId,
+            stalkerType: rows.type,
+          ),
+        )
         .toList();
   }
 
@@ -413,21 +629,39 @@ class StalkerSource implements Source {
     if (item.kind != ContentKind.movie && item.kind != ContentKind.episode) {
       throw StalkerException('${item.kind.name} is not directly playable yet');
     }
-    final cmd = _vodCommand(item);
-    final r = await _call({
+    final params = {
       'type': 'vod',
       'action': 'create_link',
-      'cmd': cmd,
+      'cmd': _vodCommand(item),
       'forced_storage': '0',
       'disable_ad': '0',
-    });
-    final js = r['js'];
-    final raw = js is Map ? _firstString(js, ['url', 'cmd']) : null;
+      ..._seriesCreateLinkParams(item),
+    };
+    var r = await _call(params);
+    var js = r['js'];
+    var raw = js is Map ? _firstString(js, ['url', 'cmd']) : null;
+    if (raw != null && _hasPlaceholderStreamQuery(raw)) {
+      final fallback = _alternateSeriesEpisodeCommand(item);
+      if (fallback != null && fallback != params['cmd']) {
+        _debug(
+          'series create_link returned placeholder stream; retrying with alternate episode cmd',
+        );
+        r = await _call({...params, 'cmd': fallback});
+        js = r['js'];
+        raw = js is Map ? _firstString(js, ['url', 'cmd']) : null;
+      }
+    }
     if (raw == null) throw StalkerException('VOD create_link returned no URL');
+    if (_hasPlaceholderStreamQuery(raw)) {
+      throw StalkerException('VOD create_link returned placeholder stream');
+    }
     return StreamInfo(
       url: _stripStreamPrefix(raw),
-      headers: {'User-Agent': profile.userAgent},
+      headers: _playbackHeaders(),
       isLive: false,
+      subtitles: js is Map
+          ? _parsePlaybackSubtitles(js['subtitles'])
+          : const [],
     );
   }
 
@@ -539,6 +773,10 @@ class StalkerSource implements Source {
     add('genre', genre);
     add('category', category);
     add('movie_id', movieId);
+    if (type == 'series') {
+      add('series_id', movieId);
+      add('parent_id', movieId);
+    }
     add('season_id', seasonId);
     add('episode_id', episodeId);
     add('search', search);
@@ -624,24 +862,17 @@ class StalkerSource implements Source {
     required ContentKind kind,
     String? categoryId,
     MediaItem? parent,
+    String stalkerType = 'vod',
   }) {
-    final id =
-        _firstString(item, [
-          'id',
-          'movie_id',
-          'video_id',
-          'stream_id',
-          'season_id',
-          'episode_id',
-        ]) ??
-        '';
+    final id = _mediaItemId(item, kind: kind, parent: parent);
+    final seasonNumber = _seriesSeasonNumber(item);
     return MediaItem(
       id: id,
       title: _firstString(item, ['name', 'title']) ?? 'Untitled',
       kind: kind,
       parentId: parent?.id ?? _firstString(item, ['parent_id', 'series_id']),
       categoryId: categoryId ?? _firstString(item, ['category_id']),
-      poster: _firstString(item, ['screenshot_uri', 'poster', 'cover']),
+      poster: _firstString(item, ['screenshot_uri', 'poster', 'cover', 'pic']),
       backdrop: _firstString(item, ['backdrop', 'background', 'cover_big']),
       description: _firstString(item, ['description', 'descr', 'plot']),
       year: _firstString(item, ['year', 'released']),
@@ -651,19 +882,83 @@ class StalkerSource implements Source {
       durationSeconds: _parseDurationSeconds(
         _firstString(item, ['duration', 'time', 'length']),
       ),
-      seasonNumber: _parseInt(item['season_number'] ?? item['season']),
-      episodeNumber: _parseInt(item['episode_number'] ?? item['episode']),
+      seasonNumber: seasonNumber,
+      episodeNumber: _parseInt(
+        item['episode_number'] ?? item['episode'] ?? item['numbering'],
+      ),
       providerId: _firstString(item, ['tmdb_id', 'imdb_id', 'kinopoisk_id']),
       extra: {
         ...item,
-        'movieId': _firstString(item, ['movie_id', 'id']) ?? id,
+        'movieId': _mediaItemSeriesId(item, kind: kind, parent: parent) ?? id,
+        'stalkerType': stalkerType,
         if (parent != null) 'parentId': parent.id,
         if (kind == ContentKind.season)
-          'seasonId': _firstString(item, ['season_id', 'id']) ?? id,
+          'seasonId': _seriesSeasonKey(item) ?? id,
         if (kind == ContentKind.episode)
           'episodeId': _firstString(item, ['episode_id', 'id']) ?? id,
       },
     );
+  }
+
+  String _mediaItemId(
+    Map<String, dynamic> item, {
+    required ContentKind kind,
+    MediaItem? parent,
+  }) {
+    if (kind == ContentKind.season) {
+      final seasonKey = _seriesSeasonKey(item);
+      if (parent != null && seasonKey != null) {
+        return '${parent.id}:season:$seasonKey';
+      }
+      return seasonKey ?? _firstStableId(item) ?? '';
+    }
+    if (kind == ContentKind.episode) {
+      return _firstPlayableId(item) ?? _firstStableId(item) ?? '';
+    }
+    return _normalizeCompositeSeriesId(_firstStableId(item)) ?? '';
+  }
+
+  String? _firstStableId(Map<String, dynamic> item) => _firstString(item, [
+    'id',
+    'movie_id',
+    'series_id',
+    'video_id',
+    'stream_id',
+    'season_id',
+    'episode_id',
+  ]);
+
+  String? _mediaItemSeriesId(
+    Map<String, dynamic> item, {
+    required ContentKind kind,
+    MediaItem? parent,
+  }) {
+    if (kind == ContentKind.season || kind == ContentKind.episode) {
+      final fromParent = _firstString(parent?.extra ?? const {}, [
+        'movieId',
+        'series_id',
+        'id',
+      ]);
+      return _normalizeCompositeSeriesId(fromParent ?? parent?.id);
+    }
+    return _normalizeCompositeSeriesId(
+      _firstString(item, ['movie_id', 'series_id', 'id']),
+    );
+  }
+
+  String? _normalizeCompositeSeriesId(String? value) {
+    if (value == null) return null;
+    var text = value.trim();
+    if (text.isEmpty || text == 'null') return null;
+    final seasonMarker = text.indexOf(':season:');
+    if (seasonMarker > 0) text = text.substring(0, seasonMarker);
+    final parts = text.split(':');
+    if (parts.length >= 2 &&
+        parts.first.isNotEmpty &&
+        parts.every((part) => int.tryParse(part) != null)) {
+      return parts.first;
+    }
+    return text;
   }
 
   Future<List<MediaItem>> _mediaItemsFromDetails(
@@ -690,6 +985,35 @@ class StalkerSource implements Source {
     MediaItem parent,
     Map<String, dynamic> details,
   ) => _episodesFromDetails(parent, details);
+
+  @visibleForTesting
+  List<MediaItem> debugEpisodesFromEmbeddedSeason(MediaItem season) =>
+      _episodesFromEmbeddedSeason(season);
+
+  @visibleForTesting
+  bool debugMatchesVodListKind(
+    Map<String, dynamic> item,
+    ContentKind kind, {
+    String? categoryTitle,
+  }) => _matchesVodListKind(item, kind, categoryTitle: categoryTitle);
+
+  @visibleForTesting
+  bool debugMatchesSeriesListKind(
+    Map<String, dynamic> item,
+    ContentKind kind,
+  ) => _matchesSeriesListKind(item, kind);
+
+  @visibleForTesting
+  MediaItem debugMapMediaItem(
+    Map<String, dynamic> item,
+    ContentKind kind, {
+    MediaItem? parent,
+    String stalkerType = 'vod',
+  }) =>
+      _mapMediaItem(item, kind: kind, parent: parent, stalkerType: stalkerType);
+
+  @visibleForTesting
+  String debugVodCommand(MediaItem item) => _vodCommand(item);
 
   Future<Map<String, dynamic>> _movieDetails(MediaItem item) async {
     final existing = item.extra['details'];
@@ -786,6 +1110,63 @@ class StalkerSource implements Source {
     ];
   }
 
+  List<MediaItem> _episodesFromEmbeddedSeason(MediaItem season) {
+    if (season.kind != ContentKind.season) return const [];
+    final raw =
+        season.extra['episodes'] ??
+        season.extra['episode'] ??
+        season.extra['series'] ??
+        season.extra['videos'] ??
+        season.extra['files'];
+    if (raw == null) return const [];
+    final rows = _listFromAny(raw);
+    if (rows.isNotEmpty) {
+      return [
+        for (final row in rows)
+          _episodeFromDetails(season, {
+            ..._seasonPlaybackHints(season),
+            ...row,
+          }, const {}),
+      ];
+    }
+    final values = _scalarListFromAny(raw);
+    if (values.isEmpty) return const [];
+    final seriesId =
+        _normalizeCompositeSeriesId(
+          _firstString(season.extra, ['movieId', 'series_id', 'id']),
+        ) ??
+        _normalizeCompositeSeriesId(season.parentId) ??
+        season.parentId ??
+        season.id;
+    final seasonId =
+        _normalizeSeasonId(
+          _firstString(season.extra, ['seasonId', 'season_id', 'id']),
+        ) ??
+        season.seasonNumber?.toString() ??
+        '1';
+    return [
+      for (final value in values)
+        _episodeFromDetails(season, {
+          'id': '$seriesId:$value',
+          'episode_id': '$seriesId:$value',
+          'episode_number': value,
+          'name': 'Episode $value',
+          'movie_id': seriesId,
+          'season_number': seasonId,
+          ..._seasonPlaybackHints(season),
+        }, const {}),
+    ];
+  }
+
+  Map<String, dynamic> _seasonPlaybackHints(MediaItem season) {
+    final out = <String, dynamic>{};
+    final cmd = season.extra['cmd'];
+    if (cmd != null) out['cmd'] = cmd;
+    final path = season.extra['path'];
+    if (path != null) out['path'] = path;
+    return out;
+  }
+
   MediaItem _episodeFromDetails(
     MediaItem parent,
     Map<String, dynamic> episode,
@@ -858,6 +1239,25 @@ class StalkerSource implements Source {
     return const [];
   }
 
+  List<String> _scalarListFromAny(dynamic value) {
+    if (value is List) {
+      return [
+        for (final entry in value)
+          if (entry is! Map && entry != null && entry.toString().isNotEmpty)
+            entry.toString(),
+      ];
+    }
+    if (value is Map) {
+      if (value['data'] is List) return _scalarListFromAny(value['data']);
+      return [
+        for (final entry in value.values)
+          if (entry is! Map && entry is! List && entry != null)
+            entry.toString(),
+      ];
+    }
+    return const [];
+  }
+
   String? _seasonKey(Map<String, dynamic> value) =>
       _firstString(value, ['season_id', 'season_number', 'season', 'number']);
 
@@ -874,24 +1274,250 @@ class StalkerSource implements Source {
       kind == ContentKind.season ||
       kind == ContentKind.episode;
 
-  bool _matchesVodListKind(Map<String, dynamic> item, ContentKind kind) {
-    final isSeries = '${item['is_series']}' == '1';
-    if (kind == ContentKind.movie) return !isSeries;
-    if (kind == ContentKind.series) return isSeries;
+  String _stalkerListType(ContentKind kind, MediaItem? parent) {
+    final parentType = parent?.extra['stalkerType']?.toString();
+    if (parentType == 'series' || parentType == 'vod') return parentType!;
+    return kind == ContentKind.movie ? 'vod' : 'series';
+  }
+
+  List<Map<String, dynamic>> _filterMediaRows(
+    List<Map<String, dynamic>> rows,
+    ContentKind kind, {
+    required String type,
+    String? categoryId,
+  }) {
+    final filtered = rows
+        .where(
+          (m) => type == 'series'
+              ? _matchesSeriesListKind(m, kind)
+              : _matchesVodListKind(
+                  m,
+                  kind,
+                  categoryId: categoryId,
+                  categoryType: type,
+                ),
+        )
+        .toList();
+    if (rows.isNotEmpty && filtered.isEmpty) {
+      _debug(
+        '$type ${kind.name} filtered 0/${rows.length}; '
+        'category=${categoryId ?? '<none>'} sample=${_rowShape(rows.first)}',
+      );
+    }
+    return filtered;
+  }
+
+  bool _matchesSeriesListKind(Map<String, dynamic> item, ContentKind kind) {
+    if (kind == ContentKind.movie) return false;
+    if (kind == ContentKind.episode) return _isSeriesEpisodeRow(item);
     return true;
+  }
+
+  bool _isSeriesEpisodeRow(Map<String, dynamic> item) {
+    if (_firstPlayableId(item) != null) return true;
+    if (_truthyFlag(item, ['is_episode', 'episode']) == true) return true;
+    final title = _firstString(item, ['name', 'title'])?.toLowerCase();
+    if (title != null && RegExp(r'^season\s+\d+$').hasMatch(title)) {
+      return false;
+    }
+    if (_hasAny(item, ['episode_id', 'episode_number', 'episode_num'])) {
+      return true;
+    }
+    return _firstStableId(item) != null && title != null;
+  }
+
+  bool _matchesVodListKind(
+    Map<String, dynamic> item,
+    ContentKind kind, {
+    String? categoryId,
+    String? categoryType,
+    String? categoryTitle,
+  }) {
+    final series = _isSeriesVodItem(
+      item,
+      categoryTitle:
+          categoryTitle ?? _vodCategoryTitle(categoryId, type: categoryType),
+    );
+    if (kind == ContentKind.movie) return series != true;
+    if (kind == ContentKind.series) return series == true;
+    return true;
+  }
+
+  bool? _isSeriesVodItem(Map<String, dynamic> item, {String? categoryTitle}) {
+    final explicit = _truthyFlag(item, [
+      'is_series',
+      'is_serial',
+      'serial',
+      'tv_series',
+      'is_tv_series',
+    ]);
+    if (explicit != null) return explicit;
+    if (_hasAny(item, [
+      'series_id',
+      'seasons',
+      'season',
+      'episodes',
+      'episode_count',
+      'season_count',
+    ])) {
+      return true;
+    }
+    final itemType = _firstString(item, ['type', 'item_type', 'media_type']);
+    if (itemType != null) {
+      final normalized = itemType.toLowerCase();
+      if (normalized.contains('series') ||
+          normalized.contains('serial') ||
+          normalized.contains('show')) {
+        return true;
+      }
+      if (normalized.contains('movie') ||
+          normalized.contains('film') ||
+          normalized.contains('vod')) {
+        return false;
+      }
+    }
+    final category = categoryTitle?.toLowerCase() ?? '';
+    if (category.contains('series') ||
+        category.contains('serial') ||
+        category.contains('shows') ||
+        category.contains('episodes')) {
+      return true;
+    }
+    if (category.contains('movie') ||
+        category.contains('film') ||
+        category.contains('vod')) {
+      return false;
+    }
+    return null;
+  }
+
+  bool? _truthyFlag(Map<String, dynamic> item, List<String> keys) {
+    for (final key in keys) {
+      if (!item.containsKey(key)) continue;
+      final value = item[key];
+      if (value is bool) return value;
+      final text = value?.toString().trim().toLowerCase();
+      if (text == null || text.isEmpty || text == 'null') continue;
+      if (const {'1', 'true', 'yes', 'y', 'on'}.contains(text)) return true;
+      if (const {'0', 'false', 'no', 'n', 'off'}.contains(text)) return false;
+    }
+    return null;
+  }
+
+  bool _hasAny(Map<String, dynamic> item, List<String> keys) {
+    for (final key in keys) {
+      final value = item[key];
+      if (value == null) continue;
+      if (value is String && value.trim().isEmpty) continue;
+      if (value is Iterable && value.isEmpty) continue;
+      if (value is Map && value.isEmpty) continue;
+      return true;
+    }
+    return false;
+  }
+
+  String? _firstPlayableId(Map<String, dynamic> item) {
+    final value = _firstString(item, [
+      'episode_id',
+      'video_id',
+      'stream_id',
+      'file_id',
+    ]);
+    if (value == null || _isPlaceholderStreamId(value)) return null;
+    return value;
+  }
+
+  bool _isPlaceholderStreamId(String value) {
+    final text = value.trim();
+    return text.isEmpty || text == '.' || text == '0' || text == 'null';
+  }
+
+  String? _seriesSeasonKey(Map<String, dynamic> item) {
+    final direct = _firstString(item, [
+      'season_id',
+      'season_number',
+      'season',
+      'number',
+    ]);
+    if (direct != null && !_isPlaceholderStreamId(direct)) {
+      return _normalizeSeasonId(direct);
+    }
+    final title = _firstString(item, ['name', 'title']);
+    if (title == null) return null;
+    final match = RegExp(
+      r'\bseason\s+(\d+)\b',
+      caseSensitive: false,
+    ).firstMatch(title);
+    return match?.group(1);
+  }
+
+  int? _seriesSeasonNumber(Map<String, dynamic> item) {
+    final key = _seriesSeasonKey(item);
+    if (key == null) return null;
+    return int.tryParse(key);
+  }
+
+  String? _vodCategoryTitle(String? categoryId, {String? type}) {
+    if (categoryId == null) return null;
+    if (type != null) {
+      final typed = _vodCategoryTitles['$type:$categoryId'];
+      if (typed != null) return typed;
+    }
+    return _vodCategoryTitles[categoryId];
+  }
+
+  String _rowShape(Map<String, dynamic> row) {
+    final keys = row.keys.take(16).join(',');
+    final id = _firstString(row, [
+      'id',
+      'movie_id',
+      'series_id',
+      'video_id',
+      'stream_id',
+    ]);
+    final title = _firstString(row, ['name', 'title']);
+    final flags = [
+      for (final key in const [
+        'is_series',
+        'is_serial',
+        'type',
+        'item_type',
+        'media_type',
+      ])
+        if (row.containsKey(key)) '$key=${row[key]}',
+    ].join(',');
+    return 'keys=$keys id=${id ?? '<none>'} title=${title ?? '<none>'} flags=$flags';
   }
 
   String? _parentMovieId(ContentKind kind, MediaItem? parent) {
     if (parent == null) return null;
     if (kind != ContentKind.season && kind != ContentKind.episode) return null;
-    return _firstString(parent.extra, ['movieId', 'series_id', 'id']) ??
-        parent.id;
+    return _normalizeCompositeSeriesId(
+          _firstString(parent.extra, ['movieId', 'series_id', 'id']),
+        ) ??
+        _normalizeCompositeSeriesId(parent.id);
   }
 
   String? _parentSeasonId(ContentKind kind, MediaItem? parent) {
     if (parent == null || kind != ContentKind.episode) return null;
-    return _firstString(parent.extra, ['seasonId', 'season_id', 'id']) ??
-        parent.id;
+    return _normalizeSeasonId(
+          _firstString(parent.extra, ['seasonId', 'season_id', 'id']),
+        ) ??
+        _normalizeSeasonId(parent.id);
+  }
+
+  String? _normalizeSeasonId(String? value) {
+    if (value == null) return null;
+    final text = value.trim();
+    if (text.isEmpty || text == 'null') return null;
+    final seasonMarker = text.indexOf(':season:');
+    if (seasonMarker >= 0) return text.substring(seasonMarker + 8);
+    final parts = text.split(':');
+    if (parts.length >= 2 &&
+        parts.every((part) => int.tryParse(part) != null)) {
+      return parts[1];
+    }
+    return text;
   }
 
   double? _parseDouble(String? value) {
@@ -912,18 +1538,68 @@ class StalkerSource implements Source {
 
   String _vodCommand(MediaItem item) {
     final direct = item.extra['cmd']?.toString();
-    if (direct != null && direct.isNotEmpty) return direct;
-    final streamId = _firstString(item.extra, [
-      'stream_id',
-      'video_id',
-      'series_id',
-      'movieId',
-      'id',
-    ]);
-    if (streamId == null || streamId.isEmpty) {
+    if (direct != null &&
+        direct.isNotEmpty &&
+        (!_hasPlaceholderStreamQuery(direct) ||
+            item.kind == ContentKind.episode)) {
+      return direct;
+    }
+    final streamId = item.kind == ContentKind.episode
+        ? _firstString(item.extra, [
+            'episode_id',
+            'stream_id',
+            'video_id',
+            'id',
+            'movieId',
+          ])
+        : _firstString(item.extra, ['stream_id', 'video_id', 'movieId', 'id']);
+    if (streamId == null || _isPlaceholderStreamId(streamId)) {
       throw StalkerException('Movie "${item.title}" has no stream id');
     }
     return '/media/file_$streamId.mpg';
+  }
+
+  Map<String, String> _seriesCreateLinkParams(MediaItem item) {
+    if (item.kind != ContentKind.episode) return const {};
+    final episode = _episodeSelector(item);
+    if (episode == null) return const {};
+    return {'series': episode};
+  }
+
+  String? _episodeSelector(MediaItem item) {
+    final direct = _firstString(item.extra, [
+      'episode_number',
+      'episode_num',
+      'episode',
+      'numbering',
+    ]);
+    if (direct != null && !_isPlaceholderStreamId(direct)) return direct;
+    final id = _firstString(item.extra, ['episode_id', 'id']) ?? item.id;
+    final parts = id.split(':');
+    if (parts.length >= 2) return parts.last;
+    return null;
+  }
+
+  String? _alternateSeriesEpisodeCommand(MediaItem item) {
+    if (item.kind != ContentKind.episode) return null;
+    final seriesId =
+        _normalizeCompositeSeriesId(
+          _firstString(item.extra, ['movieId', 'series_id', 'movie_id']),
+        ) ??
+        _normalizeCompositeSeriesId(item.parentId);
+    final episode = _episodeSelector(item);
+    if (seriesId == null || episode == null) return null;
+    return '/media/file_$seriesId:$episode.mpg';
+  }
+
+  bool _hasPlaceholderStreamQuery(String value) {
+    final uri = Uri.tryParse(value);
+    final stream = uri?.queryParameters['stream'];
+    if (stream != null) return _isPlaceholderStreamId(stream);
+    return RegExp(
+      r'([?&]stream=\.)(?=&|$)',
+      caseSensitive: false,
+    ).hasMatch(value);
   }
 
   String? _liveCommand(Channel channel) {
@@ -1136,42 +1812,131 @@ class StalkerSource implements Source {
     final uri = Uri.parse(
       endpoint,
     ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
-    final req = await _http.getUrl(uri);
-    req.followRedirects = true;
-    req.headers
-      ..set(HttpHeaders.userAgentHeader, profile.userAgent)
-      ..set('X-User-Agent', 'Model: ${profile.model}; Link: WiFi')
-      ..set(HttpHeaders.acceptHeader, '*/*')
-      ..set('Cookie', 'mac=$mac; stb_lang=$lang; timezone=$timezone')
-      ..set(HttpHeaders.refererHeader, _referer ?? _base().toString());
-    if (_token != null) {
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
-    }
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      final req = await _http.getUrl(uri);
+      req.followRedirects = true;
+      req.headers
+        ..set(HttpHeaders.userAgentHeader, profile.userAgent)
+        ..set('X-User-Agent', 'Model: ${profile.model}; Link: WiFi')
+        ..set(HttpHeaders.acceptHeader, '*/*')
+        ..set('Cookie', 'mac=$mac; stb_lang=$lang; timezone=$timezone')
+        ..set(HttpHeaders.refererHeader, _referer ?? _base().toString());
+      if (_token != null) {
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+      }
 
-    final resp = await req.close();
-    final body = await resp.transform(utf8.decoder).join();
-    _debug(
-      '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
-      'body=${body.length}B',
-    );
-    if (resp.statusCode != 200) {
-      _debug('non-200 body ${_bodyPreview(body)}');
-      throw StalkerException(
-        'HTTP ${resp.statusCode} from ${_redactUrl(endpoint)}',
+      final resp = await req.close();
+      final body = await resp.transform(utf8.decoder).join();
+      _debug(
+        '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
+        'body=${body.length}B',
+      );
+      if (resp.statusCode != 200) {
+        if (_isTransientStatus(resp.statusCode) && attempt < 3) {
+          _debug(
+            'transient HTTP ${resp.statusCode}; retrying ${_actionName(params)} attempt ${attempt + 1}',
+          );
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+          continue;
+        }
+        _debug('non-200 body ${_bodyPreview(body)}');
+        throw StalkerException(
+          'HTTP ${resp.statusCode} from ${_redactUrl(endpoint)}',
+        );
+      }
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(body);
+      } on FormatException {
+        _debug('non-json body ${_bodyPreview(body)}');
+        throw StalkerException('Non-JSON response (wrong endpoint?)');
+      }
+      if (decoded is! Map) throw StalkerException('Unexpected response shape');
+      final result = Map<String, dynamic>.from(decoded);
+      _debug('${_actionName(params)} response ${_responseShape(result)}');
+      return result;
+    }
+    throw StalkerException('Request failed after retries');
+  }
+
+  Map<String, String> _playbackHeaders() {
+    return {HttpHeaders.userAgentHeader: profile.userAgent};
+  }
+
+  List<StreamSubtitle> _parsePlaybackSubtitles(dynamic value) {
+    final out = <StreamSubtitle>[];
+    void add(dynamic urlValue, {dynamic label, dynamic language}) {
+      final rawUrl = urlValue?.toString().trim();
+      if (rawUrl == null || rawUrl.isEmpty) return;
+      final subtitleUrl = _stripStreamPrefix(rawUrl);
+      if (!subtitleUrl.startsWith(RegExp(r'https?://', caseSensitive: false))) {
+        return;
+      }
+      final lang = language?.toString().trim();
+      final title = label?.toString().trim();
+      final fallback = lang != null && lang.isNotEmpty
+          ? lang.toUpperCase()
+          : 'Subtitle ${out.length + 1}';
+      if (out.any((item) => item.url == subtitleUrl)) return;
+      out.add(
+        StreamSubtitle(
+          url: subtitleUrl,
+          label: title != null && title.isNotEmpty ? title : fallback,
+          language: lang != null && lang.isNotEmpty ? lang : null,
+        ),
       );
     }
-    dynamic decoded;
-    try {
-      decoded = jsonDecode(body);
-    } on FormatException {
-      _debug('non-json body ${_bodyPreview(body)}');
-      throw StalkerException('Non-JSON response (wrong endpoint?)');
+
+    void parse(dynamic node, {String? keyLabel}) {
+      if (node == null) return;
+      if (node is String) {
+        add(node, label: keyLabel, language: keyLabel);
+        return;
+      }
+      if (node is List) {
+        for (final item in node) {
+          parse(item);
+        }
+        return;
+      }
+      if (node is Map) {
+        final map = Map<dynamic, dynamic>.from(node);
+        final url = _firstString(map, [
+          'url',
+          'src',
+          'file',
+          'link',
+          'subtitle',
+          'sub',
+        ]);
+        if (url != null) {
+          add(
+            url,
+            label: _firstString(map, ['title', 'label', 'name']) ?? keyLabel,
+            language:
+                _firstString(map, ['lang', 'language', 'iso']) ?? keyLabel,
+          );
+          return;
+        }
+        for (final entry in map.entries) {
+          parse(entry.value, keyLabel: entry.key?.toString());
+        }
+      }
     }
-    if (decoded is! Map) throw StalkerException('Unexpected response shape');
-    final result = Map<String, dynamic>.from(decoded);
-    _debug('${_actionName(params)} response ${_responseShape(result)}');
-    return result;
+
+    parse(value);
+    if (out.isNotEmpty) {
+      _debug('playback subtitles parsed count=${out.length}');
+    }
+    return out;
   }
+
+  bool _isTransientStatus(int statusCode) =>
+      statusCode == 429 ||
+      statusCode == 500 ||
+      statusCode == 502 ||
+      statusCode == 503 ||
+      statusCode == 504;
 
   String _stripStreamPrefix(String cmd) {
     var s = cmd.trim();

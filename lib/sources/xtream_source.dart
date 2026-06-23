@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'source.dart';
 import 'xmltv.dart';
 
@@ -122,15 +124,17 @@ class XtreamSource implements Source {
     };
     if (action == null) return const [];
     final r = await _api({'action': action});
-    if (r is! List) return const [];
-    return r.whereType<Map>().map((c) {
-      final m = Map<String, dynamic>.from(c);
-      return MediaCategory(
-        id: '${m['category_id']}',
-        title: '${m['category_name']}',
-        kind: kind,
-      );
-    }).toList();
+    return _listFromAny(r)
+        .map((c) {
+          final m = Map<String, dynamic>.from(c);
+          return MediaCategory(
+            id: _firstString(m, ['category_id', 'id']) ?? '',
+            title: _firstString(m, ['category_name', 'name', 'title']) ?? '',
+            kind: kind,
+          );
+        })
+        .where((c) => c.id.isNotEmpty && c.title.isNotEmpty)
+        .toList();
   }
 
   @override
@@ -155,11 +159,9 @@ class XtreamSource implements Source {
     final params = {'action': action};
     if (categoryId != null) params['category_id'] = categoryId;
     final r = await _api(params);
-    if (r is! List) return const [];
-    return r
-        .whereType<Map>()
-        .map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind))
-        .toList();
+    return _listFromAny(
+      r,
+    ).map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind)).toList();
   }
 
   @override
@@ -224,6 +226,7 @@ class XtreamSource implements Source {
     final path = item.kind == ContentKind.movie ? 'movie' : 'series';
     return StreamInfo(
       url: '$_base/$path/$username/$password/${item.id}.$extension',
+      headers: {HttpHeaders.userAgentHeader: 'VLC/3.0.20 LibVLC/3.0.20'},
       isLive: false,
     );
   }
@@ -295,7 +298,7 @@ class XtreamSource implements Source {
     if (raw is! List) return const [];
     return raw.whereType<Map>().map((entry) {
       final m = Map<String, dynamic>.from(entry);
-      final id = _firstString(m, ['id', 'episode_id']) ?? '';
+      final id = _firstString(m, ['id', 'episode_id', 'stream_id']) ?? '';
       return MediaItem(
         id: id,
         title: _firstString(m, ['title', 'name']) ?? 'Episode',
@@ -323,11 +326,17 @@ class XtreamSource implements Source {
     return r is Map ? Map<String, dynamic>.from(r) : const {};
   }
 
+  @visibleForTesting
+  MediaItem debugMapMediaItem(Map<String, dynamic> m, ContentKind kind) =>
+      _mapMediaItem(m, kind);
+
   MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
-    final idKey = kind == ContentKind.movie ? 'stream_id' : 'series_id';
+    final id = kind == ContentKind.movie
+        ? _firstString(m, ['stream_id', 'id', 'movie_id', 'vod_id'])
+        : _firstString(m, ['series_id', 'id', 'stream_id']);
     return MediaItem(
-      id: '${m[idKey]}',
-      title: '${m['name']}',
+      id: id ?? '',
+      title: _firstString(m, ['name', 'title']) ?? 'Untitled',
       kind: kind,
       categoryId: m['category_id']?.toString(),
       poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
@@ -338,6 +347,31 @@ class XtreamSource implements Source {
       providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
       extra: m,
     );
+  }
+
+  List<Map<String, dynamic>> _listFromAny(dynamic value) {
+    if (value is List) {
+      return value
+          .whereType<Map>()
+          .map((entry) => Map<String, dynamic>.from(entry))
+          .toList();
+    }
+    if (value is Map) {
+      for (final key in const [
+        'data',
+        'items',
+        'results',
+        'series',
+        'movies',
+        'available_channels',
+        'categories',
+      ]) {
+        final nested = value[key];
+        final rows = _listFromAny(nested);
+        if (rows.isNotEmpty) return rows;
+      }
+    }
+    return const [];
   }
 
   int? _parseInt(dynamic value) {

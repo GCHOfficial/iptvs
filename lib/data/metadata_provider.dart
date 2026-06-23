@@ -7,5 +7,15 @@ abstract class MetadataProvider {
 
   Future<ExternalMetadata?> search(MediaItem item);
 
+  Future<ExternalMetadata?> seasonMetadata(
+    MediaItem series,
+    MediaItem season,
+  ) async => null;
+
+  Future<ExternalMetadata?> episodeMetadata(
+    MediaItem season,
+    MediaItem episode,
+  ) async => null;
+
   void close();
 }

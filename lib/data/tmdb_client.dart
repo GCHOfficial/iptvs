@@ -57,6 +57,46 @@ class TmdbClient implements MetadataProvider {
     return _mapDetails(best, item, type);
   }
 
+  @override
+  Future<ExternalMetadata?> seasonMetadata(
+    MediaItem series,
+    MediaItem season,
+  ) async {
+    final seriesId = _tmdbId(series);
+    final seasonNumber = season.seasonNumber;
+    if (seriesId == null || seasonNumber == null) return null;
+    final details = await _get('/tv/$seriesId/season/$seasonNumber');
+    if (details is! Map) return null;
+    return _mapSeasonDetails(
+      Map<String, dynamic>.from(details),
+      series,
+      season,
+    );
+  }
+
+  @override
+  Future<ExternalMetadata?> episodeMetadata(
+    MediaItem season,
+    MediaItem episode,
+  ) async {
+    final seriesId = _seriesTmdbId(season);
+    final seasonNumber = episode.seasonNumber ?? season.seasonNumber;
+    final episodeNumber = episode.episodeNumber;
+    if (seriesId == null || seasonNumber == null || episodeNumber == null) {
+      return null;
+    }
+    final details = await _get(
+      '/tv/$seriesId/season/$seasonNumber/episode/$episodeNumber',
+    );
+    if (details is! Map) return null;
+    return _mapEpisodeDetails(
+      Map<String, dynamic>.from(details),
+      season,
+      episode,
+      seriesId,
+    );
+  }
+
   Future<dynamic> _get(String path, [Map<String, String> query = const {}]) {
     final uri = Uri.parse('$_base$path').replace(
       queryParameters: {
@@ -112,6 +152,63 @@ class TmdbClient implements MetadataProvider {
       year: date != null && date.length >= 4 ? date.substring(0, 4) : item.year,
       rating: _readDouble(data['vote_average']),
       payload: data,
+      refreshedAt: DateTime.now(),
+    );
+  }
+
+  ExternalMetadata _mapSeasonDetails(
+    Map<String, dynamic> data,
+    MediaItem series,
+    MediaItem season,
+  ) {
+    final seriesId = _tmdbId(series) ?? '';
+    final seasonNumber = season.seasonNumber;
+    final id = data['id']?.toString() ?? '$seriesId:s$seasonNumber';
+    final posterPath = _firstString(data, ['poster_path']);
+    final airDate = _firstString(data, ['air_date']);
+    final title = _firstString(data, ['name']) ?? season.title;
+    return ExternalMetadata(
+      provider: providerKey,
+      providerKey: id,
+      title: title,
+      overview: _firstString(data, ['overview']),
+      poster: posterPath == null ? null : '$_imageBase$posterPath',
+      year: airDate != null && airDate.length >= 4
+          ? airDate.substring(0, 4)
+          : season.year,
+      payload: {
+        ...data,
+        'series_tmdb_id': seriesId,
+        if (seasonNumber != null) ...{'season_number': seasonNumber},
+      },
+      refreshedAt: DateTime.now(),
+    );
+  }
+
+  ExternalMetadata _mapEpisodeDetails(
+    Map<String, dynamic> data,
+    MediaItem season,
+    MediaItem episode,
+    String seriesId,
+  ) {
+    final id = data['id']?.toString() ?? episode.id;
+    final stillPath = _firstString(data, ['still_path']);
+    final airDate = _firstString(data, ['air_date']);
+    return ExternalMetadata(
+      provider: providerKey,
+      providerKey: id,
+      title: _firstString(data, ['name']) ?? episode.title,
+      overview: _firstString(data, ['overview']),
+      poster: stillPath == null ? null : '$_imageBase$stillPath',
+      year: airDate != null && airDate.length >= 4
+          ? airDate.substring(0, 4)
+          : episode.year,
+      rating: _readDouble(data['vote_average']),
+      payload: {
+        ...data,
+        'series_tmdb_id': seriesId,
+        'season_metadata_id': season.providerId,
+      },
       refreshedAt: DateTime.now(),
     );
   }
@@ -182,6 +279,25 @@ class TmdbClient implements MetadataProvider {
     for (final key in ['tmdb_id', 'tmdbId']) {
       final value = item.extra[key]?.toString();
       if (value != null && RegExp(r'^\d+$').hasMatch(value)) return value;
+    }
+    return null;
+  }
+
+  String? _seriesTmdbId(MediaItem season) {
+    final direct = _firstString(season.extra, ['series_tmdb_id', 'tmdb_id']);
+    if (direct != null && RegExp(r'^\d+$').hasMatch(direct)) return direct;
+    final metadata = season.extra['metadata'];
+    if (metadata is Map) {
+      final tmdb = metadata[providerKey];
+      if (tmdb is Map) {
+        final id = _firstString(tmdb, ['series_tmdb_id']);
+        if (id != null && RegExp(r'^\d+$').hasMatch(id)) return id;
+      }
+    }
+    final details = season.extra['details'];
+    if (details is Map) {
+      final id = _firstString(details, ['series_tmdb_id', 'tmdb_id']);
+      if (id != null && RegExp(r'^\d+$').hasMatch(id)) return id;
     }
     return null;
   }

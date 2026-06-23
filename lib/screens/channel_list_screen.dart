@@ -1892,7 +1892,10 @@ class _SeriesBrowser extends StatelessWidget {
                 tilePadding: EdgeInsets.zero,
                 childrenPadding: const EdgeInsets.only(bottom: 8),
                 title: Text(season.title),
-                subtitle: season.seasonNumber == null
+                subtitle:
+                    season.seasonNumber == null ||
+                        season.title.trim().toLowerCase() ==
+                            'season ${season.seasonNumber}'.toLowerCase()
                     ? null
                     : Text(
                         'Season ${season.seasonNumber}',

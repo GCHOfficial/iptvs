@@ -11,6 +11,7 @@ import 'package:iptvs/data/tmdb_client.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/stalker_source.dart';
+import 'package:iptvs/sources/xtream_source.dart';
 import 'package:iptvs/sources/xmltv.dart';
 
 void main() {
@@ -174,6 +175,180 @@ void main() {
       expect(episodes.first.episodeNumber, 1);
       expect(episodes.first.durationSeconds, 2525);
     });
+
+    test('builds episodes from embedded Stalker season numbers', () {
+      const season = MediaItem(
+        id: '4977:season:22',
+        title: 'Season 22',
+        kind: ContentKind.season,
+        parentId: '4977',
+        seasonNumber: 22,
+        extra: {
+          'movieId': '4977',
+          'seasonId': '22',
+          'series': [1, 2],
+        },
+      );
+
+      final episodes = source.debugEpisodesFromEmbeddedSeason(season);
+
+      expect(episodes.map((e) => e.id), ['4977:1', '4977:2']);
+      expect(episodes.first.title, 'Episode 1');
+      expect(episodes.first.seasonNumber, 22);
+      expect(episodes.first.episodeNumber, 1);
+    });
+
+    test('recognizes Stalker series without is_series flag', () {
+      expect(
+        source.debugMatchesVodListKind(
+          {'id': 'show-1', 'name': 'Example Show'},
+          ContentKind.series,
+          categoryTitle: 'TV Shows',
+        ),
+        isTrue,
+      );
+      expect(
+        source.debugMatchesVodListKind(
+          {'id': 'movie-1', 'name': 'Example Movie', 'is_series': '0'},
+          ContentKind.series,
+          categoryTitle: 'TV Shows',
+        ),
+        isFalse,
+      );
+      expect(
+        source.debugMatchesVodListKind({
+          'id': 'show-2',
+          'name': 'Example Show',
+          'series_id': 'show-2',
+        }, ContentKind.series),
+        isTrue,
+      );
+    });
+
+    test('does not treat season placeholder rows as episodes', () {
+      expect(
+        source.debugMatchesSeriesListKind({
+          'id': '.',
+          'name': 'Season 1',
+          'cmd': '/play/movie.php?stream=.&type=series',
+        }, ContentKind.episode),
+        isFalse,
+      );
+      expect(
+        source.debugMatchesSeriesListKind({
+          'episode_id': 'ep-1',
+          'name': 'Pilot',
+        }, ContentKind.episode),
+        isTrue,
+      );
+      expect(
+        source.debugMatchesSeriesListKind({
+          'id': '22769:4:1',
+          'name': 'Episode 1',
+        }, ContentKind.episode),
+        isTrue,
+      );
+    });
+
+    test('maps series seasons with stable season ids', () {
+      final season = source.debugMapMediaItem(
+        {'id': '.', 'name': 'Season 1'},
+        ContentKind.season,
+        parent: series,
+        stalkerType: 'series',
+      );
+
+      expect(season.id, 'series-1:season:1');
+      expect(season.seasonNumber, 1);
+      expect(season.extra['seasonId'], '1');
+    });
+
+    test('splits Stalker composite season ids into series and season ids', () {
+      final season = source.debugMapMediaItem(
+        {'id': '22769:4', 'name': 'Season 4'},
+        ContentKind.season,
+        parent: const MediaItem(
+          id: '22769',
+          title: 'Composite Series',
+          kind: ContentKind.series,
+          extra: {'movieId': '22769'},
+        ),
+        stalkerType: 'series',
+      );
+
+      expect(season.id, '22769:season:4');
+      expect(season.extra['movieId'], '22769');
+      expect(season.extra['seasonId'], '4');
+    });
+
+    test('prefers episode row id over carried series id for playback', () {
+      const episode = MediaItem(
+        id: '22769:1',
+        title: 'Episode 1',
+        kind: ContentKind.episode,
+        extra: {'id': '22769:1', 'movieId': '22769'},
+      );
+
+      expect(source.debugVodCommand(episode), '/media/file_22769:1.mpg');
+    });
+
+    test('keeps series season cmd for episode create_link params', () {
+      const episode = MediaItem(
+        id: '4977:1',
+        title: 'Episode 1',
+        kind: ContentKind.episode,
+        episodeNumber: 1,
+        extra: {
+          'id': '4977:1',
+          'movieId': '4977',
+          'episode_number': '1',
+          'cmd': '/play/movie.php?stream=.&type=series',
+        },
+      );
+
+      expect(
+        source.debugVodCommand(episode),
+        '/play/movie.php?stream=.&type=series',
+      );
+    });
+  });
+
+  group('Xtream series mapping', () {
+    final source = XtreamSource(
+      host: 'http://example.invalid',
+      username: 'user',
+      password: 'pass',
+    );
+
+    test('uses alternate series id fields from provider payloads', () {
+      final fromId = source.debugMapMediaItem({
+        'id': 'series-1',
+        'name': 'Example Series',
+      }, ContentKind.series);
+      final fromStreamId = source.debugMapMediaItem({
+        'stream_id': 'series-2',
+        'title': 'Alternate Series',
+      }, ContentKind.series);
+
+      expect(fromId.id, 'series-1');
+      expect(fromId.title, 'Example Series');
+      expect(fromStreamId.id, 'series-2');
+      expect(fromStreamId.title, 'Alternate Series');
+    });
+
+    test('adds a VOD user agent for direct movie playback', () async {
+      const movie = MediaItem(
+        id: 'movie-1',
+        title: 'Example Movie',
+        kind: ContentKind.movie,
+        extra: {'container_extension': 'mkv'},
+      );
+
+      final stream = await source.resolveMedia(movie);
+
+      expect(stream.url, endsWith('/movie/user/pass/movie-1.mkv'));
+      expect(stream.headers['user-agent'], contains('VLC'));
+    });
   });
 
   group('MetadataConfig', () {
@@ -297,6 +472,27 @@ void main() {
       expect(
         sourceHintLabels(item, includeWeak: true),
         contains('Audio: English'),
+      );
+    });
+
+    test('handles SC as Seychellois Creole only with context', () {
+      const bare = MediaItem(
+        id: 'movie-6',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'SC | Clean Movie Title'},
+      );
+      const audio = MediaItem(
+        id: 'movie-7',
+        title: 'Clean Movie Title',
+        kind: ContentKind.movie,
+        extra: {'providerTitle': 'AUDIO SC | Clean Movie Title'},
+      );
+
+      expect(sourceHintLabels(bare), isNot(contains('Seychellois Creole')));
+      expect(
+        sourceHintLabels(audio, includeWeak: true),
+        contains('Audio: Seychellois Creole'),
       );
     });
   });
