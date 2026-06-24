@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/diagnostics_log.dart';
+import '../data/net.dart';
 import 'source.dart';
 
 /// A MAG set-top-box profile emulated to the portal.
@@ -1825,8 +1826,11 @@ class StalkerSource implements Source {
         req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
       }
 
-      final resp = await req.close();
-      final body = await resp.transform(utf8.decoder).join();
+      final resp = await req.close().timeout(kHttpReadTimeout);
+      final body = await resp
+          .transform(utf8.decoder)
+          .join()
+          .timeout(kHttpReadTimeout);
       _debug(
         '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
         'body=${body.length}B',

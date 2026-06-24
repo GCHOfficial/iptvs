@@ -1,0 +1,214 @@
+// Tests for the persistence layer: AppDatabase schema/migrations and the
+// LibraryRepository cache behaviour. These exercise the real SQLite engine via
+// the FFI factory (desktop), without depending on path_provider.
+
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/sources/source.dart';
+
+void main() {
+  late Directory tempDir;
+
+  setUp(() {
+    tempDir = Directory.systemTemp.createTempSync('iptvs_db_test');
+  });
+
+  tearDown(() {
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+  });
+
+  String dbPath() => '${tempDir.path}/iptv.db';
+
+  group('AppDatabase migrations', () {
+    test('upgrades a v1 database to the current schema, preserving data', () async {
+      // Build the original (v1) schema by hand, seed a source + channel, then
+      // reopen through AppDatabase so the full onUpgrade chain runs.
+      sqfliteFfiInit();
+      final raw = await databaseFactoryFfi.openDatabase(
+        dbPath(),
+        options: OpenDatabaseOptions(
+          version: 1,
+          onCreate: (db, _) async {
+            await db.execute(
+              'CREATE TABLE sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+              'synced_at INTEGER)',
+            );
+            await db.execute(
+              'CREATE TABLE categories (source_id TEXT NOT NULL, id TEXT NOT NULL, '
+              'title TEXT NOT NULL, PRIMARY KEY (source_id, id))',
+            );
+            await db.execute(
+              'CREATE TABLE channels (source_id TEXT NOT NULL, id TEXT NOT NULL, '
+              'name TEXT NOT NULL, number INTEGER, logo TEXT, category_id TEXT, '
+              'extra TEXT, PRIMARY KEY (source_id, id))',
+            );
+          },
+        ),
+      );
+      await raw.insert('sources', {
+        'id': 'src1',
+        'name': 'Legacy',
+        'synced_at': DateTime.now().millisecondsSinceEpoch,
+      });
+      await raw.insert('channels', {
+        'source_id': 'src1',
+        'id': 'ch1',
+        'name': 'Channel One',
+        'number': 1,
+      });
+      await raw.close();
+
+      final db = await AppDatabase.openAt(dbPath());
+
+      // Old data survived the migration.
+      final channels = await db.readChannels('src1');
+      expect(channels, hasLength(1));
+      expect(channels.first.name, 'Channel One');
+      expect(await db.lastSynced('src1'), isNotNull);
+
+      // Tables added across later versions are now usable.
+      expect(
+        await db.mediaSyncState('src1', ContentKind.movie),
+        isNull, // queryable (no rows yet), proving the table exists
+      );
+      await db.close();
+    });
+
+    test('opening twice is a no-op upgrade', () async {
+      final first = await AppDatabase.openAt(dbPath());
+      await first.close();
+      final second = await AppDatabase.openAt(dbPath());
+      expect(await second.readChannels('missing'), isEmpty);
+      await second.close();
+    });
+  });
+
+  group('AppDatabase media round-trip', () {
+    test('writes and reads back a media library with paging state', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const kind = ContentKind.movie;
+      final items = [
+        const MediaItem(id: 'm1', title: 'Alpha', kind: kind, year: '2001'),
+        const MediaItem(id: 'm2', title: 'Beta', kind: kind, rating: 7.5),
+      ];
+
+      await db.replaceMediaLibrary(
+        'src1',
+        kind,
+        const [MediaCategory(id: 'c1', title: 'Action', kind: kind)],
+        items,
+        loadedPages: 1,
+        totalPages: 3,
+      );
+
+      final read = await db.readMediaItems('src1', kind);
+      expect(read.map((i) => i.title), ['Alpha', 'Beta']); // display order
+      expect(read.firstWhere((i) => i.id == 'm2').rating, 7.5);
+
+      final sync = await db.mediaSyncState('src1', kind);
+      expect(sync, isNotNull);
+      expect(sync!.loadedPages, 1);
+      expect(sync.totalPages, 3);
+      await db.close();
+    });
+  });
+
+  group('LibraryRepository', () {
+    test('fetches from the source on a cold load, then serves from cache', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _FakeSource();
+      final repo = LibraryRepository(source: source, db: db);
+
+      final cold = await repo.load();
+      expect(cold.fromCache, isFalse);
+      expect(cold.channels, hasLength(2));
+      expect(source.channelCalls, 1);
+
+      final warm = await repo.load();
+      expect(warm.fromCache, isTrue);
+      expect(warm.channels, hasLength(2));
+      // The cache served the second load without touching the provider again.
+      expect(source.channelCalls, 1);
+
+      final forced = await repo.load(forceRefresh: true);
+      expect(forced.fromCache, isFalse);
+      expect(source.channelCalls, 2);
+      await db.close();
+    });
+  });
+}
+
+/// Minimal in-memory [Source] that records how often the heavy fetch runs.
+class _FakeSource implements Source {
+  int channelCalls = 0;
+
+  @override
+  String get id => 'fake';
+
+  @override
+  String get name => 'Fake';
+
+  @override
+  Future<void> connect() async {}
+
+  @override
+  Future<List<Category>> categories() async =>
+      const [Category(id: 'c1', title: 'News')];
+
+  @override
+  Future<List<Channel>> channels({String? categoryId}) async {
+    channelCalls++;
+    return const [
+      Channel(id: 'a', name: 'A', categoryId: 'c1'),
+      Channel(id: 'b', name: 'B', categoryId: 'c1'),
+    ];
+  }
+
+  @override
+  Future<StreamInfo> resolve(Channel channel) async =>
+      const StreamInfo(url: 'http://stream');
+
+  @override
+  Future<List<Programme>> epg(List<Channel> channels) async => const [];
+
+  @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async => const [];
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int? maxPages,
+  }) async => const [];
+
+  @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async => MediaPage(items: const [], page: page, totalPages: page);
+
+  @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async => const [];
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async => item;
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      throw UnsupportedError('not playable');
+
+  @override
+  Future<void> dispose() async {}
+}

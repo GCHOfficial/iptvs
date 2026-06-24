@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -13,6 +14,10 @@ class AppDatabase {
   final Database _db;
   AppDatabase._(this._db);
 
+  /// Current schema version. Bump this and add an [onUpgrade] branch whenever
+  /// the schema changes.
+  static const schemaVersion = 7;
+
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
@@ -22,10 +27,19 @@ class AppDatabase {
 
     final dir = await getApplicationSupportDirectory();
     final path = p.join(dir.path, 'iptv.db');
+    return openAt(path);
+  }
 
+  /// Opens (and migrates) the database at an explicit [path] using the FFI
+  /// factory. Lets tests exercise schema creation, migrations, and the
+  /// read/write methods without depending on `path_provider`.
+  @visibleForTesting
+  static Future<AppDatabase> openAt(String path) async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
     final db = await openDatabase(
       path,
-      version: 7,
+      version: schemaVersion,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE sources (
