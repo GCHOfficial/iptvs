@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../data/net.dart';
 import 'source.dart';
 import 'xmltv.dart';
 
@@ -181,14 +182,11 @@ class M3uSource implements Source {
     if (userAgent != null) {
       req.headers.set(HttpHeaders.userAgentHeader, userAgent!);
     }
-    final resp = await req.close();
+    final resp = await req.close().timeout(kHttpReadTimeout);
     if (resp.statusCode != 200) {
-      throw StateError('HTTP ${resp.statusCode} fetching $uri');
+      // redactUrl strips credentials some providers embed in the playlist URL.
+      throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
     }
-    final builder = BytesBuilder();
-    await for (final chunk in resp) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
+    return resp.readBytes();
   }
 }

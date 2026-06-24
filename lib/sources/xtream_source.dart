@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
+import '../data/net.dart';
 import 'source.dart';
 import 'xmltv.dart';
 
@@ -305,15 +306,12 @@ class XtreamSource implements Source {
 
   Future<Uint8List> _download(Uri uri) async {
     final req = await _http.getUrl(uri);
-    final resp = await req.close();
+    final resp = await req.close().timeout(kHttpReadTimeout);
     if (resp.statusCode != 200) {
-      throw StateError('HTTP ${resp.statusCode} from $uri');
+      // redactUrl strips the username/password query params from the panel URL.
+      throw StateError('HTTP ${resp.statusCode} from ${redactUrl(uri)}');
     }
-    final builder = BytesBuilder();
-    await for (final chunk in resp) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
+    return resp.readBytes();
   }
 
   Future<MediaPage> _aggregateMediaPage(

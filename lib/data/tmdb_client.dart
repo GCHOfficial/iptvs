@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import '../sources/source.dart';
 import 'metadata_config.dart';
 import 'metadata_provider.dart';
+import 'net.dart';
 
 class TmdbClient implements MetadataProvider {
   final String apiKey;
@@ -12,7 +13,9 @@ class TmdbClient implements MetadataProvider {
 
   TmdbClient({required String apiKey, HttpClient? http})
     : apiKey = MetadataConfig.normalizeTmdbCredential(apiKey),
-      _http = http ?? HttpClient();
+      _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+
+  static const _connectTimeout = Duration(seconds: 15);
 
   static const providerKey = 'tmdb';
   static const _base = 'https://api.themoviedb.org/3';
@@ -115,15 +118,11 @@ class TmdbClient implements MetadataProvider {
     if (usesBearerToken) {
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $apiKey');
     }
-    final response = await request.close();
+    final response = await request.close().timeout(kHttpReadTimeout);
     if (response.statusCode != 200) {
       throw StateError('TMDB HTTP ${response.statusCode} auth=$authMode');
     }
-    final builder = BytesBuilder();
-    await for (final chunk in response) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
+    return response.readBytes();
   }
 
   ExternalMetadata _mapDetails(

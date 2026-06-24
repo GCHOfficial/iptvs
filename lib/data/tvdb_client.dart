@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import '../sources/source.dart';
 import 'metadata_provider.dart';
+import 'net.dart';
 
 class TvdbClient implements MetadataProvider {
   final String apiKey;
@@ -12,7 +12,9 @@ class TvdbClient implements MetadataProvider {
   String? _token;
 
   TvdbClient({required this.apiKey, this.pin = '', HttpClient? http})
-    : _http = http ?? HttpClient();
+    : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+
+  static const _connectTimeout = Duration(seconds: 15);
 
   static const providerKey = 'tvdb';
   static const _base = 'https://api4.thetvdb.com/v4';
@@ -129,12 +131,12 @@ class TvdbClient implements MetadataProvider {
     request.write(
       jsonEncode({'apikey': apiKey, if (pin.isNotEmpty) 'pin': pin}),
     );
-    final response = await request.close();
+    final response = await request.close().timeout(kHttpReadTimeout);
     if (response.statusCode != 200) {
       throw StateError('TVDB HTTP ${response.statusCode} auth=login');
     }
     final body = jsonDecode(
-      utf8.decode(await _readBytes(response), allowMalformed: true),
+      utf8.decode(await response.readBytes(), allowMalformed: true),
     );
     final token = body is Map && body['data'] is Map
         ? (body['data'] as Map)['token']?.toString()
@@ -156,12 +158,12 @@ class TvdbClient implements MetadataProvider {
       HttpHeaders.authorizationHeader,
       'Bearer ${await _bearerToken()}',
     );
-    final response = await request.close();
+    final response = await request.close().timeout(kHttpReadTimeout);
     if (response.statusCode != 200) {
       throw StateError('TVDB HTTP ${response.statusCode} path=$path');
     }
     return jsonDecode(
-      utf8.decode(await _readBytes(response), allowMalformed: true),
+      utf8.decode(await response.readBytes(), allowMalformed: true),
     );
   }
 
@@ -183,14 +185,6 @@ class TvdbClient implements MetadataProvider {
         .whereType<Map>()
         .map((entry) => Map<String, dynamic>.from(entry))
         .toList();
-  }
-
-  Future<Uint8List> _readBytes(HttpClientResponse response) async {
-    final builder = BytesBuilder();
-    await for (final chunk in response) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
   }
 
   Map<String, dynamic>? _bestSearchResult(

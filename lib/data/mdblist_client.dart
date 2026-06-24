@@ -1,16 +1,18 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import '../sources/source.dart';
 import 'metadata_provider.dart';
+import 'net.dart';
 
 class MdblistClient implements MetadataProvider {
   final String apiKey;
   final HttpClient _http;
 
   MdblistClient({required this.apiKey, HttpClient? http})
-    : _http = http ?? HttpClient();
+    : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+
+  static const _connectTimeout = Duration(seconds: 15);
 
   static const providerKey = 'mdblist';
   static const _base = 'https://api.mdblist.com';
@@ -58,21 +60,13 @@ class MdblistClient implements MetadataProvider {
 
   Future<dynamic> _get(Uri uri) async {
     final request = await _http.getUrl(uri);
-    final response = await request.close();
+    final response = await request.close().timeout(kHttpReadTimeout);
     if (response.statusCode != 200) {
       throw StateError('MDBList HTTP ${response.statusCode}');
     }
     return jsonDecode(
-      utf8.decode(await _readBytes(response), allowMalformed: true),
+      utf8.decode(await response.readBytes(), allowMalformed: true),
     );
-  }
-
-  Future<Uint8List> _readBytes(HttpClientResponse response) async {
-    final builder = BytesBuilder();
-    await for (final chunk in response) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
   }
 
   ({String provider, String value})? _providerId(MediaItem item) {
