@@ -238,13 +238,15 @@ class _SourceCard extends StatelessWidget {
                 ],
               ),
             ),
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert, color: AppColors.textLo),
-              onSelected: (v) => v == 'edit' ? onEdit() : onDelete(),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'edit', child: Text('Edit')),
-                PopupMenuItem(value: 'delete', child: Text('Delete')),
-              ],
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, color: AppColors.textLo),
+              tooltip: 'Edit',
+              onPressed: onEdit,
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: AppColors.textLo),
+              tooltip: 'Delete',
+              onPressed: onDelete,
             ),
           ],
         ),
@@ -306,6 +308,8 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   late SourceKind _kind;
   late final TextEditingController _label;
   final Map<String, TextEditingController> _fields = {};
+  final Map<String, FocusNode> _focusNodes = {};
+  final FocusNode _labelFocus = FocusNode();
 
   @override
   void initState() {
@@ -317,8 +321,12 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   @override
   void dispose() {
     _label.dispose();
+    _labelFocus.dispose();
     for (final c in _fields.values) {
       c.dispose();
+    }
+    for (final f in _focusNodes.values) {
+      f.dispose();
     }
     super.dispose();
   }
@@ -327,6 +335,9 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     key,
     () => TextEditingController(text: widget.existing?.fields[key] ?? ''),
   );
+
+  FocusNode _focusNode(String key) =>
+      _focusNodes.putIfAbsent(key, () => FocusNode());
 
   List<_FieldSpec> _specs(SourceKind kind) {
     switch (kind) {
@@ -413,19 +424,42 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
             onChanged: (k) => setState(() => _kind = k ?? _kind),
           ),
           const SizedBox(height: 16),
-          TextField(
-            controller: _label,
-            decoration: const InputDecoration(labelText: 'Label (optional)'),
-          ),
-          for (final s in _specs(_kind)) ...[
+          Builder(builder: (context) {
+            final specs = _specs(_kind);
+            return TextField(
+              controller: _label,
+              focusNode: _labelFocus,
+              autofocus: widget.existing == null,
+              textInputAction: specs.isEmpty
+                  ? TextInputAction.done
+                  : TextInputAction.next,
+              onSubmitted: (_) => specs.isEmpty
+                  ? _save()
+                  : _focusNode(specs.first.key).requestFocus(),
+              decoration: const InputDecoration(labelText: 'Label (optional)'),
+            );
+          }),
+          for (int i = 0; i < _specs(_kind).length; i++) ...[
             const SizedBox(height: 16),
-            TextField(
-              controller: _controller(s.key),
-              obscureText: s.obscure,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: InputDecoration(labelText: s.label, hintText: s.hint),
-            ),
+            Builder(builder: (context) {
+              final specs = _specs(_kind);
+              final s = specs[i];
+              return TextField(
+                controller: _controller(s.key),
+                focusNode: _focusNode(s.key),
+                textInputAction: i == specs.length - 1
+                    ? TextInputAction.done
+                    : TextInputAction.next,
+                onSubmitted: (_) => i == specs.length - 1
+                    ? _save()
+                    : _focusNode(specs[i + 1].key).requestFocus(),
+                obscureText: s.obscure,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration:
+                    InputDecoration(labelText: s.label, hintText: s.hint),
+              );
+            }),
           ],
           const SizedBox(height: 28),
           SizedBox(
@@ -460,6 +494,10 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   final _tvdb = TextEditingController();
   final _tvdbPin = TextEditingController();
   final _mdblist = TextEditingController();
+  final _tmdbFocus = FocusNode();
+  final _tvdbFocus = FocusNode();
+  final _tvdbPinFocus = FocusNode();
+  final _mdblistFocus = FocusNode();
   String _provider = 'tmdb';
   bool _autoEnrich = true;
   bool _loading = true;
@@ -477,6 +515,10 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     _tvdb.dispose();
     _tvdbPin.dispose();
     _mdblist.dispose();
+    _tmdbFocus.dispose();
+    _tvdbFocus.dispose();
+    _tvdbPinFocus.dispose();
+    _mdblistFocus.dispose();
     super.dispose();
   }
 
@@ -603,6 +645,9 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                 const SizedBox(height: 16),
                 TextField(
                   controller: _tmdb,
+                  focusNode: _tmdbFocus,
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => _tvdbFocus.requestFocus(),
                   obscureText: true,
                   autocorrect: false,
                   enableSuggestions: false,
@@ -614,6 +659,9 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                 const SizedBox(height: 12),
                 TextField(
                   controller: _tvdb,
+                  focusNode: _tvdbFocus,
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => _tvdbPinFocus.requestFocus(),
                   obscureText: true,
                   autocorrect: false,
                   enableSuggestions: false,
@@ -625,6 +673,9 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                 const SizedBox(height: 12),
                 TextField(
                   controller: _tvdbPin,
+                  focusNode: _tvdbPinFocus,
+                  textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => _mdblistFocus.requestFocus(),
                   obscureText: true,
                   autocorrect: false,
                   enableSuggestions: false,
@@ -636,6 +687,9 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                 const SizedBox(height: 12),
                 TextField(
                   controller: _mdblist,
+                  focusNode: _mdblistFocus,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _save(),
                   obscureText: true,
                   autocorrect: false,
                   enableSuggestions: false,
