@@ -37,7 +37,11 @@ class XtreamSource implements Source {
     required this.password,
     this.streamExtension = 'ts',
     this.debugApi,
+    this.displayName,
   });
+
+  /// User-assigned label (from SourceConfig); preferred over the derived name.
+  final String? displayName;
 
   String get _base {
     var h = host.trim();
@@ -50,7 +54,8 @@ class XtreamSource implements Source {
   String get id => 'xtream:$_base|$username';
 
   @override
-  String get name => 'Xtream · $username';
+  String get name =>
+      displayName?.trim().isNotEmpty == true ? displayName!.trim() : 'Xtream · $username';
 
   @override
   Future<void> connect() async {

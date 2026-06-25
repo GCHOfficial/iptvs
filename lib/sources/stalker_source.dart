@@ -165,13 +165,18 @@ class StalkerSource implements Source {
     this.lang = 'en',
     this.timezone = 'Europe/Bucharest',
     this.diagnostics = true,
+    this.displayName,
   });
+
+  /// User-assigned label (from SourceConfig); preferred over the derived name.
+  final String? displayName;
 
   @override
   String get id => 'stalker:$portal|$mac';
 
   @override
-  String get name => 'Stalker · $mac';
+  String get name =>
+      displayName?.trim().isNotEmpty == true ? displayName!.trim() : 'Stalker · $mac';
 
   @override
   Future<void> connect() async {

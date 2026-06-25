@@ -23,13 +23,23 @@ class M3uSource implements Source {
   List<Category>? _categories;
   String? _headerEpgUrl;
 
-  M3uSource({required this.playlistUrl, this.epgUrl, this.userAgent});
+  M3uSource({
+    required this.playlistUrl,
+    this.epgUrl,
+    this.userAgent,
+    this.displayName,
+  });
+
+  /// User-assigned label (from SourceConfig); preferred over the derived name.
+  final String? displayName;
 
   @override
   String get id => 'm3u:$playlistUrl';
 
   @override
-  String get name => 'M3U · ${Uri.tryParse(playlistUrl)?.host ?? 'playlist'}';
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'M3U · ${Uri.tryParse(playlistUrl)?.host ?? 'playlist'}';
 
   @override
   Future<void> connect() async {} // nothing to authenticate

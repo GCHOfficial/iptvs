@@ -41,7 +41,7 @@ constexpr int kNativeBottomControlsHeightLive = 80;
 constexpr int kNativeBottomControlsHeightVod = 116;
 // Live with an EPG snapshot gets a taller bar: a programme row (title + progress
 // + next) sits where the VOD scrubber would be.
-constexpr int kNativeBottomControlsHeightLiveEpg = 132;
+constexpr int kNativeBottomControlsHeightLiveEpg = 150;
 constexpr int kNativeMenuWidth = 300;
 constexpr int kNativeMenuHeaderHeight = 36;
 constexpr int kNativeMenuRowHeight = 40;
@@ -565,12 +565,14 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
 
   l.has_epg = HasLiveEpg();
   if (l.has_epg) {
-    const int ey = by + 14;
+    // Programme row sits in the upper part of the (taller) live bar, well clear
+    // of the control row below: title + time, then progress, then next.
+    const int ey = by + 18;
     const int time_w = 110;
     l.epg_title = RectFrom(16, ey, MaxInt(20, right - 16 - time_w - 10), ey + 20);
     l.epg_time = RectFrom(right - 16 - time_w, ey, right - 16, ey + 20);
-    l.epg_progress = RectFrom(16, ey + 28, right - 16, ey + 28 + 6);
-    l.epg_next = RectFrom(16, ey + 42, right - 16, ey + 42 + 18);
+    l.epg_progress = RectFrom(16, ey + 30, right - 16, ey + 30 + 6);
+    l.epg_next = RectFrom(16, ey + 46, right - 16, ey + 46 + 18);
   }
   return l;
 }
