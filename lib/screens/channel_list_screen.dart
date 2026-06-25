@@ -59,6 +59,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   bool _fromCache = false;
   Timer? _epgTimer;
   Timer? _searchTimer;
+  // One controller for whichever list/grid is mounted (only one exists per tab),
+  // so a tab/category change can jump it back to the top.
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -75,6 +78,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _epgTimer?.cancel();
     _searchTimer?.cancel();
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -509,6 +513,15 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return b.toString();
   }
 
+  // Jump the active list/grid back to the top after a tab/category change so the
+  // new content isn't shown scrolled to the previous position. Post-frame so the
+  // new list has attached before we move it.
+  void _scrollToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) _scrollController.jumpTo(0);
+    });
+  }
+
   void _selectTab(ContentKind kind) {
     if (_tab == kind) return;
     final previous = _tab;
@@ -529,6 +542,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (kind != ContentKind.live && !_media.containsKey(kind)) {
       _loadMedia(kind);
     }
+    _scrollToTop();
   }
 
   @override
@@ -589,7 +603,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 ? _CategoryDropdown(
                     categories: _categories,
                     value: _categoryId,
-                    onChanged: (v) => setState(() => _categoryId = v),
+                    onChanged: (v) {
+                      setState(() => _categoryId = v);
+                      _scrollToTop();
+                    },
                   )
                 : _MediaCategoryDropdown(
                     categories: _media[_tab]?.categories ?? const [],
@@ -601,6 +618,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         _mediaSearchQuery.remove(_tab);
                       });
                       _loadMedia(_tab);
+                      _scrollToTop();
                       if (_query.trim().length >= 2) {
                         _searchTimer?.cancel();
                         _searchTimer = Timer(
@@ -697,6 +715,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       );
     }
     return ListView.builder(
+      controller: _scrollController,
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
       scrollCacheExtent: const ScrollCacheExtent.pixels(
         120,
@@ -761,6 +780,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         final wide = constraints.maxWidth >= 860;
         if (!wide) {
           return ListView.builder(
+            controller: _scrollController,
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
             scrollCacheExtent: const ScrollCacheExtent.pixels(800),
             itemCount: visible.length + (showLoadMore ? 1 : 0),
@@ -782,6 +802,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         }
         final columns = constraints.maxWidth >= 1280 ? 6 : 4;
         return GridView.builder(
+          controller: _scrollController,
           padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
           scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(

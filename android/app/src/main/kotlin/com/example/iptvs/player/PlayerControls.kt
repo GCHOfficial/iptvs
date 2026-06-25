@@ -292,10 +292,14 @@ private fun BottomBar(
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
+                        // Uniform gaps for every control (the parent Row supplies them, so
+                        // TransportControls omits its own spacers) — avoids per-spacer
+                        // rounding that left a wider forward-10s→mute gap on some devices.
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         // Fixed-width volume so the row stays left-grouped (matching the
                         // cluster row below) instead of the slider stretching to the edge.
-                        TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(140.dp))
+                        TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(140.dp), spread = true)
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(
@@ -331,7 +335,10 @@ private fun RowScope.TransportControls(
     playFocus: FocusRequester,
     onInteract: () -> Unit,
     volumeModifier: Modifier,
+    spread: Boolean = false,
 ) {
+    // When `spread`, the parent Row supplies uniform gaps (`spacedBy`), so we omit
+    // the manual spacers; otherwise (landscape) we space the controls ourselves.
     IconControlButton(
         icon = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
         contentDescription = "Play/Pause",
@@ -339,21 +346,21 @@ private fun RowScope.TransportControls(
         onClick = { onInteract(); callbacks.onPlayPause() },
     )
     if (!state.isLive) {
-        Spacer(Modifier.width(8.dp))
+        if (!spread) Spacer(Modifier.width(8.dp))
         IconControlButton(Icons.Filled.Replay10, "Back 10s") {
             onInteract(); callbacks.onSeekBy(-10_000)
         }
-        Spacer(Modifier.width(8.dp))
+        if (!spread) Spacer(Modifier.width(8.dp))
         IconControlButton(Icons.Filled.Forward10, "Forward 10s") {
             onInteract(); callbacks.onSeekBy(10_000)
         }
     }
-    Spacer(Modifier.width(8.dp))
+    if (!spread) Spacer(Modifier.width(8.dp))
     IconControlButton(
         icon = if (state.muted || state.volume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
         contentDescription = "Mute",
     ) { onInteract(); callbacks.onToggleMute() }
-    Spacer(Modifier.width(8.dp))
+    if (!spread) Spacer(Modifier.width(8.dp))
     SlimSlider(
         value = if (state.muted) 0f else state.volume,
         onValueChange = { onInteract(); callbacks.onSetVolume(it) },

@@ -92,10 +92,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _subs.add(
       _player.stream.log.listen((entry) {
         if (entry.level != 'warn' && entry.level != 'error') return;
-        // ffmpeg demux/decode warnings (UDTA, timescale, …) are non-fatal noise,
-        // amplified by the shared libmpv av_log callback relaying the native
-        // engine's software-decode complaints. Drop them; keep real errors.
-        if (entry.level == 'warn' && entry.prefix.contains('ffmpeg')) return;
+        // ffmpeg-prefixed lines (UDTA/timescale demux noise, alternating
+        // `hevc: Could not find ref with POC …` / `Error constructing the frame
+        // RPS` decode complaints) are non-fatal diagnostics, amplified by the
+        // shared libav av_log callback relaying the native engine's software
+        // decode out through media_kit's log stream. Drop them at both warn and
+        // error level — genuine fatal playback failures arrive on stream.error,
+        // not here. Keep non-ffmpeg warnings/errors.
+        if (entry.prefix.contains('ffmpeg')) return;
         _logPlaybackDeduped('${entry.level} ${entry.prefix}: ${entry.text}');
       }),
     );
@@ -1101,60 +1105,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  Widget _nativePlaybackOverlay() {
-    if (Platform.isWindows) {
-      return const ColoredBox(color: Colors.black);
-    }
-    return Container(
-      color: Colors.black,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.hdr_on, color: AppColors.accent, size: 48),
-          const SizedBox(height: 12),
-          Text(
-            widget.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            'Playing in the native HDR player',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: AppColors.textLo),
-          ),
-          const SizedBox(height: 16),
-          if (!Platform.isWindows) ...[
-            const SizedBox(height: 16),
-            _nativeActions(),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _nativeActions() {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      alignment: WrapAlignment.center,
-      children: [
-        FilledButton.icon(
-          onPressed: _back,
-          icon: const Icon(Icons.arrow_back),
-          label: const Text('Back'),
-        ),
-      ],
-    );
-  }
+  // The native player (Android Activity / Windows HWND) renders over this route
+  // and owns its own controls; this surface is only ever visible for the launch
+  // flicker and is auto-popped on `nativeClosed`. Keep it a bare black fill — no
+  // labels or buttons that would read as a stray extra screen.
+  Widget _nativePlaybackOverlay() => const ColoredBox(color: Colors.black);
 
   String _redactPlayback(String value) {
     final urlMatch = RegExp(
