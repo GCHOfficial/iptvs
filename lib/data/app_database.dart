@@ -16,7 +16,7 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
-  static const schemaVersion = 7;
+  static const schemaVersion = 8;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -103,6 +103,12 @@ class AppDatabase {
           await _addMediaPageParentColumn(db);
           await _createExternalMetadata(db);
         }
+        if (oldV < 8) {
+          // Repair DBs created fresh at v7 (and pre-v3 upgrades): `onCreate` /
+          // `_createMediaTables` built every media table except external_metadata,
+          // so it was missing until now. Idempotent (CREATE TABLE IF NOT EXISTS).
+          await _createExternalMetadata(db);
+        }
       },
     );
     return AppDatabase._(db);
@@ -174,6 +180,7 @@ class AppDatabase {
     );
     await _createMediaEnrichment(db);
     await _createMediaPageState(db);
+    await _createExternalMetadata(db);
   }
 
   static Future<void> _addMediaPagingColumns(Database db) async {

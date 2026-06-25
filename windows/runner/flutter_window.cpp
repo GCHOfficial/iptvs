@@ -1,8 +1,11 @@
 #include "flutter_window.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <flutter/encodable_value.h>
@@ -11,6 +14,7 @@
 #include <windowsx.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "resource.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject &project)
     : project_(project) {}
@@ -28,18 +32,21 @@ constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
-constexpr int kNativeTopControlsHeight = 58;
-constexpr int kNativeBottomControlsHeight = 96;
-constexpr int kNativeSubtitleMenuWidth = 286;
-constexpr int kNativeSubtitleMenuHeaderHeight = 36;
-constexpr int kNativeSubtitleMenuRowHeight = 40;
-constexpr int kNativeSubtitleMenuMaxRows = 5;
-constexpr int kNativeSubtitleMenuPadding = 10;
+constexpr int kNativeTopControlsHeight = 64;
+// The bottom bar is a single row for live (no scrubber) and two rows for VOD
+// (scrubber row + control row).
+constexpr int kNativeBottomControlsHeightLive = 80;
+constexpr int kNativeBottomControlsHeightVod = 116;
+constexpr int kNativeMenuWidth = 300;
+constexpr int kNativeMenuHeaderHeight = 36;
+constexpr int kNativeMenuRowHeight = 40;
+constexpr int kNativeMenuMaxRows = 5;
+constexpr int kNativeMenuPadding = 10;
 constexpr int kNativeControlsKindOverlay = 0;
 bool g_native_video_cursor_visible = true;
 POINT g_last_video_mouse{-1, -1};
 POINT g_last_controls_mouse{-1, -1};
-int g_native_subtitle_scroll_offset = 0;
+int g_native_menu_scroll_offset = 0;
 
 HWND NativeControlsOwner(HWND hwnd) {
   if (HWND owner = GetWindow(hwnd, GW_OWNER)) {
@@ -48,25 +55,103 @@ HWND NativeControlsOwner(HWND hwnd) {
   return GetParent(hwnd);
 }
 
-struct NativeSubtitleOption {
+struct NativeMenuOption {
   std::string id;
   std::wstring label;
 };
+
+// Which secondary list-menu (if any) is currently open. The menus all share one
+// rendering / hit-test / scroll path; only the backing option list differs.
+enum class NativeMenuKind { kNone, kAudio, kSubtitles, kSpeed };
 
 struct NativeControlState {
   std::wstring title;
   bool is_live = false;
   bool playing = false;
   bool fullscreen = false;
-  bool subtitles_open = false;
+  NativeMenuKind open_menu = NativeMenuKind::kNone;
+  bool info_open = false;
   double position_ms = 0.0;
   double duration_ms = 0.0;
   double volume = 100.0;
   std::string selected_subtitle_id = "auto";
-  std::vector<NativeSubtitleOption> subtitles;
+  std::string selected_audio_id = "auto";
+  std::string selected_speed_id;
+  std::vector<NativeMenuOption> subtitle_tracks;
+  std::vector<NativeMenuOption> audio_tracks;
+  std::vector<NativeMenuOption> speed_options;
+  std::wstring aspect_label;
+  // Stream info (for the badges + info panel). Empty / zero means "unknown",
+  // in which case the corresponding row/badge is omitted.
+  int video_width = 0;
+  int video_height = 0;
+  double fps = 0.0;
+  std::wstring dynamic_range;
+  std::wstring video_codec;
+  std::wstring audio_codec;
+  std::wstring audio_channels;
 };
 
 NativeControlState g_native_control_state;
+
+bool ControlsPinnedByOverlay() {
+  return g_native_control_state.open_menu != NativeMenuKind::kNone ||
+         g_native_control_state.info_open;
+}
+
+const std::vector<NativeMenuOption> &MenuOptions(NativeMenuKind kind) {
+  static const std::vector<NativeMenuOption> kEmpty;
+  switch (kind) {
+  case NativeMenuKind::kAudio:
+    return g_native_control_state.audio_tracks;
+  case NativeMenuKind::kSubtitles:
+    return g_native_control_state.subtitle_tracks;
+  case NativeMenuKind::kSpeed:
+    return g_native_control_state.speed_options;
+  default:
+    return kEmpty;
+  }
+}
+
+const std::string &MenuSelectedId(NativeMenuKind kind) {
+  static const std::string kNone;
+  switch (kind) {
+  case NativeMenuKind::kAudio:
+    return g_native_control_state.selected_audio_id;
+  case NativeMenuKind::kSubtitles:
+    return g_native_control_state.selected_subtitle_id;
+  case NativeMenuKind::kSpeed:
+    return g_native_control_state.selected_speed_id;
+  default:
+    return kNone;
+  }
+}
+
+std::wstring MenuHeader(NativeMenuKind kind) {
+  switch (kind) {
+  case NativeMenuKind::kAudio:
+    return L"Audio";
+  case NativeMenuKind::kSubtitles:
+    return L"Subtitles";
+  case NativeMenuKind::kSpeed:
+    return L"Playback speed";
+  default:
+    return L"";
+  }
+}
+
+std::string MenuSelectCommandPrefix(NativeMenuKind kind) {
+  switch (kind) {
+  case NativeMenuKind::kAudio:
+    return "audioTrack:";
+  case NativeMenuKind::kSubtitles:
+    return "subtitleTrack:";
+  case NativeMenuKind::kSpeed:
+    return "speed:";
+  default:
+    return "";
+  }
+}
 
 std::wstring Utf8ToWide(const std::string &value) {
   if (value.empty()) {
@@ -166,6 +251,38 @@ std::string EncodableStdStringArg(const flutter::EncodableValue *args,
   return std::get<std::string>(found->second);
 }
 
+std::vector<NativeMenuOption> ParseMenuOptions(
+    const flutter::EncodableValue *args, const char *key) {
+  std::vector<NativeMenuOption> out;
+  if (!args || !std::holds_alternative<flutter::EncodableMap>(*args)) {
+    return out;
+  }
+  const auto &map = std::get<flutter::EncodableMap>(*args);
+  const auto found = map.find(flutter::EncodableValue(key));
+  if (found == map.end() ||
+      !std::holds_alternative<flutter::EncodableList>(found->second)) {
+    return out;
+  }
+  for (const auto &item : std::get<flutter::EncodableList>(found->second)) {
+    if (!std::holds_alternative<flutter::EncodableMap>(item)) {
+      continue;
+    }
+    const auto &item_map = std::get<flutter::EncodableMap>(item);
+    const auto id = item_map.find(flutter::EncodableValue("id"));
+    const auto label = item_map.find(flutter::EncodableValue("label"));
+    if (id == item_map.end() || label == item_map.end() ||
+        !std::holds_alternative<std::string>(id->second) ||
+        !std::holds_alternative<std::string>(label->second)) {
+      continue;
+    }
+    out.push_back(NativeMenuOption{
+        std::get<std::string>(id->second),
+        Utf8ToWide(std::get<std::string>(label->second)),
+    });
+  }
+  return out;
+}
+
 std::wstring FormatTime(double milliseconds) {
   const int total_seconds = std::max(0, static_cast<int>(milliseconds / 1000));
   const int hours = total_seconds / 3600;
@@ -207,11 +324,52 @@ bool PointInRect(int x, int y, const RECT &rect) {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-HFONT UiFont(int size, int weight = FW_NORMAL,
-             const wchar_t *family = L"Segoe UI") {
-  return CreateFont(size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH | FF_SWISS, family);
+// Loads the bundled Inter weights (embedded as RCDATA) so the GDI overlay can
+// render in the app's typeface without requiring Inter to be installed.
+void LoadBundledFonts() {
+  static bool loaded = false;
+  if (loaded) {
+    return;
+  }
+  loaded = true;
+  HMODULE module = GetModuleHandle(nullptr);
+  const int ids[] = {IDR_FONT_INTER_REGULAR, IDR_FONT_INTER_SEMIBOLD,
+                     IDR_FONT_INTER_BOLD};
+  for (int id : ids) {
+    HRSRC res = FindResource(module, MAKEINTRESOURCE(id), RT_RCDATA);
+    if (!res) {
+      continue;
+    }
+    HGLOBAL handle = LoadResource(module, res);
+    if (!handle) {
+      continue;
+    }
+    void *data = LockResource(handle);
+    const DWORD size = SizeofResource(module, res);
+    if (data && size > 0) {
+      DWORD count = 0;
+      AddFontMemResourceEx(data, size, nullptr, &count);
+    }
+  }
+}
+
+// Default family is Inter (bundled). Inter's SemiBold is a separate GDI family
+// ("Inter SemiBold"); Regular/Bold share the "Inter" family via weight. Pass an
+// explicit [family] (e.g. the Segoe MDL2 icon font) to bypass this mapping.
+HFONT UiFont(int size, int weight = FW_NORMAL, const wchar_t *family = nullptr) {
+  const wchar_t *face = family;
+  int lf_weight = weight;
+  if (face == nullptr) {
+    if (weight >= FW_SEMIBOLD && weight < FW_BOLD) {
+      face = L"Inter SemiBold";
+      lf_weight = FW_NORMAL;
+    } else {
+      face = L"Inter";
+    }
+  }
+  return CreateFont(size, 0, 0, 0, lf_weight, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
 }
 
 void FillRectColor(HDC hdc, const RECT &rect, COLORREF color) {
@@ -259,15 +417,6 @@ void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label) {
   DeleteObject(font);
 }
 
-RECT PlaybackProgressRect(const RECT &rect) {
-  return RectFrom(244, 43, MaxInt(260, static_cast<int>(rect.right) - 386), 51);
-}
-
-RECT VolumeProgressRect(const RECT &rect) {
-  return RectFrom(MaxInt(0, static_cast<int>(rect.right) - 162), 43,
-                  MaxInt(0, static_cast<int>(rect.right) - 88), 51);
-}
-
 double RatioFromX(int x, const RECT &rect) {
   return std::clamp(static_cast<double>(x - rect.left) /
                         static_cast<double>(std::max(1, RectWidth(rect))),
@@ -278,32 +427,14 @@ RECT TopControlsRect(const RECT &rect) {
   return RectFrom(0, 0, rect.right, kNativeTopControlsHeight);
 }
 
-RECT BottomControlsRect(const RECT &rect) {
-  return RectFrom(0, MaxInt(0, rect.bottom - kNativeBottomControlsHeight),
-                  rect.right, rect.bottom);
+int BottomControlsHeight() {
+  return g_native_control_state.is_live ? kNativeBottomControlsHeightLive
+                                        : kNativeBottomControlsHeightVod;
 }
 
-RECT SubtitleMenuRect(const RECT &rect) {
-  const int width = RectWidth(rect);
-  const int height = RectHeight(rect);
-  const int menu_width =
-      std::min(kNativeSubtitleMenuWidth, MaxInt(1, width - 24));
-  const int menu_height =
-      kNativeSubtitleMenuHeaderHeight +
-      std::clamp(
-          static_cast<int>(g_native_control_state.subtitles.empty()
-                               ? 1
-                               : g_native_control_state.subtitles.size()),
-          1, kNativeSubtitleMenuMaxRows) *
-          kNativeSubtitleMenuRowHeight +
-      kNativeSubtitleMenuPadding;
-  const int subtitle_button_center_x = width - 254;
-  const int menu_left = std::clamp(subtitle_button_center_x - (menu_width / 2),
-                                   12, MaxInt(12, width - menu_width - 12));
-  const int menu_top =
-      MaxInt(8, height - kNativeBottomControlsHeight - menu_height - 8);
-  return RectFrom(menu_left, menu_top, menu_left + menu_width,
-                  menu_top + menu_height);
+RECT BottomControlsRect(const RECT &rect) {
+  return RectFrom(0, MaxInt(0, rect.bottom - BottomControlsHeight()),
+                  rect.right, rect.bottom);
 }
 
 RECT OffsetRectToLocal(RECT rect, int dx, int dy) {
@@ -314,64 +445,456 @@ RECT OffsetRectToLocal(RECT rect, int dx, int dy) {
   return rect;
 }
 
-int SubtitleVisibleRowCount() {
-  if (g_native_control_state.subtitles.empty()) {
+// Single source of truth for the bottom-bar geometry, shared by paint,
+// hit-testing, the click-through region, and the menu anchor. The right cluster
+// is laid out from the right edge leftward so hidden (contextual) buttons don't
+// leave gaps.
+struct BottomLayout {
+  RECT bottom;
+  int control_center_y = 0;
+  RECT play;
+  bool has_seek = false;
+  RECT seek_back;
+  RECT seek_forward;
+  RECT mute;
+  RECT volume; // thin slider track
+  bool has_scrubber = false;
+  RECT progress; // thin slider track
+  RECT position_text;
+  RECT duration_text;
+  bool has_speed = false;
+  bool has_audio = false;
+  bool has_subtitles = false;
+  RECT speed;
+  RECT audio;
+  RECT subtitles;
+  RECT aspect;
+  RECT info;
+  RECT fullscreen;
+};
+
+BottomLayout ComputeBottomLayout(const RECT &rect) {
+  BottomLayout l;
+  l.bottom = BottomControlsRect(rect);
+  const int by = l.bottom.top;
+  const int right = MaxInt(0, static_cast<int>(rect.right));
+  const bool live = g_native_control_state.is_live;
+  const int cy = by + (live ? 40 : 76);
+  l.control_center_y = cy;
+  const int kBtn = 36;
+  const int top = cy - kBtn / 2;
+  const int bot = cy + kBtn / 2;
+
+  int x = 16;
+  l.play = RectFrom(x, cy - 21, x + 42, cy + 21);
+  x += 42 + 12;
+  l.has_seek = !live;
+  if (l.has_seek) {
+    l.seek_back = RectFrom(x, top, x + 44, bot);
+    x += 44 + 6;
+    l.seek_forward = RectFrom(x, top, x + 44, bot);
+    x += 44 + 14;
+  }
+  l.mute = RectFrom(x, top, x + kBtn, bot);
+  x += kBtn + 8;
+  l.volume = RectFrom(x, cy - 3, x + 84, cy + 3);
+
+  int rx = right - 16;
+  const auto place = [&](RECT &out, int w) {
+    out = RectFrom(rx - w, top, rx, bot);
+    rx -= w + 8;
+  };
+  place(l.fullscreen, kBtn);
+  place(l.info, kBtn);
+  place(l.aspect, 52);
+  l.has_subtitles = !g_native_control_state.subtitle_tracks.empty();
+  if (l.has_subtitles) {
+    place(l.subtitles, kBtn);
+  }
+  l.has_audio = !g_native_control_state.audio_tracks.empty();
+  if (l.has_audio) {
+    place(l.audio, kBtn);
+  }
+  l.has_speed = !g_native_control_state.speed_options.empty();
+  if (l.has_speed) {
+    place(l.speed, 54);
+  }
+
+  l.has_scrubber = !live;
+  if (l.has_scrubber) {
+    const int sy = by + 30;
+    const int time_w = 62;
+    l.position_text = RectFrom(16, sy - 12, 16 + time_w, sy + 12);
+    l.duration_text =
+        RectFrom(right - 16 - time_w, sy - 12, right - 16, sy + 12);
+    l.progress =
+        RectFrom(16 + time_w + 12, sy - 3, right - 16 - time_w - 12, sy + 3);
+  }
+  return l;
+}
+
+int MenuAnchorX(const BottomLayout &l) {
+  switch (g_native_control_state.open_menu) {
+  case NativeMenuKind::kAudio:
+    return (l.audio.left + l.audio.right) / 2;
+  case NativeMenuKind::kSubtitles:
+    return (l.subtitles.left + l.subtitles.right) / 2;
+  case NativeMenuKind::kSpeed:
+    return (l.speed.left + l.speed.right) / 2;
+  default:
+    return (l.fullscreen.left + l.fullscreen.right) / 2;
+  }
+}
+
+int MenuVisibleRowCount() {
+  const auto &options = MenuOptions(g_native_control_state.open_menu);
+  if (options.empty()) {
     return 1;
   }
-  return std::clamp(static_cast<int>(g_native_control_state.subtitles.size()),
-                    1, kNativeSubtitleMenuMaxRows);
+  return std::clamp(static_cast<int>(options.size()), 1, kNativeMenuMaxRows);
 }
 
-int SubtitleMenuHeight() {
-  return kNativeSubtitleMenuHeaderHeight +
-         SubtitleVisibleRowCount() * kNativeSubtitleMenuRowHeight +
-         kNativeSubtitleMenuPadding;
+int MenuMaxScrollOffset() {
+  const auto &options = MenuOptions(g_native_control_state.open_menu);
+  return MaxInt(0, static_cast<int>(options.size()) - kNativeMenuMaxRows);
 }
 
-int MaxSubtitleScrollOffset() {
-  return MaxInt(0, static_cast<int>(g_native_control_state.subtitles.size()) -
-                       kNativeSubtitleMenuMaxRows);
+void ClampMenuScrollOffset() {
+  g_native_menu_scroll_offset =
+      std::clamp(g_native_menu_scroll_offset, 0, MenuMaxScrollOffset());
 }
 
-void ClampSubtitleScrollOffset() {
-  g_native_subtitle_scroll_offset =
-      std::clamp(g_native_subtitle_scroll_offset, 0, MaxSubtitleScrollOffset());
-}
-
-void EnsureSelectedSubtitleVisible() {
+void EnsureSelectedMenuVisible() {
+  const auto &options = MenuOptions(g_native_control_state.open_menu);
+  const auto &selected_id = MenuSelectedId(g_native_control_state.open_menu);
   int selected = -1;
-  for (size_t i = 0; i < g_native_control_state.subtitles.size(); i++) {
-    if (g_native_control_state.subtitles[i].id ==
-        g_native_control_state.selected_subtitle_id) {
+  for (size_t i = 0; i < options.size(); i++) {
+    if (options[i].id == selected_id) {
       selected = static_cast<int>(i);
       break;
     }
   }
   if (selected < 0) {
-    ClampSubtitleScrollOffset();
+    ClampMenuScrollOffset();
     return;
   }
-  if (selected < g_native_subtitle_scroll_offset) {
-    g_native_subtitle_scroll_offset = selected;
-  } else if (selected >=
-             g_native_subtitle_scroll_offset + kNativeSubtitleMenuMaxRows) {
-    g_native_subtitle_scroll_offset = selected - kNativeSubtitleMenuMaxRows + 1;
+  if (selected < g_native_menu_scroll_offset) {
+    g_native_menu_scroll_offset = selected;
+  } else if (selected >= g_native_menu_scroll_offset + kNativeMenuMaxRows) {
+    g_native_menu_scroll_offset = selected - kNativeMenuMaxRows + 1;
   }
-  ClampSubtitleScrollOffset();
+  ClampMenuScrollOffset();
 }
 
-std::vector<RECT> SubtitleOptionRects(const RECT &rect) {
+RECT MenuRect(const RECT &rect, int anchor_x) {
+  const auto &options = MenuOptions(g_native_control_state.open_menu);
+  const int width = RectWidth(rect);
+  const int height = RectHeight(rect);
+  const int menu_width = std::min(kNativeMenuWidth, MaxInt(1, width - 24));
+  const int rows =
+      std::clamp(static_cast<int>(options.empty() ? 1 : options.size()), 1,
+                 kNativeMenuMaxRows);
+  const int menu_height = kNativeMenuHeaderHeight + rows * kNativeMenuRowHeight +
+                          kNativeMenuPadding;
+  const int menu_left = std::clamp(anchor_x - (menu_width / 2), 12,
+                                   MaxInt(12, width - menu_width - 12));
+  const int menu_top =
+      MaxInt(8, height - BottomControlsHeight() - menu_height - 8);
+  return RectFrom(menu_left, menu_top, menu_left + menu_width,
+                  menu_top + menu_height);
+}
+
+RECT CurrentMenuRect(const RECT &rect) {
+  if (g_native_control_state.open_menu == NativeMenuKind::kNone) {
+    return RectFrom(0, 0, 0, 0);
+  }
+  const BottomLayout layout = ComputeBottomLayout(rect);
+  return MenuRect(rect, MenuAnchorX(layout));
+}
+
+std::vector<RECT> MenuOptionRects(const RECT &rect) {
   std::vector<RECT> out;
-  const int visible_rows = SubtitleVisibleRowCount();
+  const int visible_rows = MenuVisibleRowCount();
   const int left = 10;
   const int right = rect.right - 10;
-  int top = kNativeSubtitleMenuHeaderHeight;
+  int top = kNativeMenuHeaderHeight;
   for (int i = 0; i < visible_rows; i++) {
-    out.push_back(
-        RectFrom(left, top, right, top + kNativeSubtitleMenuRowHeight - 4));
-    top += kNativeSubtitleMenuRowHeight;
+    out.push_back(RectFrom(left, top, right, top + kNativeMenuRowHeight - 4));
+    top += kNativeMenuRowHeight;
   }
   return out;
+}
+
+std::wstring ResolutionBadge() {
+  const int w = g_native_control_state.video_width;
+  const int h = g_native_control_state.video_height;
+  if (w >= 3840 || h >= 2160) {
+    return L"4K";
+  }
+  if (h >= 1080) {
+    return L"1080p";
+  }
+  if (h >= 720) {
+    return L"720p";
+  }
+  if (h > 0) {
+    return L"SD";
+  }
+  return L"";
+}
+
+std::wstring HdrBadge() {
+  const std::wstring &dr = g_native_control_state.dynamic_range;
+  if (dr.find(L"Dolby") != std::wstring::npos ||
+      dr.find(L"DV") != std::wstring::npos) {
+    return L"DV";
+  }
+  if (dr.find(L"HDR10") != std::wstring::npos) {
+    return L"HDR10";
+  }
+  if (dr.find(L"HLG") != std::wstring::npos) {
+    return L"HLG";
+  }
+  if (dr.find(L"HDR") != std::wstring::npos) {
+    return L"HDR";
+  }
+  return L"";
+}
+
+std::wstring FormatFps(double fps) {
+  if (fps <= 0.0) {
+    return L"";
+  }
+  wchar_t buffer[32];
+  if (std::abs(fps - std::round(fps)) < 0.01) {
+    swprintf_s(buffer, L"%.0f fps", fps);
+  } else {
+    swprintf_s(buffer, L"%.3f fps", fps);
+    std::wstring text(buffer);
+    const size_t space = text.find(L' ');
+    std::wstring number = text.substr(0, space);
+    while (!number.empty() && number.back() == L'0') {
+      number.pop_back();
+    }
+    if (!number.empty() && number.back() == L'.') {
+      number.pop_back();
+    }
+    return number + L" fps";
+  }
+  return buffer;
+}
+
+std::vector<std::pair<std::wstring, std::wstring>> InfoRows() {
+  std::vector<std::pair<std::wstring, std::wstring>> rows;
+  const auto &s = g_native_control_state;
+  if (s.video_width > 0 && s.video_height > 0) {
+    rows.push_back({L"Resolution", std::to_wstring(s.video_width) + L"×" +
+                                       std::to_wstring(s.video_height)});
+  }
+  const std::wstring fps = FormatFps(s.fps);
+  if (!fps.empty()) {
+    rows.push_back({L"Frame rate", fps});
+  }
+  if (!s.dynamic_range.empty()) {
+    rows.push_back({L"Dynamic range", s.dynamic_range});
+  }
+  if (!s.video_codec.empty()) {
+    rows.push_back({L"Video", s.video_codec});
+  }
+  if (!s.audio_codec.empty() || !s.audio_channels.empty()) {
+    std::wstring audio = s.audio_codec;
+    if (!s.audio_channels.empty()) {
+      if (!audio.empty()) {
+        audio += L" ";
+      }
+      audio += s.audio_channels;
+    }
+    rows.push_back({L"Audio", audio});
+  }
+  return rows;
+}
+
+bool HasInfoPanel() {
+  return g_native_control_state.info_open && !InfoRows().empty();
+}
+
+RECT InfoPanelRect(const RECT &rect) {
+  const int rows = static_cast<int>(InfoRows().size());
+  const int width = 224;
+  const int height = 12 + 22 + rows * 22 + 10;
+  const int left = MaxInt(12, static_cast<int>(rect.right) - 14 - width);
+  const int top = kNativeTopControlsHeight + 10;
+  return RectFrom(left, top, left + width, top + height);
+}
+
+void DrawSlider(HDC hdc, const RECT &track, double ratio, int thumb_radius) {
+  const int cy = (track.top + track.bottom) / 2;
+  FillRoundRect(hdc, RectFrom(track.left, cy - 3, track.right, cy + 3), 6,
+                RGB(39, 43, 58));
+  const int fill_x =
+      track.left + static_cast<int>(RectWidth(track) * std::clamp(ratio, 0.0,
+                                                                  1.0));
+  FillRoundRect(hdc, RectFrom(track.left, cy - 3, fill_x, cy + 3), 6,
+                RGB(123, 108, 246));
+  FillRoundRect(hdc,
+                RectFrom(fill_x - thumb_radius, cy - thumb_radius,
+                         fill_x + thumb_radius, cy + thumb_radius),
+                thumb_radius * 2, RGB(154, 141, 255));
+}
+
+// Draws a pill badge ending at [right_edge]; returns the horizontal space it
+// consumed (badge width + trailing gap) so callers can stack badges leftward.
+int DrawBadge(HDC hdc, int right_edge, int center_y, const std::wstring &text,
+              COLORREF bg, COLORREF fg) {
+  HFONT font = UiFont(11, FW_BOLD);
+  HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
+  SIZE size{};
+  GetTextExtentPoint32(hdc, text.c_str(), static_cast<int>(text.size()),
+                       &size);
+  SelectObject(hdc, old_font);
+  const int width = size.cx + 18;
+  const RECT badge =
+      RectFrom(right_edge - width, center_y - 11, right_edge, center_y + 11);
+  FillRoundRect(hdc, badge, 7, bg);
+  DrawTextWithFont(hdc, text, badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                   font, fg);
+  DeleteObject(font);
+  return width + 8;
+}
+
+std::wstring ShortSpeed(const std::string &id) {
+  if (id.empty()) {
+    return L"1×";
+  }
+  const double value = atof(id.c_str());
+  wchar_t buffer[16];
+  if (std::abs(value - std::round(value)) < 0.01) {
+    swprintf_s(buffer, L"%.0f×", value);
+    return buffer;
+  }
+  swprintf_s(buffer, L"%.2f×", value);
+  std::wstring text(buffer);
+  const size_t mult = text.find(L'×');
+  std::wstring number = text.substr(0, mult);
+  while (!number.empty() && number.back() == L'0') {
+    number.pop_back();
+  }
+  if (!number.empty() && number.back() == L'.') {
+    number.pop_back();
+  }
+  return number + L"×";
+}
+
+void PaintInfoPanel(HDC hdc, const RECT &rect) {
+  const auto rows = InfoRows();
+  if (rows.empty()) {
+    return;
+  }
+  const RECT panel = InfoPanelRect(rect);
+  FillRoundRect(hdc, panel, 12, RGB(10, 11, 16));
+  HFONT header_font = UiFont(11, FW_SEMIBOLD);
+  DrawTextWithFont(
+      hdc, L"STREAM INFO",
+      RectFrom(panel.left + 14, panel.top + 10, panel.right - 14,
+               panel.top + 28),
+      DT_LEFT | DT_VCENTER | DT_SINGLELINE, header_font, RGB(154, 161, 178));
+  DeleteObject(header_font);
+  HFONT label_font = UiFont(12, FW_SEMIBOLD);
+  HFONT value_font = UiFont(12, FW_BOLD);
+  int y = panel.top + 34;
+  for (const auto &row : rows) {
+    const bool hdr = row.first == L"Dynamic range" &&
+                     (row.second.find(L"HDR") != std::wstring::npos ||
+                      row.second.find(L"HLG") != std::wstring::npos ||
+                      row.second.find(L"PQ") != std::wstring::npos ||
+                      row.second.find(L"Dolby") != std::wstring::npos);
+    DrawTextWithFont(hdc, row.first,
+                     RectFrom(panel.left + 14, y, panel.left + 110, y + 20),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font,
+                     RGB(154, 161, 178));
+    DrawTextWithFont(hdc, row.second,
+                     RectFrom(panel.left + 110, y, panel.right - 14, y + 20),
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     value_font,
+                     hdr ? RGB(154, 141, 255) : RGB(238, 240, 247));
+    y += 22;
+  }
+  DeleteObject(label_font);
+  DeleteObject(value_font);
+}
+
+void PaintListMenu(HDC hdc, const RECT &rect) {
+  const NativeMenuKind kind = g_native_control_state.open_menu;
+  if (kind == NativeMenuKind::kNone) {
+    return;
+  }
+  const auto &options = MenuOptions(kind);
+  const std::string &selected_id = MenuSelectedId(kind);
+  const RECT menu = CurrentMenuRect(rect);
+  const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
+  FillRoundRect(hdc, menu, 16, RGB(8, 9, 14));
+  HFONT label_font = UiFont(13, FW_SEMIBOLD);
+  DrawTextWithFont(
+      hdc, MenuHeader(kind),
+      RectFrom(menu.left + 16, menu.top + 4, menu.right - 16, menu.top + 32),
+      DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font, RGB(154, 161, 178));
+  const auto option_rects = MenuOptionRects(menu_local);
+  if (options.empty()) {
+    DrawTextWithFont(
+        hdc, L"Nothing available",
+        option_rects.empty() ? RectFrom(menu.left + 16, menu.top + 36,
+                                        menu.right - 16, menu.bottom - 10)
+                             : RectFrom(menu.left + option_rects[0].left,
+                                        menu.top + option_rects[0].top,
+                                        menu.left + option_rects[0].right,
+                                        menu.top + option_rects[0].bottom),
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font, RGB(184, 190, 204));
+  } else {
+    for (size_t i = 0; i < option_rects.size(); i++) {
+      const int option_index =
+          g_native_menu_scroll_offset + static_cast<int>(i);
+      if (option_index >= static_cast<int>(options.size())) {
+        break;
+      }
+      const auto &option = options[option_index];
+      const bool active = option.id == selected_id;
+      const RECT option_rect = RectFrom(menu.left + option_rects[i].left,
+                                        menu.top + option_rects[i].top,
+                                        menu.left + option_rects[i].right,
+                                        menu.top + option_rects[i].bottom);
+      FillRoundRect(hdc, option_rect, 12,
+                    active ? RGB(123, 108, 246) : RGB(26, 29, 40));
+      DrawTextWithFont(hdc, option.label,
+                       RectFrom(option_rect.left + 12, option_rect.top,
+                                option_rect.right - 12, option_rect.bottom),
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                       label_font,
+                       active ? RGB(255, 255, 255) : RGB(218, 222, 233));
+    }
+    if (MenuMaxScrollOffset() > 0) {
+      const int track_top = menu.top + kNativeMenuHeaderHeight;
+      const int track_bottom = menu.bottom - kNativeMenuPadding;
+      FillRoundRect(
+          hdc, RectFrom(menu.right - 6, track_top, menu.right - 3, track_bottom),
+          4, RGB(39, 43, 58));
+      const double visible_ratio = static_cast<double>(MenuVisibleRowCount()) /
+                                   static_cast<double>(options.size());
+      const int thumb_height = MaxInt(
+          24, static_cast<int>((track_bottom - track_top) * visible_ratio));
+      const double scroll_ratio =
+          static_cast<double>(g_native_menu_scroll_offset) /
+          static_cast<double>(MenuMaxScrollOffset());
+      const int thumb_top =
+          track_top + static_cast<int>(
+                          (track_bottom - track_top - thumb_height) *
+                          scroll_ratio);
+      FillRoundRect(hdc,
+                    RectFrom(menu.right - 7, thumb_top, menu.right - 2,
+                             thumb_top + thumb_height),
+                    5, RGB(123, 108, 246));
+    }
+  }
+  DeleteObject(label_font);
 }
 
 void PaintNativeControlBar(HWND hwnd, int control_kind) {
@@ -394,181 +917,88 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   SetBkMode(paint_hdc, TRANSPARENT);
 
   const RECT top = TopControlsRect(rect);
-  DrawIconButton(paint_hdc, RectFrom(16, top.top + 10, 54, top.top + 48),
+  const int top_cy = (top.top + top.bottom) / 2;
+  DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
                  L"\xE72B");
-  HFONT title_font = UiFont(18, FW_SEMIBOLD);
+
+  // Top-right badges, stacked leftward: LIVE, then dynamic range, then
+  // resolution.
+  int badge_right = rect.right - 16;
+  if (g_native_control_state.is_live) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
+                             RGB(255, 64, 112), RGB(255, 255, 255));
+  }
+  const std::wstring hdr_badge = HdrBadge();
+  if (!hdr_badge.empty()) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, hdr_badge,
+                             RGB(60, 52, 137), RGB(206, 203, 246));
+  }
+  const std::wstring res_badge = ResolutionBadge();
+  if (!res_badge.empty()) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, res_badge,
+                             RGB(60, 52, 137), RGB(206, 203, 246));
+  }
+
+  HFONT title_font = UiFont(18, FW_BOLD);
   DrawTextWithFont(paint_hdc, g_native_control_state.title,
-                   RectFrom(66, top.top, rect.right - 112, top.bottom),
+                   RectFrom(66, top.top, MaxInt(80, badge_right - 12),
+                            top.bottom),
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                    title_font, RGB(246, 247, 251));
   DeleteObject(title_font);
-  if (g_native_control_state.is_live) {
-    RECT live{rect.right - 82, top.top + 18, rect.right - 22, top.top + 40};
-    FillRoundRect(paint_hdc, live, 7, RGB(255, 64, 112));
-    HFONT badge_font = UiFont(11, FW_BOLD);
-    DrawTextWithFont(paint_hdc, L"\x25CF LIVE", live,
-                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, badge_font,
-                     RGB(255, 255, 255));
-    DeleteObject(badge_font);
-  }
 
-  const RECT bottom = BottomControlsRect(rect);
-  const int bottom_y = bottom.top;
-  const int center_y = bottom_y + 47;
-  DrawIconButton(paint_hdc, RectFrom(18, bottom_y + 24, 58, bottom_y + 64),
+  const BottomLayout l = ComputeBottomLayout(rect);
+  DrawIconButton(paint_hdc, l.play,
                  g_native_control_state.playing ? L"\xE769" : L"\xE768", true);
-  int content_left = 72;
-  if (!g_native_control_state.is_live) {
-    DrawTextButton(paint_hdc, RectFrom(68, bottom_y + 27, 112, bottom_y + 61),
-                   L"-10");
-    DrawTextButton(paint_hdc, RectFrom(118, bottom_y + 27, 162, bottom_y + 61),
-                   L"+10");
-    content_left = 178;
+  if (l.has_seek) {
+    DrawTextButton(paint_hdc, l.seek_back, L"-10");
+    DrawTextButton(paint_hdc, l.seek_forward, L"+10");
   }
+  DrawIconButton(paint_hdc, l.mute,
+                 g_native_control_state.volume <= 0 ? L"\xE74F" : L"\xE767");
+  DrawSlider(paint_hdc, l.volume,
+             std::clamp(g_native_control_state.volume / 100.0, 0.0, 1.0), 5);
 
-  if (g_native_control_state.is_live) {
-    RECT live{content_left, center_y - 12, content_left + 64, center_y + 12};
-    FillRoundRect(paint_hdc, live, 7, RGB(255, 64, 112));
-    HFONT badge_font = UiFont(11, FW_BOLD);
-    DrawTextWithFont(paint_hdc, L"\x25CF LIVE", live,
-                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, badge_font,
-                     RGB(255, 255, 255));
-    DeleteObject(badge_font);
-  } else {
+  if (l.has_scrubber) {
     HFONT time_font = UiFont(13, FW_SEMIBOLD);
-    DrawTextWithFont(
-        paint_hdc, FormatTime(g_native_control_state.position_ms),
-        RectFrom(content_left, bottom_y + 32, content_left + 58, bottom_y + 62),
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font, RGB(184, 190, 204));
-    const RECT local_bar = PlaybackProgressRect(
-        RectFrom(0, 0, rect.right, kNativeBottomControlsHeight));
-    const RECT bar = RectFrom(local_bar.left, bottom_y + local_bar.top,
-                              local_bar.right, bottom_y + local_bar.bottom);
-    FillRoundRect(paint_hdc,
-                  RectFrom(bar.left, center_y - 3, bar.right, center_y + 3), 6,
-                  RGB(39, 43, 58));
+    DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.position_ms),
+                     l.position_text,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, time_font,
+                     RGB(184, 190, 204));
     const double duration = std::max(1.0, g_native_control_state.duration_ms);
-    const double ratio =
-        std::clamp(g_native_control_state.position_ms / duration, 0.0, 1.0);
-    const int thumb_x = bar.left + static_cast<int>(RectWidth(bar) * ratio);
-    FillRoundRect(paint_hdc,
-                  RectFrom(bar.left, center_y - 3, thumb_x, center_y + 3), 6,
-                  RGB(123, 108, 246));
-    FillRoundRect(
-        paint_hdc,
-        RectFrom(thumb_x - 6, center_y - 6, thumb_x + 6, center_y + 6), 12,
-        RGB(154, 141, 255));
-    DrawTextWithFont(
-        paint_hdc, FormatTime(g_native_control_state.duration_ms),
-        RectFrom(bar.right + 14, bottom_y + 32, bar.right + 72, bottom_y + 62),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE, time_font, RGB(184, 190, 204));
+    DrawSlider(paint_hdc, l.progress,
+               g_native_control_state.position_ms / duration, 6);
+    DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.duration_ms),
+                     l.duration_text,
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font,
+                     RGB(184, 190, 204));
     DeleteObject(time_font);
   }
 
-  const RECT local_volume = VolumeProgressRect(
-      RectFrom(0, 0, rect.right, kNativeBottomControlsHeight));
-  const RECT volume_bar =
-      RectFrom(local_volume.left, bottom_y + local_volume.top,
-               local_volume.right, bottom_y + local_volume.bottom);
-  DrawIconButton(paint_hdc,
-                 RectFrom(rect.right - 220, bottom_y + 27, rect.right - 184,
-                          bottom_y + 63),
-                 g_native_control_state.volume <= 0 ? L"\xE74F" : L"\xE767");
-  FillRoundRect(
-      paint_hdc,
-      RectFrom(volume_bar.left, center_y - 3, volume_bar.right, center_y + 3),
-      6, RGB(39, 43, 58));
-  const double volume_ratio =
-      std::clamp(g_native_control_state.volume / 100.0, 0.0, 1.0);
-  const int volume_x =
-      volume_bar.left + static_cast<int>(RectWidth(volume_bar) * volume_ratio);
-  FillRoundRect(paint_hdc,
-                RectFrom(volume_bar.left, center_y - 3, volume_x, center_y + 3),
-                6, RGB(123, 108, 246));
-  FillRoundRect(
-      paint_hdc,
-      RectFrom(volume_x - 5, center_y - 5, volume_x + 5, center_y + 5), 10,
-      RGB(154, 141, 255));
+  if (l.has_speed) {
+    DrawTextButton(paint_hdc, l.speed,
+                   ShortSpeed(g_native_control_state.selected_speed_id));
+  }
+  if (l.has_audio) {
+    DrawIconButton(paint_hdc, l.audio, L"\xE8D6",
+                   g_native_control_state.open_menu == NativeMenuKind::kAudio);
+  }
+  if (l.has_subtitles) {
+    DrawIconButton(
+        paint_hdc, l.subtitles, L"\xE190",
+        g_native_control_state.open_menu == NativeMenuKind::kSubtitles);
+  }
+  DrawTextButton(paint_hdc, l.aspect,
+                 g_native_control_state.aspect_label.empty()
+                     ? L"Fit"
+                     : g_native_control_state.aspect_label);
+  DrawIconButton(paint_hdc, l.info, L"\xE946", g_native_control_state.info_open);
+  DrawIconButton(paint_hdc, l.fullscreen,
+                 g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740");
 
-  DrawIconButton(paint_hdc,
-                 RectFrom(rect.right - 272, bottom_y + 27, rect.right - 236,
-                          bottom_y + 63),
-                 L"\xE190", g_native_control_state.subtitles_open);
-  DrawIconButton(
-      paint_hdc,
-      RectFrom(rect.right - 54, bottom_y + 27, rect.right - 18, bottom_y + 63),
-      g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740");
-
-  if (g_native_control_state.subtitles_open) {
-    const RECT menu = SubtitleMenuRect(rect);
-    const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
-    FillRoundRect(paint_hdc, menu, 16, RGB(8, 9, 14));
-    HFONT label_font = UiFont(13, FW_SEMIBOLD);
-    DrawTextWithFont(
-        paint_hdc, L"Subtitles",
-        RectFrom(menu.left + 16, menu.top + 4, menu.right - 16, menu.top + 32),
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font, RGB(154, 161, 178));
-    const auto option_rects = SubtitleOptionRects(menu_local);
-    if (g_native_control_state.subtitles.empty()) {
-      DrawTextWithFont(
-          paint_hdc, L"No subtitles available",
-          option_rects.empty() ? RectFrom(menu.left + 16, menu.top + 36,
-                                          menu.right - 16, menu.bottom - 10)
-                               : RectFrom(menu.left + option_rects[0].left,
-                                          menu.top + option_rects[0].top,
-                                          menu.left + option_rects[0].right,
-                                          menu.top + option_rects[0].bottom),
-          DT_LEFT | DT_VCENTER | DT_SINGLELINE, label_font, RGB(184, 190, 204));
-    } else {
-      for (size_t i = 0; i < option_rects.size(); i++) {
-        const int option_index =
-            g_native_subtitle_scroll_offset + static_cast<int>(i);
-        if (option_index >=
-            static_cast<int>(g_native_control_state.subtitles.size())) {
-          break;
-        }
-        const auto &option = g_native_control_state.subtitles[option_index];
-        const bool active =
-            option.id == g_native_control_state.selected_subtitle_id;
-        const RECT option_rect = RectFrom(menu.left + option_rects[i].left,
-                                          menu.top + option_rects[i].top,
-                                          menu.left + option_rects[i].right,
-                                          menu.top + option_rects[i].bottom);
-        FillRoundRect(paint_hdc, option_rect, 12,
-                      active ? RGB(123, 108, 246) : RGB(26, 29, 40));
-        DrawTextWithFont(paint_hdc, option.label,
-                         RectFrom(option_rect.left + 12, option_rect.top,
-                                  option_rect.right - 12, option_rect.bottom),
-                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                         label_font,
-                         active ? RGB(255, 255, 255) : RGB(218, 222, 233));
-      }
-      if (MaxSubtitleScrollOffset() > 0) {
-        const int track_top = menu.top + kNativeSubtitleMenuHeaderHeight;
-        const int track_bottom = menu.bottom - kNativeSubtitleMenuPadding;
-        FillRoundRect(
-            paint_hdc,
-            RectFrom(menu.right - 6, track_top, menu.right - 3, track_bottom),
-            4, RGB(39, 43, 58));
-        const double visible_ratio =
-            static_cast<double>(SubtitleVisibleRowCount()) /
-            static_cast<double>(g_native_control_state.subtitles.size());
-        const int thumb_height = MaxInt(
-            24, static_cast<int>((track_bottom - track_top) * visible_ratio));
-        const double scroll_ratio =
-            static_cast<double>(g_native_subtitle_scroll_offset) /
-            static_cast<double>(MaxSubtitleScrollOffset());
-        const int thumb_top =
-            track_top +
-            static_cast<int>((track_bottom - track_top - thumb_height) *
-                             scroll_ratio);
-        FillRoundRect(paint_hdc,
-                      RectFrom(menu.right - 7, thumb_top, menu.right - 2,
-                               thumb_top + thumb_height),
-                      5, RGB(123, 108, 246));
-      }
-    }
-    DeleteObject(label_font);
+  PaintListMenu(paint_hdc, rect);
+  if (HasInfoPanel()) {
+    PaintInfoPanel(paint_hdc, rect);
   }
 
   BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
@@ -583,19 +1013,19 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   RECT rect;
   GetClientRect(hwnd, &rect);
   const RECT top = TopControlsRect(rect);
-  const RECT bottom = BottomControlsRect(rect);
   if (PointInRect(x, y, top)) {
-    if (PointInRect(x, y, RectFrom(8, 4, 64, 56))) {
+    if (PointInRect(x, y, RectFrom(12, 8, 60, 56))) {
       return "back";
     }
     return "show";
   }
 
-  if (g_native_control_state.subtitles_open) {
-    const RECT menu = SubtitleMenuRect(rect);
+  if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+    const RECT menu = CurrentMenuRect(rect);
     if (PointInRect(x, y, menu)) {
+      const auto &options = MenuOptions(g_native_control_state.open_menu);
       const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
-      const auto option_rects = SubtitleOptionRects(menu_local);
+      const auto option_rects = MenuOptionRects(menu_local);
       for (size_t i = 0; i < option_rects.size(); i++) {
         const RECT option_rect = RectFrom(menu.left + option_rects[i].left,
                                           menu.top + option_rects[i].top,
@@ -603,12 +1033,11 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
                                           menu.top + option_rects[i].bottom);
         if (PointInRect(x, y, option_rect)) {
           const int option_index =
-              g_native_subtitle_scroll_offset + static_cast<int>(i);
+              g_native_menu_scroll_offset + static_cast<int>(i);
           if (option_index >= 0 &&
-              option_index <
-                  static_cast<int>(g_native_control_state.subtitles.size())) {
-            return "subtitleTrack:" +
-                   g_native_control_state.subtitles[option_index].id;
+              option_index < static_cast<int>(options.size())) {
+            return MenuSelectCommandPrefix(g_native_control_state.open_menu) +
+                   options[option_index].id;
           }
         }
       }
@@ -616,54 +1045,56 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
     }
   }
 
-  if (!PointInRect(x, y, bottom)) {
+  // Clicking inside the info panel keeps it (and the controls) up.
+  if (HasInfoPanel() && PointInRect(x, y, InfoPanelRect(rect))) {
     return "show";
   }
-  const int bottom_y = bottom.top;
-  if (PointInRect(x, y, RectFrom(10, bottom_y + 18, 66, bottom_y + 72))) {
+
+  const BottomLayout l = ComputeBottomLayout(rect);
+  if (!PointInRect(x, y, l.bottom)) {
+    return "show";
+  }
+  if (PointInRect(x, y, l.play)) {
     return "playPause";
   }
-  if (!g_native_control_state.is_live) {
-    if (PointInRect(x, y, RectFrom(64, bottom_y + 22, 116, bottom_y + 68))) {
+  if (l.has_seek) {
+    if (PointInRect(x, y, l.seek_back)) {
       return "seekBack";
     }
-    if (PointInRect(x, y, RectFrom(114, bottom_y + 22, 166, bottom_y + 68))) {
+    if (PointInRect(x, y, l.seek_forward)) {
       return "seekForward";
     }
-    const RECT local_progress = PlaybackProgressRect(
-        RectFrom(0, 0, rect.right, kNativeBottomControlsHeight));
-    const RECT progress =
-        RectFrom(local_progress.left, bottom_y + local_progress.top,
-                 local_progress.right, bottom_y + local_progress.bottom);
-    if (PointInRect(x, y,
-                    RectFrom(progress.left, progress.top - 14, progress.right,
-                             progress.bottom + 14))) {
-      return "seekPercent:" + std::to_string(RatioFromX(x, progress));
-    }
   }
-  if (PointInRect(x, y,
-                  RectFrom(rect.right - 226, bottom_y + 22, rect.right - 178,
-                           bottom_y + 68))) {
+  if (l.has_scrubber &&
+      PointInRect(x, y,
+                  RectFrom(l.progress.left, l.progress.top - 14,
+                           l.progress.right, l.progress.bottom + 14))) {
+    return "seekPercent:" + std::to_string(RatioFromX(x, l.progress));
+  }
+  if (PointInRect(x, y, l.mute)) {
     return "muteToggle";
   }
-  const RECT local_volume = VolumeProgressRect(
-      RectFrom(0, 0, rect.right, kNativeBottomControlsHeight));
-  const RECT volume =
-      RectFrom(local_volume.left, bottom_y + local_volume.top,
-               local_volume.right, bottom_y + local_volume.bottom);
   if (PointInRect(x, y,
-                  RectFrom(volume.left, volume.top - 14, volume.right,
-                           volume.bottom + 14))) {
-    return "volumePercent:" + std::to_string(RatioFromX(x, volume));
+                  RectFrom(l.volume.left, l.volume.top - 14, l.volume.right,
+                           l.volume.bottom + 14))) {
+    return "volumePercent:" + std::to_string(RatioFromX(x, l.volume));
   }
-  if (PointInRect(x, y,
-                  RectFrom(rect.right - 278, bottom_y + 22, rect.right - 230,
-                           bottom_y + 68))) {
-    return "subtitles";
+  if (l.has_speed && PointInRect(x, y, l.speed)) {
+    return "menu:speed";
   }
-  if (PointInRect(x, y,
-                  RectFrom(rect.right - 64, bottom_y + 22, rect.right - 8,
-                           bottom_y + 68))) {
+  if (l.has_audio && PointInRect(x, y, l.audio)) {
+    return "menu:audio";
+  }
+  if (l.has_subtitles && PointInRect(x, y, l.subtitles)) {
+    return "menu:subtitles";
+  }
+  if (PointInRect(x, y, l.aspect)) {
+    return "aspect";
+  }
+  if (PointInRect(x, y, l.info)) {
+    return "info";
+  }
+  if (PointInRect(x, y, l.fullscreen)) {
     return "fullscreen";
   }
   return "show";
@@ -704,11 +1135,23 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
         hwnd, control_kind, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
-    if (command == "subtitles") {
-      g_native_control_state.subtitles_open =
-          !g_native_control_state.subtitles_open;
-      if (g_native_control_state.subtitles_open) {
-        EnsureSelectedSubtitleVisible();
+    // Menu open/close and the info panel are owned entirely by the overlay; they
+    // don't round-trip to Dart (the option lists arrive via setControlState).
+    if (command.rfind("menu:", 0) == 0) {
+      const NativeMenuKind kind = command == "menu:audio"
+                                      ? NativeMenuKind::kAudio
+                                  : command == "menu:subtitles"
+                                      ? NativeMenuKind::kSubtitles
+                                  : command == "menu:speed"
+                                      ? NativeMenuKind::kSpeed
+                                      : NativeMenuKind::kNone;
+      if (g_native_control_state.open_menu == kind) {
+        g_native_control_state.open_menu = NativeMenuKind::kNone;
+      } else {
+        g_native_control_state.open_menu = kind;
+        g_native_control_state.info_open = false;
+        g_native_menu_scroll_offset = 0;
+        EnsureSelectedMenuVisible();
       }
       if (HWND parent = NativeControlsOwner(hwnd)) {
         KillTimer(parent, kNativeControlsHideTimer);
@@ -717,8 +1160,22 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
       InvalidateRect(hwnd, nullptr, FALSE);
       return 0;
     }
-    if (command.rfind("subtitleTrack:", 0) == 0) {
-      g_native_control_state.subtitles_open = false;
+    if (command == "info") {
+      g_native_control_state.info_open = !g_native_control_state.info_open;
+      if (g_native_control_state.info_open) {
+        g_native_control_state.open_menu = NativeMenuKind::kNone;
+      }
+      if (HWND parent = NativeControlsOwner(hwnd)) {
+        KillTimer(parent, kNativeControlsHideTimer);
+        PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
+      }
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    }
+    if (command.rfind("audioTrack:", 0) == 0 ||
+        command.rfind("subtitleTrack:", 0) == 0 ||
+        command.rfind("speed:", 0) == 0) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
       if (HWND parent = NativeControlsOwner(hwnd)) {
         PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
       }
@@ -737,14 +1194,14 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
       break;
     }
     ScreenToClient(hwnd, &point);
-    if (!g_native_control_state.subtitles_open ||
-        !PointInRect(point.x, point.y, SubtitleMenuRect(rect)) ||
-        MaxSubtitleScrollOffset() <= 0) {
+    if (g_native_control_state.open_menu == NativeMenuKind::kNone ||
+        !PointInRect(point.x, point.y, CurrentMenuRect(rect)) ||
+        MenuMaxScrollOffset() <= 0) {
       break;
     }
     const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
-    g_native_subtitle_scroll_offset += delta > 0 ? -1 : 1;
-    ClampSubtitleScrollOffset();
+    g_native_menu_scroll_offset += delta > 0 ? -1 : 1;
+    ClampMenuScrollOffset();
     SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -839,6 +1296,8 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
 
+  LoadBundledFonts();
+
   RECT frame = GetClientArea();
 
   // The size here must match the window dimensions to avoid unnecessary surface
@@ -914,7 +1373,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         ShowNativeControls(true);
         return 0;
       }
-      if (g_native_control_state.subtitles_open) {
+      if (ControlsPinnedByOverlay()) {
         ShowNativeControls(true);
         return 0;
       }
@@ -955,7 +1414,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
   case kNativeControlsLayoutMessage:
     ShowNativeControls(true);
-    if (!g_native_control_state.subtitles_open) {
+    if (!ControlsPinnedByOverlay()) {
       ScheduleNativeControlsHide();
     } else {
       KillTimer(hwnd, kNativeControlsHideTimer);
@@ -1111,13 +1570,20 @@ void FlutterWindow::UpdateNativeControlsRegion() {
       CreateRectRgn(bottom.left, bottom.top, bottom.right, bottom.bottom);
   CombineRgn(region, region, bottom_region, RGN_OR);
   DeleteObject(bottom_region);
-  if (g_native_control_state.subtitles_open) {
-    ClampSubtitleScrollOffset();
-    const RECT menu = SubtitleMenuRect(rect);
+  if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+    ClampMenuScrollOffset();
+    const RECT menu = CurrentMenuRect(rect);
     HRGN menu_region = CreateRoundRectRgn(menu.left, menu.top, menu.right,
                                           menu.bottom, 16, 16);
     CombineRgn(region, region, menu_region, RGN_OR);
     DeleteObject(menu_region);
+  }
+  if (HasInfoPanel()) {
+    const RECT panel = InfoPanelRect(rect);
+    HRGN panel_region = CreateRoundRectRgn(panel.left, panel.top, panel.right,
+                                           panel.bottom, 12, 12);
+    CombineRgn(region, region, panel_region, RGN_OR);
+    DeleteObject(panel_region);
   }
   SetWindowRgn(native_controls_overlay_, region, FALSE);
   native_controls_region_dirty_ = false;
@@ -1141,8 +1607,9 @@ bool FlutterWindow::IsCursorOverNativeControls() const {
   GetClientRect(native_controls_overlay_, &client);
   return PointInRect(point.x, point.y, TopControlsRect(client)) ||
          PointInRect(point.x, point.y, BottomControlsRect(client)) ||
-         (g_native_control_state.subtitles_open &&
-          PointInRect(point.x, point.y, SubtitleMenuRect(client)));
+         (g_native_control_state.open_menu != NativeMenuKind::kNone &&
+          PointInRect(point.x, point.y, CurrentMenuRect(client))) ||
+         (HasInfoPanel() && PointInRect(point.x, point.y, InfoPanelRect(client)));
 }
 
 void FlutterWindow::ShowNativeControls(bool visible) {
@@ -1150,8 +1617,10 @@ void FlutterWindow::ShowNativeControls(bool visible) {
   native_controls_visible_ = visible;
   if (!visible) {
     native_ignore_input_until_ = GetTickCount64() + 650;
-    if (g_native_control_state.subtitles_open) {
-      g_native_control_state.subtitles_open = false;
+    if (g_native_control_state.open_menu != NativeMenuKind::kNone ||
+        g_native_control_state.info_open) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
+      g_native_control_state.info_open = false;
       native_controls_region_dirty_ = true;
     }
   } else {
@@ -1214,8 +1683,7 @@ void FlutterWindow::ScheduleNativeControlsHide() {
   if (native_controls_pinned_) {
     return;
   }
-  if (g_native_control_state.playing &&
-      !g_native_control_state.subtitles_open) {
+  if (g_native_control_state.playing && !ControlsPinnedByOverlay()) {
     SetTimer(hwnd, kNativeControlsHideTimer, 3500, nullptr);
   }
 }
@@ -1249,49 +1717,56 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableDoubleArg(args, "volume", g_native_control_state.volume);
   g_native_control_state.selected_subtitle_id = EncodableStdStringArg(
       args, "selectedSubtitleId", g_native_control_state.selected_subtitle_id);
+  g_native_control_state.selected_audio_id = EncodableStdStringArg(
+      args, "selectedAudioId", g_native_control_state.selected_audio_id);
+  g_native_control_state.selected_speed_id = EncodableStdStringArg(
+      args, "selectedSpeedId", g_native_control_state.selected_speed_id);
   if (args && std::holds_alternative<flutter::EncodableMap>(*args)) {
-    const auto &map = std::get<flutter::EncodableMap>(*args);
-    const auto found = map.find(flutter::EncodableValue("subtitles"));
-    if (found != map.end() &&
-        std::holds_alternative<flutter::EncodableList>(found->second)) {
-      g_native_control_state.subtitles.clear();
-      const auto &list = std::get<flutter::EncodableList>(found->second);
-      for (const auto &item : list) {
-        if (!std::holds_alternative<flutter::EncodableMap>(item)) {
-          continue;
-        }
-        const auto &item_map = std::get<flutter::EncodableMap>(item);
-        const auto id = item_map.find(flutter::EncodableValue("id"));
-        const auto label = item_map.find(flutter::EncodableValue("label"));
-        if (id == item_map.end() || label == item_map.end() ||
-            !std::holds_alternative<std::string>(id->second) ||
-            !std::holds_alternative<std::string>(label->second)) {
-          continue;
-        }
-        g_native_control_state.subtitles.push_back(NativeSubtitleOption{
-            std::get<std::string>(id->second),
-            Utf8ToWide(std::get<std::string>(label->second)),
-        });
-      }
-      if (g_native_control_state.subtitles_open) {
-        native_controls_region_dirty_ = true;
-      }
-      if (g_native_control_state.subtitles.empty()) {
-        if (g_native_control_state.subtitles_open) {
-          g_native_control_state.subtitles_open = false;
-          native_controls_region_dirty_ = true;
-        }
-        ApplyNativeControlsVisibility();
-      }
+    g_native_control_state.subtitle_tracks =
+        ParseMenuOptions(args, "subtitleTracks");
+    g_native_control_state.audio_tracks = ParseMenuOptions(args, "audioTracks");
+    g_native_control_state.speed_options =
+        ParseMenuOptions(args, "speedOptions");
+  }
+  g_native_control_state.aspect_label =
+      EncodableStringArg(args, "aspectLabel", g_native_control_state.aspect_label);
+  g_native_control_state.video_width =
+      EncodableIntArg(args, "videoWidth", g_native_control_state.video_width);
+  g_native_control_state.video_height =
+      EncodableIntArg(args, "videoHeight", g_native_control_state.video_height);
+  g_native_control_state.fps =
+      EncodableDoubleArg(args, "fps", g_native_control_state.fps);
+  g_native_control_state.dynamic_range = EncodableStringArg(
+      args, "dynamicRange", g_native_control_state.dynamic_range);
+  g_native_control_state.video_codec =
+      EncodableStringArg(args, "videoCodec", g_native_control_state.video_codec);
+  g_native_control_state.audio_codec =
+      EncodableStringArg(args, "audioCodec", g_native_control_state.audio_codec);
+  g_native_control_state.audio_channels = EncodableStringArg(
+      args, "audioChannels", g_native_control_state.audio_channels);
+
+  // If the open menu lost all its options (e.g. tracks changed), close it. Same
+  // for the info panel if there is nothing left to show.
+  if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+    native_controls_region_dirty_ = true;
+    if (MenuOptions(g_native_control_state.open_menu).empty()) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
+    } else {
+      ClampMenuScrollOffset();
     }
   }
+  if (g_native_control_state.info_open && InfoRows().empty()) {
+    g_native_control_state.info_open = false;
+    native_controls_region_dirty_ = true;
+  }
+
   native_controls_pinned_ =
-      !g_native_control_state.playing || g_native_control_state.subtitles_open;
+      !g_native_control_state.playing || ControlsPinnedByOverlay();
   if (native_video_surface_) {
     if (!g_native_control_state.playing) {
       KillTimer(GetHandle(), kNativeControlsHideTimer);
       ShowNativeControls(true);
-    } else if (g_native_control_state.subtitles_open) {
+    } else if (ControlsPinnedByOverlay()) {
       KillTimer(GetHandle(), kNativeControlsHideTimer);
     } else if (!was_playing || was_pinned) {
       ScheduleNativeControlsHide();
@@ -1396,6 +1871,9 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           if (native_video_surface_) {
             ShowWindow(native_video_surface_, SW_HIDE);
           }
+          g_native_control_state.open_menu = NativeMenuKind::kNone;
+          g_native_control_state.info_open = false;
+          g_native_menu_scroll_offset = 0;
           g_native_video_cursor_visible = true;
           SetCursor(LoadCursor(nullptr, IDC_ARROW));
           result->Success(flutter::EncodableValue(true));

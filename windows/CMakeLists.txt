@@ -87,6 +87,59 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Override media_kit's bundled libmpv with a libplacebo-enabled build so mpv's
+# `gpu-next` video output is available — needed for correct HDR / Dolby Vision
+# rendering, since media_kit's pinned 2023 libmpv has no gpu-next.
+#
+# If the DLL isn't already vendored at windows/libmpv/libmpv-2.dll, fetch a
+# pinned, hash-verified build at configure time so fresh clones / CI work with no
+# manual step. To use a different build, drop your own libmpv-2.dll in that
+# folder (it takes precedence). See windows/libmpv/README.md.
+set(LIBMPV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmpv")
+set(CUSTOM_LIBMPV "${LIBMPV_DIR}/libmpv-2.dll")
+if(NOT EXISTS "${CUSTOM_LIBMPV}")
+  set(LIBMPV_PLACEBO_URL "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-06-24-2339eb7276/mpv-dev-x86_64-20260624-git-2339eb7276.7z")
+  set(LIBMPV_PLACEBO_SHA256 "51cd88560196d788b6410d571c2aa324a56cd5794300009f93ea7f2c35a930c9")
+  set(LIBMPV_PLACEBO_ARCHIVE "${CMAKE_BINARY_DIR}/libmpv-placebo.7z")
+  set(LIBMPV_PLACEBO_EXTRACT "${CMAKE_BINARY_DIR}/libmpv-placebo")
+  message(STATUS "Fetching libplacebo libmpv (gpu-next): ${LIBMPV_PLACEBO_URL}")
+  file(DOWNLOAD "${LIBMPV_PLACEBO_URL}" "${LIBMPV_PLACEBO_ARCHIVE}"
+    SHOW_PROGRESS
+    EXPECTED_HASH "SHA256=${LIBMPV_PLACEBO_SHA256}"
+    STATUS LIBMPV_DL_STATUS)
+  list(GET LIBMPV_DL_STATUS 0 LIBMPV_DL_CODE)
+  if(NOT LIBMPV_DL_CODE EQUAL 0)
+    message(WARNING "libmpv download failed (${LIBMPV_DL_STATUS}); HDR / Dolby "
+      "Vision will fall back to media_kit's bundled libmpv. See "
+      "windows/libmpv/README.md to vendor it manually.")
+  else()
+    file(MAKE_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar xzf "${LIBMPV_PLACEBO_ARCHIVE}"
+      WORKING_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}"
+      RESULT_VARIABLE LIBMPV_EXTRACT_RESULT)
+    file(GLOB_RECURSE LIBMPV_FOUND "${LIBMPV_PLACEBO_EXTRACT}/libmpv-2.dll")
+    if(LIBMPV_EXTRACT_RESULT EQUAL 0 AND LIBMPV_FOUND)
+      list(GET LIBMPV_FOUND 0 LIBMPV_FOUND_FIRST)
+      file(MAKE_DIRECTORY "${LIBMPV_DIR}")
+      file(COPY "${LIBMPV_FOUND_FIRST}" DESTINATION "${LIBMPV_DIR}")
+      message(STATUS "Vendored libmpv-2.dll -> ${CUSTOM_LIBMPV}")
+    else()
+      message(WARNING "Could not extract libmpv-2.dll from the downloaded archive.")
+    endif()
+  endif()
+endif()
+
+# Install our libmpv over media_kit's at install time (after the plugin libraries
+# above, so it wins). The EXISTS check is evaluated at install time, so dropping
+# the DLL in later only needs a rebuild, not a CMake reconfigure.
+install(CODE "
+  if(EXISTS \"${CUSTOM_LIBMPV}\")
+    message(STATUS \"Overriding libmpv-2.dll with libplacebo build (gpu-next).\")
+    file(COPY \"${CUSTOM_LIBMPV}\" DESTINATION \"${INSTALL_BUNDLE_LIB_DIR}\")
+  endif()
+" COMPONENT Runtime)
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

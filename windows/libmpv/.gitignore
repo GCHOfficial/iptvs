@@ -1,0 +1,4 @@
+# The vendored libplacebo libmpv build is large (~100 MB). Keep it out of git by
+# default; use Git LFS if you want to track it. See README.md.
+*.dll
+*.7z

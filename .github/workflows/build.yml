@@ -1,0 +1,84 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: 3.44.2
+
+jobs:
+  # Fast gate: static analysis + the pure-logic / persistence unit tests.
+  analyze-test:
+    name: Analyze & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      # The persistence tests use sqflite_common_ffi, which loads the system
+      # libsqlite3 at runtime.
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # One universal release APK serves both phone and Android TV (the manifest
+  # declares the leanback launcher + optional touchscreen).
+  build-android:
+    name: Build Android (phone + TV)
+    needs: analyze-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pull the libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar).
+          lfs: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build release APK
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iptvs-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  # Windows desktop build. The libplacebo/Dolby-Vision libmpv-2.dll is fetched +
+  # hash-verified automatically by windows/CMakeLists.txt at configure time.
+  build-windows:
+    name: Build Windows
+    needs: analyze-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - name: Build release (Windows x64)
+        run: flutter build windows --release
+      - name: Package build
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iptvs-windows-x64
+          path: iptvs-windows-x64.zip
+          if-no-files-found: error

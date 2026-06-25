@@ -1,100 +1,142 @@
 package com.example.iptvs
 
-import android.app.Activity
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.FrameLayout
-import android.widget.Toast
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.VideoSize
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
+import com.example.iptvs.player.AspectMode
+import com.example.iptvs.player.ExoPlayerEngine
+import com.example.iptvs.player.MpvEngine
+import com.example.iptvs.player.PlaybackEngine
+import com.example.iptvs.player.PlayerCallbacks
+import com.example.iptvs.player.PlayerScreen
+import com.example.iptvs.player.PlayerUiState
+import com.example.iptvs.player.SubtitleSpec
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
+/**
+ * Native HDR player. Hosts a [PlaybackEngine] behind the Jetpack Compose control
+ * overlay ([PlayerScreen]). Starts on [ExoPlayerEngine] (MediaCodec hardware decode
+ * → true HDR); if ExoPlayer can't decode the video track (e.g. Dolby Vision
+ * Profile 5 on non-DV hardware) it falls back once to [MpvEngine] (libmpv, which
+ * software-reshapes DV and tone-maps). The engine swap is device-aware: on
+ * DV-capable hardware ExoPlayer handles everything and the fallback never fires.
+ */
 @UnstableApi
-class HdrPlayerActivity : Activity() {
-    private var player: ExoPlayer? = null
-    private lateinit var playerView: PlayerView
-    private var controllerVisible = true
+class HdrPlayerActivity : ComponentActivity() {
+    private lateinit var uiState: PlayerUiState
+    private lateinit var url: String
+    private lateinit var headers: Map<String, String>
+    private lateinit var subtitles: List<SubtitleSpec>
+
+    private val engineState = mutableStateOf<PlaybackEngine?>(null)
+    private var engine: PlaybackEngine? = null
+    private var progressTicker: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUi()
 
-        val url = intent.getStringExtra(EXTRA_URL)
-        if (url.isNullOrBlank()) {
+        val streamUrl = intent.getStringExtra(EXTRA_URL)
+        if (streamUrl.isNullOrBlank()) {
             finish()
             return
         }
-
-        title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
-        playerView = PlayerView(this).apply {
-            useController = true
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-            setControllerAutoShow(true)
-            setControllerHideOnTouch(true)
-            setControllerShowTimeoutMs(if (intent.getBooleanExtra(EXTRA_IS_LIVE, false)) 4500 else 3500)
-            setControllerVisibilityListener(
-                PlayerView.ControllerVisibilityListener { visibility ->
-                    controllerVisible = visibility == View.VISIBLE
-                    if (visibility == View.GONE) hideSystemUi()
-                },
-            )
-        }
-        setContentView(
-            playerView,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ),
+        url = streamUrl
+        headers = requestHeaders()
+        subtitles = subtitleSpecs()
+        uiState = PlayerUiState(
+            title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+            isLive = intent.getBooleanExtra(EXTRA_IS_LIVE, false),
         )
 
-        val headers = requestHeaders()
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(headers)
-        val mediaSourceFactory = DefaultMediaSourceFactory(this)
-            .setDataSourceFactory(httpFactory)
+        startWithExoPlayer()
 
-        player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build()
-            .also { exoPlayer ->
-                playerView.player = exoPlayer
-                exoPlayer.addListener(object : Player.Listener {
-                    override fun onVideoSizeChanged(videoSize: VideoSize) {
-                        Log.i(
-                            TAG,
-                            "video ${videoSize.width}x${videoSize.height} " +
-                                "ratio=${videoSize.pixelWidthHeightRatio}",
-                        )
-                    }
-
-                    override fun onPlayerError(error: PlaybackException) {
-                        Log.e(TAG, "playback failed", error)
-                        Toast.makeText(
-                            this@HdrPlayerActivity,
-                            error.localizedMessage ?: "Playback failed",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    }
-                })
-                exoPlayer.setMediaItem(mediaItem(url))
-                exoPlayer.prepare()
-                exoPlayer.playWhenReady = true
+        setContent {
+            engineState.value?.let { active ->
+                PlayerScreen(
+                    state = uiState,
+                    videoView = active.view,
+                    callbacks = playerCallbacks(),
+                )
             }
+        }
+    }
+
+    private fun startWithExoPlayer() {
+        val exo = ExoPlayerEngine(
+            context = this,
+            state = uiState,
+            headers = headers,
+            onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } },
+        )
+        setEngine(exo)
+        exo.load(url, subtitles)
+    }
+
+    /** One-way fallback: ExoPlayer couldn't decode the video → switch to libmpv. */
+    private fun fallbackToMpv() {
+        if (engine is MpvEngine || isFinishing) return
+        Log.i(TAG, "falling back to libmpv (video unsupported by ExoPlayer)")
+        engine?.release()
+        // Reset stale stream info before the new engine repopulates it.
+        uiState.videoUnsupported = false
+        val mpv = MpvEngine(
+            context = this,
+            state = uiState,
+            headers = headers,
+            post = { action -> if (!isFinishing) runOnUiThread(action) },
+        )
+        setEngine(mpv)
+        mpv.load(url, subtitles)
+    }
+
+    private fun setEngine(next: PlaybackEngine) {
+        engine = next
+        engineState.value = next
+    }
+
+    private fun playerCallbacks() = PlayerCallbacks(
+        onPlayPause = { engine?.playPause() },
+        onSeekTo = { engine?.seekTo(it) },
+        onSeekBy = { if (!uiState.isLive) engine?.seekBy(it) },
+        onSetVolume = { engine?.setVolume(it) },
+        onToggleMute = { engine?.toggleMute() },
+        onSelectAudio = { engine?.selectAudio(it) },
+        onSelectSubtitle = { engine?.selectSubtitle(it) },
+        onSetSpeed = { engine?.setSpeed(it) },
+        onCycleAspect = {
+            uiState.aspect = AspectMode.entries[(uiState.aspect.ordinal + 1) % AspectMode.entries.size]
+            engine?.applyAspect(uiState.aspect)
+        },
+        onBack = { finish() },
+    )
+
+    override fun onStart() {
+        super.onStart()
+        progressTicker = lifecycleScope.launch {
+            while (isActive) {
+                engine?.syncProgress()
+                delay(500)
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        progressTicker?.cancel()
+        progressTicker = null
+        engine?.pause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -103,93 +145,23 @@ class HdrPlayerActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        val exoPlayer = player
-        if (exoPlayer != null) {
-            when (keyCode) {
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                KeyEvent.KEYCODE_SPACE -> {
-                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> {
-                    if (controllerVisible) return super.onKeyDown(keyCode, event)
-                    playerView.showController()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_MEDIA_PLAY -> {
-                    exoPlayer.play()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                    exoPlayer.pause()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    if (controllerVisible) return super.onKeyDown(keyCode, event)
-                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
-                        exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
-                    }
-                    playerView.showController()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    if (controllerVisible) return super.onKeyDown(keyCode, event)
-                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
-                        exoPlayer.seekTo(exoPlayer.currentPosition + 10_000)
-                    }
-                    playerView.showController()
-                    return true
-                }
-
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    if (!controllerVisible) playerView.showController()
-                    return super.onKeyDown(keyCode, event)
-                }
-
-                KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
-                        exoPlayer.seekTo((exoPlayer.currentPosition - 10_000).coerceAtLeast(0))
-                    }
-                    return true
-                }
-
-                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    if (!intent.getBooleanExtra(EXTRA_IS_LIVE, false)) {
-                        exoPlayer.seekTo(exoPlayer.currentPosition + 10_000)
-                    }
-                    return true
-                }
+        when (keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> { engine?.playPause(); return true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                if (!uiState.isLive) engine?.seekBy(10_000); return true
+            }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                if (!uiState.isLive) engine?.seekBy(-10_000); return true
             }
         }
         return super.onKeyDown(keyCode, event)
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (controllerVisible) {
-            playerView.hideController()
-            hideSystemUi()
-            return
-        }
-        super.onBackPressed()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        player?.pause()
-    }
-
     override fun onDestroy() {
-        playerView.player = null
-        player?.release()
-        player = null
+        engine?.release()
+        engine = null
         super.onDestroy()
     }
 
@@ -202,38 +174,20 @@ class HdrPlayerActivity : Activity() {
         }.toMap()
     }
 
-    private fun mediaItem(url: String): MediaItem {
-        val subtitles = subtitleConfigurations()
-        return MediaItem.Builder()
-            .setUri(url)
-            .setSubtitleConfigurations(subtitles)
-            .build()
-    }
-
-    private fun subtitleConfigurations(): List<MediaItem.SubtitleConfiguration> {
+    private fun subtitleSpecs(): List<SubtitleSpec> {
         val urls = intent.getStringArrayListExtra(EXTRA_SUBTITLE_URLS).orEmpty()
         val labels = intent.getStringArrayListExtra(EXTRA_SUBTITLE_LABELS).orEmpty()
         val languages = intent.getStringArrayListExtra(EXTRA_SUBTITLE_LANGUAGES).orEmpty()
-        return urls.mapIndexedNotNull { index, url ->
-            if (url.isBlank()) {
+        return urls.mapIndexedNotNull { index, subUrl ->
+            if (subUrl.isBlank()) {
                 null
             } else {
-                MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
-                    .setMimeType(subtitleMimeType(url))
-                    .setLabel(labels.getOrNull(index)?.ifBlank { null })
-                    .setLanguage(languages.getOrNull(index)?.ifBlank { null })
-                    .build()
+                SubtitleSpec(
+                    url = subUrl,
+                    label = labels.getOrNull(index).orEmpty(),
+                    language = languages.getOrNull(index).orEmpty(),
+                )
             }
-        }
-    }
-
-    private fun subtitleMimeType(url: String): String {
-        val clean = url.substringBefore('?').substringBefore('#').lowercase()
-        return when {
-            clean.endsWith(".vtt") || clean.endsWith(".webvtt") -> MimeTypes.TEXT_VTT
-            clean.endsWith(".ssa") || clean.endsWith(".ass") -> MimeTypes.TEXT_SSA
-            clean.endsWith(".ttml") || clean.endsWith(".dfxp") -> MimeTypes.APPLICATION_TTML
-            else -> MimeTypes.APPLICATION_SUBRIP
         }
     }
 
