@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android TV launcher banner (320x180). On-brand: ink background, accent
+     play glyph + wordmark, matching lib/theme.dart AppColors. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Background (AppColors.ink) -->
+    <path
+        android:fillColor="#0E0F13"
+        android:pathData="M0,0 L320,0 L320,180 L0,180 Z" />
+
+    <!-- Rounded accent tile behind the play glyph (AppColors.accent) -->
+    <path
+        android:fillColor="#7B6CF6"
+        android:pathData="M118,52 m0,14 a14,14 0 0 1 14,-14 l40,0 a14,14 0 0 1 14,14 l0,40 a14,14 0 0 1 -14,14 l-40,0 a14,14 0 0 1 -14,-14 z" />
+
+    <!-- Play triangle (white) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M146,72 L146,104 L172,88 Z" />
+
+    <!-- Wordmark (AppColors.textHi) -->
+    <path
+        android:fillColor="#F2F4F8"
+        android:pathData="M120,138 L124,138 L124,158 L120,158 Z" />
+    <path
+        android:fillColor="#F2F4F8"
+        android:pathData="M130,138 L134,138 L134,158 L130,158 Z M129,131 L135,131 L135,135 L129,135 Z" />
+    <path
+        android:fillColor="#F2F4F8"
+        android:pathData="M139,138 L155,138 L155,142 L149,142 L149,158 L145,158 L145,142 L139,142 Z" />
+    <path
+        android:fillColor="#F2F4F8"
+        android:pathData="M158,143 L162,143 L162,145 Q164,143 167,143 Q173,143 173,150 Q173,158 167,158 Q164,158 162,156 L162,158 L158,158 Z M162,150 Q162,154 165,154 Q169,154 169,150 Q169,147 165,147 Q162,147 162,150 Z" />
+    <path
+        android:fillColor="#7B6CF6"
+        android:pathData="M176,153 Q176,158 182,158 Q186,158 188,155 L185,153 Q184,154 182,154 Q180,154 180,152 L189,152 Q189,143 182,143 Q176,143 176,150 Z M180,149 L185,149 Q185,147 182,147 Q180,147 180,149 Z" />
+</vector>

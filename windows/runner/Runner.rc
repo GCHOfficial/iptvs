@@ -57,6 +57,15 @@ IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 //
+// Fonts (Inter, bundled for the native player control overlay)
+//
+IDR_FONT_INTER_REGULAR  RCDATA                  "fonts\\Inter-Regular.ttf"
+IDR_FONT_INTER_SEMIBOLD RCDATA                  "fonts\\Inter-SemiBold.ttf"
+IDR_FONT_INTER_BOLD     RCDATA                  "fonts\\Inter-Bold.ttf"
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
 // Version
 //
 

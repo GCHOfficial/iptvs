@@ -86,6 +86,70 @@ void main() {
       expect(await second.readChannels('missing'), isEmpty);
       await second.close();
     });
+
+    test('fresh create has a usable external_metadata table', () async {
+      // Regression: onCreate must build external_metadata, not just the
+      // v3->7 upgrade branch — a fresh install was landing at the current
+      // schema with the table missing, crashing every metadata query.
+      final db = await AppDatabase.openAt(dbPath());
+      const item = MediaItem(id: 'm1', title: 'Alpha', kind: ContentKind.movie);
+      final metadata = ExternalMetadata(
+        provider: 'tmdb',
+        providerKey: '123',
+        title: 'Alpha (enriched)',
+        rating: 8.1,
+        refreshedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+      );
+
+      await db.cacheExternalMetadata('src1', item, metadata);
+      final read = await db.readExternalMetadata('src1', item, 'tmdb');
+      expect(read, isNotNull);
+      expect(read!.title, 'Alpha (enriched)');
+      expect(read.rating, 8.1);
+      await db.close();
+    });
+
+    test('repairs a v7 database missing external_metadata', () async {
+      // A DB created fresh at v7 (the buggy version) has every media table
+      // except external_metadata. The v7->8 upgrade must add it.
+      sqfliteFfiInit();
+      final raw = await databaseFactoryFfi.openDatabase(
+        dbPath(),
+        options: OpenDatabaseOptions(
+          version: 7,
+          onCreate: (db, _) async {
+            // Minimal v7-era shape: just enough that the v7->8 branch is the
+            // only thing that can create external_metadata.
+            await db.execute(
+              'CREATE TABLE sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
+              'synced_at INTEGER, epg_synced_at INTEGER)',
+            );
+          },
+        ),
+      );
+      // Prove the table is absent before the upgrade.
+      final before = await raw.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table' AND "
+        "name='external_metadata'",
+      );
+      expect(before, isEmpty);
+      await raw.close();
+
+      final db = await AppDatabase.openAt(dbPath());
+      const item = MediaItem(id: 'm1', title: 'Alpha', kind: ContentKind.movie);
+      final metadata = ExternalMetadata(
+        provider: 'mdblist',
+        providerKey: 'tt0001',
+        rating: 6.4,
+        refreshedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      );
+
+      await db.cacheExternalMetadata('src1', item, metadata);
+      final read = await db.readExternalMetadata('src1', item, 'mdblist');
+      expect(read, isNotNull);
+      expect(read!.rating, 6.4);
+      await db.close();
+    });
   });
 
   group('AppDatabase media round-trip', () {

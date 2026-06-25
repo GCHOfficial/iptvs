@@ -4,6 +4,12 @@
 //
 #define IDI_APP_ICON                    101
 
+// Bundled Inter fonts for the native player overlay (loaded via
+// AddFontMemResourceEx so the GDI controls match the app's typeface).
+#define IDR_FONT_INTER_REGULAR          201
+#define IDR_FONT_INTER_SEMIBOLD         202
+#define IDR_FONT_INTER_BOLD             203
+
 // Next default values for new objects
 //
 #ifdef APSTUDIO_INVOKED

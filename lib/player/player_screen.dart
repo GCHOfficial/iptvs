@@ -48,8 +48,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _isNativeFullscreen = false;
   bool _nativeControlsVisible = true;
   bool _nativeTeardownScheduled = false;
+  bool _loggedActiveVo = false;
+  String? _lastVideoParamsLog;
   DateTime? _ignoreNativeInputUntil;
   int? _windowsNativeSurface;
+  // Index into [_aspectModes]. Starts at "Fill" to match the panscan=1.0 the
+  // native surface is configured with in [_configureNativePlayer].
+  int _aspectModeIndex = 1;
+
+  static const List<double> _speedOptions = <double>[
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    2.0,
+  ];
+
+  static const List<_AspectMode> _aspectModes = <_AspectMode>[
+    _AspectMode('Fit', '0.0', 'no'),
+    _AspectMode('Fill', '1.0', 'no'),
+    _AspectMode('16:9', '0.0', '16:9'),
+    _AspectMode('4:3', '0.0', '4:3'),
+  ];
 
   bool get _usesWindowsNativeSurface => Platform.isWindows;
 
@@ -70,9 +91,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     _subs.add(
       _player.stream.log.listen((entry) {
-        if (entry.level == 'warn' || entry.level == 'error') {
-          _logPlayback('${entry.level} ${entry.prefix}: ${entry.text}');
-        }
+        if (entry.level != 'warn' && entry.level != 'error') return;
+        // ffmpeg demux/decode warnings (UDTA, timescale, …) are non-fatal noise,
+        // amplified by the shared libmpv av_log callback relaying the native
+        // engine's software-decode complaints. Drop them; keep real errors.
+        if (entry.level == 'warn' && entry.prefix.contains('ffmpeg')) return;
+        _logPlaybackDeduped('${entry.level} ${entry.prefix}: ${entry.text}');
       }),
     );
     _subs.add(
@@ -117,10 +141,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     _subs.add(
       _player.stream.videoParams.listen((params) {
-        _logPlayback(
-          'video format=${params.hwPixelformat ?? params.pixelformat} '
-          'w=${params.w} h=${params.h} display=${params.dw}x${params.dh}',
-        );
+        // mpv re-emits identical video-params repeatedly; only log on change so
+        // the exportable diagnostics log stays readable.
+        final line =
+            'video format=${params.hwPixelformat ?? params.pixelformat} '
+            'w=${params.w} h=${params.h} display=${params.dw}x${params.dh} '
+            'primaries=${params.primaries} gamma=${params.gamma} '
+            'sigPeak=${params.sigPeak} matrix=${params.colormatrix} '
+            'levels=${params.colorlevels}';
+        if (line != _lastVideoParamsLog) {
+          _lastVideoParamsLog = line;
+          _logPlayback(line);
+        }
+        unawaited(_logActiveVideoOutput());
       }),
     );
     // Clear the error overlay once playback actually starts.
@@ -364,6 +397,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _syncWindowsNativeControlState();
       return;
     }
+    if (command.startsWith('audioTrack:')) {
+      final id = command.substring('audioTrack:'.length);
+      await _selectNativeAudioTrack(id);
+      await _syncWindowsNativeControlState();
+      return;
+    }
+    if (command.startsWith('speed:')) {
+      final rate = double.tryParse(command.substring('speed:'.length));
+      if (rate != null) await _player.setRate(rate);
+      await _syncWindowsNativeControlState();
+      return;
+    }
+    if (command.startsWith('menu:')) {
+      // The native overlay owns menu open/close state; refresh so the menu it
+      // just opened renders the latest track/option list.
+      await _syncWindowsNativeControlState();
+      return;
+    }
     switch (command) {
       case 'back':
         _back();
@@ -386,7 +437,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       case 'fullscreen':
         await _toggleNativeFullscreen();
         break;
-      case 'subtitles':
+      case 'aspect':
+        await _cycleNativeAspect();
+        break;
+      case 'info':
+        // The native overlay owns the info-panel open state; refresh so it
+        // renders with the latest metadata.
         await _syncWindowsNativeControlState();
         break;
       case 'show':
@@ -407,7 +463,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
         'durationMs': _player.state.duration.inMilliseconds.toDouble(),
         'volume': _player.state.volume,
         'selectedSubtitleId': _player.state.track.subtitle.id,
-        'subtitles': _nativeSubtitleTrackPayload(),
+        'subtitleTracks': _nativeSubtitleTrackPayload(),
+        'selectedAudioId': _player.state.track.audio.id,
+        'audioTracks': _nativeAudioTrackPayload(),
+        'selectedSpeedId': _speedId(_player.state.rate),
+        'speedOptions': _speedOptionPayload(),
+        'aspectLabel': _aspectModes[_aspectModeIndex].label,
+        ..._streamInfoPayload(),
       });
     } catch (error) {
       _logPlayback('native hdr control state failed: $error');
@@ -458,9 +520,187 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   List<Map<String, String>> _nativeSubtitleTrackPayload() {
-    return _nativeSubtitleTracks()
+    final tracks = _nativeSubtitleTracks();
+    // Only surface the subtitles button when there is something to pick beyond
+    // the Auto/Off defaults (e.g. most live IPTV has none).
+    final hasReal = tracks.any((track) => track.id != 'auto' && track.id != 'no');
+    if (!hasReal) return const [];
+    return tracks
         .map((track) => {'id': track.id, 'label': _subtitleTrackLabel(track)})
         .toList(growable: false);
+  }
+
+  List<AudioTrack> _nativeAudioTracks() {
+    return _player.state.tracks.audio
+        .where((track) => track.id != 'auto' && track.id != 'no')
+        .toList();
+  }
+
+  List<Map<String, String>> _nativeAudioTrackPayload() {
+    final tracks = _nativeAudioTracks();
+    // Switching is only meaningful with at least two real tracks.
+    if (tracks.length < 2) return const [];
+    return tracks
+        .map((track) => {'id': track.id, 'label': _audioTrackLabel(track)})
+        .toList(growable: false);
+  }
+
+  String _audioTrackLabel(AudioTrack track) {
+    final parts = <String>[];
+    final language = track.language?.trim();
+    if (language != null && language.isNotEmpty) {
+      parts.add(language.toUpperCase());
+    }
+    final title = track.title?.trim();
+    if (title != null && title.isNotEmpty) parts.add(title);
+    final codec = _codecLabel(track.codec);
+    if (codec.isNotEmpty) parts.add(codec);
+    final channels = _channelsLabel(track);
+    if (channels.isNotEmpty) parts.add(channels);
+    if (parts.isEmpty) return 'Audio ${track.id}';
+    return parts.join(' · ');
+  }
+
+  Future<void> _selectNativeAudioTrack(String id) async {
+    AudioTrack? selected;
+    for (final track in _nativeAudioTracks()) {
+      if (track.id == id) {
+        selected = track;
+        break;
+      }
+    }
+    if (selected == null) return;
+    _logPlayback(
+      'native audio select id=${selected.id} '
+      'label=${_audioTrackLabel(selected)}',
+    );
+    await _player.setAudioTrack(selected);
+  }
+
+  String _speedId(double rate) => rate.toStringAsFixed(2);
+
+  String _speedLabel(double rate) {
+    if (rate == 1.0) return 'Normal (1.0×)';
+    final text = rate == rate.roundToDouble()
+        ? rate.toStringAsFixed(1)
+        : rate.toString();
+    return '$text×';
+  }
+
+  List<Map<String, String>> _speedOptionPayload() {
+    if (_isLive) return const [];
+    return _speedOptions
+        .map((rate) => {'id': _speedId(rate), 'label': _speedLabel(rate)})
+        .toList(growable: false);
+  }
+
+  Future<void> _cycleNativeAspect() async {
+    _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
+    final mode = _aspectModes[_aspectModeIndex];
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      final properties = <String, String>{
+        'panscan': mode.panscan,
+        'video-aspect-override': mode.aspect,
+      };
+      for (final entry in properties.entries) {
+        try {
+          await platform.setProperty(entry.key, entry.value);
+        } catch (error) {
+          _logPlayback('warn mpv aspect ${entry.key} failed: $error');
+        }
+      }
+    }
+    _logPlayback('native aspect mode=${mode.label}');
+    await _syncWindowsNativeControlState();
+  }
+
+  // The selected track often reads as the `auto` placeholder (null codec/fps)
+  // even while a concrete track is playing, so fall back to the first real
+  // track for the info panel's codec/fps/channels.
+  VideoTrack _infoVideoTrack() {
+    final selected = _player.state.track.video;
+    if (selected.codec != null || selected.fps != null) return selected;
+    for (final track in _player.state.tracks.video) {
+      if (track.id != 'auto' && track.id != 'no') return track;
+    }
+    return selected;
+  }
+
+  AudioTrack _infoAudioTrack() {
+    final selected = _player.state.track.audio;
+    if (selected.codec != null || selected.channels != null) return selected;
+    for (final track in _player.state.tracks.audio) {
+      if (track.id != 'auto' && track.id != 'no') return track;
+    }
+    return selected;
+  }
+
+  Map<String, Object?> _streamInfoPayload() {
+    final params = _player.state.videoParams;
+    final video = _infoVideoTrack();
+    final audio = _infoAudioTrack();
+    return {
+      'videoWidth': params.w ?? video.w ?? 0,
+      'videoHeight': params.h ?? video.h ?? 0,
+      'fps': video.fps ?? 0.0,
+      'dynamicRange': _dynamicRangeLabel(params),
+      'videoCodec': _codecLabel(video.codec),
+      'audioCodec': _codecLabel(audio.codec),
+      'audioChannels': _channelsLabel(audio),
+    };
+  }
+
+  String _dynamicRangeLabel(VideoParams params) {
+    final gamma = params.gamma?.toLowerCase() ?? '';
+    final primaries = params.primaries?.toLowerCase() ?? '';
+    final matrix = params.colormatrix?.toLowerCase() ?? '';
+    if (matrix.contains('dolby') || gamma.contains('dolby')) {
+      return 'Dolby Vision';
+    }
+    if (gamma.contains('pq')) return 'HDR10 · PQ';
+    if (gamma.contains('hlg')) return 'HLG';
+    if (primaries.contains('2020')) return 'HDR · BT.2020';
+    if (gamma.isEmpty && primaries.isEmpty) return '';
+    return 'SDR';
+  }
+
+  String _codecLabel(String? codec) {
+    if (codec == null || codec.trim().isEmpty) return '';
+    switch (codec.toLowerCase()) {
+      case 'hevc':
+        return 'HEVC';
+      case 'h264':
+        return 'H.264';
+      case 'mpeg2video':
+        return 'MPEG-2';
+      case 'av1':
+        return 'AV1';
+      case 'vp9':
+        return 'VP9';
+      case 'eac3':
+        return 'E-AC3';
+      case 'ac3':
+        return 'AC3';
+      case 'aac':
+        return 'AAC';
+      case 'mp3':
+        return 'MP3';
+      default:
+        return codec.toUpperCase();
+    }
+  }
+
+  String _channelsLabel(AudioTrack track) {
+    final channels = track.channels?.trim();
+    if (channels != null && channels.isNotEmpty) return channels;
+    final count = track.audiochannels ?? track.channelscount;
+    if (count != null && count > 0) {
+      if (count == 1) return 'Mono';
+      if (count == 2) return 'Stereo';
+      return '$count ch';
+    }
+    return '';
   }
 
   List<SubtitleTrack> _nativeSubtitleTracks() {
@@ -529,9 +769,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
             // to the display stack. With a native HWND, mpv presents directly
             // instead of round-tripping frames through Flutter's SDR texture.
             'vid': 'auto',
-            'vo': 'gpu',
+            // gpu-next is libplacebo's renderer; it has the modern HDR and
+            // Dolby Vision (P5/P8) handling the legacy 'gpu' VO lacks. Requires
+            // a libplacebo-enabled libmpv (see windows/libmpv/README.md);
+            // falls back to 'gpu' when that build isn't present.
+            'vo': 'gpu-next,gpu',
             'gpu-api': 'd3d11',
             'gpu-context': 'd3d11',
+            // Hardware-decode on the GPU (zero-copy with the d3d11 path). 4K
+            // HEVC/10-bit is too heavy for software decode and causes A/V
+            // desync; mpv falls back to software if a codec isn't supported.
+            'hwdec': 'd3d11va',
+            // 10-bit swapchain so HDR/10-bit output isn't truncated to 8-bit,
+            // without forcing the desktop into HDR globally.
+            'd3d11-output-format': 'rgb10_a2',
             'osd-level': '1',
             'target-colorspace-hint': 'yes',
             'tone-mapping': 'auto',
@@ -577,6 +828,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  // Logs which video output / decoder mpv actually initialized — tells us
+  // whether `gpu-next` loaded or fell back to `gpu`, and the active colorspace.
+  Future<void> _logActiveVideoOutput() async {
+    if (_loggedActiveVo) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    try {
+      final vo = await platform.getProperty('current-vo');
+      if (vo.isEmpty) return; // VO not initialized yet; retry on next event.
+      _loggedActiveVo = true;
+      final hwdec = await platform.getProperty('hwdec-current');
+      _logPlayback('active vo=$vo hwdec=$hwdec');
+    } catch (error) {
+      _loggedActiveVo = true;
+      _logPlayback('warn query active vo failed: $error');
+    }
+  }
+
   Future<void> _setNativeHeaderOptions(
     NativePlayer platform,
     Map<String, String> headers,
@@ -616,6 +885,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     for (final s in _subs) {
       s.cancel();
     }
+    _flushDedup();
     if (Platform.isWindows && _windowsNativeSurface != null) {
       _scheduleWindowsNativeTeardown();
     }
@@ -924,6 +1194,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     debugPrint('[iptvs.player] $message');
   }
 
+  // Collapses runs of identical messages (e.g. the hundreds of repeated
+  // `hevc: Could not find ref with POC …` errors from bad DV P5 muxing) into a
+  // single line plus a `(×N)` summary, so the exportable diagnostics stay
+  // readable. Non-repeating lines pass straight through.
+  String? _lastDedupMessage;
+  int _dedupCount = 0;
+
+  void _logPlaybackDeduped(String message) {
+    if (message == _lastDedupMessage) {
+      _dedupCount++;
+      return;
+    }
+    _flushDedup();
+    _lastDedupMessage = message;
+    _logPlayback(message);
+  }
+
+  void _flushDedup() {
+    if (_dedupCount > 0 && _lastDedupMessage != null) {
+      _logPlayback('$_lastDedupMessage (×${_dedupCount + 1})');
+    }
+    _lastDedupMessage = null;
+    _dedupCount = 0;
+  }
+
   String _trackSummary(dynamic track) {
     final codec = track.codec == null ? '' : ' codec=${track.codec}';
     final decoder = track.decoder == null ? '' : ' decoder=${track.decoder}';
@@ -936,6 +1231,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         : ' ${track.w}x${track.h}';
     return '${track.id}$codec$decoder$channels$rate$size';
   }
+}
+
+/// A video framing mode for the Windows native surface. [panscan] maps to mpv's
+/// `panscan` (0 = letterbox/fit, 1 = crop to fill) and [aspect] to
+/// `video-aspect-override` (`no` clears any forced display aspect).
+class _AspectMode {
+  final String label;
+  final String panscan;
+  final String aspect;
+  const _AspectMode(this.label, this.panscan, this.aspect);
 }
 
 class _LiveBadge extends StatelessWidget {

@@ -1,0 +1,627 @@
+package com.example.iptvs.player
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import android.view.View
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+
+/** Player actions the overlay invokes; implemented by the Activity over ExoPlayer. */
+class PlayerCallbacks(
+    val onPlayPause: () -> Unit,
+    val onSeekTo: (Long) -> Unit,
+    val onSeekBy: (Long) -> Unit,
+    val onSetVolume: (Float) -> Unit,
+    val onToggleMute: () -> Unit,
+    val onSelectAudio: (String) -> Unit,
+    val onSelectSubtitle: (String) -> Unit,
+    val onSetSpeed: (Float) -> Unit,
+    val onCycleAspect: () -> Unit,
+    val onBack: () -> Unit,
+)
+
+private const val HIDE_DELAY_VOD = 3500L
+private const val HIDE_DELAY_LIVE = 4500L
+
+/**
+ * Root of the native player UI: the ExoPlayer surface with a Compose control
+ * overlay on top. Mirrors the Windows native overlay (top bar + badges, bottom
+ * bar with contextual right cluster, list-menus, info panel) and is D-pad
+ * navigable for Android TV.
+ */
+@Composable
+fun PlayerScreen(
+    state: PlayerUiState,
+    videoView: View,
+    callbacks: PlayerCallbacks,
+) {
+    val rootFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    // Bumped on any interaction to (re)arm the auto-hide timer.
+    var interaction by remember { mutableIntStateOf(0) }
+
+    fun poke() {
+        interaction++
+        state.controlsVisible = true
+    }
+
+    // Auto-hide: hide after the timeout unless pinned (a menu / info panel open)
+    // or playback is paused.
+    LaunchedEffect(interaction, state.pinned, state.isPlaying, state.controlsVisible) {
+        if (state.controlsVisible && !state.pinned && state.isPlaying) {
+            kotlinx.coroutines.delay(if (state.isLive) HIDE_DELAY_LIVE else HIDE_DELAY_VOD)
+            state.controlsVisible = false
+        }
+    }
+
+    // Move focus to the controls when shown; park it on the root when hidden so a
+    // D-pad press can reveal them again.
+    LaunchedEffect(state.controlsVisible) {
+        if (state.controlsVisible) {
+            runCatching { playFocus.requestFocus() }
+        } else {
+            state.openMenu = PlayerMenu.None
+            state.infoOpen = false
+            runCatching { rootFocus.requestFocus() }
+        }
+    }
+
+    BackHandler(enabled = true) {
+        when {
+            state.openMenu != PlayerMenu.None -> state.openMenu = PlayerMenu.None
+            state.infoOpen -> state.infoOpen = false
+            state.controlsVisible && state.isPlaying -> state.controlsVisible = false
+            else -> callbacks.onBack()
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(PlayerColors.Ink)
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    val wasHidden = !state.controlsVisible
+                    poke()
+                    wasHidden // consume the first key only to reveal controls
+                } else {
+                    false
+                }
+            },
+    ) {
+        // key() so swapping engines (ExoPlayer -> mpv fallback) rebuilds the host
+        // with the new engine's view.
+        key(videoView) {
+            AndroidView(factory = { videoView }, modifier = Modifier.fillMaxSize())
+        }
+
+        // Tap layer (below the controls) toggles visibility on touch devices.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = {
+                            if (state.controlsVisible) {
+                                state.controlsVisible = false
+                            } else {
+                                poke()
+                            }
+                        },
+                    )
+                },
+        )
+
+        if (state.videoUnsupported) {
+            UnsupportedVideoNotice(
+                reason = state.videoUnsupportedReason,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+
+        AnimatedVisibility(
+            visible = state.controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            ControlsOverlay(state, callbacks, playFocus) { poke() }
+        }
+
+        // Menus + info panel sit above the bars; they imply controls are visible.
+        if (state.controlsVisible) {
+            PlayerMenusLayer(state, callbacks) { poke() }
+            if (state.infoOpen) {
+                InfoPanel(
+                    state = state,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 84.dp, end = PlayerDimens.EdgePadding),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ControlsOverlay(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    playFocus: FocusRequester,
+    onInteract: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    0f to PlayerColors.ScrimTop,
+                    0.25f to androidx.compose.ui.graphics.Color.Transparent,
+                    0.7f to androidx.compose.ui.graphics.Color.Transparent,
+                    1f to PlayerColors.ScrimBottom,
+                ),
+            ),
+    ) {
+        TopBar(state, callbacks, onInteract)
+        Spacer(Modifier.weight(1f))
+        BottomBar(state, callbacks, playFocus, onInteract)
+    }
+}
+
+@Composable
+private fun TopBar(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    onInteract: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconControlButton(
+            icon = Icons.AutoMirrored.Filled.ArrowBack,
+            contentDescription = "Back",
+            onClick = { onInteract(); callbacks.onBack() },
+        )
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = state.title,
+                color = PlayerColors.TextHi,
+                fontFamily = InterFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp,
+                maxLines = 1,
+            )
+        }
+        if (state.isLive) {
+            LiveBadge()
+        } else {
+            state.resolutionBadge()?.let { Badge(it); Spacer(Modifier.width(8.dp)) }
+            state.hdrBadge()?.let { Badge(it, accent = true) }
+        }
+    }
+}
+
+@Composable
+private fun BottomBar(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    playFocus: FocusRequester,
+    onInteract: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PlayerDimens.EdgePadding, vertical = 18.dp),
+    ) {
+        if (!state.isLive) {
+            Scrubber(state, callbacks, onInteract)
+            Spacer(Modifier.height(10.dp))
+        }
+        // Below ~560dp (phone portrait) the transport + right cluster won't fit on
+        // one line, so the right cluster wraps onto a second row. Both rows are
+        // left-grouped with the same rhythm so they read as a balanced pair.
+        BoxWithConstraints {
+            val compact = maxWidth < 560.dp
+            if (compact) {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // Fixed-width volume so the row stays left-grouped (matching the
+                        // cluster row below) instead of the slider stretching to the edge.
+                        TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(140.dp))
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // The parent Row supplies the 8dp gaps, so skip the
+                        // cluster's own inter-button spacers (`spread = true`).
+                        RightCluster(state, callbacks, onInteract, spread = true)
+                    }
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(120.dp))
+                    Spacer(Modifier.weight(1f))
+                    RightCluster(state, callbacks, onInteract)
+                }
+            }
+        }
+    }
+}
+
+/** Play/pause, ±10s (VOD), mute + volume. `volumeModifier` sizes the volume slider
+ *  (a fixed width in both layouts, so the transport row stays left-grouped). */
+@Composable
+private fun RowScope.TransportControls(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    playFocus: FocusRequester,
+    onInteract: () -> Unit,
+    volumeModifier: Modifier,
+) {
+    IconControlButton(
+        icon = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+        contentDescription = "Play/Pause",
+        focusRequester = playFocus,
+        onClick = { onInteract(); callbacks.onPlayPause() },
+    )
+    if (!state.isLive) {
+        Spacer(Modifier.width(8.dp))
+        IconControlButton(Icons.Filled.Replay10, "Back 10s") {
+            onInteract(); callbacks.onSeekBy(-10_000)
+        }
+        Spacer(Modifier.width(8.dp))
+        IconControlButton(Icons.Filled.Forward10, "Forward 10s") {
+            onInteract(); callbacks.onSeekBy(10_000)
+        }
+    }
+    Spacer(Modifier.width(8.dp))
+    IconControlButton(
+        icon = if (state.muted || state.volume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+        contentDescription = "Mute",
+    ) { onInteract(); callbacks.onToggleMute() }
+    Spacer(Modifier.width(8.dp))
+    SlimSlider(
+        value = if (state.muted) 0f else state.volume,
+        onValueChange = { onInteract(); callbacks.onSetVolume(it) },
+        modifier = volumeModifier,
+    )
+}
+
+/** Contextual right cluster: speed (VOD), audio, subtitles, aspect, info. */
+@Composable
+private fun RowScope.RightCluster(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    onInteract: () -> Unit,
+    spread: Boolean = false,
+) {
+    // When `spread`, the parent Row supplies the gaps (portrait, `spacedBy`), so we
+    // omit the manual spacers; otherwise (landscape) we space the buttons ourselves.
+    if (state.showSpeedButton) {
+        TextControlButton(state.speedLabel(), "Playback speed") {
+            onInteract(); state.openMenu =
+                if (state.openMenu == PlayerMenu.Speed) PlayerMenu.None else PlayerMenu.Speed
+        }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
+    if (state.showAudioButton) {
+        IconControlButton(Icons.Filled.Audiotrack, "Audio track") {
+            onInteract(); state.openMenu =
+                if (state.openMenu == PlayerMenu.Audio) PlayerMenu.None else PlayerMenu.Audio
+        }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
+    if (state.showSubtitleButton) {
+        IconControlButton(Icons.Filled.ClosedCaption, "Subtitles") {
+            onInteract(); state.openMenu =
+                if (state.openMenu == PlayerMenu.Subtitles) PlayerMenu.None else PlayerMenu.Subtitles
+        }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
+    TextControlButton(state.aspect.label, "Aspect ratio") {
+        onInteract(); callbacks.onCycleAspect()
+    }
+    if (!spread) Spacer(Modifier.width(8.dp))
+    IconControlButton(Icons.Filled.Info, "Stream info") {
+        onInteract(); state.infoOpen = !state.infoOpen
+    }
+}
+
+@Composable
+private fun Scrubber(
+    state: PlayerUiState,
+    callbacks: PlayerCallbacks,
+    onInteract: () -> Unit,
+) {
+    val duration = state.durationMs.coerceAtLeast(1)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            formatTime(state.positionMs),
+            color = PlayerColors.TextHi,
+            fontFamily = InterFontFamily,
+            fontSize = 13.sp,
+            modifier = Modifier.width(58.dp),
+        )
+        SlimSlider(
+            value = (state.positionMs.toFloat() / duration).coerceIn(0f, 1f),
+            onValueChange = { fraction ->
+                onInteract()
+                callbacks.onSeekTo((fraction * duration).toLong())
+            },
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            formatTime(state.durationMs),
+            color = PlayerColors.TextLo,
+            fontFamily = InterFontFamily,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(start = 8.dp),
+        )
+    }
+}
+
+// ---- Reusable controls ------------------------------------------------------
+
+@Composable
+fun IconControlButton(
+    icon: ImageVector,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val base = modifier
+        .size(PlayerDimens.ButtonSize)
+        .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
+        .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
+    val withFocus = if (focusRequester != null) base.focusRequester(focusRequester) else base
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = withFocus
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(onClick = onClick),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = PlayerColors.TextHi,
+            modifier = Modifier.size(22.dp),
+        )
+    }
+}
+
+@Composable
+fun TextControlButton(
+    label: String,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .height(PlayerDimens.ButtonSize)
+            .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
+            .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp),
+    ) {
+        Text(
+            text = label,
+            color = PlayerColors.TextHi,
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun UnsupportedVideoNotice(reason: String, modifier: Modifier = Modifier) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .padding(32.dp)
+            .clip(RoundedCornerShape(PlayerDimens.MenuCorner))
+            .background(PlayerColors.Panel)
+            .padding(horizontal = 24.dp, vertical = 20.dp),
+    ) {
+        Text(
+            text = reason,
+            color = PlayerColors.TextHi,
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Audio is still playing.",
+            color = PlayerColors.TextLo,
+            fontFamily = InterFontFamily,
+            fontSize = 13.sp,
+        )
+    }
+}
+
+@Composable
+fun LiveBadge() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(PlayerColors.Live)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(
+            "LIVE",
+            color = androidx.compose.ui.graphics.Color.White,
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+@Composable
+fun Badge(text: String, accent: Boolean = false) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (accent) PlayerColors.Accent else PlayerColors.PanelHi)
+            .padding(horizontal = 9.dp, vertical = 5.dp),
+    ) {
+        Text(
+            text = text,
+            color = PlayerColors.TextHi,
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp,
+        )
+    }
+}
+
+@Composable
+fun sliderColors() = SliderDefaults.colors(
+    thumbColor = PlayerColors.Accent,
+    activeTrackColor = PlayerColors.Accent,
+    inactiveTrackColor = PlayerColors.TrackInactive,
+)
+
+/**
+ * A slim slider matching the Windows overlay: a thin rounded track and a small
+ * round thumb, without Material 3's wide thumb / stop indicators. Keeps the M3
+ * Slider's drag + D-pad behaviour. Used for both the scrubber and volume.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SlimSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier,
+        colors = sliderColors(),
+        thumb = {
+            Box(
+                Modifier
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(PlayerColors.Accent),
+            )
+        },
+        track = { sliderState ->
+            val range = sliderState.valueRange
+            val fraction = ((sliderState.value - range.start) /
+                (range.endInclusive - range.start)).coerceIn(0f, 1f)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(PlayerColors.TrackInactive),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(PlayerColors.Accent),
+                )
+            }
+        },
+    )
+}
+
+fun formatTime(ms: Long): String {
+    if (ms <= 0) return "0:00"
+    val totalSeconds = ms / 1000
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) {
+        "%d:%02d:%02d".format(h, m, s)
+    } else {
+        "%d:%02d".format(m, s)
+    }
+}
