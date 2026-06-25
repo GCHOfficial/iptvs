@@ -52,7 +52,7 @@ jobs:
       - run: flutter pub get
       - name: Build release APK
         run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: iptvs-android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
@@ -77,7 +77,7 @@ jobs:
         run: flutter build windows --release
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: iptvs-windows-x64
           path: iptvs-windows-x64.zip

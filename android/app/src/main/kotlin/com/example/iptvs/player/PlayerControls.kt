@@ -348,12 +348,12 @@ private fun RowScope.TransportControls(
             onInteract(); callbacks.onSeekBy(10_000)
         }
     }
-    Spacer(Modifier.width(14.dp))
+    Spacer(Modifier.width(8.dp))
     IconControlButton(
         icon = if (state.muted || state.volume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
         contentDescription = "Mute",
     ) { onInteract(); callbacks.onToggleMute() }
-    Spacer(Modifier.width(10.dp))
+    Spacer(Modifier.width(8.dp))
     SlimSlider(
         value = if (state.muted) 0f else state.volume,
         onValueChange = { onInteract(); callbacks.onSetVolume(it) },
