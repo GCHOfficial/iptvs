@@ -120,13 +120,13 @@ class _TvTextFieldState extends State<TvTextField> {
   }
 
   Widget _buildCell(bool highlighted) {
-    return BackButtonListener(
-      onBackButtonPressed: () async {
-        if (_editing) {
-          _exitEdit();
-          return true; // consume Back: exit edit instead of popping the route
-        }
-        return false;
+    // While editing, swallow Back to leave edit mode instead of popping the route.
+    // PopScope (not BackButtonListener) is the Navigator-compatible mechanism —
+    // this app uses Navigator, not a Router, so BackButtonListener would throw.
+    return PopScope(
+      canPop: !_editing,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _editing) _exitEdit();
       },
       child: FocusableActionDetector(
         focusNode: _cellFocus,
@@ -155,34 +155,41 @@ class _TvTextFieldState extends State<TvTextField> {
                 width: highlighted ? 2 : 1,
               ),
             ),
-            child: ExcludeFocus(
-              excluding: !_editing,
-              child: TextField(
-                controller: widget.controller,
-                focusNode: _fieldFocus,
-                obscureText: widget.obscureText,
-                onChanged: widget.onChanged,
-                textInputAction: widget.textInputAction,
-                onSubmitted: (value) {
-                  _exitEdit();
-                  widget.onSubmitted?.call(value);
-                },
-                // The cell already supplies the background + focus ring, so strip
-                // the global InputDecorationTheme's fill and all borders.
-                decoration: InputDecoration(
-                  isDense: true,
-                  filled: false,
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  disabledBorder: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
+            // Until editing, the inner field neither takes focus (ExcludeFocus) nor
+            // pointer events (IgnorePointer) — so a tap falls through to the cell's
+            // onTap → _enterEdit instead of being swallowed by the (unfocusable)
+            // field. Once editing, both barriers lift so caret/selection work.
+            child: IgnorePointer(
+              ignoring: !_editing,
+              child: ExcludeFocus(
+                excluding: !_editing,
+                child: TextField(
+                  controller: widget.controller,
+                  focusNode: _fieldFocus,
+                  obscureText: widget.obscureText,
+                  onChanged: widget.onChanged,
+                  textInputAction: widget.textInputAction,
+                  onSubmitted: (value) {
+                    _exitEdit();
+                    widget.onSubmitted?.call(value);
+                  },
+                  // The cell already supplies the background + focus ring, so strip
+                  // the global InputDecorationTheme's fill and all borders.
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: false,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    hintText: widget.hintText,
+                    prefixIcon: widget.prefixIcon,
+                    suffixIcon: widget.suffixIcon,
                   ),
-                  hintText: widget.hintText,
-                  prefixIcon: widget.prefixIcon,
-                  suffixIcon: widget.suffixIcon,
                 ),
               ),
             ),
