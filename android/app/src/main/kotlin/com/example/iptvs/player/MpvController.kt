@@ -53,6 +53,11 @@ class MpvController(
             setOptionString("hdr-compute-peak", "yes")
             setOptionString("gamut-mapping-mode", "perceptual")
             // Housekeeping: never read user config, never touch yt-dlp, keep quiet.
+            // Silence libav's non-fatal decode/demux chatter (alternating
+            // `hevc: Could not find ref with POC …` etc. from poorly-muxed DV P5)
+            // at the source so it doesn't flood the shared av_log callback that
+            // media_kit relays into the Dart diagnostics log.
+            setOptionString("msg-level", "ffmpeg=fatal")
             setOptionString("ytdl", "no")
             setOptionString("save-position-on-quit", "no")
             setOptionString("sub-auto", "no")
