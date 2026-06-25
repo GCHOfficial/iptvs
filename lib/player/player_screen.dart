@@ -77,7 +77,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    if (Platform.isWindows) {
+    // Both native-player platforms call back over this channel: Windows sends
+    // input/control/closed events for its GDI overlay; Android sends `nativeClosed`
+    // when its native Activity finishes. Without the Android handler, backing out
+    // of the native player leaves this route stranded on the black overlay until a
+    // second Back press — register it so `nativeClosed` pops us straight to the list.
+    if (Platform.isWindows || Platform.isAndroid) {
       _nativeHdrPlayer.setMethodCallHandler(_handleNativeHdrMethodCall);
     }
 
