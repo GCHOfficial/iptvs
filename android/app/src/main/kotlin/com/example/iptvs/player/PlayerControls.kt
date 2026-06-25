@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -99,6 +100,15 @@ fun PlayerScreen(
     val playFocus = remember { FocusRequester() }
     // Bumped on any interaction to (re)arm the auto-hide timer.
     var interaction by remember { mutableIntStateOf(0) }
+    // Wall-clock tick driving the clock badge and the live EPG progress (slow —
+    // both move on the order of a minute, so 10s granularity is plenty).
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            kotlinx.coroutines.delay(10_000)
+        }
+    }
 
     fun poke() {
         interaction++
@@ -186,7 +196,7 @@ fun PlayerScreen(
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
-            ControlsOverlay(state, callbacks, playFocus) { poke() }
+            ControlsOverlay(state, callbacks, playFocus, nowMillis) { poke() }
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.
@@ -209,6 +219,7 @@ private fun ControlsOverlay(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
+    nowMillis: Long,
     onInteract: () -> Unit,
 ) {
     Column(
@@ -223,9 +234,9 @@ private fun ControlsOverlay(
                 ),
             ),
     ) {
-        TopBar(state, callbacks, onInteract)
+        TopBar(state, callbacks, nowMillis, onInteract)
         Spacer(Modifier.weight(1f))
-        BottomBar(state, callbacks, playFocus, onInteract)
+        BottomBar(state, callbacks, playFocus, nowMillis, onInteract)
     }
 }
 
@@ -233,6 +244,7 @@ private fun ControlsOverlay(
 private fun TopBar(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
+    nowMillis: Long,
     onInteract: () -> Unit,
 ) {
     Row(
@@ -257,11 +269,19 @@ private fun TopBar(
                 maxLines = 1,
             )
         }
-        if (state.isLive) {
-            LiveBadge()
-        } else {
-            state.resolutionBadge()?.let { Badge(it); Spacer(Modifier.width(8.dp)) }
+        Spacer(Modifier.width(8.dp))
+        // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV only) a
+        // date+time clock. The title above takes the remaining width and ellipsizes.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            state.sourceBadge()?.let { Badge(it) }
+            if (state.isLive) LiveBadge()
+            state.resolutionBadge()?.let { Badge(it) }
             state.hdrBadge()?.let { Badge(it, accent = true) }
+            state.fpsBadge()?.let { Badge(it) }
+            if (state.isTv) Badge(formatClock(nowMillis))
         }
     }
 }
@@ -271,6 +291,7 @@ private fun BottomBar(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
     playFocus: FocusRequester,
+    nowMillis: Long,
     onInteract: () -> Unit,
 ) {
     Column(
@@ -281,6 +302,13 @@ private fun BottomBar(
         if (!state.isLive) {
             Scrubber(state, callbacks, onInteract)
             Spacer(Modifier.height(10.dp))
+        } else {
+            // Live has no scrubber; surface the EPG now/next + programme progress in
+            // its place when available.
+            state.epgNow?.let { now ->
+                LiveEpgStrip(now, state.epgNext, nowMillis)
+                Spacer(Modifier.height(12.dp))
+            }
         }
         // Below ~560dp (phone portrait) the transport + right cluster won't fit on
         // one line, so the right cluster wraps onto a second row. Both rows are
@@ -630,5 +658,69 @@ fun formatTime(ms: Long): String {
         "%d:%02d:%02d".format(h, m, s)
     } else {
         "%d:%02d".format(m, s)
+    }
+}
+
+/** Date + time clock for the TV top-bar badge, e.g. "Fri 26 Jun · 23:09". */
+private fun formatClock(ms: Long): String =
+    java.text.SimpleDateFormat("EEE d MMM · HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(ms))
+
+/** Wall-clock HH:mm for EPG programme start/stop labels. */
+private fun clockHm(ms: Long): String =
+    java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(ms))
+
+/**
+ * Live EPG strip shown where the VOD scrubber sits: the current programme title +
+ * its start–stop, a thin elapsed-progress bar, and the next programme.
+ */
+@Composable
+private fun LiveEpgStrip(now: EpgEntry, next: EpgEntry?, nowMillis: Long) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = now.title,
+                color = PlayerColors.TextHi,
+                fontFamily = InterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "${clockHm(now.startMs)} – ${clockHm(now.stopMs)}",
+                color = PlayerColors.TextLo,
+                fontFamily = InterFontFamily,
+                fontSize = 12.sp,
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(PlayerColors.TrackInactive),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(now.progressAt(nowMillis))
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(PlayerColors.Accent),
+            )
+        }
+        next?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Next · ${it.title}",
+                color = PlayerColors.TextLo,
+                fontFamily = InterFontFamily,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
+        }
     }
 }

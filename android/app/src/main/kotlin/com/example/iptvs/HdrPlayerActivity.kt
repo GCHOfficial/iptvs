@@ -58,6 +58,10 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState = PlayerUiState(
             title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
             isLive = intent.getBooleanExtra(EXTRA_IS_LIVE, false),
+            sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME),
+            isTv = isTelevision(),
+            epgNow = epgEntry(EXTRA_EPG_NOW_TITLE, EXTRA_EPG_NOW_START, EXTRA_EPG_NOW_STOP, EXTRA_EPG_NOW_DESC),
+            epgNext = epgEntry(EXTRA_EPG_NEXT_TITLE, EXTRA_EPG_NEXT_START, EXTRA_EPG_NEXT_STOP, null),
         )
 
         startWithExoPlayer()
@@ -191,6 +195,31 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun isTelevision(): Boolean {
+        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager
+        return uiModeManager?.currentModeType ==
+            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    }
+
+    /** Builds an [com.example.iptvs.player.EpgEntry] from intent extras, or null if absent/invalid. */
+    private fun epgEntry(
+        titleKey: String,
+        startKey: String,
+        stopKey: String,
+        descKey: String?,
+    ): com.example.iptvs.player.EpgEntry? {
+        val title = intent.getStringExtra(titleKey)?.takeIf { it.isNotBlank() } ?: return null
+        val start = intent.getLongExtra(startKey, -1L)
+        val stop = intent.getLongExtra(stopKey, -1L)
+        if (start < 0L || stop <= start) return null
+        return com.example.iptvs.player.EpgEntry(
+            title = title,
+            startMs = start,
+            stopMs = stop,
+            description = descKey?.let { intent.getStringExtra(it) }?.takeIf { it.isNotBlank() },
+        )
+    }
+
     private fun hideSystemUi() {
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -205,6 +234,14 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_IS_LIVE = "is_live"
+        const val EXTRA_SOURCE_NAME = "source_name"
+        const val EXTRA_EPG_NOW_TITLE = "epg_now_title"
+        const val EXTRA_EPG_NOW_START = "epg_now_start"
+        const val EXTRA_EPG_NOW_STOP = "epg_now_stop"
+        const val EXTRA_EPG_NOW_DESC = "epg_now_desc"
+        const val EXTRA_EPG_NEXT_TITLE = "epg_next_title"
+        const val EXTRA_EPG_NEXT_START = "epg_next_start"
+        const val EXTRA_EPG_NEXT_STOP = "epg_next_stop"
         const val EXTRA_HEADER_KEYS = "header_keys"
         const val EXTRA_HEADER_VALUES = "header_values"
         const val EXTRA_SUBTITLE_URLS = "subtitle_urls"

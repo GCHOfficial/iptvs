@@ -10,11 +10,18 @@ import 'source.dart';
 /// HLS examples, Blender open movies). They're intended for testing and may
 /// occasionally be down; swap any that misbehave.
 class DemoSource implements Source {
+  DemoSource({this.displayName});
+
+  /// User-assigned label (from SourceConfig); preferred over the derived name.
+  final String? displayName;
+
   @override
   String get id => 'demo';
 
   @override
-  String get name => 'Demo · public test streams';
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'Demo · public test streams';
 
   static const _category = Category(id: 'test', title: 'Test streams');
   static const _mediaCategory = MediaCategory(

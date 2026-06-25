@@ -1,8 +1,10 @@
 #include "flutter_window.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <optional>
 #include <string>
 #include <utility>
@@ -37,6 +39,9 @@ constexpr int kNativeTopControlsHeight = 64;
 // (scrubber row + control row).
 constexpr int kNativeBottomControlsHeightLive = 80;
 constexpr int kNativeBottomControlsHeightVod = 116;
+// Live with an EPG snapshot gets a taller bar: a programme row (title + progress
+// + next) sits where the VOD scrubber would be.
+constexpr int kNativeBottomControlsHeightLiveEpg = 150;
 constexpr int kNativeMenuWidth = 300;
 constexpr int kNativeMenuHeaderHeight = 36;
 constexpr int kNativeMenuRowHeight = 40;
@@ -90,6 +95,15 @@ struct NativeControlState {
   std::wstring video_codec;
   std::wstring audio_codec;
   std::wstring audio_channels;
+  // Active source name (badge).
+  std::wstring source_name;
+  // Live EPG now/next snapshot (epoch ms; 0 = absent).
+  std::wstring epg_now_title;
+  double epg_now_start_ms = 0.0;
+  double epg_now_stop_ms = 0.0;
+  std::wstring epg_now_desc;
+  std::wstring epg_next_title;
+  double epg_next_start_ms = 0.0;
 };
 
 NativeControlState g_native_control_state;
@@ -427,9 +441,19 @@ RECT TopControlsRect(const RECT &rect) {
   return RectFrom(0, 0, rect.right, kNativeTopControlsHeight);
 }
 
+bool HasLiveEpg() {
+  return g_native_control_state.is_live &&
+         !g_native_control_state.epg_now_title.empty() &&
+         g_native_control_state.epg_now_stop_ms >
+             g_native_control_state.epg_now_start_ms;
+}
+
 int BottomControlsHeight() {
-  return g_native_control_state.is_live ? kNativeBottomControlsHeightLive
-                                        : kNativeBottomControlsHeightVod;
+  if (g_native_control_state.is_live) {
+    return HasLiveEpg() ? kNativeBottomControlsHeightLiveEpg
+                        : kNativeBottomControlsHeightLive;
+  }
+  return kNativeBottomControlsHeightVod;
 }
 
 RECT BottomControlsRect(const RECT &rect) {
@@ -462,6 +486,12 @@ struct BottomLayout {
   RECT progress; // thin slider track
   RECT position_text;
   RECT duration_text;
+  // Live EPG row (programme title + progress + next), where the scrubber sits.
+  bool has_epg = false;
+  RECT epg_title;
+  RECT epg_time;
+  RECT epg_progress;
+  RECT epg_next;
   bool has_speed = false;
   bool has_audio = false;
   bool has_subtitles = false;
@@ -479,7 +509,9 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   const int by = l.bottom.top;
   const int right = MaxInt(0, static_cast<int>(rect.right));
   const bool live = g_native_control_state.is_live;
-  const int cy = by + (live ? 40 : 76);
+  // Control row sits a fixed 40px above the bottom edge in every layout
+  // (VOD = scrubber above; live-EPG = programme row above; bare live = single row).
+  const int cy = by + (BottomControlsHeight() - 40);
   l.control_center_y = cy;
   const int kBtn = 36;
   const int top = cy - kBtn / 2;
@@ -529,6 +561,18 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
         RectFrom(right - 16 - time_w, sy - 12, right - 16, sy + 12);
     l.progress =
         RectFrom(16 + time_w + 12, sy - 3, right - 16 - time_w - 12, sy + 3);
+  }
+
+  l.has_epg = HasLiveEpg();
+  if (l.has_epg) {
+    // Programme row sits in the upper part of the (taller) live bar, well clear
+    // of the control row below: title + time, then progress, then next.
+    const int ey = by + 18;
+    const int time_w = 110;
+    l.epg_title = RectFrom(16, ey, MaxInt(20, right - 16 - time_w - 10), ey + 20);
+    l.epg_time = RectFrom(right - 16 - time_w, ey, right - 16, ey + 20);
+    l.epg_progress = RectFrom(16, ey + 30, right - 16, ey + 30 + 6);
+    l.epg_next = RectFrom(16, ey + 46, right - 16, ey + 46 + 18);
   }
   return l;
 }
@@ -684,9 +728,61 @@ std::wstring FormatFps(double fps) {
   return buffer;
 }
 
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+// Date + time for the top-bar clock badge, e.g. "Fri 26 Jun · 23:09" (locale names).
+std::wstring FormatClock() {
+  std::time_t t = std::time(nullptr);
+  std::tm local{};
+  if (localtime_s(&local, &t) != 0) {
+    return L"";
+  }
+  wchar_t buffer[64];
+  if (wcsftime(buffer, 64, L"%a %d %b · %H:%M", &local) == 0) {
+    return L"";
+  }
+  return buffer;
+}
+
+// Wall-clock HH:mm for EPG programme start/stop labels.
+std::wstring FormatClockHm(double epoch_ms) {
+  if (epoch_ms <= 0.0) {
+    return L"";
+  }
+  std::time_t t = static_cast<std::time_t>(epoch_ms / 1000.0);
+  std::tm local{};
+  if (localtime_s(&local, &t) != 0) {
+    return L"";
+  }
+  wchar_t buffer[16];
+  if (wcsftime(buffer, 16, L"%H:%M", &local) == 0) {
+    return L"";
+  }
+  return buffer;
+}
+
+std::wstring TruncateBadge(const std::wstring &text, size_t max_len) {
+  if (text.size() <= max_len) {
+    return text;
+  }
+  return text.substr(0, max_len - 1) + L"…";
+}
+
 std::vector<std::pair<std::wstring, std::wstring>> InfoRows() {
   std::vector<std::pair<std::wstring, std::wstring>> rows;
   const auto &s = g_native_control_state;
+  if (s.is_live) {
+    if (!s.epg_now_title.empty()) {
+      rows.push_back({L"Now", s.epg_now_title});
+    }
+    if (!s.epg_next_title.empty()) {
+      rows.push_back({L"Next", s.epg_next_title});
+    }
+  }
   if (s.video_width > 0 && s.video_height > 0) {
     rows.push_back({L"Resolution", std::to_wstring(s.video_width) + L"×" +
                                        std::to_wstring(s.video_height)});
@@ -921,9 +1017,16 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
                  L"\xE72B");
 
-  // Top-right badges, stacked leftward: LIVE, then dynamic range, then
-  // resolution.
+  // Top-right badges, stacked leftward: clock, LIVE, dynamic range, resolution,
+  // fps, then source name.
+  const COLORREF kNeutralBg = RGB(30, 33, 45);
+  const COLORREF kNeutralFg = RGB(206, 210, 224);
   int badge_right = rect.right - 16;
+  const std::wstring clock = FormatClock();
+  if (!clock.empty()) {
+    badge_right -=
+        DrawBadge(paint_hdc, badge_right, top_cy, clock, kNeutralBg, kNeutralFg);
+  }
   if (g_native_control_state.is_live) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
                              RGB(255, 64, 112), RGB(255, 255, 255));
@@ -937,6 +1040,17 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   if (!res_badge.empty()) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, res_badge,
                              RGB(60, 52, 137), RGB(206, 203, 246));
+  }
+  const std::wstring fps_badge = FormatFps(g_native_control_state.fps);
+  if (!fps_badge.empty()) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, fps_badge,
+                             kNeutralBg, kNeutralFg);
+  }
+  if (!g_native_control_state.source_name.empty()) {
+    badge_right -=
+        DrawBadge(paint_hdc, badge_right, top_cy,
+                  TruncateBadge(g_native_control_state.source_name, 22),
+                  kNeutralBg, kNeutralFg);
   }
 
   HFONT title_font = UiFont(18, FW_BOLD);
@@ -973,6 +1087,41 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font,
                      RGB(184, 190, 204));
     DeleteObject(time_font);
+  }
+
+  if (l.has_epg) {
+    const auto &s = g_native_control_state;
+    HFONT epg_title_font = UiFont(14, FW_SEMIBOLD);
+    DrawTextWithFont(paint_hdc, s.epg_now_title, l.epg_title,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     epg_title_font, RGB(238, 240, 247));
+    HFONT epg_meta_font = UiFont(12, FW_SEMIBOLD);
+    const std::wstring range = FormatClockHm(s.epg_now_start_ms) + L" – " +
+                               FormatClockHm(s.epg_now_stop_ms);
+    DrawTextWithFont(paint_hdc, range, l.epg_time,
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, epg_meta_font,
+                     RGB(184, 190, 204));
+    // Programme progress: a thin track + elapsed fill (no thumb).
+    const double span = std::max(1.0, s.epg_now_stop_ms - s.epg_now_start_ms);
+    const double prog = std::clamp(
+        (static_cast<double>(NowMs()) - s.epg_now_start_ms) / span, 0.0, 1.0);
+    const int ecy = (l.epg_progress.top + l.epg_progress.bottom) / 2;
+    FillRoundRect(paint_hdc,
+                  RectFrom(l.epg_progress.left, ecy - 3, l.epg_progress.right,
+                           ecy + 3),
+                  6, RGB(39, 43, 58));
+    const int fill_x =
+        l.epg_progress.left + static_cast<int>(RectWidth(l.epg_progress) * prog);
+    FillRoundRect(paint_hdc,
+                  RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
+                  RGB(123, 108, 246));
+    if (!s.epg_next_title.empty()) {
+      DrawTextWithFont(paint_hdc, L"Next · " + s.epg_next_title, l.epg_next,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                       epg_meta_font, RGB(184, 190, 204));
+    }
+    DeleteObject(epg_title_font);
+    DeleteObject(epg_meta_font);
   }
 
   if (l.has_speed) {
@@ -1701,6 +1850,10 @@ void FlutterWindow::UpdateNativeControlState(
     const flutter::EncodableValue *args) {
   const bool was_playing = g_native_control_state.playing;
   const bool was_pinned = native_controls_pinned_;
+  // The bottom bar grows for live-with-EPG; if its height changes (e.g. the EPG
+  // snapshot arrives after the first frame), the clip region must be rebuilt or
+  // the taller bar is clipped until the next resize.
+  const int prev_bottom_height = BottomControlsHeight();
   g_native_control_state.title =
       EncodableStringArg(args, "title", g_native_control_state.title);
   g_native_control_state.is_live =
@@ -1744,6 +1897,26 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "audioCodec", g_native_control_state.audio_codec);
   g_native_control_state.audio_channels = EncodableStringArg(
       args, "audioChannels", g_native_control_state.audio_channels);
+  g_native_control_state.source_name =
+      EncodableStringArg(args, "sourceName", g_native_control_state.source_name);
+  // EPG now/next ride along on every setControlState, so default to empty: that
+  // clears them for VOD and keeps live in sync.
+  g_native_control_state.epg_now_title =
+      EncodableStringArg(args, "epgNowTitle", L"");
+  g_native_control_state.epg_now_start_ms =
+      EncodableDoubleArg(args, "epgNowStartMs", 0.0);
+  g_native_control_state.epg_now_stop_ms =
+      EncodableDoubleArg(args, "epgNowStopMs", 0.0);
+  g_native_control_state.epg_now_desc =
+      EncodableStringArg(args, "epgNowDesc", L"");
+  g_native_control_state.epg_next_title =
+      EncodableStringArg(args, "epgNextTitle", L"");
+  g_native_control_state.epg_next_start_ms =
+      EncodableDoubleArg(args, "epgNextStartMs", 0.0);
+
+  if (BottomControlsHeight() != prev_bottom_height) {
+    native_controls_region_dirty_ = true;
+  }
 
   // If the open menu lost all its options (e.g. tracks changed), close it. Same
   // for the info panel if there is nothing left to show.

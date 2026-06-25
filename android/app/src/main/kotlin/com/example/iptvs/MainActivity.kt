@@ -43,10 +43,28 @@ class MainActivity : FlutterActivity() {
                             )
                         }
                     }
+                    fun epochMs(key: String): Long = (args[key] as? Number)?.toLong() ?: -1L
                     val intent = Intent(this, HdrPlayerActivity::class.java).apply {
                         putExtra(HdrPlayerActivity.EXTRA_URL, url)
                         putExtra(HdrPlayerActivity.EXTRA_TITLE, args["title"] as? String ?: "")
                         putExtra(HdrPlayerActivity.EXTRA_IS_LIVE, args["isLive"] as? Boolean ?: false)
+                        (args["sourceName"] as? String)?.let {
+                            putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
+                        }
+                        // Live EPG now/next snapshot (epoch ms passed as doubles).
+                        (args["epgNowTitle"] as? String)?.let {
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NOW_TITLE, it)
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NOW_START, epochMs("epgNowStartMs"))
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NOW_STOP, epochMs("epgNowStopMs"))
+                            (args["epgNowDesc"] as? String)?.let { d ->
+                                putExtra(HdrPlayerActivity.EXTRA_EPG_NOW_DESC, d)
+                            }
+                        }
+                        (args["epgNextTitle"] as? String)?.let {
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NEXT_TITLE, it)
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NEXT_START, epochMs("epgNextStartMs"))
+                            putExtra(HdrPlayerActivity.EXTRA_EPG_NEXT_STOP, epochMs("epgNextStopMs"))
+                        }
                         putStringArrayListExtra(
                             HdrPlayerActivity.EXTRA_HEADER_KEYS,
                             ArrayList(headerPairs.map { it.first }),

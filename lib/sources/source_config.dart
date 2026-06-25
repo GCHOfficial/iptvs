@@ -22,23 +22,33 @@ class SourceConfig {
   });
 
   Source build() {
+    // The user-assigned label is the canonical display name everywhere it's shown
+    // (app bar, player badge, logs); fall back to each source's derived name when
+    // it's blank.
+    final name = label.trim().isEmpty ? null : label.trim();
     switch (kind) {
       case SourceKind.stalker:
-        return StalkerSource(portal: fields['portal']!, mac: fields['mac']!);
+        return StalkerSource(
+          portal: fields['portal']!,
+          mac: fields['mac']!,
+          displayName: name,
+        );
       case SourceKind.xtream:
         return XtreamSource(
           host: fields['host']!,
           username: fields['username']!,
           password: fields['password']!,
+          displayName: name,
         );
       case SourceKind.m3u:
         return M3uSource(
           playlistUrl: fields['playlistUrl']!,
           epgUrl: _opt('epgUrl'),
           userAgent: _opt('userAgent'),
+          displayName: name,
         );
       case SourceKind.demo:
-        return DemoSource();
+        return DemoSource(displayName: name);
     }
   }
 
