@@ -376,7 +376,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (!mounted) return;
       await navigator.push(
         MaterialPageRoute(
-          builder: (_) => PlayerScreen(title: channel.name, stream: stream),
+          builder: (_) => PlayerScreen(
+            title: channel.name,
+            stream: stream,
+            sourceName: widget.repo.source.name,
+            epgNow: _now[channel.id],
+            epgNext: _next[channel.id],
+          ),
         ),
       );
     } catch (e) {
@@ -424,7 +430,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (!mounted) return;
       await navigator.push(
         MaterialPageRoute(
-          builder: (_) => PlayerScreen(title: item.title, stream: stream),
+          builder: (_) => PlayerScreen(
+            title: item.title,
+            stream: stream,
+            sourceName: widget.repo.source.name,
+          ),
         ),
       );
     } catch (e) {
@@ -2026,7 +2036,11 @@ class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
       future: _stream,
       builder: (context, snapshot) {
         if (snapshot.hasData) {
-          return PlayerScreen(title: widget.item.title, stream: snapshot.data!);
+          return PlayerScreen(
+            title: widget.item.title,
+            stream: snapshot.data!,
+            sourceName: widget.repo.source.name,
+          );
         }
         if (snapshot.hasError) {
           return Scaffold(

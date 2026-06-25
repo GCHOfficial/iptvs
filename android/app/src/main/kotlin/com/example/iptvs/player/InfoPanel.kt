@@ -30,6 +30,10 @@ fun InfoPanel(
     modifier: Modifier = Modifier,
 ) {
     val rows = buildList {
+        if (state.isLive) {
+            state.epgNow?.let { add("Now" to it.title) }
+            state.epgNext?.let { add("Next" to it.title) }
+        }
         if (state.videoWidth > 0 && state.videoHeight > 0) {
             add("Resolution" to "${state.videoWidth} × ${state.videoHeight}")
         }
@@ -78,8 +82,23 @@ fun InfoPanel(
                     fontFamily = InterFontFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
+                    modifier = Modifier.weight(1f, fill = false),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                    maxLines = 2,
                 )
             }
+        }
+        // Live programme synopsis (wraps), shown under the rows when available.
+        val synopsis = state.epgNow?.description
+        if (state.isLive && !synopsis.isNullOrBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = synopsis,
+                color = PlayerColors.TextLo,
+                fontFamily = InterFontFamily,
+                fontSize = 12.sp,
+                maxLines = 4,
+            )
         }
     }
 }

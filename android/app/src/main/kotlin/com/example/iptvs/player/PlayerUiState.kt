@@ -4,9 +4,24 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.util.Locale
 
 /** A selectable row in one of the player's list-menus (audio / subtitles / speed). */
 data class TrackOption(val id: String, val label: String)
+
+/** A live EPG programme snapshot (now or next), captured at play time. */
+data class EpgEntry(
+    val title: String,
+    val startMs: Long,
+    val stopMs: Long,
+    val description: String? = null,
+) {
+    /** Fraction elapsed at [atMs] within [startMs]..[stopMs], clamped to 0..1. */
+    fun progressAt(atMs: Long): Float {
+        val span = (stopMs - startMs).coerceAtLeast(1L)
+        return ((atMs - startMs).toFloat() / span).coerceIn(0f, 1f)
+    }
+}
 
 /** Which list-menu, if any, is currently open. Mirrors the Windows single-menu model. */
 enum class PlayerMenu { None, Audio, Subtitles, Speed }
@@ -35,6 +50,13 @@ val SPEED_OPTIONS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
 class PlayerUiState(
     val title: String,
     val isLive: Boolean,
+    /** Active source's display name, shown as a top-bar badge. */
+    val sourceName: String? = null,
+    /** True on Android TV (drives the clock badge, hidden on phones). */
+    val isTv: Boolean = false,
+    /** Live EPG now/next snapshot; null for VOD. */
+    val epgNow: EpgEntry? = null,
+    val epgNext: EpgEntry? = null,
 ) {
     var isPlaying by mutableStateOf(false)
     var isBuffering by mutableStateOf(true)
@@ -105,6 +127,25 @@ class PlayerUiState(
         dynamicRange.contains("HLG") -> "HLG"
         dynamicRange.startsWith("HDR") -> "HDR"
         else -> null
+    }
+
+    /** Compact frame-rate badge for the top bar, e.g. "50fps" / "23.976fps"; null when unknown. */
+    fun fpsBadge(): String? {
+        if (fps <= 0f) return null
+        val rounded = Math.round(fps * 1000f) / 1000f
+        val n = if (rounded == rounded.toLong().toFloat()) {
+            rounded.toLong().toString()
+        } else {
+            String.format(Locale.ROOT, "%.3f", rounded).trimEnd('0').trimEnd('.')
+        }
+        return "${n}fps"
+    }
+
+    /** Short source-name badge, truncated so a long provider label can't crowd the bar. */
+    fun sourceBadge(): String? {
+        val name = sourceName?.trim().orEmpty()
+        if (name.isEmpty()) return null
+        return if (name.length > 20) name.take(19) + "…" else name
     }
 
     fun speedLabel(): String {

@@ -18,7 +18,22 @@ class PlayerScreen extends StatefulWidget {
   final String title;
   final StreamInfo stream;
 
-  const PlayerScreen({super.key, required this.title, required this.stream});
+  /// Active source's display name, shown as a badge in the player overlay.
+  final String? sourceName;
+
+  /// EPG now/next for a live channel (a one-shot snapshot taken at play time),
+  /// surfaced in the overlay instead of the VOD scrubber. Null for VOD.
+  final Programme? epgNow;
+  final Programme? epgNext;
+
+  const PlayerScreen({
+    super.key,
+    required this.title,
+    required this.stream,
+    this.sourceName,
+    this.epgNow,
+    this.epgNext,
+  });
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -239,8 +254,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final opened = await _nativeHdrPlayer.invokeMethod<bool>('open', {
         'url': widget.stream.url,
         'title': widget.title,
+        if (widget.sourceName != null) 'sourceName': widget.sourceName,
         'headers': widget.stream.headers,
         'isLive': widget.stream.isLive,
+        ..._epgPayload(),
         'subtitles': widget.stream.subtitles
             .map(
               (subtitle) => {
@@ -465,6 +482,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       await _nativeHdrPlayer.invokeMethod<bool>('setControlState', {
         'title': widget.title,
+        if (widget.sourceName != null) 'sourceName': widget.sourceName,
+        ..._epgPayload(),
         'isLive': _isLive,
         'playing': _player.state.playing,
         'fullscreen': _isNativeFullscreen,
@@ -643,6 +662,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (track.id != 'auto' && track.id != 'no') return track;
     }
     return selected;
+  }
+
+  // Live EPG now/next snapshot for the native overlays. Epoch values are passed
+  // as doubles (ms) so they survive the MethodChannel without int32 truncation.
+  Map<String, Object?> _epgPayload() {
+    final now = widget.epgNow;
+    final next = widget.epgNext;
+    return {
+      if (now != null) ...{
+        'epgNowTitle': now.title,
+        'epgNowStartMs': now.start.millisecondsSinceEpoch.toDouble(),
+        'epgNowStopMs': now.stop.millisecondsSinceEpoch.toDouble(),
+        if (now.description != null && now.description!.isNotEmpty)
+          'epgNowDesc': now.description,
+      },
+      if (next != null) ...{
+        'epgNextTitle': next.title,
+        'epgNextStartMs': next.start.millisecondsSinceEpoch.toDouble(),
+        'epgNextStopMs': next.stop.millisecondsSinceEpoch.toDouble(),
+      },
+    };
   }
 
   Map<String, Object?> _streamInfoPayload() {
