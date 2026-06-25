@@ -1850,6 +1850,10 @@ void FlutterWindow::UpdateNativeControlState(
     const flutter::EncodableValue *args) {
   const bool was_playing = g_native_control_state.playing;
   const bool was_pinned = native_controls_pinned_;
+  // The bottom bar grows for live-with-EPG; if its height changes (e.g. the EPG
+  // snapshot arrives after the first frame), the clip region must be rebuilt or
+  // the taller bar is clipped until the next resize.
+  const int prev_bottom_height = BottomControlsHeight();
   g_native_control_state.title =
       EncodableStringArg(args, "title", g_native_control_state.title);
   g_native_control_state.is_live =
@@ -1909,6 +1913,10 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "epgNextTitle", L"");
   g_native_control_state.epg_next_start_ms =
       EncodableDoubleArg(args, "epgNextStartMs", 0.0);
+
+  if (BottomControlsHeight() != prev_bottom_height) {
+    native_controls_region_dirty_ = true;
+  }
 
   // If the open menu lost all its options (e.g. tracks changed), close it. Same
   // for the info panel if there is nothing left to show.
