@@ -130,6 +130,7 @@ class PlayerUiState(
     /** Compact HDR badge for the top bar (matches Windows `HdrBadge`); null when SDR/unknown. */
     fun hdrBadge(): String? = when {
         dynamicRange.contains("Dolby", ignoreCase = true) -> "DV"
+        dynamicRange.contains("HDR10+") -> "HDR10+"
         dynamicRange.contains("HDR10") -> "HDR10"
         dynamicRange.contains("HLG") -> "HLG"
         dynamicRange.startsWith("HDR") -> "HDR"
