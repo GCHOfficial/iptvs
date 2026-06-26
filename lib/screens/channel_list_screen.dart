@@ -9,6 +9,7 @@ import '../data/source_hint_parser.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
 
@@ -561,30 +562,42 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.repo.source.name),
+        // Group the actions so D-pad traversal treats them as one cluster (reached
+        // by going up to the bar), rather than the toolbar's "right" jumping
+        // straight to the rightmost icon.
         actions: [
-          if (widget.onManageSources != null)
-            IconButton(
-              tooltip: 'Sources',
-              icon: const Icon(Icons.dns_outlined),
-              onPressed: widget.onManageSources,
-            ),
-          IconButton(
-            tooltip: 'Diagnostics',
-            icon: const Icon(Icons.bug_report_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+          FocusTraversalGroup(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.onManageSources != null)
+                  IconButton(
+                    tooltip: 'Sources',
+                    icon: const Icon(Icons.dns_outlined),
+                    onPressed: widget.onManageSources,
+                  ),
+                IconButton(
+                  tooltip: 'Diagnostics',
+                  icon: const Icon(Icons.bug_report_outlined),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const DiagnosticsScreen(),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh from source',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: _loading || _mediaLoading[_tab] == true
+                      ? null
+                      : () => _tab == ContentKind.live
+                            ? _load(forceRefresh: true)
+                            : _loadMedia(_tab, forceRefresh: true),
+                ),
+                const SizedBox(width: 4),
+              ],
             ),
           ),
-          IconButton(
-            tooltip: 'Refresh from source',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loading || _mediaLoading[_tab] == true
-                ? null
-                : () => _tab == ContentKind.live
-                      ? _load(forceRefresh: true)
-                      : _loadMedia(_tab, forceRefresh: true),
-          ),
-          const SizedBox(width: 4),
         ],
         bottom: _resolving
             ? const PreferredSize(
@@ -593,85 +606,91 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               )
             : null,
       ),
-      body: Column(
-        children: [
-          _ContentTabs(value: _tab, onChanged: _selectTab),
-          _Toolbar(
-            searchController: _searchController,
-            query: _query,
-            hintText: _tab == ContentKind.live
-                ? 'Search channels'
-                : _tab == ContentKind.movie
-                ? 'Search movies'
-                : 'Search series',
-            onQueryChanged: _setQuery,
-            onClearQuery: () {
-              _searchController.clear();
-              _setQuery('');
-            },
-            categoryControl: _tab == ContentKind.live
-                ? _CategoryDropdown(
-                    categories: _categories,
-                    value: _categoryId,
-                    onChanged: (v) {
-                      setState(() => _categoryId = v);
-                      _scrollToTop();
-                    },
-                  )
-                : _MediaCategoryDropdown(
-                    categories: _media[_tab]?.categories ?? const [],
-                    value: _mediaCategoryId[_tab],
-                    onChanged: (v) {
-                      setState(() {
-                        _mediaCategoryId[_tab] = v;
-                        _mediaSearchResults.remove(_tab);
-                        _mediaSearchQuery.remove(_tab);
-                      });
-                      _loadMedia(_tab);
-                      _scrollToTop();
-                      if (_query.trim().length >= 2) {
-                        _searchTimer?.cancel();
-                        _searchTimer = Timer(
-                          const Duration(milliseconds: 250),
-                          () => _searchMedia(_tab, _query.trim()),
-                        );
-                      }
-                    },
-                  ),
-            actionControl:
-                _tab == ContentKind.live || !widget.repo.canEnrichMetadata
-                ? null
-                : _ToolbarIconButton(
-                    tooltip: _mediaEnriching[_tab] == true
-                        ? 'Cancel metadata refresh'
-                        : 'Refresh displayed metadata',
-                    busy: _mediaEnriching[_tab] == true,
-                    icon: _mediaEnriching[_tab] == true
-                        ? Icons.stop_rounded
-                        : Icons.auto_awesome_outlined,
-                    onPressed:
-                        _mediaLoading[_tab] == true ||
-                            _mediaSearching[_tab] == true
-                        ? null
-                        : _mediaEnriching[_tab] == true
-                        ? () => setState(() => _cancelMediaEnrichment(_tab))
-                        : () => _enrichVisibleMedia(_tab),
-                  ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _statusText(visible.length),
-                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+      // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
+      // arrowing sideways into the AppBar's action cluster.
+      body: FocusTraversalGroup(
+        child: Column(
+          children: [
+            _ContentTabs(value: _tab, onChanged: _selectTab),
+            _Toolbar(
+              searchController: _searchController,
+              query: _query,
+              hintText: _tab == ContentKind.live
+                  ? 'Search channels'
+                  : _tab == ContentKind.movie
+                  ? 'Search movies'
+                  : 'Search series',
+              onQueryChanged: _setQuery,
+              onClearQuery: () {
+                _searchController.clear();
+                _setQuery('');
+              },
+              categoryControl: _tab == ContentKind.live
+                  ? _CategoryDropdown(
+                      categories: _categories,
+                      value: _categoryId,
+                      onChanged: (v) {
+                        setState(() => _categoryId = v);
+                        _scrollToTop();
+                      },
+                    )
+                  : _MediaCategoryDropdown(
+                      categories: _media[_tab]?.categories ?? const [],
+                      value: _mediaCategoryId[_tab],
+                      onChanged: (v) {
+                        setState(() {
+                          _mediaCategoryId[_tab] = v;
+                          _mediaSearchResults.remove(_tab);
+                          _mediaSearchQuery.remove(_tab);
+                        });
+                        _loadMedia(_tab);
+                        _scrollToTop();
+                        if (_query.trim().length >= 2) {
+                          _searchTimer?.cancel();
+                          _searchTimer = Timer(
+                            const Duration(milliseconds: 250),
+                            () => _searchMedia(_tab, _query.trim()),
+                          );
+                        }
+                      },
+                    ),
+              actionControl:
+                  _tab == ContentKind.live || !widget.repo.canEnrichMetadata
+                  ? null
+                  : _ToolbarIconButton(
+                      tooltip: _mediaEnriching[_tab] == true
+                          ? 'Cancel metadata refresh'
+                          : 'Refresh displayed metadata',
+                      busy: _mediaEnriching[_tab] == true,
+                      icon: _mediaEnriching[_tab] == true
+                          ? Icons.stop_rounded
+                          : Icons.auto_awesome_outlined,
+                      onPressed:
+                          _mediaLoading[_tab] == true ||
+                              _mediaSearching[_tab] == true
+                          ? null
+                          : _mediaEnriching[_tab] == true
+                          ? () => setState(() => _cancelMediaEnrichment(_tab))
+                          : () => _enrichVisibleMedia(_tab),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _statusText(visible.length),
+                  style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                ),
               ),
             ),
-          ),
-          Expanded(
-            child: _tab == ContentKind.live ? _body(visible) : _mediaBody(_tab),
-          ),
-        ],
+            Expanded(
+              child: _tab == ContentKind.live
+                  ? _body(visible)
+                  : _mediaBody(_tab),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -850,30 +869,113 @@ class _ContentTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      scrollDirection: Axis.horizontal,
-      child: SegmentedButton<ContentKind>(
-        segments: const [
-          ButtonSegment(
-            value: ContentKind.live,
-            icon: Icon(Icons.live_tv_rounded),
-            label: Text('Live'),
+    // A focusable chip strip (not a SegmentedButton): it's the natural top of the
+    // D-pad focus order, left/right moves between Live/Movies/Series, and OK/tap
+    // selects. Grouped so directional traversal stays within the strip.
+    return FocusTraversalGroup(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            _TabChip(
+              icon: Icons.live_tv_rounded,
+              label: 'Live',
+              selected: value == ContentKind.live,
+              autofocus: value == ContentKind.live,
+              onTap: () => onChanged(ContentKind.live),
+            ),
+            const SizedBox(width: 8),
+            _TabChip(
+              icon: Icons.movie_outlined,
+              label: 'Movies',
+              selected: value == ContentKind.movie,
+              autofocus: value == ContentKind.movie,
+              onTap: () => onChanged(ContentKind.movie),
+            ),
+            const SizedBox(width: 8),
+            _TabChip(
+              icon: Icons.tv_outlined,
+              label: 'Series',
+              selected: value == ContentKind.series,
+              autofocus: value == ContentKind.series,
+              onTap: () => onChanged(ContentKind.series),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TabChip extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final bool autofocus;
+  final VoidCallback onTap;
+
+  const _TabChip({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.autofocus,
+    required this.onTap,
+  });
+
+  @override
+  State<_TabChip> createState() => _TabChipState();
+}
+
+class _TabChipState extends State<_TabChip> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.selected;
+    final bg = active
+        ? AppColors.accent
+        : (_focused ? AppColors.panelHi : AppColors.panel);
+    final fg = active ? Colors.white : AppColors.textHi;
+    return FocusableActionDetector(
+      autofocus: widget.autofocus,
+      mouseCursor: SystemMouseCursors.click,
+      onShowFocusHighlight: (v) {
+        if (mounted) setState(() => _focused = v);
+      },
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          height: _toolbarControlHeight,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+            border: Border.all(
+              color: (_focused && !active) ? AppColors.accent : AppColors.line,
+              width: (_focused && !active) ? 2 : 1,
+            ),
           ),
-          ButtonSegment(
-            value: ContentKind.movie,
-            icon: Icon(Icons.movie_outlined),
-            label: Text('Movies'),
+          child: Row(
+            children: [
+              Icon(widget.icon, size: 18, color: fg),
+              const SizedBox(width: 8),
+              Text(
+                widget.label,
+                style: TextStyle(color: fg, fontWeight: FontWeight.w600),
+              ),
+            ],
           ),
-          ButtonSegment(
-            value: ContentKind.series,
-            icon: Icon(Icons.tv_outlined),
-            label: Text('Series'),
-          ),
-        ],
-        selected: {value},
-        showSelectedIcon: false,
-        onSelectionChanged: (values) => onChanged(values.first),
+        ),
       ),
     );
   }
@@ -903,25 +1005,19 @@ class _Toolbar extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final narrow = constraints.maxWidth < 620;
-        final search = SizedBox(
+        final search = TvTextField(
+          controller: searchController,
+          hintText: hintText,
           height: _toolbarControlHeight,
-          child: TextField(
-            controller: searchController,
-            onChanged: onQueryChanged,
-            decoration: InputDecoration(
-              constraints: const BoxConstraints.tightFor(
-                height: _toolbarControlHeight,
-              ),
-              hintText: hintText,
-              prefixIcon: const Icon(Icons.search, size: 20),
-              suffixIcon: query.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear, size: 18),
-                      onPressed: onClearQuery,
-                    ),
-            ),
-          ),
+          onChanged: onQueryChanged,
+          textInputAction: TextInputAction.search,
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: query.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.clear, size: 18),
+                  onPressed: onClearQuery,
+                ),
         );
         final action = actionControl;
 

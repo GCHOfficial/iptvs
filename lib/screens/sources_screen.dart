@@ -7,6 +7,7 @@ import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/tv_text_field.dart';
 
 IconData _kindIcon(SourceKind k) {
   switch (k) {
@@ -308,8 +309,6 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   late SourceKind _kind;
   late final TextEditingController _label;
   final Map<String, TextEditingController> _fields = {};
-  final Map<String, FocusNode> _focusNodes = {};
-  final FocusNode _labelFocus = FocusNode();
 
   @override
   void initState() {
@@ -321,12 +320,8 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   @override
   void dispose() {
     _label.dispose();
-    _labelFocus.dispose();
     for (final c in _fields.values) {
       c.dispose();
-    }
-    for (final f in _focusNodes.values) {
-      f.dispose();
     }
     super.dispose();
   }
@@ -335,9 +330,6 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     key,
     () => TextEditingController(text: widget.existing?.fields[key] ?? ''),
   );
-
-  FocusNode _focusNode(String key) =>
-      _focusNodes.putIfAbsent(key, () => FocusNode());
 
   List<_FieldSpec> _specs(SourceKind kind) {
     switch (kind) {
@@ -424,42 +416,22 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
             onChanged: (k) => setState(() => _kind = k ?? _kind),
           ),
           const SizedBox(height: 16),
-          Builder(builder: (context) {
-            final specs = _specs(_kind);
-            return TextField(
-              controller: _label,
-              focusNode: _labelFocus,
-              autofocus: widget.existing == null,
-              textInputAction: specs.isEmpty
-                  ? TextInputAction.done
-                  : TextInputAction.next,
-              onSubmitted: (_) => specs.isEmpty
-                  ? _save()
-                  : _focusNode(specs.first.key).requestFocus(),
-              decoration: const InputDecoration(labelText: 'Label (optional)'),
-            );
-          }),
-          for (int i = 0; i < _specs(_kind).length; i++) ...[
+          TvTextField(
+            controller: _label,
+            label: 'Label (optional)',
+            hintText: 'e.g. Living room IPTV',
+            autofocus: widget.existing == null,
+            textInputAction: TextInputAction.next,
+          ),
+          for (final s in _specs(_kind)) ...[
             const SizedBox(height: 16),
-            Builder(builder: (context) {
-              final specs = _specs(_kind);
-              final s = specs[i];
-              return TextField(
-                controller: _controller(s.key),
-                focusNode: _focusNode(s.key),
-                textInputAction: i == specs.length - 1
-                    ? TextInputAction.done
-                    : TextInputAction.next,
-                onSubmitted: (_) => i == specs.length - 1
-                    ? _save()
-                    : _focusNode(specs[i + 1].key).requestFocus(),
-                obscureText: s.obscure,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration:
-                    InputDecoration(labelText: s.label, hintText: s.hint),
-              );
-            }),
+            TvTextField(
+              controller: _controller(s.key),
+              label: s.label,
+              hintText: s.hint ?? '',
+              obscureText: s.obscure,
+              textInputAction: TextInputAction.next,
+            ),
           ],
           const SizedBox(height: 28),
           SizedBox(
@@ -494,10 +466,6 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   final _tvdb = TextEditingController();
   final _tvdbPin = TextEditingController();
   final _mdblist = TextEditingController();
-  final _tmdbFocus = FocusNode();
-  final _tvdbFocus = FocusNode();
-  final _tvdbPinFocus = FocusNode();
-  final _mdblistFocus = FocusNode();
   String _provider = 'tmdb';
   bool _autoEnrich = true;
   bool _loading = true;
@@ -515,10 +483,6 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     _tvdb.dispose();
     _tvdbPin.dispose();
     _mdblist.dispose();
-    _tmdbFocus.dispose();
-    _tvdbFocus.dispose();
-    _tvdbPinFocus.dispose();
-    _mdblistFocus.dispose();
     super.dispose();
   }
 
@@ -643,60 +607,37 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                       setState(() => _provider = value.first),
                 ),
                 const SizedBox(height: 16),
-                TextField(
+                TvTextField(
                   controller: _tmdb,
-                  focusNode: _tmdbFocus,
-                  textInputAction: TextInputAction.next,
-                  onSubmitted: (_) => _tvdbFocus.requestFocus(),
+                  label: 'TMDB API credential',
+                  hintText: 'Paste a v3 API key or v4 Read Access Token',
                   obscureText: true,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  decoration: const InputDecoration(
-                    labelText: 'TMDB API credential',
-                    hintText: 'Paste a v3 API key or v4 Read Access Token',
-                  ),
+                  textInputAction: TextInputAction.next,
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                TvTextField(
                   controller: _tvdb,
-                  focusNode: _tvdbFocus,
-                  textInputAction: TextInputAction.next,
-                  onSubmitted: (_) => _tvdbPinFocus.requestFocus(),
+                  label: 'TVDB API key',
+                  hintText: 'Used as preferred or fallback visual provider',
                   obscureText: true,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  decoration: const InputDecoration(
-                    labelText: 'TVDB API key',
-                    hintText: 'Used as preferred or fallback visual provider',
-                  ),
+                  textInputAction: TextInputAction.next,
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                TvTextField(
                   controller: _tvdbPin,
-                  focusNode: _tvdbPinFocus,
-                  textInputAction: TextInputAction.next,
-                  onSubmitted: (_) => _mdblistFocus.requestFocus(),
+                  label: 'TVDB PIN',
+                  hintText: 'Optional user-supported key PIN',
                   obscureText: true,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  decoration: const InputDecoration(
-                    labelText: 'TVDB PIN',
-                    hintText: 'Optional user-supported key PIN',
-                  ),
+                  textInputAction: TextInputAction.next,
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                TvTextField(
                   controller: _mdblist,
-                  focusNode: _mdblistFocus,
+                  label: 'MDBList API key',
+                  hintText: 'Optional ratings enrichment',
+                  obscureText: true,
                   textInputAction: TextInputAction.done,
                   onSubmitted: (_) => _save(),
-                  obscureText: true,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  decoration: const InputDecoration(
-                    labelText: 'MDBList API key',
-                    hintText: 'Optional ratings enrichment',
-                  ),
                 ),
                 const SizedBox(height: 8),
                 const Text(
