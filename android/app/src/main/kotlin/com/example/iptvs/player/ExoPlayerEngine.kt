@@ -322,6 +322,12 @@ class ExoPlayerEngine(
 
     override fun setSpeed(value: Float) = player.setPlaybackSpeed(value)
 
+    override fun goLive() {
+        // For a live stream the default position is the live edge.
+        player.seekToDefaultPosition()
+        syncProgress()
+    }
+
     override fun applyAspect(mode: AspectMode) {
         val frame = contentFrame ?: return
         val videoRatio = if (state.videoHeight > 0) {

@@ -466,6 +466,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       case 'aspect':
         await _cycleNativeAspect();
         break;
+      case 'goLive':
+        // Jump a live stream to the live edge (end of the seekable window).
+        if (_isLive) await _player.seek(_player.state.duration);
+        break;
       case 'info':
         // The native overlay owns the info-panel open state; refresh so it
         // renders with the latest metadata.

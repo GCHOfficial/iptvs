@@ -118,6 +118,8 @@ class MpvController(
         mpv?.setPropertyInt("volume", (value.coerceIn(0f, 1f) * 100).toInt())
     }
     fun toggleMute() = mpv?.command(arrayOf("cycle", "mute")) ?: Unit
+    /** Seek to the live edge (end of the seekable range) for a live stream. */
+    fun goLive() = mpv?.command(arrayOf("seek", "100", "absolute-percent")) ?: Unit
     fun setSpeed(value: Float) = mpv?.setPropertyDouble("speed", value.toDouble()) ?: Unit
 
     fun selectAudio(id: String) {

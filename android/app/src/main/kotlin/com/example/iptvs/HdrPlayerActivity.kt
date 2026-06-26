@@ -123,6 +123,7 @@ class HdrPlayerActivity : ComponentActivity() {
             uiState.aspect = AspectMode.entries[(uiState.aspect.ordinal + 1) % AspectMode.entries.size]
             engine?.applyAspect(uiState.aspect)
         },
+        onGoLive = { if (uiState.isLive) engine?.goLive() },
         onBack = { finish() },
     )
 

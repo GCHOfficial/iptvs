@@ -5,8 +5,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,20 +32,19 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -57,10 +58,13 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import android.view.View
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -78,6 +82,7 @@ class PlayerCallbacks(
     val onSelectSubtitle: (String) -> Unit,
     val onSetSpeed: (Float) -> Unit,
     val onCycleAspect: () -> Unit,
+    val onGoLive: () -> Unit,
     val onBack: () -> Unit,
 )
 
@@ -136,13 +141,31 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler(enabled = true) {
-        when {
-            state.openMenu != PlayerMenu.None -> state.openMenu = PlayerMenu.None
-            state.infoOpen -> state.infoOpen = false
-            state.controlsVisible && state.isPlaying -> state.controlsVisible = false
-            else -> callbacks.onBack()
+    // Single source of truth for Back: peel one layer per press — close an open
+    // menu, then the info panel, then hide the controls — and report whether it
+    // handled the press. Returns false only when there's nothing left to dismiss.
+    fun handleBack(): Boolean = when {
+        state.openMenu != PlayerMenu.None -> {
+            state.openMenu = PlayerMenu.None
+            true
         }
+        state.infoOpen -> {
+            state.infoOpen = false
+            true
+        }
+        state.controlsVisible -> {
+            state.controlsVisible = false
+            true
+        }
+        else -> false
+    }
+
+    // Phones deliver Back through the dispatcher (gesture / nav bar); TV remotes
+    // deliver it as a key consumed in onPreviewKeyEvent below. They're mutually
+    // exclusive (a consumed key never reaches the dispatcher), so both routing to
+    // handleBack() gives a deterministic single press per step.
+    BackHandler(enabled = true) {
+        if (!handleBack()) callbacks.onBack()
     }
 
     Box(
@@ -152,12 +175,17 @@ fun PlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown) {
-                    val wasHidden = !state.controlsVisible
-                    poke()
-                    wasHidden // consume the first key only to reveal controls
-                } else {
-                    false
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.Back -> {
+                        if (!handleBack()) callbacks.onBack()
+                        true
+                    }
+                    else -> {
+                        val wasHidden = !state.controlsVisible
+                        poke()
+                        wasHidden // consume the first key only to reveal controls
+                    }
                 }
             },
     ) {
@@ -406,6 +434,14 @@ private fun RowScope.RightCluster(
 ) {
     // When `spread`, the parent Row supplies the gaps (portrait, `spacedBy`), so we
     // omit the manual spacers; otherwise (landscape) we space the buttons ourselves.
+    // Live-only: an unobtrusive "jump to live edge" control (separate from
+    // play/pause, which keeps resuming from where you paused).
+    if (state.isLive) {
+        IconControlButton(Icons.Filled.LiveTv, "Go to live") {
+            onInteract(); callbacks.onGoLive()
+        }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
     if (state.showSpeedButton) {
         TextControlButton(state.speedLabel(), "Playback speed") {
             onInteract(); state.openMenu =
@@ -458,6 +494,7 @@ private fun Scrubber(
                 callbacks.onSeekTo((fraction * duration).toLong())
             },
             modifier = Modifier.weight(1f),
+            step = 0.02f, // ~2% per D-pad press for quicker scrubbing
         )
         Text(
             formatTime(state.durationMs),
@@ -593,59 +630,104 @@ fun Badge(text: String, accent: Boolean = false) {
     }
 }
 
-@Composable
-fun sliderColors() = SliderDefaults.colors(
-    thumbColor = PlayerColors.Accent,
-    activeTrackColor = PlayerColors.Accent,
-    inactiveTrackColor = PlayerColors.TrackInactive,
-)
-
 /**
- * A slim slider matching the Windows overlay: a thin rounded track and a small
- * round thumb, without Material 3's wide thumb / stop indicators. Keeps the M3
- * Slider's drag + D-pad behaviour. Used for both the scrubber and volume.
+ * A slim slider that's D-pad friendly under the "OK to edit" model: focusing it
+ * does nothing, and Left/Right pass through to normal focus traversal — so it's
+ * never a trap. Press OK/Center to enter adjust mode (the thumb grows + gains an
+ * accent ring); then Left/Right [step] the value and OK/Center or Back exits.
+ * Touch keeps drag + tap-to-seek. Used for both the scrubber and volume.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SlimSlider(
     value: Float,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    step: Float = 0.05f,
 ) {
-    Slider(
-        value = value,
-        onValueChange = onValueChange,
-        modifier = modifier,
-        colors = sliderColors(),
-        thumb = {
+    var focused by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
+    var widthPx by remember { mutableFloatStateOf(0f) }
+    val f = value.coerceIn(0f, 1f)
+    val thumbSize = if (editing) 18.dp else 14.dp
+
+    Box(
+        modifier
+            .height(28.dp) // comfortable touch / focus target around the thin track
+            .onFocusChanged {
+                focused = it.isFocused
+                if (!it.isFocused) editing = false
+            }
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        editing = !editing
+                        true
+                    }
+                    // Only capture Left/Right (to change the value) while editing;
+                    // otherwise let them traverse focus to the neighbouring control.
+                    Key.DirectionLeft ->
+                        if (editing) { onValueChange((value - step).coerceIn(0f, 1f)); true } else false
+                    Key.DirectionRight ->
+                        if (editing) { onValueChange((value + step).coerceIn(0f, 1f)); true } else false
+                    Key.Back -> if (editing) { editing = false; true } else false
+                    else -> false
+                }
+            }
+            .onSizeChanged { widthPx = it.width.toFloat() }
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    if (widthPx > 0f) onValueChange((offset.x / widthPx).coerceIn(0f, 1f))
+                }
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { change, _ ->
+                    if (widthPx > 0f) onValueChange((change.position.x / widthPx).coerceIn(0f, 1f))
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        // Track + elapsed fill.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(PlayerColors.TrackInactive),
+        ) {
             Box(
                 Modifier
-                    .size(14.dp)
-                    .clip(CircleShape)
-                    .background(PlayerColors.Accent),
-            )
-        },
-        track = { sliderState ->
-            val range = sliderState.valueRange
-            val fraction = ((sliderState.value - range.start) /
-                (range.endInclusive - range.start)).coerceIn(0f, 1f)
-            Box(
-                Modifier
-                    .fillMaxWidth()
+                    .fillMaxWidth(f)
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(PlayerColors.TrackInactive),
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(fraction)
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(PlayerColors.Accent),
-                )
-            }
-        },
-    )
+                    .background(PlayerColors.Accent),
+            )
+        }
+        // Thumb positioned at the fill end via [f : 1-f] weighted spacers (centers
+        // it exactly: thumb left = f * (width - thumbWidth)).
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (f > 0f) Spacer(Modifier.weight(f))
+            Box(
+                Modifier
+                    .size(thumbSize)
+                    .clip(CircleShape)
+                    .background(PlayerColors.Accent)
+                    .then(
+                        if (editing || focused) {
+                            Modifier.border(
+                                2.dp,
+                                androidx.compose.ui.graphics.Color.White.copy(alpha = 0.92f),
+                                CircleShape,
+                            )
+                        } else {
+                            Modifier
+                        },
+                    ),
+            )
+            if (f < 1f) Spacer(Modifier.weight(1f - f))
+        }
+    }
 }
 
 fun formatTime(ms: Long): String {

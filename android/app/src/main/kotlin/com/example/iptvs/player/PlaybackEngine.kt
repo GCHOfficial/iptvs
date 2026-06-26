@@ -32,6 +32,9 @@ interface PlaybackEngine {
     fun selectSubtitle(id: String)
     fun applyAspect(mode: AspectMode)
 
+    /** Jump a live stream to the live edge. No-op for VOD / engines without it. */
+    fun goLive() {}
+
     fun pause()
     fun release()
 

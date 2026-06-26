@@ -42,6 +42,7 @@ class MpvEngine(
     override fun selectAudio(id: String) = controller.selectAudio(id)
     override fun selectSubtitle(id: String) = controller.selectSubtitle(id)
     override fun applyAspect(mode: AspectMode) = controller.applyAspect(mode)
+    override fun goLive() = controller.goLive()
     override fun pause() = controller.pause()
     override fun release() = controller.destroy()
 }

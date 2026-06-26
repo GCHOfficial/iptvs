@@ -501,6 +501,8 @@ struct BottomLayout {
   RECT aspect;
   RECT info;
   RECT fullscreen;
+  bool has_go_live = false;
+  RECT go_live; // live-only "jump to live edge" button
 };
 
 BottomLayout ComputeBottomLayout(const RECT &rect) {
@@ -550,6 +552,11 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   l.has_speed = !g_native_control_state.speed_options.empty();
   if (l.has_speed) {
     place(l.speed, 54);
+  }
+  // Live-only "go to live" button, placed at the left end of the right cluster.
+  l.has_go_live = live;
+  if (l.has_go_live) {
+    place(l.go_live, 54);
   }
 
   l.has_scrubber = !live;
@@ -1144,6 +1151,9 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, l.info, L"\xE946", g_native_control_state.info_open);
   DrawIconButton(paint_hdc, l.fullscreen,
                  g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740");
+  if (l.has_go_live) {
+    DrawTextButton(paint_hdc, l.go_live, L"LIVE");
+  }
 
   PaintListMenu(paint_hdc, rect);
   if (HasInfoPanel()) {
@@ -1245,6 +1255,9 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   }
   if (PointInRect(x, y, l.fullscreen)) {
     return "fullscreen";
+  }
+  if (l.has_go_live && PointInRect(x, y, l.go_live)) {
+    return "goLive";
   }
   return "show";
 }
