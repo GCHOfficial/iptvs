@@ -37,10 +37,33 @@ class _SourcesScreenState extends State<SourcesScreen> {
   String? _activeId;
   bool _loading = true;
 
+  // One focus node per source row, so we can land focus back on a specific
+  // card after returning from the edit/add route (otherwise Navigator restores
+  // focus to the Edit icon the user activated).
+  final Map<String, FocusNode> _cardFocus = {};
+
   @override
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void dispose() {
+    for (final node in _cardFocus.values) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  FocusNode _focusNodeFor(String id) =>
+      _cardFocus.putIfAbsent(id, () => FocusNode());
+
+  void _focusCard(String? id) {
+    if (id == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _cardFocus[id]?.requestFocus();
+    });
   }
 
   Future<void> _reload() async {
@@ -55,10 +78,19 @@ class _SourcesScreenState extends State<SourcesScreen> {
   }
 
   Future<void> _add() async {
+    final before = _sources.map((s) => s.id).toSet();
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(builder: (_) => EditSourceScreen(store: widget.store)),
     );
-    if (saved == true) await _reload();
+    if (saved != true) return;
+    await _reload();
+    // Land focus on the newly added source row (fall back to the first card).
+    final added = _sources
+        .map((s) => s.id)
+        .firstWhere((id) => !before.contains(id), orElse: () => '');
+    _focusCard(added.isNotEmpty
+        ? added
+        : (_sources.isNotEmpty ? _sources.first.id : null));
   }
 
   Future<void> _edit(SourceConfig c) async {
@@ -67,7 +99,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
         builder: (_) => EditSourceScreen(store: widget.store, existing: c),
       ),
     );
-    if (saved == true) await _reload();
+    if (saved != true) return;
+    await _reload();
+    _focusCard(c.id);
   }
 
   Future<void> _activate(SourceConfig c) async {
@@ -119,7 +153,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
+      // A FilledButton (rather than a FAB) so it shows the same accent/white
+      // focus ring as the "Save source" / "Save" buttons under a D-pad.
+      floatingActionButton: FilledButton.icon(
         onPressed: _add,
         icon: const Icon(Icons.add),
         label: const Text('Add source'),
@@ -143,6 +179,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
                   config: c,
                   active: c.id == _activeId,
                   autofocus: i == 0,
+                  focusNode: _focusNodeFor(c.id),
                   onActivate: () => _activate(c),
                   onEdit: () => _edit(c),
                   onDelete: () => _delete(c),
@@ -153,10 +190,11 @@ class _SourcesScreenState extends State<SourcesScreen> {
   }
 }
 
-class _SourceCard extends StatelessWidget {
+class _SourceCard extends StatefulWidget {
   final SourceConfig config;
   final bool active;
   final bool autofocus;
+  final FocusNode? focusNode;
   final VoidCallback onActivate;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
@@ -168,88 +206,151 @@ class _SourceCard extends StatelessWidget {
     required this.onActivate,
     required this.onEdit,
     required this.onDelete,
+    this.focusNode,
   });
 
+  @override
+  State<_SourceCard> createState() => _SourceCardState();
+}
+
+class _SourceCardState extends State<_SourceCard> {
+  // The Edit/Delete buttons are skip-traversal so automatic/directional
+  // navigation (Up/Down) never lands on them — vertical arrows only ever stop
+  // on the row card. Left/Right step into and out of them explicitly (see
+  // _handleDirectional).
+  final FocusNode _editNode = FocusNode(skipTraversal: true);
+  final FocusNode _deleteNode = FocusNode(skipTraversal: true);
+
+  @override
+  void dispose() {
+    _editNode.dispose();
+    _deleteNode.dispose();
+    super.dispose();
+  }
+
   String get _subtitle {
-    switch (config.kind) {
+    switch (widget.config.kind) {
       case SourceKind.stalker:
-        return 'Stalker · ${config.fields['portal'] ?? ''}';
+        return 'Stalker · ${widget.config.fields['portal'] ?? ''}';
       case SourceKind.xtream:
-        return 'Xtream · ${config.fields['host'] ?? ''}';
+        return 'Xtream · ${widget.config.fields['host'] ?? ''}';
       case SourceKind.m3u:
-        return 'M3U · ${config.fields['playlistUrl'] ?? ''}';
+        return 'M3U · ${widget.config.fields['playlistUrl'] ?? ''}';
       case SourceKind.demo:
         return 'Demo streams';
     }
   }
 
+  Object? _handleDirectional(DirectionalFocusIntent intent) {
+    final focused = FocusManager.instance.primaryFocus;
+    switch (intent.direction) {
+      case TraversalDirection.right:
+        if (focused == widget.focusNode) {
+          _editNode.requestFocus();
+        } else if (focused == _editNode) {
+          _deleteNode.requestFocus();
+        }
+        // On Delete there is nothing further right — consume.
+        return null;
+      case TraversalDirection.left:
+        if (focused == _deleteNode) {
+          _editNode.requestFocus();
+        } else if (focused == _editNode) {
+          widget.focusNode?.requestFocus();
+        } else {
+          focused?.focusInDirection(intent.direction);
+        }
+        return null;
+      case TraversalDirection.up:
+      case TraversalDirection.down:
+        // Buttons are skip-traversal, so this only finds adjacent row cards —
+        // vertical movement always lands on a row, whether we start on the
+        // card or on a button.
+        focused?.focusInDirection(intent.direction);
+        return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return FocusableCard(
-      autofocus: autofocus,
-      onTap: onActivate,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: AppColors.panelHi,
-                borderRadius: BorderRadius.circular(10),
+    return Actions(
+      actions: <Type, Action<Intent>>{
+        DirectionalFocusIntent: CallbackAction<DirectionalFocusIntent>(
+          onInvoke: _handleDirectional,
+        ),
+      },
+      child: FocusableCard(
+        autofocus: widget.autofocus,
+        focusNode: widget.focusNode,
+        onTap: widget.onActivate,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: AppColors.panelHi,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  _kindIcon(widget.config.kind),
+                  color: widget.active ? AppColors.accent : AppColors.textLo,
+                ),
               ),
-              child: Icon(
-                _kindIcon(config.kind),
-                color: active ? AppColors.accent : AppColors.textLo,
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          config.label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            widget.config.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
                         ),
-                      ),
-                      if (active) ...[
-                        const SizedBox(width: 8),
-                        const _ActivePill(),
+                        if (widget.active) ...[
+                          const SizedBox(width: 8),
+                          const _ActivePill(),
+                        ],
                       ],
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    _subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppColors.textLo,
-                      fontSize: 12,
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 4),
+                    Text(
+                      _subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.edit_outlined, color: AppColors.textLo),
-              tooltip: 'Edit',
-              onPressed: onEdit,
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: AppColors.textLo),
-              tooltip: 'Delete',
-              onPressed: onDelete,
-            ),
-          ],
+              IconButton(
+                focusNode: _editNode,
+                icon: const Icon(Icons.edit_outlined, color: AppColors.textLo),
+                tooltip: 'Edit',
+                onPressed: widget.onEdit,
+              ),
+              IconButton(
+                focusNode: _deleteNode,
+                icon: const Icon(
+                  Icons.delete_outline,
+                  color: AppColors.textLo,
+                ),
+                tooltip: 'Delete',
+                onPressed: widget.onDelete,
+              ),
+            ],
+          ),
         ),
       ),
     );

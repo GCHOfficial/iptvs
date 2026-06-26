@@ -5,8 +5,8 @@ import 'package:google_fonts/google_fonts.dart';
 class AppColors {
   static const ink = Color(0xFF0E0F13); // app background
   static const panel = Color(0xFF16181F); // cards / surfaces
-  static const panelHi = Color(0xFF1E212B); // hover / focus lift
-  static const line = Color(0xFF262A36); // hairlines / borders
+  static const panelHi = Color(0xFF272B36); // hover / focus lift
+  static const line = Color(0xFF353B49); // hairlines / borders
   static const textHi = Color(0xFFF2F4F8);
   static const textLo = Color(0xFF9AA3B2);
   static const accent = Color(0xFF7B6CF6); // brand / progress
@@ -83,36 +83,81 @@ class AppTheme {
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          backgroundColor: AppColors.accent,
-          foregroundColor: Colors.white,
-          minimumSize: const Size(44, 42),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          textStyle: const TextStyle(fontWeight: FontWeight.w700),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.control),
-          ),
-        ),
+        style:
+            FilledButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+              minimumSize: const Size(44, 42),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+              ),
+            ).copyWith(
+              // A bright inner ring reads clearly against the purple fill when
+              // focused via D-pad/keyboard (Material's default overlay alone is
+              // nearly invisible here).
+              side: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.focused)
+                    ? const BorderSide(color: Colors.white, width: 2)
+                    : null,
+              ),
+              overlayColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.focused)
+                    ? Colors.white.withValues(alpha: 0.12)
+                    : null,
+              ),
+            ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(
-          foregroundColor: AppColors.textHi,
-          side: const BorderSide(color: AppColors.line),
-          minimumSize: const Size(44, 42),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          textStyle: const TextStyle(fontWeight: FontWeight.w700),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.control),
-          ),
-        ),
+        style:
+            OutlinedButton.styleFrom(
+              foregroundColor: AppColors.textHi,
+              side: const BorderSide(color: AppColors.line),
+              minimumSize: const Size(44, 42),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              textStyle: const TextStyle(fontWeight: FontWeight.w700),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+              ),
+            ).copyWith(
+              side: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.focused)
+                    ? const BorderSide(color: AppColors.accent, width: 2)
+                    : const BorderSide(color: AppColors.line),
+              ),
+              overlayColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.focused)
+                    ? AppColors.accent.withValues(alpha: 0.16)
+                    : null,
+              ),
+            ),
       ),
       textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(
-          foregroundColor: AppColors.textHi,
-          minimumSize: const Size(44, 40),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppRadius.control),
+        style:
+            TextButton.styleFrom(
+              foregroundColor: AppColors.textHi,
+              minimumSize: const Size(44, 40),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+              ),
+            ).copyWith(
+              overlayColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.focused)
+                    ? AppColors.accent.withValues(alpha: 0.16)
+                    : null,
+              ),
+            ),
+      ),
+      iconButtonTheme: IconButtonThemeData(
+        style: ButtonStyle(
+          // Clear accent disc when an icon button (Edit/Delete, refresh) takes
+          // D-pad focus.
+          overlayColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? AppColors.accent.withValues(alpha: 0.22)
+                : null,
           ),
         ),
       ),
