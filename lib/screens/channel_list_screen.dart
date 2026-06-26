@@ -1059,7 +1059,7 @@ class _Toolbar extends StatelessWidget {
   }
 }
 
-class _ToolbarIconButton extends StatelessWidget {
+class _ToolbarIconButton extends StatefulWidget {
   final String tooltip;
   final IconData icon;
   final bool busy;
@@ -1073,24 +1073,58 @@ class _ToolbarIconButton extends StatelessWidget {
   });
 
   @override
+  State<_ToolbarIconButton> createState() => _ToolbarIconButtonState();
+}
+
+class _ToolbarIconButtonState extends State<_ToolbarIconButton> {
+  final FocusNode _node = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(_sync);
+  }
+
+  void _sync() {
+    if (mounted && _focused != _node.hasFocus) {
+      setState(() => _focused = _node.hasFocus);
+    }
+  }
+
+  @override
+  void dispose() {
+    _node.removeListener(_sync);
+    _node.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: tooltip,
+      message: widget.tooltip,
       child: SizedBox.square(
         dimension: _toolbarControlHeight,
         child: IconButton.filledTonal(
+          focusNode: _node,
           style: IconButton.styleFrom(
-            backgroundColor: AppColors.panel,
+            backgroundColor: _focused ? AppColors.panelHi : AppColors.panel,
             foregroundColor: AppColors.textHi,
             disabledBackgroundColor: AppColors.panel,
             disabledForegroundColor: AppColors.textLo,
+            // Match the accent ring/lift of the search field and category
+            // dropdown rather than the default focus disc.
+            overlayColor: Colors.transparent,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(AppRadius.control),
-              side: const BorderSide(color: AppColors.line),
+              side: BorderSide(
+                color: _focused ? AppColors.accent : AppColors.line,
+                width: _focused ? 2 : 1,
+              ),
             ),
           ),
-          onPressed: onPressed,
-          icon: Icon(icon, size: 20),
+          onPressed: widget.onPressed,
+          icon: Icon(widget.icon, size: 20),
         ),
       ),
     );
@@ -1319,6 +1353,60 @@ class _LivePill extends StatelessWidget {
   }
 }
 
+/// The bordered shell shared by the category dropdowns. Reflects the focus of
+/// the [DropdownButton] it hosts with the same accent ring/lift as
+/// [FocusableCard], so the control is clearly visible under a D-pad.
+class _DropdownFrame extends StatefulWidget {
+  final Widget Function(FocusNode focusNode) builder;
+
+  const _DropdownFrame({required this.builder});
+
+  @override
+  State<_DropdownFrame> createState() => _DropdownFrameState();
+}
+
+class _DropdownFrameState extends State<_DropdownFrame> {
+  final FocusNode _node = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(_sync);
+  }
+
+  void _sync() {
+    if (mounted && _focused != _node.hasFocus) {
+      setState(() => _focused = _node.hasFocus);
+    }
+  }
+
+  @override
+  void dispose() {
+    _node.removeListener(_sync);
+    _node.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: _toolbarControlHeight,
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: _focused ? AppColors.panelHi : AppColors.panel,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        border: Border.all(
+          color: _focused ? AppColors.accent : AppColors.line,
+          width: _focused ? 2 : 1,
+        ),
+      ),
+      child: DropdownButtonHideUnderline(child: widget.builder(_node)),
+    );
+  }
+}
+
 class _CategoryDropdown extends StatelessWidget {
   final List<Category> categories;
   final String? value;
@@ -1332,45 +1420,33 @@ class _CategoryDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: _toolbarControlHeight,
-      constraints: const BoxConstraints(maxWidth: 220),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: AppColors.panel,
+    return _DropdownFrame(
+      builder: (focusNode) => DropdownButton<String?>(
+        focusNode: focusNode,
+        focusColor: Colors.transparent,
+        isDense: true,
+        isExpanded: true,
+        value: value,
+        dropdownColor: AppColors.panelHi,
         borderRadius: BorderRadius.circular(AppRadius.control),
-        border: Border.all(color: AppColors.line),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String?>(
-          isDense: true,
-          isExpanded: true,
-          value: value,
-          dropdownColor: AppColors.panelHi,
-          borderRadius: BorderRadius.circular(AppRadius.control),
-          icon: const Icon(Icons.expand_more, color: AppColors.textLo),
-          hint: const Text(
-            'All categories',
-            style: TextStyle(color: AppColors.textLo),
-          ),
-          items: [
-            const DropdownMenuItem<String?>(
-              value: null,
-              child: Text('All categories'),
-            ),
-            ...categories.map(
-              (c) => DropdownMenuItem<String?>(
-                value: c.id,
-                child: Text(
-                  c.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ),
-          ],
-          onChanged: onChanged,
+        icon: const Icon(Icons.expand_more, color: AppColors.textLo),
+        hint: const Text(
+          'All categories',
+          style: TextStyle(color: AppColors.textLo),
         ),
+        items: [
+          const DropdownMenuItem<String?>(
+            value: null,
+            child: Text('All categories'),
+          ),
+          ...categories.map(
+            (c) => DropdownMenuItem<String?>(
+              value: c.id,
+              child: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ),
+        ],
+        onChanged: onChanged,
       ),
     );
   }
@@ -1389,45 +1465,33 @@ class _MediaCategoryDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: _toolbarControlHeight,
-      constraints: const BoxConstraints(maxWidth: 220),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: AppColors.panel,
+    return _DropdownFrame(
+      builder: (focusNode) => DropdownButton<String?>(
+        focusNode: focusNode,
+        focusColor: Colors.transparent,
+        isDense: true,
+        isExpanded: true,
+        value: value,
+        dropdownColor: AppColors.panelHi,
         borderRadius: BorderRadius.circular(AppRadius.control),
-        border: Border.all(color: AppColors.line),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String?>(
-          isDense: true,
-          isExpanded: true,
-          value: value,
-          dropdownColor: AppColors.panelHi,
-          borderRadius: BorderRadius.circular(AppRadius.control),
-          icon: const Icon(Icons.expand_more, color: AppColors.textLo),
-          hint: const Text(
-            'All categories',
-            style: TextStyle(color: AppColors.textLo),
-          ),
-          items: [
-            const DropdownMenuItem<String?>(
-              value: null,
-              child: Text('All categories'),
-            ),
-            ...categories.map(
-              (c) => DropdownMenuItem<String?>(
-                value: c.id,
-                child: Text(
-                  c.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ),
-          ],
-          onChanged: onChanged,
+        icon: const Icon(Icons.expand_more, color: AppColors.textLo),
+        hint: const Text(
+          'All categories',
+          style: TextStyle(color: AppColors.textLo),
         ),
+        items: [
+          const DropdownMenuItem<String?>(
+            value: null,
+            child: Text('All categories'),
+          ),
+          ...categories.map(
+            (c) => DropdownMenuItem<String?>(
+              value: c.id,
+              child: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ),
+        ],
+        onChanged: onChanged,
       ),
     );
   }
@@ -1465,16 +1529,26 @@ class _MediaListTile extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  if (item.year != null) ...[
+                  if (item.year != null || _hasRating(item)) ...[
                     const SizedBox(height: 4),
-                    Text(
-                      item.year!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textLo,
-                        fontSize: 12,
-                      ),
+                    Row(
+                      children: [
+                        if (item.year != null)
+                          Flexible(
+                            child: Text(
+                              item.year!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textLo,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        if (item.year != null && _hasRating(item))
+                          const SizedBox(width: 10),
+                        _RatingBadge(rating: item.rating),
+                      ],
                     ),
                   ],
                   if (sourceHintLabels(item).isNotEmpty) ...[
@@ -1533,10 +1607,31 @@ class _MediaGridTile extends StatelessWidget {
           children: [
             Expanded(
               child: SizedBox.expand(
-                child: _Poster(
-                  item: item,
-                  width: double.infinity,
-                  height: double.infinity,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _Poster(
+                      item: item,
+                      width: double.infinity,
+                      height: double.infinity,
+                    ),
+                    if (_hasRating(item))
+                      Positioned(
+                        top: 6,
+                        left: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.ink.withValues(alpha: 0.75),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: _RatingBadge(rating: item.rating, compact: true),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
@@ -1601,6 +1696,41 @@ class _SourceHints extends StatelessWidget {
               ),
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// Whether an item has a real (non-zero) score worth showing. Many items come
+/// back with `rating == 0.0`, which means "unrated", not a literal zero.
+bool _hasRating(MediaItem item) => (item.rating ?? 0) > 0;
+
+/// A small `★ 8.5` rating chip, shown when an item carries a non-zero 0–10
+/// score (TMDB or MDBList). Renders nothing otherwise.
+class _RatingBadge extends StatelessWidget {
+  final double? rating;
+  final bool compact;
+
+  const _RatingBadge({required this.rating, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final value = rating;
+    if (value == null || value <= 0) return const SizedBox.shrink();
+    final fontSize = compact ? 11.0 : 12.0;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.star_rounded, size: fontSize + 3, color: AppColors.accent),
+        const SizedBox(width: 3),
+        Text(
+          value.toStringAsFixed(1),
+          style: TextStyle(
+            color: AppColors.textHi,
+            fontSize: fontSize,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
       ],
     );
   }
@@ -1767,6 +1897,21 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
   final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
   bool _refreshingMetadata = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // Movies/episodes autofocus their Play button directly. A series has no
+    // top-level Play button, so once the seasons load, nudge focus onto the
+    // first season tile (ExpansionTile exposes no autofocus of its own).
+    if (widget.onPlay == null) {
+      _seasonsFuture?.whenComplete(() {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) FocusScope.of(context).nextFocus();
+        });
+      });
+    }
+  }
+
   Future<List<MediaItem>>? _loadSeasonsIfNeeded() {
     if (_item.kind != ContentKind.series) return null;
     return widget.repo
@@ -1837,11 +1982,19 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                if (_item.year != null) ...[
+                if (_item.year != null || _hasRating(_item)) ...[
                   const SizedBox(height: 6),
-                  Text(
-                    _item.year!,
-                    style: const TextStyle(color: AppColors.textLo),
+                  Row(
+                    children: [
+                      if (_item.year != null)
+                        Text(
+                          _item.year!,
+                          style: const TextStyle(color: AppColors.textLo),
+                        ),
+                      if (_item.year != null && _hasRating(_item))
+                        const SizedBox(width: 12),
+                      _RatingBadge(rating: _item.rating),
+                    ],
                   ),
                 ],
                 if (sourceHintLabels(_item).isNotEmpty) ...[
@@ -1872,6 +2025,7 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
                 const SizedBox(height: 16),
                 if (widget.onPlay != null)
                   FilledButton.icon(
+                    autofocus: true,
                     onPressed: widget.onPlay,
                     icon: const Icon(Icons.play_arrow_rounded),
                     label: const Text('Play'),

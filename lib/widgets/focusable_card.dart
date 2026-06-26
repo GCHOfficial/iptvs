@@ -13,12 +13,18 @@ class FocusableCard extends StatefulWidget {
   final bool autofocus;
   final bool scrollOnFocus;
 
+  /// Optional external focus node, so a parent can move focus to this card
+  /// programmatically (e.g. land on a specific row after returning from a
+  /// pushed route).
+  final FocusNode? focusNode;
+
   const FocusableCard({
     super.key,
     required this.child,
     required this.onTap,
     this.autofocus = false,
     this.scrollOnFocus = true,
+    this.focusNode,
   });
 
   @override
@@ -50,6 +56,7 @@ class _FocusableCardState extends State<FocusableCard> {
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: FocusableActionDetector(
         autofocus: widget.autofocus,
+        focusNode: widget.focusNode,
         mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: _onHighlight,
         actions: {
