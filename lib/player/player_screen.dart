@@ -68,6 +68,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _nativeControlsVisible = true;
   bool _nativeTeardownScheduled = false;
   bool _loggedActiveVo = false;
+  bool _loggedHwdec = false;
   String? _lastVideoParamsLog;
   DateTime? _ignoreNativeInputUntil;
   int? _windowsNativeSurface;
@@ -847,10 +848,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'vo': 'gpu-next,gpu',
             'gpu-api': 'd3d11',
             'gpu-context': 'd3d11',
-            // Hardware-decode on the GPU (zero-copy with the d3d11 path). 4K
-            // HEVC/10-bit is too heavy for software decode and causes A/V
-            // desync; mpv falls back to software if a codec isn't supported.
-            'hwdec': 'd3d11va',
+            // Hardware-decode on the GPU. `auto-safe` lets mpv negotiate the
+            // best working method (d3d11va zero-copy with this d3d11 path) and
+            // fall back cleanly to software when a codec/driver combo isn't
+            // supported — forcing `d3d11va` could half-init and stall/desync.
+            // 4K HEVC/10-bit is too heavy for software decode, so we want HW.
+            'hwdec': 'auto-safe',
             // 10-bit swapchain so HDR/10-bit output isn't truncated to 8-bit,
             // without forcing the desktop into HDR globally.
             'd3d11-output-format': 'rgb10_a2',
@@ -902,17 +905,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // Logs which video output / decoder mpv actually initialized — tells us
   // whether `gpu-next` loaded or fell back to `gpu`, and the active colorspace.
   Future<void> _logActiveVideoOutput() async {
-    if (_loggedActiveVo) return;
+    if (_loggedActiveVo && _loggedHwdec) return;
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     try {
-      final vo = await platform.getProperty('current-vo');
-      if (vo.isEmpty) return; // VO not initialized yet; retry on next event.
-      _loggedActiveVo = true;
-      final hwdec = await platform.getProperty('hwdec-current');
-      _logPlayback('active vo=$vo hwdec=$hwdec');
+      if (!_loggedActiveVo) {
+        final vo = await platform.getProperty('current-vo');
+        if (vo.isNotEmpty) {
+          _loggedActiveVo = true;
+          _logPlayback('active vo=$vo');
+        }
+      }
+      // The decoder initializes a beat after the VO, so hwdec-current is often
+      // still empty on the first videoParams event — only log it (once) once it's
+      // actually engaged, so an empty reading isn't mistaken for software decode.
+      if (!_loggedHwdec) {
+        final hwdec = await platform.getProperty('hwdec-current');
+        if (hwdec.isNotEmpty && hwdec != 'no') {
+          _loggedHwdec = true;
+          _logPlayback('active hwdec=$hwdec');
+        }
+      }
     } catch (error) {
       _loggedActiveVo = true;
+      _loggedHwdec = true;
       _logPlayback('warn query active vo failed: $error');
     }
   }
