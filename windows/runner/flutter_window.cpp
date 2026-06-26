@@ -73,6 +73,7 @@ struct NativeControlState {
   std::wstring title;
   bool is_live = false;
   bool live_synced = true; // at the live edge (red badge) vs behind (grey + button)
+  bool reconnecting = false; // live reconnect watchdog re-establishing the stream
   bool playing = false;
   bool fullscreen = false;
   NativeMenuKind open_menu = NativeMenuKind::kNone;
@@ -1031,6 +1032,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   const COLORREF kNeutralBg = RGB(30, 33, 45);
   const COLORREF kNeutralFg = RGB(206, 210, 224);
   int badge_right = rect.right - 16;
+  if (g_native_control_state.reconnecting) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x21BB Reconnecting\x2026",
+                             RGB(150, 102, 24), RGB(255, 236, 196));
+  }
   const std::wstring clock = FormatClock();
   if (!clock.empty()) {
     badge_right -=
@@ -1879,6 +1884,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableBoolArg(args, "isLive", g_native_control_state.is_live);
   g_native_control_state.live_synced =
       EncodableBoolArg(args, "liveSynced", g_native_control_state.live_synced);
+  g_native_control_state.reconnecting =
+      EncodableBoolArg(args, "reconnecting", g_native_control_state.reconnecting);
   g_native_control_state.playing =
       EncodableBoolArg(args, "playing", g_native_control_state.playing);
   g_native_control_state.fullscreen =

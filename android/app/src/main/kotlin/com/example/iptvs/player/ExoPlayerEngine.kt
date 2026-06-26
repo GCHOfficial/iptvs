@@ -36,6 +36,7 @@ class ExoPlayerEngine(
     private val state: PlayerUiState,
     private val headers: Map<String, String>,
     private val onUnsupportedVideo: () -> Unit,
+    private val onRecoverableError: () -> Unit = {},
 ) : PlaybackEngine {
 
     private val playerView = PlayerView(context).apply {
@@ -121,7 +122,11 @@ class ExoPlayerEngine(
 
         override fun onPlayerError(error: PlaybackException) {
             Log.e(TAG, "playback error code=${error.errorCode}", error)
-            if (isVideoDecodeError(error)) triggerFallback()
+            // A decode error means this device can't play the video -> mpv fallback.
+            // Anything else (network/source) is transient -> let the host reconnect;
+            // ExoPlayer otherwise stops in STATE_IDLE, which the stall watchdog can't
+            // see (it's neither buffering nor ended).
+            if (isVideoDecodeError(error)) triggerFallback() else onRecoverableError()
         }
     }
 
