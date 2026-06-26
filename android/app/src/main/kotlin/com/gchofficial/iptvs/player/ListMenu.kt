@@ -1,4 +1,4 @@
-package com.example.iptvs.player
+package com.gchofficial.iptvs.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable

@@ -60,7 +60,7 @@ data. Trim ABIs in `build.sh`/the workflow to keep the AAR small.)
    `packaging.jniLibs.pickFirsts += "**/libmpv.so"` — and **re-verify the kept
    `libmpv.so` is ours** (it should contain libplacebo + libdovi; media_kit's
    ships separate `libav*.so`). If the wrong one wins, exclude media_kit's.
-3. In [`MpvController.kt`](../src/main/kotlin/com/example/iptvs/player/MpvController.kt),
+3. In [`MpvController.kt`](../src/main/kotlin/com/gchofficial/iptvs/player/MpvController.kt),
    set software decode for the fallback so libplacebo gets clean frames to reshape:
    ```kotlin
    setOptionString("hwdec", "no")   // was "mediacodec"

@@ -6,11 +6,22 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Supersede in-flight runs for the same branch/PR (a force-push or rapid pushes
+# shouldn't keep older builds burning minutes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only reads the repo (releases live in release.yml).
+permissions:
+  contents: read
+
 env:
   FLUTTER_VERSION: 3.44.2
 
 jobs:
-  # Fast gate: static analysis + the pure-logic / persistence unit tests.
+  # Fast gate: static analysis + the pure-logic / persistence unit tests. Always
+  # runs (incl. doc-only commits) so it stays a stable required status check.
   analyze-test:
     name: Analyze & test
     runs-on: ubuntu-latest
@@ -29,11 +40,44 @@ jobs:
       - run: flutter analyze
       - run: flutter test
 
+  # Skip the heavy platform builds on doc-only commits (README/CLAUDE.md/memory).
+  # `code` is an allowlist of paths that actually affect a build.
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    # paths-filter reads the PR's changed-files list via the API on pull_request
+    # events; the top-level `contents: read` alone isn't enough for that.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'lib/**'
+              - 'test/**'
+              - 'android/**'
+              - 'windows/**'
+              - 'ios/**'
+              - 'linux/**'
+              - 'macos/**'
+              - 'web/**'
+              - 'pubspec.yaml'
+              - 'pubspec.lock'
+              - 'analysis_options.yaml'
+              - '.github/workflows/**'
+
   # One universal release APK serves both phone and Android TV (the manifest
   # declares the leanback launcher + optional touchscreen).
   build-android:
     name: Build Android (phone + TV)
-    needs: analyze-test
+    needs: [analyze-test, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -49,9 +93,18 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
       - run: flutter pub get
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --build-number ${{ github.run_number }}
       - uses: actions/upload-artifact@v5
         with:
           name: iptvs-android-apk
@@ -59,10 +112,12 @@ jobs:
           if-no-files-found: error
 
   # Windows desktop build. The libplacebo/Dolby-Vision libmpv-2.dll is fetched +
-  # hash-verified automatically by windows/CMakeLists.txt at configure time.
+  # hash-verified automatically by windows/CMakeLists.txt at configure time; we
+  # cache it (keyed on the URL+SHA that live in that file) so it's fetched once.
   build-windows:
     name: Build Windows
-    needs: analyze-test
+    needs: [analyze-test, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -71,10 +126,15 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - name: Cache libmpv DLL
+        uses: actions/cache@v4
+        with:
+          path: windows/libmpv/libmpv-2.dll
+          key: libmpv-dll-${{ hashFiles('windows/CMakeLists.txt') }}
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - name: Build release (Windows x64)
-        run: flutter build windows --release
+        run: flutter build windows --release --build-number ${{ github.run_number }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip
       - uses: actions/upload-artifact@v5

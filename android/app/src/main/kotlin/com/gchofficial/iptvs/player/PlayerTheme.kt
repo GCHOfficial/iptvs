@@ -1,11 +1,11 @@
-package com.example.iptvs.player
+package com.gchofficial.iptvs.player
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.iptvs.R
+import com.gchofficial.iptvs.R
 
 /**
  * Design tokens for the native player's Compose control overlay.

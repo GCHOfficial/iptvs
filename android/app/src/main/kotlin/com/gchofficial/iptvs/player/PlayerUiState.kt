@@ -1,4 +1,4 @@
-package com.example.iptvs.player
+package com.gchofficial.iptvs.player
 
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue

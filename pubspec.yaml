@@ -1,5 +1,5 @@
 name: iptvs
-description: "A new Flutter project."
+description: "Cross-platform IPTV player with true HDR and Android TV support."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -57,6 +57,34 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  # Generates per-platform launcher icons from assets/icon/. Run after changing
+  # the source art: `dart run flutter_launcher_icons`.
+  flutter_launcher_icons: ^0.14.4
+
+# Launcher icon: a material accent tile + white play glyph (matches lib/theme.dart
+# AppColors and the Android TV banner). Android uses an adaptive icon (accent
+# background + the play glyph as foreground).
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+  android: true
+  min_sdk_android: 26
+  adaptive_icon_background: "#7B6CF6"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+  ios: true
+  remove_alpha_ios: true
+  background_color_ios: "#7B6CF6"
+  web:
+    generate: true
+    image_path: "assets/icon/icon.png"
+    background_color: "#0E0F13"
+    theme_color: "#7B6CF6"
+  windows:
+    generate: true
+    image_path: "assets/icon/icon.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/icon/icon.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
