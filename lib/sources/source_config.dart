@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'demo_source.dart';
 import 'm3u_source.dart';
 import 'source.dart';
@@ -5,6 +7,27 @@ import 'stalker_source.dart';
 import 'xtream_source.dart';
 
 enum SourceKind { stalker, xtream, m3u, demo }
+
+final _uuidRe = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+  caseSensitive: false,
+);
+
+/// Whether [s] looks like a canonical UUID. Cloud `sources.id` is a Postgres
+/// `uuid`; locally-minted ids must match this shape to round-trip via push.
+bool isUuid(String s) => _uuidRe.hasMatch(s);
+
+/// A fresh random (v4) UUID for a newly created source, so the same id is usable
+/// locally and in the cloud `sources` table. Uses [Random.secure].
+String newSourceId() {
+  final r = Random.secure();
+  final b = List<int>.generate(16, (_) => r.nextInt(256));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+  final hex = b.map((n) => n.toRadixString(16).padLeft(2, '0')).join();
+  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+      '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+}
 
 /// A saved, serializable provider configuration. [build] turns it into a live
 /// [Source]. Stored (including credentials) via the SourceStore.

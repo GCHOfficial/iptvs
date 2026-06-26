@@ -55,4 +55,27 @@ void main() {
       );
     });
   });
+
+  group('source ids (push round-trip)', () {
+    test('newSourceId is a canonical v4 UUID', () {
+      final id = newSourceId();
+      expect(isUuid(id), isTrue);
+      // Version nibble is 4, variant nibble is 8/9/a/b.
+      expect(id[14], '4');
+      expect('89ab'.contains(id[19]), isTrue);
+    });
+
+    test('newSourceId yields distinct ids', () {
+      final ids = {for (var i = 0; i < 100; i++) newSourceId()};
+      expect(ids.length, 100);
+    });
+
+    test('isUuid rejects legacy timestamp ids and accepts UUIDs', () {
+      // The old id scheme (microsecond timestamps) is not a UUID, so push
+      // rewrites it before sending to the uuid-typed cloud column.
+      expect(isUuid('1719500000000000'), isFalse);
+      expect(isUuid('not-a-uuid'), isFalse);
+      expect(isUuid('123E4567-E89B-42D3-A456-426614174000'), isTrue);
+    });
+  });
 }

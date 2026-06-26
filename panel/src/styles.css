@@ -53,6 +53,9 @@ button.primary { background: var(--accent); color: #fff; }
 button.ghost { background: transparent; color: var(--text-lo); }
 button.ghost:hover { color: var(--text); }
 button.danger { color: var(--danger); }
+button.icon { padding: 8px 10px; font-size: 16px; line-height: 1; }
+button:disabled { opacity: 0.3; cursor: default; }
+button:disabled:hover { color: var(--text-lo); }
 
 main, .login { max-width: 680px; margin: 0 auto; padding: 24px 20px; }
 
@@ -91,6 +94,7 @@ input, select {
 .claim-row input { text-transform: uppercase; letter-spacing: 4px; }
 
 .muted { color: var(--text-lo); }
+.hint { margin: 0 0 12px; font-size: 13px; }
 .error { color: var(--danger); }
 
 .toast {

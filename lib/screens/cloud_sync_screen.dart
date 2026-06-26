@@ -142,6 +142,47 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     }
   }
 
+  Future<void> _push() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Push to panel?'),
+        content: const Text(
+          'This replaces the source list and metadata settings in the panel '
+          'with the ones on this device. Anything in the panel that isn\'t on '
+          'this device will be removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Push'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _status = null;
+    });
+    try {
+      final count = await _sync.pushSources(widget.store);
+      await _sync.pushMetadata(widget.store);
+      if (!mounted) return;
+      setState(() => _status =
+          'Pushed $count source${count == 1 ? '' : 's'} · metadata to the panel.');
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _unpair() async {
     setState(() => _busy = true);
     try {
@@ -285,9 +326,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         const SizedBox(height: 8),
         const Text(
-          'Your sources are managed from the panel. Pulling replaces the '
-          'cloud-managed sources and metadata settings on this device with the '
-          'latest from the panel (sources you added locally are kept).',
+          'Sync this device with the panel. Pull replaces the cloud-managed '
+          'sources and metadata here with the panel\'s (sources you added '
+          'locally are kept). Push sends this device\'s list and metadata up, '
+          'replacing the panel\'s. Newest change wins.',
           style: TextStyle(color: AppColors.textLo),
         ),
         const SizedBox(height: 24),
@@ -301,6 +343,12 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
                 )
               : const Icon(Icons.sync),
           label: const Text('Pull now'),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _push,
+          icon: const Icon(Icons.cloud_upload_outlined),
+          label: const Text('Push to panel'),
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(

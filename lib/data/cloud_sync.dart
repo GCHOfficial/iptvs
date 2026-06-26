@@ -85,8 +85,9 @@ class CloudSync {
   }
 
   /// Pull the paired account's sources into [store]. Cloud-managed sources are
-  /// replaced; any local-only sources the user added on the device are left
-  /// untouched. Returns the number of cloud sources synced.
+  /// replaced and ordered to match the panel; any local-only sources the user
+  /// added on the device are kept (after the cloud ones). Returns the number of
+  /// cloud sources synced.
   Future<int> pullSources(SourceStore store) async {
     final rows = await _client.from('sources').select().order('position');
     final configs = [
@@ -95,13 +96,15 @@ class CloudSync {
     final newIds = configs.map((c) => c.id).toSet();
     final prevIds = await _readCloudIds();
 
-    // Remove sources that were ours last time but are gone from the panel now.
-    for (final id in prevIds.difference(newIds)) {
-      await store.delete(id);
-    }
-    for (final c in configs) {
-      await store.save(c);
-    }
+    // Keep sources the user added on the device (never cloud-managed) in their
+    // existing order; cloud sources go first, in the panel's order, so panel
+    // reordering is reflected here. Previously-managed sources dropped from the
+    // panel fall out of both lists and are removed.
+    final localOnly = [
+      for (final c in await store.list())
+        if (!newIds.contains(c.id) && !prevIds.contains(c.id)) c,
+    ];
+    await store.setAll([...configs, ...localOnly]);
     await _writeCloudIds(newIds);
     return configs.length;
   }
@@ -118,6 +121,61 @@ class CloudSync {
     final config = Map<String, dynamic>.from(row['config'] as Map);
     await store.saveMetadataConfig(MetadataConfig.fromJson(config));
     return true;
+  }
+
+  /// Push this device's full source list up to the paired account, replacing the
+  /// panel's set (last-write-wins, mediated by the `push_sources` RPC so the
+  /// device never has direct write access). Legacy non-UUID local ids are first
+  /// rewritten to UUIDs and persisted, so device and cloud share ids and the push
+  /// is idempotent. After a push the whole local list is cloud-managed. Returns
+  /// the number of sources pushed.
+  Future<int> pushSources(SourceStore store) async {
+    final all = await store.list();
+    final activeOld = await store.activeId();
+    String? activeNew = activeOld;
+    var rewroteAny = false;
+    final normalized = <SourceConfig>[];
+    for (final c in all) {
+      if (isUuid(c.id)) {
+        normalized.add(c);
+        continue;
+      }
+      final fresh = SourceConfig(
+        id: newSourceId(),
+        kind: c.kind,
+        label: c.label,
+        fields: c.fields,
+      );
+      if (c.id == activeOld) activeNew = fresh.id;
+      normalized.add(fresh);
+      rewroteAny = true;
+    }
+    if (rewroteAny) {
+      await store.setAll(normalized); // may reset active; restore it next
+      await store.setActive(activeNew);
+    }
+
+    final payload = [
+      for (var i = 0; i < normalized.length; i++)
+        {
+          'id': normalized[i].id,
+          'kind': normalized[i].kind.name,
+          'label': normalized[i].label,
+          'fields': normalized[i].fields,
+          'position': i,
+        },
+    ];
+    await _client.rpc('push_sources', params: {'p_sources': payload});
+    // Everything we just pushed is now cloud-managed.
+    await _writeCloudIds(normalized.map((c) => c.id).toSet());
+    return normalized.length;
+  }
+
+  /// Push this device's metadata provider config up to the paired account
+  /// (last-write-wins, via the `push_metadata` RPC).
+  Future<void> pushMetadata(SourceStore store) async {
+    final config = await store.metadataConfig();
+    await _client.rpc('push_metadata', params: {'p_config': config.toJson()});
   }
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this

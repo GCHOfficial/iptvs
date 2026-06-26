@@ -39,7 +39,7 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/data/app_database.dart`** — local SQLite cache (channels, categories, EPG, movies/series, paging state, external metadata), keyed by `Source.id`. Schema is versioned (`schemaVersion`) with a hand-rolled `onUpgrade`. See "Database migrations" below.
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider` implementations enriching `MediaItem`s with posters/overviews/ratings. `ratingsOnly` providers (MDBList) only contribute ratings and run after a visual provider has matched.
 - **`lib/data/source_store.dart`** — persists `SourceConfig`s (credentials included) in the OS keychain via `flutter_secure_storage`, plus the active source and metadata config.
-- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs; `diagnostics_screen.dart` views/export the in-memory log. Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
+- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs (add/edit/delete/activate, plus ↑/↓ reorder persisted via `SourceStore.setAll`); `diagnostics_screen.dart` views/export the in-memory log. Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
 - **`lib/widgets/`** — shared UI widgets: `focusable_card.dart` (`FocusableCard`, the D-pad-navigable list/grid tile) and `tv_text_field.dart` (`TvTextField`, the edit-mode text input). Both are central to TV navigation.
 - **`lib/player/player_screen.dart`** — playback. See "Player" below.
 
@@ -63,36 +63,51 @@ The app targets Android TV (the universal APK) and must be fully D-pad-navigable
 ## Cloud sync (optional source panel)
 
 A **web panel** lets users manage their source list with a real keyboard instead of a TV remote;
-devices then **pull** it down with no on-device login. It's entirely optional — when the Supabase
-build config is absent the feature hides itself and the app is unchanged.
+devices **pull** it down with no on-device login, and can optionally **push** their local list back
+up (two-way). It's entirely optional — when the Supabase build config is absent the feature hides
+itself and the app is unchanged.
 
 - **Backend**: Supabase (the only free option bundling Postgres + Auth + RLS + a client SDK that's
   safe to call directly from a static page). Schema + the entire security boundary live in
   [`supabase/migrations/`](supabase/migrations/) (timestamped `<version>_<name>.sql`, the first is the
   schema + RLS) — read the first file's header before changing it. Four tables (`sources`,
   `metadata_configs`, `devices`, `pairings`) with **deny-by-default RLS** (no policy = no access) and
-  three `SECURITY DEFINER` pairing RPCs. Migrations are applied to the live project and re-applying is
+  five `SECURITY DEFINER` RPCs (three pairing: `request_pairing`/`pairing_status`/`claim_pairing`; two
+  push: `push_sources`/`push_metadata`). Migrations are applied to the live project and re-applying is
   idempotent; the Supabase GitHub integration auto-applies new ones on push.
 - **Open-source security model**: the Supabase URL + **anon/publishable** key ship in the app and the
   panel (safe *by design* — access is gated only by RLS). The `service_role` key must never appear in
-  any client or this repo. Devices authenticate as **anonymous** Supabase users and are read-only by
-  construction (write policies require `is_real_user()`); they gain read access only after a real
-  account claims their pairing code (`claim_pairing`). Pairing codes are short-lived + rate-limited.
+  any client or this repo. Devices authenticate as **anonymous** Supabase users with **no direct table
+  writes** (every write policy requires `is_real_user()`); they gain read access only after a real
+  account claims their pairing code (`claim_pairing`). The optional **push** is the one device→cloud
+  write path and goes through the `push_sources`/`push_metadata` `SECURITY DEFINER` RPCs, which are
+  owner-scoped via `current_device_owner()`: an *unpaired* anonymous caller has no owner and is
+  rejected, and a payload can't touch another account's rows (insert forces `owner = o`; the upsert's
+  `DO UPDATE` is guarded by `owner = o`). A paired device can already read all of its owner's
+  credentials, so writing that **same** owner's list adds no cross-account blast radius. Pairing codes
+  are short-lived + rate-limited. Push uses last-write-wins (it replaces the panel's set).
 - **Pairing flow (code-based, works on every platform)**: the device shows a code
   ([`cloud_sync_screen.dart`](lib/screens/cloud_sync_screen.dart)); the user enters it in the panel's
-  Devices page; the device polls `pairing_status` until claimed, then pulls.
+  Devices page; the device polls `pairing_status` until claimed, then pulls. Once paired, the screen
+  also offers **Pull now** / **Push to panel** (push confirms first, since it overwrites the panel).
 - **Flutter side**: [`cloud_config.dart`](lib/data/cloud_config.dart) (build-time `--dart-define`
   `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
-  [`cloud_sync.dart`](lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, **read-only**
-  `pullSources`/`pullMetadata` that write through the existing `SourceStore` — cloud-managed source
-  ids are tracked in secure storage so a pull replaces the managed set but leaves local-only sources
-  alone), and [`secure_local_storage.dart`](lib/data/secure_local_storage.dart) (persists the Supabase
-  session in the keychain, not plaintext prefs). Init is in `main.dart`, behind `isConfigured`. The
-  pure row→`SourceConfig` mapper `cloudRowToConfig` is unit-tested in `test/cloud_sync_test.dart`.
+  [`cloud_sync.dart`](lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, `pullSources`/
+  `pullMetadata` and `pushSources`/`pushMetadata`, all writing through the existing `SourceStore` —
+  cloud-managed source ids are tracked in secure storage so a pull replaces the managed set in panel
+  order but leaves local-only sources alone). Source ids are UUIDs (`newSourceId`/`isUuid` in
+  [`source_config.dart`](lib/sources/source_config.dart)) so they round-trip through the `uuid`-typed
+  cloud column; push rewrites any legacy non-UUID id first. [`secure_local_storage.dart`](lib/data/secure_local_storage.dart)
+  persists the Supabase session in the keychain, not plaintext prefs. Init is in `main.dart`, behind
+  `isConfigured`. The pure mapper `cloudRowToConfig` + the id helpers are unit-tested in
+  `test/cloud_sync_test.dart`.
 - **Web panel**: [`panel/`](panel/) — a tiny Vite + `@supabase/supabase-js` SPA (no framework).
-  **Magic-link sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Branded with the
-  app icon (`panel/public/icon.png`, copied from `assets/icon/`). Deployed to **GitHub Pages** by
-  [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (Supabase values from repo Variables).
+  **Magic-link sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Sources carry an
+  integer `position` and the list has **↑/↓ reorder** controls (positions self-heal to a clean `0..n-1`
+  on reorder; new sources append); devices show sources in that order. Branded with the app icon
+  (`panel/public/icon.png`, copied from `assets/icon/`). Deployed to **GitHub Pages** by
+  [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (`upload-pages-artifact@v5` +
+  `deploy-pages@v5`; Supabase values from repo Variables).
   Note: the Flutter web target lives in `web/`; the panel deliberately lives in `panel/`.
 
 ## Database migrations

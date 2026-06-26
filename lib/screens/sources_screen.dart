@@ -111,6 +111,21 @@ class _SourcesScreenState extends State<SourcesScreen> {
     await _reload();
   }
 
+  /// Move a source one slot up (delta -1) or down (delta +1) and persist the new
+  /// order. Keeps the active selection and refocuses the moved row. Note: cloud
+  /// sync orders cloud-managed sources from the panel on the next pull, so this
+  /// is most useful for the order among local-only sources.
+  Future<void> _move(SourceConfig c, int delta) async {
+    final i = _sources.indexWhere((s) => s.id == c.id);
+    final j = i + delta;
+    if (i < 0 || j < 0 || j >= _sources.length) return;
+    final list = List<SourceConfig>.of(_sources);
+    list.insert(j, list.removeAt(i));
+    await widget.store.setAll(list);
+    await _reload();
+    _focusCard(c.id);
+  }
+
   Future<void> _delete(SourceConfig c) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -192,11 +207,16 @@ class _SourcesScreenState extends State<SourcesScreen> {
               itemBuilder: (context, i) {
                 final c = _sources[i];
                 return _SourceCard(
+                  key: ValueKey(c.id),
                   config: c,
                   active: c.id == _activeId,
                   autofocus: i == 0,
                   focusNode: _focusNodeFor(c.id),
+                  canMoveUp: i > 0,
+                  canMoveDown: i < _sources.length - 1,
                   onActivate: () => _activate(c),
+                  onMoveUp: () => _move(c, -1),
+                  onMoveDown: () => _move(c, 1),
                   onEdit: () => _edit(c),
                   onDelete: () => _delete(c),
                 );
@@ -211,7 +231,11 @@ class _SourceCard extends StatefulWidget {
   final bool active;
   final bool autofocus;
   final FocusNode? focusNode;
+  final bool canMoveUp;
+  final bool canMoveDown;
   final VoidCallback onActivate;
+  final VoidCallback onMoveUp;
+  final VoidCallback onMoveDown;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -219,10 +243,15 @@ class _SourceCard extends StatefulWidget {
     required this.config,
     required this.active,
     required this.autofocus,
+    required this.canMoveUp,
+    required this.canMoveDown,
     required this.onActivate,
+    required this.onMoveUp,
+    required this.onMoveDown,
     required this.onEdit,
     required this.onDelete,
     this.focusNode,
+    super.key,
   });
 
   @override
@@ -230,15 +259,19 @@ class _SourceCard extends StatefulWidget {
 }
 
 class _SourceCardState extends State<_SourceCard> {
-  // The Edit/Delete buttons are skip-traversal so automatic/directional
+  // The row's action buttons are skip-traversal so automatic/directional
   // navigation (Up/Down) never lands on them — vertical arrows only ever stop
-  // on the row card. Left/Right step into and out of them explicitly (see
-  // _handleDirectional).
+  // on the row card. Left/Right step through them explicitly, in order:
+  // card → up → down → edit → delete (see _handleDirectional).
+  final FocusNode _upNode = FocusNode(skipTraversal: true);
+  final FocusNode _downNode = FocusNode(skipTraversal: true);
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
   @override
   void dispose() {
+    _upNode.dispose();
+    _downNode.dispose();
     _editNode.dispose();
     _deleteNode.dispose();
     super.dispose();
@@ -257,31 +290,32 @@ class _SourceCardState extends State<_SourceCard> {
     }
   }
 
+  // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
+  // skip-traversal, so vertical movement only finds adjacent row cards).
+  List<FocusNode?> get _chain =>
+      [widget.focusNode, _upNode, _downNode, _editNode, _deleteNode];
+
   Object? _handleDirectional(DirectionalFocusIntent intent) {
     final focused = FocusManager.instance.primaryFocus;
+    final chain = _chain;
+    final idx = chain.indexOf(focused);
     switch (intent.direction) {
       case TraversalDirection.right:
-        if (focused == widget.focusNode) {
-          _editNode.requestFocus();
-        } else if (focused == _editNode) {
-          _deleteNode.requestFocus();
+        if (idx >= 0 && idx < chain.length - 1) {
+          chain[idx + 1]?.requestFocus();
         }
-        // On Delete there is nothing further right — consume.
+        // On the last button there is nothing further right — consume.
         return null;
       case TraversalDirection.left:
-        if (focused == _deleteNode) {
-          _editNode.requestFocus();
-        } else if (focused == _editNode) {
-          widget.focusNode?.requestFocus();
+        if (idx > 0) {
+          chain[idx - 1]?.requestFocus();
         } else {
+          // On the card (or unknown): leave the row leftwards.
           focused?.focusInDirection(intent.direction);
         }
         return null;
       case TraversalDirection.up:
       case TraversalDirection.down:
-        // Buttons are skip-traversal, so this only finds adjacent row cards —
-        // vertical movement always lands on a row, whether we start on the
-        // card or on a button.
         focused?.focusInDirection(intent.direction);
         return null;
     }
@@ -349,6 +383,27 @@ class _SourceCardState extends State<_SourceCard> {
                     ),
                   ],
                 ),
+              ),
+              // Move up/down are always enabled so they stay in the Left/Right
+              // focus chain on every row; the parent clamps at the ends and the
+              // icon dims when there's nowhere to go.
+              IconButton(
+                focusNode: _upNode,
+                icon: Icon(
+                  Icons.keyboard_arrow_up,
+                  color: widget.canMoveUp ? AppColors.textLo : AppColors.line,
+                ),
+                tooltip: 'Move up',
+                onPressed: widget.onMoveUp,
+              ),
+              IconButton(
+                focusNode: _downNode,
+                icon: Icon(
+                  Icons.keyboard_arrow_down,
+                  color: widget.canMoveDown ? AppColors.textLo : AppColors.line,
+                ),
+                tooltip: 'Move down',
+                onPressed: widget.onMoveDown,
               ),
               IconButton(
                 focusNode: _editNode,
@@ -491,9 +546,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     };
     final label = _label.text.trim().isEmpty ? _kind.name : _label.text.trim();
     final config = SourceConfig(
-      id:
-          widget.existing?.id ??
-          DateTime.now().microsecondsSinceEpoch.toString(),
+      id: widget.existing?.id ?? newSourceId(),
       kind: _kind,
       label: label,
       fields: fields,
