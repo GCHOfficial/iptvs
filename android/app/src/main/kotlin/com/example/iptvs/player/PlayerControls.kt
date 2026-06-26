@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
@@ -301,7 +300,7 @@ private fun TopBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             state.sourceBadge()?.let { Badge(it) }
-            if (state.isLive) LiveBadge()
+            if (state.isLive) LiveBadge(synced = state.liveSynced)
             state.resolutionBadge()?.let { Badge(it) }
             state.hdrBadge()?.let { Badge(it, accent = true) }
             state.fpsBadge()?.let { Badge(it) }
@@ -430,10 +429,11 @@ private fun RowScope.RightCluster(
 ) {
     // When `spread`, the parent Row supplies the gaps (portrait, `spacedBy`), so we
     // omit the manual spacers; otherwise (landscape) we space the buttons ourselves.
-    // Live-only: an unobtrusive "jump to live edge" control (separate from
-    // play/pause, which keeps resuming from where you paused).
-    if (state.isLive) {
-        IconControlButton(Icons.Filled.LiveTv, "Go to live") {
+    // Live-only "jump to live edge", shown only once behind (paused) — separate
+    // from play/pause, which keeps resuming from where you paused. Text "LIVE"
+    // for parity with the Windows overlay button.
+    if (state.isLive && !state.liveSynced) {
+        TextControlButton("LIVE", "Go to live") {
             onInteract(); callbacks.onGoLive()
         }
         if (!spread) Spacer(Modifier.width(8.dp))
@@ -590,17 +590,23 @@ private fun UnsupportedVideoNotice(reason: String, modifier: Modifier = Modifier
 }
 
 @Composable
-fun LiveBadge() {
+fun LiveBadge(synced: Boolean = true) {
+    // Red at the live edge; grey once behind (paused/seeked). Pairs with the
+    // go-to-live button, which appears only while behind.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(PlayerColors.Live)
+            .background(if (synced) PlayerColors.Live else PlayerColors.TrackInactive)
             .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
         Text(
             "LIVE",
-            color = androidx.compose.ui.graphics.Color.White,
+            color = if (synced) {
+                androidx.compose.ui.graphics.Color.White
+            } else {
+                PlayerColors.TextLo
+            },
             fontFamily = InterFontFamily,
             fontWeight = FontWeight.Bold,
             fontSize = 12.sp,

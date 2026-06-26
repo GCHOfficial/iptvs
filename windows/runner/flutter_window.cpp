@@ -72,6 +72,7 @@ enum class NativeMenuKind { kNone, kAudio, kSubtitles, kSpeed };
 struct NativeControlState {
   std::wstring title;
   bool is_live = false;
+  bool live_synced = true; // at the live edge (red badge) vs behind (grey + button)
   bool playing = false;
   bool fullscreen = false;
   NativeMenuKind open_menu = NativeMenuKind::kNone;
@@ -553,8 +554,9 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   if (l.has_speed) {
     place(l.speed, 54);
   }
-  // Live-only "go to live" button, placed at the left end of the right cluster.
-  l.has_go_live = live;
+  // "Go to live" button, shown only once behind the live edge; left end of the
+  // right cluster.
+  l.has_go_live = live && !g_native_control_state.live_synced;
   if (l.has_go_live) {
     place(l.go_live, 54);
   }
@@ -1035,8 +1037,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
         DrawBadge(paint_hdc, badge_right, top_cy, clock, kNeutralBg, kNeutralFg);
   }
   if (g_native_control_state.is_live) {
-    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
-                             RGB(255, 64, 112), RGB(255, 255, 255));
+    // Red at the live edge; grey once behind (paired with the go-to-live button).
+    const bool synced = g_native_control_state.live_synced;
+    badge_right -= DrawBadge(
+        paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
+        synced ? RGB(255, 64, 112) : RGB(74, 80, 94),
+        synced ? RGB(255, 255, 255) : RGB(200, 205, 216));
   }
   const std::wstring hdr_badge = HdrBadge();
   if (!hdr_badge.empty()) {
@@ -1871,6 +1877,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "title", g_native_control_state.title);
   g_native_control_state.is_live =
       EncodableBoolArg(args, "isLive", g_native_control_state.is_live);
+  g_native_control_state.live_synced =
+      EncodableBoolArg(args, "liveSynced", g_native_control_state.live_synced);
   g_native_control_state.playing =
       EncodableBoolArg(args, "playing", g_native_control_state.playing);
   g_native_control_state.fullscreen =

@@ -111,7 +111,11 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     private fun playerCallbacks() = PlayerCallbacks(
-        onPlayPause = { engine?.playPause() },
+        onPlayPause = {
+            // Pausing a live stream drops you behind the live edge.
+            if (uiState.isLive && uiState.isPlaying) uiState.liveSynced = false
+            engine?.playPause()
+        },
         onSeekTo = { engine?.seekTo(it) },
         onSeekBy = { if (!uiState.isLive) engine?.seekBy(it) },
         onSetVolume = { engine?.setVolume(it) },
@@ -125,7 +129,12 @@ class HdrPlayerActivity : ComponentActivity() {
         },
         // Live streams are typically non-seekable, so "go to live" reloads the
         // source — reconnecting drops the buffer and resumes at the live edge.
-        onGoLive = { if (uiState.isLive) engine?.load(url, subtitles) },
+        onGoLive = {
+            if (uiState.isLive) {
+                engine?.load(url, subtitles)
+                uiState.liveSynced = true
+            }
+        },
         onBack = { finish() },
     )
 

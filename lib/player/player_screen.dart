@@ -59,6 +59,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
   late final bool _isLive = widget.stream.isLive;
+  // Live-edge sync for the Windows overlay: false once the user pauses live (and
+  // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
+  // go-to-live button.
+  bool _liveSynced = true;
   late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
   bool _isNativeFullscreen = false;
   bool _nativeControlsVisible = true;
@@ -447,6 +451,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         break;
       case 'playPause':
         final wasPlaying = _player.state.playing;
+        if (_isLive && wasPlaying) _liveSynced = false; // pausing live -> behind
         await _player.playOrPause();
         if (wasPlaying) _showNativeControls(scheduleHide: false);
         break;
@@ -479,6 +484,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   : widget.stream.headers,
             ),
           );
+          _liveSynced = true;
         }
         break;
       case 'info':
@@ -500,6 +506,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         if (widget.sourceName != null) 'sourceName': widget.sourceName,
         ..._epgPayload(),
         'isLive': _isLive,
+        'liveSynced': _liveSynced,
         'playing': _player.state.playing,
         'fullscreen': _isNativeFullscreen,
         'positionMs': _player.state.position.inMilliseconds.toDouble(),
