@@ -52,6 +52,10 @@ class ExoPlayerEngine(
     private val subtitleOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private var volumeBeforeMute = 1f
     private var fellBack = false
+    // Measured-FPS sampling: many IPTV streams don't carry frameRate in their
+    // Format (stays NO_VALUE), so we derive it from the rendered-frame counter.
+    private var lastRenderedFrames = 0
+    private var lastFpsSampleNs = 0L
 
     override val view: View get() = playerView
 
@@ -75,6 +79,8 @@ class ExoPlayerEngine(
         player.setMediaItem(item)
         player.prepare()
         player.playWhenReady = true
+        lastFpsSampleNs = 0L
+        lastRenderedFrames = 0
     }
 
     private val playerListener = object : Player.Listener {
@@ -350,6 +356,25 @@ class ExoPlayerEngine(
         state.positionMs = player.currentPosition.coerceAtLeast(0)
         state.durationMs = if (player.duration == C.TIME_UNSET) 0 else player.duration
         state.bufferedMs = player.bufferedPosition.coerceAtLeast(0)
+        measureFps()
+    }
+
+    /** Derive FPS from the rendered-frame delta when the Format doesn't report it. */
+    private fun measureFps() {
+        val rendered = player.videoDecoderCounters?.renderedOutputBufferCount ?: return
+        val now = System.nanoTime()
+        if (lastFpsSampleNs == 0L) {
+            lastFpsSampleNs = now
+            lastRenderedFrames = rendered
+            return
+        }
+        val dtSec = (now - lastFpsSampleNs) / 1_000_000_000.0
+        val dFrames = rendered - lastRenderedFrames
+        if (dtSec >= 0.75 && dFrames > 0) {
+            lastFpsSampleNs = now
+            lastRenderedFrames = rendered
+            state.fps = snapFps((dFrames / dtSec).toFloat())
+        }
     }
 
     override fun pause() {
@@ -360,6 +385,15 @@ class ExoPlayerEngine(
         playerView.player = null
         player.removeListener(playerListener)
         player.release()
+    }
+
+    /** Snap a noisy measured rate to a nearby standard frame rate for a clean readout. */
+    private fun snapFps(measured: Float): Float {
+        val common = floatArrayOf(
+            23.976f, 24f, 25f, 29.97f, 30f, 48f, 50f, 59.94f, 60f, 100f, 120f,
+        )
+        for (c in common) if (kotlin.math.abs(measured - c) <= 0.6f) return c
+        return Math.round(measured * 100f) / 100f
     }
 
     private fun subtitleMimeType(url: String): String {
