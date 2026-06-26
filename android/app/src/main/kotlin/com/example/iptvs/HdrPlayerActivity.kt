@@ -42,6 +42,12 @@ class HdrPlayerActivity : ComponentActivity() {
     private var engine: PlaybackEngine? = null
     private var progressTicker: Job? = null
 
+    // Live reconnect watchdog: when a live stream stalls (buffering) or drops
+    // (ended / error), reload it with capped backoff until playback resumes.
+    private var stalledSinceMs = 0L
+    private var lastReconnectMs = 0L
+    private var reconnectAttempt = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -83,6 +89,7 @@ class HdrPlayerActivity : ComponentActivity() {
             state = uiState,
             headers = headers,
             onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } },
+            onRecoverableError = { runOnUiThread { reconnectLive(force = true) } },
         )
         setEngine(exo)
         exo.load(url, subtitles)
@@ -108,6 +115,43 @@ class HdrPlayerActivity : ComponentActivity() {
     private fun setEngine(next: PlaybackEngine) {
         engine = next
         engineState.value = next
+    }
+
+    /** Watchdog: reconnect a live stream that has stalled (buffering) or dropped (ended). */
+    private fun pollLiveReconnect() {
+        if (!uiState.isLive) return
+        val stalled = uiState.isBuffering || uiState.ended
+        if (!stalled) {
+            // Healthy playback: clear the stall clock and any reconnecting state.
+            stalledSinceMs = 0L
+            reconnectAttempt = 0
+            if (uiState.reconnecting) uiState.reconnecting = false
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (stalledSinceMs == 0L) stalledSinceMs = now
+        val threshold = if (uiState.ended) ENDED_RECONNECT_MS else STALL_RECONNECT_MS
+        if (now - stalledSinceMs >= threshold) reconnectLive(force = false)
+    }
+
+    /**
+     * Reload the live source to reconnect, with capped backoff between attempts.
+     * [force] (a hard error) skips the stall threshold but still rate-limits.
+     */
+    private fun reconnectLive(force: Boolean) {
+        if (!uiState.isLive || isFinishing) return
+        val now = System.currentTimeMillis()
+        val sinceLast = now - lastReconnectMs
+        val minGap = if (force) STALL_RECONNECT_MS else
+            minOf((reconnectAttempt + 1) * STALL_RECONNECT_MS, MAX_BACKOFF_MS)
+        if (lastReconnectMs != 0L && sinceLast < minGap) return
+        reconnectAttempt++
+        lastReconnectMs = now
+        stalledSinceMs = now
+        uiState.reconnecting = true
+        uiState.ended = false
+        Log.i(TAG, "live reconnect attempt=$reconnectAttempt force=$force")
+        engine?.load(url, subtitles)
     }
 
     private fun playerCallbacks() = PlayerCallbacks(
@@ -143,6 +187,7 @@ class HdrPlayerActivity : ComponentActivity() {
         progressTicker = lifecycleScope.launch {
             while (isActive) {
                 engine?.syncProgress()
+                pollLiveReconnect()
                 delay(500)
             }
         }
@@ -260,5 +305,10 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_SUBTITLE_LABELS = "subtitle_labels"
         const val EXTRA_SUBTITLE_LANGUAGES = "subtitle_languages"
         private const val TAG = "iptvs.hdr"
+
+        // Live reconnect watchdog thresholds.
+        private const val STALL_RECONNECT_MS = 8_000L // buffering this long -> reconnect
+        private const val ENDED_RECONNECT_MS = 2_000L // a live drop is faster to retry
+        private const val MAX_BACKOFF_MS = 30_000L // cap between repeated attempts
     }
 }

@@ -61,6 +61,14 @@ class MpvController(
             setOptionString("ytdl", "no")
             setOptionString("save-position-on-quit", "no")
             setOptionString("sub-auto", "no")
+            // Network resiliency for live streams: bound stalls and let ffmpeg
+            // transparently reconnect transient HTTP drops (the host watchdog
+            // reloads if a stall outlasts this).
+            setOptionString("network-timeout", "10")
+            setOptionString(
+                "stream-lavf-o",
+                "reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,reconnect_delay_max=5",
+            )
             applyHeaders(this, headers)
             init()
         }

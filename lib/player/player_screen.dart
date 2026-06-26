@@ -63,6 +63,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
   bool _liveSynced = true;
+  // Live reconnect watchdog (Windows / embedded media_kit; Android reconnects in
+  // its native Activity). Reload the source when a live stream stalls or errors.
+  bool _buffering = false;
+  bool _reconnecting = false;
+  int _stalledSinceMs = 0;
+  int _lastReconnectMs = 0;
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  static const int _kStallReconnectMs = 8000;
+  static const int _kMaxBackoffMs = 30000;
   late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
   bool _isNativeFullscreen = false;
   bool _nativeControlsVisible = true;
@@ -106,14 +116,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _nativeHdrPlayer.setMethodCallHandler(_handleNativeHdrMethodCall);
     }
 
-    // Show errors once as an overlay rather than a stream of snackbars.
+    // Show errors once as an overlay rather than a stream of snackbars. On a live
+    // stream, auto-reconnect instead of surfacing a terminal error.
     _subs.add(
       _player.stream.error.listen((message) {
         _logPlayback('error ${_redactPlayback(message)}');
         if (!mounted) return;
-        setState(() => _error = message);
+        if (_isLive) {
+          _reconnectLive(force: true);
+        } else {
+          setState(() => _error = message);
+        }
       }),
     );
+    // Track buffering for the live reconnect watchdog.
+    _subs.add(
+      _player.stream.buffering.listen((value) => _buffering = value),
+    );
+    if (_isLive) {
+      _reconnectTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _pollLiveReconnect(),
+      );
+    }
     _subs.add(
       _player.stream.log.listen((entry) {
         if (entry.level != 'warn' && entry.level != 'error') return;
@@ -499,6 +524,65 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _syncWindowsNativeControlState();
   }
 
+  // Watchdog: a live stream stuck buffering past the threshold gets reloaded.
+  void _pollLiveReconnect() {
+    if (!_isLive || !mounted) return;
+    if (!_buffering) {
+      _stalledSinceMs = 0;
+      _reconnectAttempt = 0;
+      if (_reconnecting) {
+        _reconnecting = false;
+        _onReconnectingChanged();
+      }
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_stalledSinceMs == 0) _stalledSinceMs = now;
+    if (now - _stalledSinceMs >= _kStallReconnectMs) {
+      unawaited(_reconnectLive(force: false));
+    }
+  }
+
+  /// Reload the live source to reconnect, with capped backoff between attempts.
+  /// [force] (a hard error) skips the stall threshold but still rate-limits.
+  Future<void> _reconnectLive({required bool force}) async {
+    if (!_isLive || !mounted) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final attemptGap =
+        ((_reconnectAttempt + 1) * _kStallReconnectMs).clamp(0, _kMaxBackoffMs);
+    final minGap = force ? _kStallReconnectMs : attemptGap;
+    if (_lastReconnectMs != 0 && now - _lastReconnectMs < minGap) return;
+    _reconnectAttempt++;
+    _lastReconnectMs = now;
+    _stalledSinceMs = now;
+    _liveSynced = true; // a reconnect reopens at the live edge
+    if (!_reconnecting) {
+      _reconnecting = true;
+      _onReconnectingChanged();
+    }
+    _logPlayback('live reconnect attempt=$_reconnectAttempt force=$force');
+    try {
+      await _player.open(
+        Media(
+          widget.stream.url,
+          httpHeaders:
+              widget.stream.headers.isEmpty ? null : widget.stream.headers,
+        ),
+      );
+    } catch (error) {
+      _logPlayback('live reconnect failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  void _onReconnectingChanged() {
+    if (_usesWindowsNativeSurface) {
+      if (_reconnecting) _showNativeControls(scheduleHide: false);
+      unawaited(_syncWindowsNativeControlState());
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
   Future<void> _syncWindowsNativeControlState() async {
     if (!Platform.isWindows || _windowsNativeSurface == null) return;
     try {
@@ -508,6 +592,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ..._epgPayload(),
         'isLive': _isLive,
         'liveSynced': _liveSynced,
+        'reconnecting': _reconnecting,
         'playing': _player.state.playing,
         'fullscreen': _isNativeFullscreen,
         'positionMs': _player.state.position.inMilliseconds.toDouble(),
@@ -804,6 +889,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return 'Subtitle ${track.id}';
   }
 
+  Widget _reconnectingChip() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.panel.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(AppRadius.tile),
+      ),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: AppColors.accent,
+              ),
+            ),
+            SizedBox(width: 10),
+            Text(
+              'Reconnecting…',
+              style: TextStyle(color: AppColors.textHi, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _playbackSurface() {
     if (_controller == null) return _nativePlaybackOverlay();
     return _nativePlaybackLaunched ? _nativePlaybackOverlay() : _video(context);
@@ -820,6 +935,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'cache-on-disk': 'no',
             'demuxer-max-back-bytes': '0',
             'network-timeout': '15',
+            // Let ffmpeg transparently reconnect transient HTTP drops; the Dart
+            // watchdog reloads if a stall outlasts this.
+            'stream-lavf-o':
+                'reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,'
+                'reconnect_delay_max=5',
             'demuxer-lavf-analyzeduration': '3',
             'demuxer-lavf-probesize': '10000000',
             'demuxer-lavf-o':
@@ -969,6 +1089,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (Platform.isWindows) {
       _nativeHdrPlayer.setMethodCallHandler(null);
     }
+    _reconnectTimer?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
@@ -1101,6 +1222,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
               children: [
                 Positioned.fill(child: _playbackSurface()),
                 if (_error != null) Positioned.fill(child: _errorOverlay()),
+                // Windows draws its own "Reconnecting…" in the native overlay;
+                // this covers the embedded media_kit path.
+                if (_reconnecting && !_usesWindowsNativeSurface)
+                  Positioned(
+                    top: 24,
+                    left: 0,
+                    right: 0,
+                    child: Center(child: _reconnectingChip()),
+                  ),
               ],
             ),
           ),

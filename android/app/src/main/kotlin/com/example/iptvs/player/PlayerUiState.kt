@@ -62,6 +62,9 @@ class PlayerUiState(
     var isBuffering by mutableStateOf(true)
     var ended by mutableStateOf(false)
 
+    // True while the live reconnect watchdog is re-establishing a dropped stream.
+    var reconnecting by mutableStateOf(false)
+
     var positionMs by mutableStateOf(0L)
     var durationMs by mutableStateOf(0L)
     var bufferedMs by mutableStateOf(0L)

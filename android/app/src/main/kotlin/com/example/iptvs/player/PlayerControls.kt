@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -212,6 +213,10 @@ fun PlayerScreen(
                 reason = state.videoUnsupportedReason,
                 modifier = Modifier.align(Alignment.Center),
             )
+        }
+
+        if (state.reconnecting) {
+            ReconnectingNotice(modifier = Modifier.align(Alignment.Center))
         }
 
         AnimatedVisibility(
@@ -585,6 +590,31 @@ private fun UnsupportedVideoNotice(reason: String, modifier: Modifier = Modifier
             color = PlayerColors.TextLo,
             fontFamily = InterFontFamily,
             fontSize = 13.sp,
+        )
+    }
+}
+
+@Composable
+private fun ReconnectingNotice(modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .clip(RoundedCornerShape(PlayerDimens.MenuCorner))
+            .background(PlayerColors.Panel)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+    ) {
+        CircularProgressIndicator(
+            color = PlayerColors.Accent,
+            strokeWidth = 2.dp,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = "Reconnecting…",
+            color = PlayerColors.TextHi,
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
         )
     }
 }
