@@ -105,7 +105,7 @@ jobs:
     needs: [version, build-android, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
