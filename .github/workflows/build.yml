@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  FLUTTER_VERSION: 3.44.2
+  FLUTTER_VERSION: 3.44.4
 
 jobs:
   # Fast gate: static analysis + the pure-logic / persistence unit tests. Always
@@ -105,7 +105,7 @@ jobs:
       - run: flutter pub get
       - name: Build release APK
         run: flutter build apk --release --build-number ${{ github.run_number }}
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: iptvs-android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
@@ -137,7 +137,7 @@ jobs:
         run: flutter build windows --release --build-number ${{ github.run_number }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: iptvs-windows-x64
           path: iptvs-windows-x64.zip
