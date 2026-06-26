@@ -323,8 +323,10 @@ class ExoPlayerEngine(
     override fun setSpeed(value: Float) = player.setPlaybackSpeed(value)
 
     override fun goLive() {
-        // For a live stream the default position is the live edge.
+        // For a live stream the default position is the live edge; resume playing
+        // in case we were paused / had fallen behind.
         player.seekToDefaultPosition()
+        player.play()
         syncProgress()
     }
 

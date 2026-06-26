@@ -176,17 +176,13 @@ fun PlayerScreen(
             .focusable()
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (event.key) {
-                    Key.Back -> {
-                        if (!handleBack()) callbacks.onBack()
-                        true
-                    }
-                    else -> {
-                        val wasHidden = !state.controlsVisible
-                        poke()
-                        wasHidden // consume the first key only to reveal controls
-                    }
-                }
+                // Leave Back entirely to BackHandler (the dispatcher): modern
+                // predictive back fires it independently of key consumption, so
+                // handling Back here too made the first press both hide AND exit.
+                if (event.key == Key.Back) return@onPreviewKeyEvent false
+                val wasHidden = !state.controlsVisible
+                poke()
+                wasHidden // consume the first key only to reveal controls
             },
     ) {
         // key() so swapping engines (ExoPlayer -> mpv fallback) rebuilds the host

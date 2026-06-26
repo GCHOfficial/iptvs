@@ -467,8 +467,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await _cycleNativeAspect();
         break;
       case 'goLive':
-        // Jump a live stream to the live edge (end of the seekable window).
-        if (_isLive) await _player.seek(_player.state.duration);
+        // Jump a live stream to the live edge and resume. `percent-pos = 100`
+        // seeks to the end of mpv's seekable window (the live edge); seeking to
+        // `duration` is unreliable for live (often 0).
+        if (_isLive) {
+          final platform = _player.platform;
+          if (platform is NativePlayer) {
+            await platform.setProperty('percent-pos', '100');
+          } else {
+            final d = _player.state.duration;
+            if (d > Duration.zero) await _player.seek(d);
+          }
+          await _player.play();
+        }
         break;
       case 'info':
         // The native overlay owns the info-panel open state; refresh so it
