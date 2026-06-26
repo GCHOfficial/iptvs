@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/app_database.dart';
+import '../data/cloud_config.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
+import 'cloud_sync_screen.dart';
 
 IconData _kindIcon(SourceKind k) {
   switch (k) {
@@ -140,6 +142,20 @@ class _SourcesScreenState extends State<SourcesScreen> {
       appBar: AppBar(
         title: const Text('Sources'),
         actions: [
+          if (CloudConfig.isConfigured)
+            IconButton(
+              tooltip: 'Cloud sync',
+              icon: const Icon(Icons.cloud_sync_outlined),
+              onPressed: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => CloudSyncScreen(store: widget.store),
+                  ),
+                );
+                // A pull may have changed the source list; refresh on return.
+                await _reload();
+              },
+            ),
           IconButton(
             tooltip: 'Metadata',
             icon: const Icon(Icons.auto_awesome_outlined),

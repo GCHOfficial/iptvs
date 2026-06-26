@@ -1,0 +1,58 @@
+name: Deploy panel
+
+# Builds the web source panel (panel/) and publishes it to GitHub Pages.
+# Runs only on pushes to main; PRs just type-check via the panel build in CI is
+# not needed (the panel is static and validated by the build step here).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'panel/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Allow this workflow to publish Pages; concurrency keeps one live deploy.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build panel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+      - run: npm ci
+        working-directory: panel
+      - name: Build
+        working-directory: panel
+        # Anon/publishable values only — set as repo Variables (Settings →
+        # Secrets and variables → Actions → Variables). Never service_role.
+        env:
+          VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: panel/dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

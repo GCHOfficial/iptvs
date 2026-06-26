@@ -63,7 +63,8 @@ jobs:
             gradle-${{ runner.os }}-
       - run: flutter pub get
       - name: Build release APK
-        run: flutter build apk --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }}
+        # Cloud-sync config (repo Variables; empty in forks → feature stays off).
+        run: flutter build apk --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Name artifact
         run: cp build/app/outputs/flutter-apk/app-release.apk iptvs-${{ needs.version.outputs.version }}-android.apk
       - uses: actions/upload-artifact@v7
@@ -91,7 +92,7 @@ jobs:
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - name: Build release (Windows x64)
-        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }}
+        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
       - uses: actions/upload-artifact@v7
