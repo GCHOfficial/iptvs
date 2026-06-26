@@ -2,6 +2,8 @@ package com.gchofficial.iptvs.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import androidx.media3.common.C
@@ -16,7 +18,6 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -53,6 +54,11 @@ class ExoPlayerEngine(
     private val subtitleOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private var volumeBeforeMute = 1f
     private var fellBack = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
+    // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
+    // Reset per load so a new stream re-derives instead of inheriting the last one.
+    private var decoderDynamicRange: String? = null
     // Measured-FPS sampling: many IPTV streams don't carry frameRate in their
     // Format (stays NO_VALUE), so we derive it from the rendered-frame counter.
     private var lastRenderedFrames = 0
@@ -82,6 +88,7 @@ class ExoPlayerEngine(
         player.playWhenReady = true
         lastFpsSampleNs = 0L
         lastRenderedFrames = 0
+        decoderDynamicRange = null
     }
 
     private val playerListener = object : Player.Listener {
@@ -136,8 +143,13 @@ class ExoPlayerEngine(
             .setDefaultRequestProperties(headers)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(true)
+        val renderersFactory = HdrRenderersFactory(context) { label ->
+            // Reported on the playback thread; marshal to main for Compose state.
+            mainHandler.post {
+                decoderDynamicRange = label
+                state.dynamicRange = label
+            }
+        }.setEnableDecoderFallback(true)
 
         player = ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -273,6 +285,9 @@ class ExoPlayerEngine(
     }
 
     private fun dynamicRangeLabel(format: Format): String {
+        // The decoder's output MediaFormat (when it's reported one) is authoritative —
+        // it sees the in-band HDR signalling Format.colorInfo often misses.
+        decoderDynamicRange?.let { return it }
         if (format.sampleMimeType == MimeTypes.VIDEO_DOLBY_VISION) return "Dolby Vision"
         val color = format.colorInfo
         if (color != null) {
