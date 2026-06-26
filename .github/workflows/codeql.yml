@@ -12,10 +12,12 @@ on:
 # it can: the Windows-runner C++ (GDI overlay, HDR badges) and the workflow YAML.
 #
 # Not covered:
-#   - java-kotlin (the Android player/HDR code): CodeQL's Kotlin extractor only
-#     supports Kotlin < 2.3.30, but the app is on 2.4.0 ("Kotlin version 2.4.0 is
-#     too recent"). Re-add a `{language: java-kotlin, build-mode: manual}` entry
-#     (with setup-java + `flutter build apk`) once CodeQL supports Kotlin 2.4.0.
+#   - java-kotlin (the Android player/HDR code): the app is on Kotlin 2.4.0, and
+#     the latest released CodeQL CLI (2.25.6) still caps at < 2.3.30 ("Kotlin
+#     version 2.4.0 is too recent"). Support is merged upstream
+#     (github/codeql#21970) but not yet in a CLI release. Re-add a
+#     `{language: java-kotlin, build-mode: manual}` entry (with setup-java +
+#     `flutter build apk` + `lfs: true`) once a CLI past 2.25.6 ships it.
 #   - javascript-typescript: web/ is only Flutter's generated bootstrap (no source).
 #   - swift: the iOS/macOS shells are Flutter template code (no first-party logic).
 permissions:
@@ -46,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -67,6 +69,6 @@ jobs:
           flutter pub get
           flutter build windows --debug
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
