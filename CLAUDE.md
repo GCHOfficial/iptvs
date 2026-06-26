@@ -6,7 +6,7 @@ Guidance for working in this repository. Keep it accurate — update it when the
 
 `iptvs` is a cross-platform Flutter IPTV player (Windows, Android, plus the usual Flutter desktop/mobile targets). It connects to user-configured IPTV providers, caches their channel/VOD/EPG data locally, enriches movie/series metadata from public APIs, and plays streams with libmpv (via `media_kit`) so it handles HEVC / AC-3 / MPEG-TS that an HTML video element can't.
 
-There is no backend — the app talks directly to user-supplied provider panels and public metadata APIs.
+There is no backend for playback — the app talks directly to user-supplied provider panels and public metadata APIs. There is one *optional* backend: a Supabase-backed **cloud source panel** for managing the source list from the web (see "Cloud sync" below); it's off unless built with Supabase config and never touches the playback path.
 
 ## Commands
 
@@ -59,6 +59,40 @@ The app targets Android TV (the universal APK) and must be fully D-pad-navigable
 - **Text inputs** use `TvTextField` (`lib/widgets/tv_text_field.dart`) — never a bare `TextField` on a TV-facing screen. A plain `TextField` traps D-pad focus (its editor eats the arrow keys). `TvTextField` is an **"OK to edit" cell**: in traversal it's one focusable stop the D-pad passes over; OK/Select (or tap) enters edit mode (the inner field — `ExcludeFocus`'d + `IgnorePointer`'d until then — takes focus and the keyboard opens); the IME action or **Back** (via `PopScope`, *not* `BackButtonListener`, which needs a `Router` this app doesn't have) exits edit and returns focus to the cell. Applied to the channel search box and every `sources_screen` credential/config field.
 - **The same "OK to edit" model** governs the player's sliders (see Player) — focus passes them freely; OK enters adjust mode.
 - **Content-kind selector** (`channel_list_screen` `_ContentTabs`) is a focusable chip strip (not `SegmentedButton`), the natural top of the focus order. AppBar actions and the body are each wrapped in a `FocusTraversalGroup` so D-pad arrows stay within the body instead of jumping sideways into the app bar (Flutter's directional traversal is geometry-based).
+
+## Cloud sync (optional source panel)
+
+A **web panel** lets users manage their source list with a real keyboard instead of a TV remote;
+devices then **pull** it down with no on-device login. It's entirely optional — when the Supabase
+build config is absent the feature hides itself and the app is unchanged.
+
+- **Backend**: Supabase (the only free option bundling Postgres + Auth + RLS + a client SDK that's
+  safe to call directly from a static page). Schema + the entire security boundary live in
+  [`supabase/migrations/`](supabase/migrations/) (timestamped `<version>_<name>.sql`, the first is the
+  schema + RLS) — read the first file's header before changing it. Four tables (`sources`,
+  `metadata_configs`, `devices`, `pairings`) with **deny-by-default RLS** (no policy = no access) and
+  three `SECURITY DEFINER` pairing RPCs. Migrations are applied to the live project and re-applying is
+  idempotent; the Supabase GitHub integration auto-applies new ones on push.
+- **Open-source security model**: the Supabase URL + **anon/publishable** key ship in the app and the
+  panel (safe *by design* — access is gated only by RLS). The `service_role` key must never appear in
+  any client or this repo. Devices authenticate as **anonymous** Supabase users and are read-only by
+  construction (write policies require `is_real_user()`); they gain read access only after a real
+  account claims their pairing code (`claim_pairing`). Pairing codes are short-lived + rate-limited.
+- **Pairing flow (code-based, works on every platform)**: the device shows a code
+  ([`cloud_sync_screen.dart`](lib/screens/cloud_sync_screen.dart)); the user enters it in the panel's
+  Devices page; the device polls `pairing_status` until claimed, then pulls.
+- **Flutter side**: [`cloud_config.dart`](lib/data/cloud_config.dart) (build-time `--dart-define`
+  `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
+  [`cloud_sync.dart`](lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, **read-only**
+  `pullSources`/`pullMetadata` that write through the existing `SourceStore` — cloud-managed source
+  ids are tracked in secure storage so a pull replaces the managed set but leaves local-only sources
+  alone), and [`secure_local_storage.dart`](lib/data/secure_local_storage.dart) (persists the Supabase
+  session in the keychain, not plaintext prefs). Init is in `main.dart`, behind `isConfigured`. The
+  pure row→`SourceConfig` mapper `cloudRowToConfig` is unit-tested in `test/cloud_sync_test.dart`.
+- **Web panel**: [`panel/`](panel/) — a tiny Vite + `@supabase/supabase-js` SPA (no framework).
+  Field shapes mirror `SourceConfig` per kind. Deployed to **GitHub Pages** by
+  [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (Supabase values from repo Variables).
+  Note: the Flutter web target lives in `web/`; the panel deliberately lives in `panel/`.
 
 ## Database migrations
 

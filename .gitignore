@@ -44,3 +44,7 @@ app.*.map.json
 
 # Claude Code agent memory store (not project files)
 /memory/
+
+# Local cloud-sync config for `flutter run --dart-define-from-file=dart_define.json`.
+# Holds only the publishable Supabase values; keep it out of git regardless.
+/dart_define.json

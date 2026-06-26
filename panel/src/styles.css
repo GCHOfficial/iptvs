@@ -1,0 +1,95 @@
+:root {
+  --bg: #0e0f13;
+  --panel: #171922;
+  --panel-hi: #1f2230;
+  --text: #e7e9ee;
+  --text-lo: #9aa0ad;
+  --accent: #7b6cf6;
+  --danger: #e5484d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 Inter, system-ui, sans-serif;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--panel-hi);
+}
+.bar nav { display: flex; gap: 6px; flex: 1; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--panel-hi);
+  color: var(--text);
+}
+button.active { background: var(--accent); color: #fff; }
+button.primary { background: var(--accent); color: #fff; }
+button.ghost { background: transparent; color: var(--text-lo); }
+button.ghost:hover { color: var(--text); }
+button.danger { color: var(--danger); }
+
+main, .login { max-width: 680px; margin: 0 auto; padding: 24px 20px; }
+
+.login { text-align: center; padding-top: 12vh; }
+.login h1 { color: var(--accent); }
+.login form, .login button { width: 100%; max-width: 360px; margin: 8px auto; display: block; }
+
+input, select {
+  font: inherit;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-hi);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  background: var(--panel);
+  border-radius: 10px;
+}
+.row .title { font-weight: 600; }
+.actions { display: flex; gap: 4px; }
+
+.form { display: flex; flex-direction: column; gap: 12px; }
+.form label { display: flex; flex-direction: column; gap: 4px; color: var(--text-lo); }
+.form label.check { flex-direction: row; align-items: center; gap: 8px; }
+.form label.check input { width: auto; }
+.form-actions { display: flex; gap: 8px; margin-top: 8px; }
+.claim-row { display: flex; gap: 8px; }
+.claim-row input { text-transform: uppercase; letter-spacing: 4px; }
+
+.muted { color: var(--text-lo); }
+.error { color: var(--danger); }
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-hi);
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+.toast.error { background: var(--danger); color: #fff; }
