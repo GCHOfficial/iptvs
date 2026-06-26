@@ -72,6 +72,10 @@ class PlayerUiState(
 
     var aspect by mutableStateOf(AspectMode.Fit)
 
+    // Live-edge sync: true while at the live edge, false once the user has paused
+    // (and thus fallen behind). Drives the grey LIVE badge + the go-to-live button.
+    var liveSynced by mutableStateOf(true)
+
     var audioTracks by mutableStateOf<List<TrackOption>>(emptyList())
     var selectedAudioId by mutableStateOf<String?>(null)
     var subtitleTracks by mutableStateOf<List<TrackOption>>(emptyList())

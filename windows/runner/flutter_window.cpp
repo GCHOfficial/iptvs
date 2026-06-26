@@ -72,6 +72,7 @@ enum class NativeMenuKind { kNone, kAudio, kSubtitles, kSpeed };
 struct NativeControlState {
   std::wstring title;
   bool is_live = false;
+  bool live_synced = true; // at the live edge (red badge) vs behind (grey + button)
   bool playing = false;
   bool fullscreen = false;
   NativeMenuKind open_menu = NativeMenuKind::kNone;
@@ -501,6 +502,8 @@ struct BottomLayout {
   RECT aspect;
   RECT info;
   RECT fullscreen;
+  bool has_go_live = false;
+  RECT go_live; // live-only "jump to live edge" button
 };
 
 BottomLayout ComputeBottomLayout(const RECT &rect) {
@@ -550,6 +553,12 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   l.has_speed = !g_native_control_state.speed_options.empty();
   if (l.has_speed) {
     place(l.speed, 54);
+  }
+  // "Go to live" button, shown only once behind the live edge; left end of the
+  // right cluster.
+  l.has_go_live = live && !g_native_control_state.live_synced;
+  if (l.has_go_live) {
+    place(l.go_live, 54);
   }
 
   l.has_scrubber = !live;
@@ -1028,8 +1037,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
         DrawBadge(paint_hdc, badge_right, top_cy, clock, kNeutralBg, kNeutralFg);
   }
   if (g_native_control_state.is_live) {
-    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
-                             RGB(255, 64, 112), RGB(255, 255, 255));
+    // Red at the live edge; grey once behind (paired with the go-to-live button).
+    const bool synced = g_native_control_state.live_synced;
+    badge_right -= DrawBadge(
+        paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
+        synced ? RGB(255, 64, 112) : RGB(74, 80, 94),
+        synced ? RGB(255, 255, 255) : RGB(200, 205, 216));
   }
   const std::wstring hdr_badge = HdrBadge();
   if (!hdr_badge.empty()) {
@@ -1144,6 +1157,9 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, l.info, L"\xE946", g_native_control_state.info_open);
   DrawIconButton(paint_hdc, l.fullscreen,
                  g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740");
+  if (l.has_go_live) {
+    DrawTextButton(paint_hdc, l.go_live, L"LIVE");
+  }
 
   PaintListMenu(paint_hdc, rect);
   if (HasInfoPanel()) {
@@ -1245,6 +1261,9 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   }
   if (PointInRect(x, y, l.fullscreen)) {
     return "fullscreen";
+  }
+  if (l.has_go_live && PointInRect(x, y, l.go_live)) {
+    return "goLive";
   }
   return "show";
 }
@@ -1858,6 +1877,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "title", g_native_control_state.title);
   g_native_control_state.is_live =
       EncodableBoolArg(args, "isLive", g_native_control_state.is_live);
+  g_native_control_state.live_synced =
+      EncodableBoolArg(args, "liveSynced", g_native_control_state.live_synced);
   g_native_control_state.playing =
       EncodableBoolArg(args, "playing", g_native_control_state.playing);
   g_native_control_state.fullscreen =
