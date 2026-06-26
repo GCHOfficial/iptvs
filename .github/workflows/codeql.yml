@@ -1,0 +1,82 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 5 * * 1' # weekly, Monday 05:23 UTC
+
+# CodeQL doesn't support Dart (the bulk of lib/), so this covers the native bits:
+# the Android player/HDR Kotlin, the Windows-runner C++, the iOS/macOS Swift
+# shells, the web JS, and the workflow YAML itself. Kotlin/JS/Actions need no
+# build; C++ and Swift are built via Flutter (CodeQL's autobuild can't drive
+# Flutter), so those run on their native OS runners.
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.44.2
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            build-mode: none
+            runner: ubuntu-latest
+          - language: javascript-typescript
+            build-mode: none
+            runner: ubuntu-latest
+          - language: actions
+            build-mode: none
+            runner: ubuntu-latest
+          - language: c-cpp
+            build-mode: manual
+            runner: windows-latest
+          - language: swift
+            build-mode: manual
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # ---- Manual builds for the compiled languages -----------------------
+      - if: matrix.build-mode == 'manual'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Build Windows (C++)
+        if: matrix.language == 'c-cpp'
+        run: |
+          flutter config --enable-windows-desktop
+          flutter pub get
+          flutter build windows --debug
+
+      - name: Build macOS (Swift)
+        if: matrix.language == 'swift'
+        run: |
+          flutter config --enable-macos-desktop
+          flutter pub get
+          flutter build macos --debug
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
