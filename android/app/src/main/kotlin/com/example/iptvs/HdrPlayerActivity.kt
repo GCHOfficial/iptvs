@@ -123,7 +123,9 @@ class HdrPlayerActivity : ComponentActivity() {
             uiState.aspect = AspectMode.entries[(uiState.aspect.ordinal + 1) % AspectMode.entries.size]
             engine?.applyAspect(uiState.aspect)
         },
-        onGoLive = { if (uiState.isLive) engine?.goLive() },
+        // Live streams are typically non-seekable, so "go to live" reloads the
+        // source — reconnecting drops the buffer and resumes at the live edge.
+        onGoLive = { if (uiState.isLive) engine?.load(url, subtitles) },
         onBack = { finish() },
     )
 

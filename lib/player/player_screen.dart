@@ -467,18 +467,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await _cycleNativeAspect();
         break;
       case 'goLive':
-        // Jump a live stream to the live edge and resume. `percent-pos = 100`
-        // seeks to the end of mpv's seekable window (the live edge); seeking to
-        // `duration` is unreliable for live (often 0).
+        // Live IPTV streams are usually non-seekable ("Cannot seek in this
+        // stream"), so reopen the source instead of seeking — reconnecting drops
+        // the buffer and resumes at the live edge.
         if (_isLive) {
-          final platform = _player.platform;
-          if (platform is NativePlayer) {
-            await platform.setProperty('percent-pos', '100');
-          } else {
-            final d = _player.state.duration;
-            if (d > Duration.zero) await _player.seek(d);
-          }
-          await _player.play();
+          await _player.open(
+            Media(
+              widget.stream.url,
+              httpHeaders: widget.stream.headers.isEmpty
+                  ? null
+                  : widget.stream.headers,
+            ),
+          );
         }
         break;
       case 'info':
