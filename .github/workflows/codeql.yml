@@ -8,11 +8,13 @@ on:
   schedule:
     - cron: '23 5 * * 1' # weekly, Monday 05:23 UTC
 
-# CodeQL doesn't support Dart (the bulk of lib/), so this covers the native bits:
-# the Android player/HDR Kotlin, the Windows-runner C++, the iOS/macOS Swift
-# shells, the web JS, and the workflow YAML itself. Kotlin/JS/Actions need no
-# build; C++ and Swift are built via Flutter (CodeQL's autobuild can't drive
-# Flutter), so those run on their native OS runners.
+# CodeQL doesn't support Dart (the bulk of lib/), so this covers the native code:
+# the Android player/HDR Kotlin, the Windows-runner C++ (GDI overlay, HDR badges),
+# and the workflow YAML. Kotlin/C++ are Flutter-driven, so CodeQL's autobuild can't
+# build them — they use `build-mode: manual` with an explicit `flutter build` on
+# their native OS runner. (web/ is only Flutter's generated bootstrap — no
+# first-party JS to scan; the iOS/macOS Swift is Flutter template code with no
+# first-party logic — both omitted.)
 permissions:
   contents: read
 
@@ -33,29 +35,32 @@ jobs:
       matrix:
         include:
           - language: java-kotlin
-            build-mode: none
-            runner: ubuntu-latest
-          - language: javascript-typescript
-            build-mode: none
-            runner: ubuntu-latest
-          - language: actions
-            build-mode: none
+            build-mode: manual
             runner: ubuntu-latest
           - language: c-cpp
             build-mode: manual
             runner: windows-latest
-          - language: swift
-            build-mode: manual
-            runner: macos-latest
+          - language: actions
+            build-mode: none
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The Kotlin build links the libdovi libmpv AAR (Git LFS).
+          lfs: ${{ matrix.language == 'java-kotlin' }}
 
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      # ---- Manual builds for the compiled languages -----------------------
+      # ---- Manual builds: Flutter drives the Kotlin/C++ compilers CodeQL traces ----
+      - if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - if: matrix.build-mode == 'manual'
         uses: subosito/flutter-action@v2
         with:
@@ -63,19 +68,18 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Build Android (Kotlin)
+        if: matrix.language == 'java-kotlin'
+        run: |
+          flutter pub get
+          flutter build apk --debug
+
       - name: Build Windows (C++)
         if: matrix.language == 'c-cpp'
         run: |
           flutter config --enable-windows-desktop
           flutter pub get
           flutter build windows --debug
-
-      - name: Build macOS (Swift)
-        if: matrix.language == 'swift'
-        run: |
-          flutter config --enable-macos-desktop
-          flutter pub get
-          flutter build macos --debug
 
       - uses: github/codeql-action/analyze@v3
         with:
