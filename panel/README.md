@@ -25,7 +25,7 @@ GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
 
 ## What it does
 
-- **Login** — magic-link email or Google OAuth (no passwords).
+- **Login** — magic-link email only (no passwords, no OAuth).
 - **Sources** — CRUD over your `sources` rows; field shapes mirror
   `lib/sources/source_config.dart` per kind (Stalker / Xtream / M3U / Demo).
 - **Metadata** — your TMDB/TVDB/MDBList keys + auto-enrich toggle.

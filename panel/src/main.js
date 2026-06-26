@@ -18,7 +18,10 @@ function render() {
   if (!session) return renderLogin();
   app.innerHTML = `
     <header class="bar">
-      <strong>iptvs sources</strong>
+      <span class="brand">
+        <img class="logo" src="${import.meta.env.BASE_URL}icon.png" alt="" />
+        <strong>iptvs sources</strong>
+      </span>
       <nav>
         ${navButton('sources', 'Sources')}
         ${navButton('metadata', 'Metadata')}
@@ -57,13 +60,15 @@ function toast(msg, isError = false) {
 function renderLogin() {
   app.innerHTML = `
     <div class="login">
-      <h1>iptvs sources</h1>
+      <div class="brand">
+        <img class="logo" src="${import.meta.env.BASE_URL}icon.png" alt="" />
+        <h1>iptvs sources</h1>
+      </div>
       <p>Sign in to manage your IPTV source list. Your devices pull it down — no login on the TV.</p>
       <form id="magic">
         <input type="email" id="email" placeholder="you@example.com" required />
         <button type="submit">Email me a sign-in link</button>
       </form>
-      <button id="google" class="ghost">Continue with Google</button>
       <p id="msg" class="muted"></p>
     </div>`;
   const redirectTo = window.location.origin + import.meta.env.BASE_URL;
@@ -78,11 +83,6 @@ function renderLogin() {
       ? error.message
       : 'Check your email for the sign-in link.';
   };
-  document.getElementById('google').onclick = () =>
-    supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo },
-    });
 }
 
 // -------------------------------------------------------------- sources

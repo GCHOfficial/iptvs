@@ -1,8 +1,8 @@
 name: Deploy panel
 
 # Builds the web source panel (panel/) and publishes it to GitHub Pages.
-# Runs only on pushes to main; PRs just type-check via the panel build in CI is
-# not needed (the panel is static and validated by the build step here).
+# Runs only on pushes to main that touch the panel (the build step here is the
+# panel's only validation; it's a static site with no separate test suite).
 on:
   push:
     branches: [main]
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: npm
