@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
@@ -101,14 +103,42 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     });
     try {
       final count = await _sync.pullSources(widget.store);
-      await _sync.pullMetadata(widget.store);
+      final metadata = await _sync.pullMetadata(widget.store);
       if (!mounted) return;
-      setState(() => _status =
-          '${initial ? 'Paired — ' : ''}Synced $count source${count == 1 ? '' : 's'}.');
+      final sources = 'Synced $count source${count == 1 ? '' : 's'}';
+      setState(() => _status = '${initial ? 'Paired — ' : ''}$sources'
+          '${metadata ? ' · metadata updated' : ''}.');
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _copyCode() async {
+    final code = _code?.code;
+    if (code == null) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Code copied'), duration: Duration(seconds: 2)),
+    );
+  }
+
+  Future<void> _openPanel() async {
+    final uri = Uri.tryParse(CloudConfig.panelUrl);
+    var ok = false;
+    if (uri != null) {
+      try {
+        ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } catch (_) {
+        ok = false;
+      }
+    }
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Couldn\'t open the link — visit it manually')),
+      );
     }
   }
 
@@ -174,28 +204,64 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         const SizedBox(height: 20),
         Center(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
-            decoration: BoxDecoration(
-              color: AppColors.panelHi,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              _code?.code ?? '········',
-              style: const TextStyle(
-                fontSize: 40,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 8,
-                fontFeatures: [FontFeature.tabularFigures()],
+          child: InkWell(
+            onTap: _code == null ? null : _copyCode,
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+              decoration: BoxDecoration(
+                color: AppColors.panelHi,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _code?.code ?? '········',
+                    style: const TextStyle(
+                      fontSize: 40,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 8,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  const Icon(Icons.copy_rounded, color: AppColors.textLo),
+                ],
               ),
             ),
           ),
         ),
+        const SizedBox(height: 8),
+        const Center(
+          child: Text(
+            'Tap the code to copy it',
+            style: TextStyle(color: AppColors.textLo, fontSize: 12),
+          ),
+        ),
         const SizedBox(height: 16),
         Center(
-          child: Text(
-            CloudConfig.panelUrl,
-            style: const TextStyle(color: AppColors.textLo),
+          child: InkWell(
+            onTap: _openPanel,
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
+                  const SizedBox(width: 6),
+                  Text(
+                    CloudConfig.panelUrl,
+                    style: const TextStyle(
+                      color: AppColors.accent,
+                      decoration: TextDecoration.underline,
+                      decorationColor: AppColors.accent,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
         const SizedBox(height: 24),
@@ -219,8 +285,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         const SizedBox(height: 8),
         const Text(
-          'Your sources are managed from the panel. Pull to apply the latest '
-          'list to this device.',
+          'Your sources are managed from the panel. Pulling replaces the '
+          'cloud-managed sources and metadata settings on this device with the '
+          'latest from the panel (sources you added locally are kept).',
           style: TextStyle(color: AppColors.textLo),
         ),
         const SizedBox(height: 24),

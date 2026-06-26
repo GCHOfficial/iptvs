@@ -17,8 +17,8 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
    repo, pushing `supabase/migrations/` applies new migrations automatically. Or use
    the CLI (`supabase link --project-ref <ref>` then `supabase db push`), or paste the
    SQL into the dashboard SQL editor.
-3. **Auth → Providers / Sign In**: enable **Email** (magic link), turn on
-   **Anonymous sign-ins** (devices rely on them), and optionally **Google** OAuth.
+3. **Auth → Providers / Sign In**: enable **Email** (magic link) and turn on
+   **Anonymous sign-ins** (devices rely on them). The panel uses magic-link only.
 4. **Auth → URL configuration**: add the GitHub Pages panel URL to the redirect allow-list.
 5. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
    the only expected warnings are the three intentional `SECURITY DEFINER` pairing RPCs

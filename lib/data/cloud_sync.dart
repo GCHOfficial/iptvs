@@ -106,15 +106,18 @@ class CloudSync {
     return configs.length;
   }
 
-  /// Pull the paired account's metadata provider config into [store], if set.
-  Future<void> pullMetadata(SourceStore store) async {
+  /// Pull the paired account's metadata provider config into [store], replacing
+  /// the local one. Returns true when a config was applied; when the panel has
+  /// none, the local config is left untouched and this returns false.
+  Future<bool> pullMetadata(SourceStore store) async {
     final row = await _client
         .from('metadata_configs')
         .select('config')
         .maybeSingle();
-    if (row == null) return;
+    if (row == null) return false;
     final config = Map<String, dynamic>.from(row['config'] as Map);
     await store.saveMetadataConfig(MetadataConfig.fromJson(config));
+    return true;
   }
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this

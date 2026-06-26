@@ -90,7 +90,8 @@ build config is absent the feature hides itself and the app is unchanged.
   session in the keychain, not plaintext prefs). Init is in `main.dart`, behind `isConfigured`. The
   pure row→`SourceConfig` mapper `cloudRowToConfig` is unit-tested in `test/cloud_sync_test.dart`.
 - **Web panel**: [`panel/`](panel/) — a tiny Vite + `@supabase/supabase-js` SPA (no framework).
-  Field shapes mirror `SourceConfig` per kind. Deployed to **GitHub Pages** by
+  **Magic-link sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Branded with the
+  app icon (`panel/public/icon.png`, copied from `assets/icon/`). Deployed to **GitHub Pages** by
   [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (Supabase values from repo Variables).
   Note: the Flutter web target lives in `web/`; the panel deliberately lives in `panel/`.
 
