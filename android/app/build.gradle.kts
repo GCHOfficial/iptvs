@@ -88,9 +88,9 @@ dependencies {
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
     // compositor switching the panel into HDR — something mpv's GL render path can't
     // do on Android.
-    implementation("androidx.media3:media3-exoplayer:1.8.0")
-    implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
-    implementation("androidx.media3:media3-ui:1.8.0")
+    implementation("androidx.media3:media3-exoplayer:1.10.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.10.1")
+    implementation("androidx.media3:media3-ui:1.10.1")
 
     // libmpv (gpu-next / libplacebo) is the FALLBACK engine, used only when ExoPlayer
     // can't decode the video track — chiefly Dolby Vision Profile 5 (single-layer, no
