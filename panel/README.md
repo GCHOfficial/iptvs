@@ -2,7 +2,8 @@
 
 A tiny static SPA (Vite + `@supabase/supabase-js`, no framework) for managing your
 IPTV source list from a real keyboard. Devices pull the list down with no on-device
-login — see `supabase/README.md` for the backend and `CLAUDE.md` for the big picture.
+login (and can push their own list back up) — see `supabase/README.md` for the backend
+and `CLAUDE.md` for the big picture.
 
 ## Develop
 
@@ -28,5 +29,6 @@ GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
 - **Login** — magic-link email only (no passwords, no OAuth).
 - **Sources** — CRUD over your `sources` rows; field shapes mirror
   `lib/sources/source_config.dart` per kind (Stalker / Xtream / M3U / Demo).
+  Reorder with ↑/↓ — devices show sources in this order.
 - **Metadata** — your TMDB/TVDB/MDBList keys + auto-enrich toggle.
 - **Devices** — pair by entering a device's code (`claim_pairing` RPC), rename, revoke.

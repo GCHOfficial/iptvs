@@ -48,6 +48,20 @@ class SourceStore {
     }
   }
 
+  /// Replace the entire source list with [ordered], preserving its order. Used
+  /// by cloud pull to mirror the panel's ordering on the device. The active
+  /// selection is kept when it's still present; otherwise it falls back to the
+  /// first source (or null when the list is empty).
+  Future<void> setAll(List<SourceConfig> ordered) async {
+    await _writeAll(ordered);
+    final active = await activeId();
+    if (ordered.isEmpty) {
+      await setActive(null);
+    } else if (active == null || !ordered.any((c) => c.id == active)) {
+      await setActive(ordered.first.id);
+    }
+  }
+
   Future<String?> activeId() => _storage.read(key: _kActive);
 
   Future<void> setActive(String? id) async {

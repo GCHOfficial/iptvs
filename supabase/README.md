@@ -6,9 +6,13 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
 
 ## What's here
 
-- `migrations/*.sql` — tables, row-level security, and the pairing RPCs (filenames
-  use Supabase's `<timestamp>_<name>` convention). The first migration is the entire
-  security boundary; read its header comment before changing anything.
+- `migrations/*.sql` — tables, row-level security, and the RPCs (filenames use
+  Supabase's `<timestamp>_<name>` convention). The first migration is the entire
+  security boundary; read its header comment before changing anything. The pairing
+  RPCs link a device to an account; the `push_sources`/`push_metadata` RPCs
+  (`..._two_way_push.sql`) are the only device→cloud write path — owner-scoped via
+  `current_device_owner()`, so an unpaired anon caller is rejected and a payload
+  can't reach another account's rows.
 
 ## One-time setup
 
@@ -21,8 +25,10 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
    **Anonymous sign-ins** (devices rely on them). The panel uses magic-link only.
 4. **Auth → URL configuration**: add the GitHub Pages panel URL to the redirect allow-list.
 5. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
-   the only expected warnings are the three intentional `SECURITY DEFINER` pairing RPCs
-   and Supabase's own `rls_auto_enable`.
+   the only expected warnings are the five intentional `SECURITY DEFINER` RPCs (three
+   pairing + `push_sources`/`push_metadata`, all callable by `authenticated`), the
+   anonymous-access policies on the tables (devices read by design), and Supabase's own
+   `rls_auto_enable`. The push RPCs are revoked from `anon` (they need a real session).
 
 ## Wiring the clients
 
@@ -43,7 +49,9 @@ Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy ano
 ## Security checklist (do this before trusting it)
 
 - [ ] Anonymous session reads **nothing** from `sources`/`metadata_configs` until paired.
-- [ ] Anonymous session can never INSERT/UPDATE/DELETE a source (writes need a real account).
+- [ ] Anonymous session has **no direct** INSERT/UPDATE/DELETE on any table (writes need a real account).
+- [ ] `push_sources`/`push_metadata` reject an **unpaired** anonymous caller (no owner).
+- [ ] A `push_sources` payload can't create/modify/delete rows for another account (owner-scoped).
 - [ ] Account A cannot read or write account B's rows.
 - [ ] `claim_pairing` rejects an anonymous claimer, an expired code, and an already-claimed code.
-- [ ] Deleting a `devices` row immediately revokes that device's read access.
+- [ ] Deleting a `devices` row immediately revokes that device's read access (and its push).

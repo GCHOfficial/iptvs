@@ -95,19 +95,25 @@ async function renderSources() {
     .order('position');
   if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
 
+  const nextPos = data.length ? Math.max(...data.map((s) => s.position ?? 0)) + 1 : 0;
   view().innerHTML = `
+    <p class="muted hint">Devices show sources in this order. Use ↑ / ↓ to reorder.</p>
     <div class="rows">
-      ${data.length ? data.map(sourceRow).join('') : '<p class="muted">No sources yet.</p>'}
+      ${data.length ? data.map((s, i) => sourceRow(s, i, data.length)).join('') : '<p class="muted">No sources yet.</p>'}
     </div>
     <button id="add" class="primary">+ Add source</button>`;
-  document.getElementById('add').onclick = () => editSource(null);
+  document.getElementById('add').onclick = () => editSource(null, nextPos);
   for (const el of view().querySelectorAll('[data-edit]'))
     el.onclick = () => editSource(data.find((s) => s.id === el.dataset.edit));
   for (const el of view().querySelectorAll('[data-del]'))
     el.onclick = () => deleteSource(el.dataset.del);
+  for (const el of view().querySelectorAll('[data-up]'))
+    el.onclick = () => reorder(data, data.findIndex((s) => s.id === el.dataset.up), -1);
+  for (const el of view().querySelectorAll('[data-down]'))
+    el.onclick = () => reorder(data, data.findIndex((s) => s.id === el.dataset.down), 1);
 }
 
-function sourceRow(s) {
+function sourceRow(s, i, n) {
   const summary =
     s.kind === 'stalker' ? s.fields.portal
     : s.kind === 'xtream' ? s.fields.host
@@ -120,13 +126,30 @@ function sourceRow(s) {
         <div class="muted">${esc(s.kind)} · ${esc(summary || '')}</div>
       </div>
       <div class="actions">
+        <button data-up="${s.id}" class="ghost icon" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button data-down="${s.id}" class="ghost icon" title="Move down" ${i === n - 1 ? 'disabled' : ''}>↓</button>
         <button data-edit="${s.id}" class="ghost">Edit</button>
         <button data-del="${s.id}" class="ghost danger">Delete</button>
       </div>
     </div>`;
 }
 
-function editSource(existing) {
+// Swap a source with its neighbour, then persist normalized 0..n-1 positions for
+// any row whose index changed (self-heals the legacy timestamp-based positions).
+async function reorder(data, index, dir) {
+  const j = index + dir;
+  if (index < 0 || j < 0 || j >= data.length) return;
+  const arr = data.slice();
+  [arr[index], arr[j]] = [arr[j], arr[index]];
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].position === i) continue;
+    const { error } = await supabase.from('sources').update({ position: i }).eq('id', arr[i].id);
+    if (error) return toast(error.message, true);
+  }
+  renderSources();
+}
+
+function editSource(existing, nextPos = 0) {
   const kinds = Object.keys(KIND_FIELDS);
   let kind = existing?.kind ?? 'stalker';
   const fieldsHtml = () =>
@@ -180,7 +203,7 @@ function editSource(existing) {
     if (existing) {
       res = await supabase.from('sources').update(row).eq('id', existing.id);
     } else {
-      row.position = Date.now() % 1000000; // append-ish; reorder is future work
+      row.position = nextPos; // append after the current last source
       res = await supabase.from('sources').insert(row);
     }
     if (res.error) return toast(res.error.message, true);

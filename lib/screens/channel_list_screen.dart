@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/services.dart' show KeyRepeatEvent;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
@@ -960,9 +961,14 @@ class _TabChipState extends State<_TabChip> {
           decoration: BoxDecoration(
             color: bg,
             borderRadius: BorderRadius.circular(AppRadius.tile),
+            // Always show a focus ring under the D-pad — including on the
+            // already-selected tab, where a white ring reads clearly against
+            // the accent fill (an accent ring there would be invisible).
             border: Border.all(
-              color: (_focused && !active) ? AppColors.accent : AppColors.line,
-              width: (_focused && !active) ? 2 : 1,
+              color: _focused
+                  ? (active ? Colors.white : AppColors.accent)
+                  : AppColors.line,
+              width: _focused ? 2 : 1,
             ),
           ),
           child: Row(
@@ -1402,7 +1408,18 @@ class _DropdownFrameState extends State<_DropdownFrame> {
           width: _focused ? 2 : 1,
         ),
       ),
-      child: DropdownButtonHideUnderline(child: widget.builder(_node)),
+      // A held (or rapidly mashed) OK on a TV remote arrives as key-repeat
+      // events; the framework turns each into an ActivateIntent, so the menu
+      // flickers open/closed with a click sound on every repeat. Swallow repeats
+      // here (ancestor of the DropdownButton's focus node, below the app-level
+      // shortcuts) so one discrete press maps to exactly one open.
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: (_, event) =>
+            event is KeyRepeatEvent ? KeyEventResult.handled : KeyEventResult.ignored,
+        child: DropdownButtonHideUnderline(child: widget.builder(_node)),
+      ),
     );
   }
 }
