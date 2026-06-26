@@ -105,6 +105,9 @@ class MpvController(
     fun load(url: String, subtitles: List<SubtitleSpec>) {
         pendingSubtitles = subtitles
         mpv?.command(arrayOf("loadfile", url))
+        // A reload while paused (go-to-live) must resume; loadfile keeps the
+        // current pause state otherwise.
+        mpv?.setPropertyBoolean("pause", false)
     }
 
     // ---- Playback actions (invoked from the Compose overlay) ----------------

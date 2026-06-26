@@ -68,6 +68,10 @@ class ExoPlayerEngine(
                 },
             )
             .build()
+        // stop() first so a reload (go-to-live) starts from a clean idle state
+        // instead of inheriting a paused / mid-flush decoder, which left the
+        // first go-to-live stuck paused. No-op on the initial (idle) load.
+        player.stop()
         player.setMediaItem(item)
         player.prepare()
         player.playWhenReady = true
