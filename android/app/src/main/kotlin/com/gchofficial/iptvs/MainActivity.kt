@@ -1,4 +1,4 @@
-package com.example.iptvs
+package com.gchofficial.iptvs
 
 import android.content.Intent
 import io.flutter.embedding.android.FlutterActivity

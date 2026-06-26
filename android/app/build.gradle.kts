@@ -10,7 +10,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.iptvs"
+    namespace = "com.gchofficial.iptvs"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,8 +20,10 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.iptvs"
+        // The application ID is the app's stable public identity (and what the
+        // system reports as the package name, e.g. in an HDMI-info overlay). It
+        // matches the Kotlin `namespace`/package.
+        applicationId = "com.gchofficial.iptvs"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // libmpv (dev.jdtech.mpv:libmpv) requires API 26+; this also matches the

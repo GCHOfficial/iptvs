@@ -1,4 +1,4 @@
-package com.example.iptvs.player
+package com.gchofficial.iptvs.player
 
 import android.content.Context
 import android.graphics.PixelFormat

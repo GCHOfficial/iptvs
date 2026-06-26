@@ -1,4 +1,4 @@
-package com.example.iptvs
+package com.gchofficial.iptvs
 
 import android.os.Bundle
 import android.util.Log
@@ -10,14 +10,14 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
-import com.example.iptvs.player.AspectMode
-import com.example.iptvs.player.ExoPlayerEngine
-import com.example.iptvs.player.MpvEngine
-import com.example.iptvs.player.PlaybackEngine
-import com.example.iptvs.player.PlayerCallbacks
-import com.example.iptvs.player.PlayerScreen
-import com.example.iptvs.player.PlayerUiState
-import com.example.iptvs.player.SubtitleSpec
+import com.gchofficial.iptvs.player.AspectMode
+import com.gchofficial.iptvs.player.ExoPlayerEngine
+import com.gchofficial.iptvs.player.MpvEngine
+import com.gchofficial.iptvs.player.PlaybackEngine
+import com.gchofficial.iptvs.player.PlayerCallbacks
+import com.gchofficial.iptvs.player.PlayerScreen
+import com.gchofficial.iptvs.player.PlayerUiState
+import com.gchofficial.iptvs.player.SubtitleSpec
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -258,18 +258,18 @@ class HdrPlayerActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
     }
 
-    /** Builds an [com.example.iptvs.player.EpgEntry] from intent extras, or null if absent/invalid. */
+    /** Builds an [com.gchofficial.iptvs.player.EpgEntry] from intent extras, or null if absent/invalid. */
     private fun epgEntry(
         titleKey: String,
         startKey: String,
         stopKey: String,
         descKey: String?,
-    ): com.example.iptvs.player.EpgEntry? {
+    ): com.gchofficial.iptvs.player.EpgEntry? {
         val title = intent.getStringExtra(titleKey)?.takeIf { it.isNotBlank() } ?: return null
         val start = intent.getLongExtra(startKey, -1L)
         val stop = intent.getLongExtra(stopKey, -1L)
         if (start < 0L || stop <= start) return null
-        return com.example.iptvs.player.EpgEntry(
+        return com.gchofficial.iptvs.player.EpgEntry(
             title = title,
             startMs = start,
             stopMs = stop,

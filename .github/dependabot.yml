@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Flutter / Dart packages (pubspec.yaml).
+  - package-ecosystem: "pub"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+
+  # GitHub Actions used by the build/release workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  # Android Gradle dependencies (media3, etc.). The vendored libmpv AAR is a local
+  # file and isn't tracked by Dependabot.
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(android)"

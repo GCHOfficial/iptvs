@@ -1,4 +1,4 @@
-package com.example.iptvs.player
+package com.gchofficial.iptvs.player
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
