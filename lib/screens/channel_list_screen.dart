@@ -562,30 +562,42 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.repo.source.name),
+        // Group the actions so D-pad traversal treats them as one cluster (reached
+        // by going up to the bar), rather than the toolbar's "right" jumping
+        // straight to the rightmost icon.
         actions: [
-          if (widget.onManageSources != null)
-            IconButton(
-              tooltip: 'Sources',
-              icon: const Icon(Icons.dns_outlined),
-              onPressed: widget.onManageSources,
-            ),
-          IconButton(
-            tooltip: 'Diagnostics',
-            icon: const Icon(Icons.bug_report_outlined),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const DiagnosticsScreen()),
+          FocusTraversalGroup(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.onManageSources != null)
+                  IconButton(
+                    tooltip: 'Sources',
+                    icon: const Icon(Icons.dns_outlined),
+                    onPressed: widget.onManageSources,
+                  ),
+                IconButton(
+                  tooltip: 'Diagnostics',
+                  icon: const Icon(Icons.bug_report_outlined),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const DiagnosticsScreen(),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh from source',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: _loading || _mediaLoading[_tab] == true
+                      ? null
+                      : () => _tab == ContentKind.live
+                            ? _load(forceRefresh: true)
+                            : _loadMedia(_tab, forceRefresh: true),
+                ),
+                const SizedBox(width: 4),
+              ],
             ),
           ),
-          IconButton(
-            tooltip: 'Refresh from source',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loading || _mediaLoading[_tab] == true
-                ? null
-                : () => _tab == ContentKind.live
-                      ? _load(forceRefresh: true)
-                      : _loadMedia(_tab, forceRefresh: true),
-          ),
-          const SizedBox(width: 4),
         ],
         bottom: _resolving
             ? const PreferredSize(
@@ -594,85 +606,91 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               )
             : null,
       ),
-      body: Column(
-        children: [
-          _ContentTabs(value: _tab, onChanged: _selectTab),
-          _Toolbar(
-            searchController: _searchController,
-            query: _query,
-            hintText: _tab == ContentKind.live
-                ? 'Search channels'
-                : _tab == ContentKind.movie
-                ? 'Search movies'
-                : 'Search series',
-            onQueryChanged: _setQuery,
-            onClearQuery: () {
-              _searchController.clear();
-              _setQuery('');
-            },
-            categoryControl: _tab == ContentKind.live
-                ? _CategoryDropdown(
-                    categories: _categories,
-                    value: _categoryId,
-                    onChanged: (v) {
-                      setState(() => _categoryId = v);
-                      _scrollToTop();
-                    },
-                  )
-                : _MediaCategoryDropdown(
-                    categories: _media[_tab]?.categories ?? const [],
-                    value: _mediaCategoryId[_tab],
-                    onChanged: (v) {
-                      setState(() {
-                        _mediaCategoryId[_tab] = v;
-                        _mediaSearchResults.remove(_tab);
-                        _mediaSearchQuery.remove(_tab);
-                      });
-                      _loadMedia(_tab);
-                      _scrollToTop();
-                      if (_query.trim().length >= 2) {
-                        _searchTimer?.cancel();
-                        _searchTimer = Timer(
-                          const Duration(milliseconds: 250),
-                          () => _searchMedia(_tab, _query.trim()),
-                        );
-                      }
-                    },
-                  ),
-            actionControl:
-                _tab == ContentKind.live || !widget.repo.canEnrichMetadata
-                ? null
-                : _ToolbarIconButton(
-                    tooltip: _mediaEnriching[_tab] == true
-                        ? 'Cancel metadata refresh'
-                        : 'Refresh displayed metadata',
-                    busy: _mediaEnriching[_tab] == true,
-                    icon: _mediaEnriching[_tab] == true
-                        ? Icons.stop_rounded
-                        : Icons.auto_awesome_outlined,
-                    onPressed:
-                        _mediaLoading[_tab] == true ||
-                            _mediaSearching[_tab] == true
-                        ? null
-                        : _mediaEnriching[_tab] == true
-                        ? () => setState(() => _cancelMediaEnrichment(_tab))
-                        : () => _enrichVisibleMedia(_tab),
-                  ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _statusText(visible.length),
-                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+      // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
+      // arrowing sideways into the AppBar's action cluster.
+      body: FocusTraversalGroup(
+        child: Column(
+          children: [
+            _ContentTabs(value: _tab, onChanged: _selectTab),
+            _Toolbar(
+              searchController: _searchController,
+              query: _query,
+              hintText: _tab == ContentKind.live
+                  ? 'Search channels'
+                  : _tab == ContentKind.movie
+                  ? 'Search movies'
+                  : 'Search series',
+              onQueryChanged: _setQuery,
+              onClearQuery: () {
+                _searchController.clear();
+                _setQuery('');
+              },
+              categoryControl: _tab == ContentKind.live
+                  ? _CategoryDropdown(
+                      categories: _categories,
+                      value: _categoryId,
+                      onChanged: (v) {
+                        setState(() => _categoryId = v);
+                        _scrollToTop();
+                      },
+                    )
+                  : _MediaCategoryDropdown(
+                      categories: _media[_tab]?.categories ?? const [],
+                      value: _mediaCategoryId[_tab],
+                      onChanged: (v) {
+                        setState(() {
+                          _mediaCategoryId[_tab] = v;
+                          _mediaSearchResults.remove(_tab);
+                          _mediaSearchQuery.remove(_tab);
+                        });
+                        _loadMedia(_tab);
+                        _scrollToTop();
+                        if (_query.trim().length >= 2) {
+                          _searchTimer?.cancel();
+                          _searchTimer = Timer(
+                            const Duration(milliseconds: 250),
+                            () => _searchMedia(_tab, _query.trim()),
+                          );
+                        }
+                      },
+                    ),
+              actionControl:
+                  _tab == ContentKind.live || !widget.repo.canEnrichMetadata
+                  ? null
+                  : _ToolbarIconButton(
+                      tooltip: _mediaEnriching[_tab] == true
+                          ? 'Cancel metadata refresh'
+                          : 'Refresh displayed metadata',
+                      busy: _mediaEnriching[_tab] == true,
+                      icon: _mediaEnriching[_tab] == true
+                          ? Icons.stop_rounded
+                          : Icons.auto_awesome_outlined,
+                      onPressed:
+                          _mediaLoading[_tab] == true ||
+                              _mediaSearching[_tab] == true
+                          ? null
+                          : _mediaEnriching[_tab] == true
+                          ? () => setState(() => _cancelMediaEnrichment(_tab))
+                          : () => _enrichVisibleMedia(_tab),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _statusText(visible.length),
+                  style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                ),
               ),
             ),
-          ),
-          Expanded(
-            child: _tab == ContentKind.live ? _body(visible) : _mediaBody(_tab),
-          ),
-        ],
+            Expanded(
+              child: _tab == ContentKind.live
+                  ? _body(visible)
+                  : _mediaBody(_tab),
+            ),
+          ],
+        ),
       ),
     );
   }
