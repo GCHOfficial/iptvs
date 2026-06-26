@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 env:
-  FLUTTER_VERSION: 3.44.2
+  FLUTTER_VERSION: 3.44.4
 
 jobs:
   # Resolve the version string once (tag minus the leading `v`, or the manual input).
@@ -66,7 +66,7 @@ jobs:
         run: flutter build apk --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }}
       - name: Name artifact
         run: cp build/app/outputs/flutter-apk/app-release.apk iptvs-${{ needs.version.outputs.version }}-android.apk
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: android
           path: iptvs-${{ needs.version.outputs.version }}-android.apk
@@ -94,7 +94,7 @@ jobs:
         run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
