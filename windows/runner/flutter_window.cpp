@@ -703,6 +703,9 @@ std::wstring HdrBadge() {
       dr.find(L"DV") != std::wstring::npos) {
     return L"DV";
   }
+  if (dr.find(L"HDR10+") != std::wstring::npos) {
+    return L"HDR10+";
+  }
   if (dr.find(L"HDR10") != std::wstring::npos) {
     return L"HDR10";
   }

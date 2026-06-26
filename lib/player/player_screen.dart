@@ -80,6 +80,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _loggedActiveVo = false;
   bool _loggedHwdec = false;
   String? _lastVideoParamsLog;
+  // HDR10+ detection (Windows/mpv). mpv has no clean "has HDR10+" flag, so we
+  // infer it from the ST2094-40 scene dynamic-metadata sub-properties — which are
+  // zero for plain HDR10 and, unlike max-pq-y, aren't synthesised by
+  // `hdr-compute-peak`. Conservative: stays false (→ "HDR10 · PQ") on any
+  // absence/error, only flips true once a PQ stream clearly carries scene metadata.
+  bool _hdr10Plus = false;
+  bool _probingHdr10Plus = false;
   DateTime? _ignoreNativeInputUntil;
   int? _windowsNativeSurface;
   // Index into [_aspectModes]. Starts at "Fill" to match the panscan=1.0 the
@@ -208,6 +215,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _logPlayback(line);
         }
         unawaited(_logActiveVideoOutput());
+        unawaited(_probeHdr10Plus(params));
       }),
     );
     // Clear the error overlay once playback actually starts.
@@ -815,11 +823,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (matrix.contains('dolby') || gamma.contains('dolby')) {
       return 'Dolby Vision';
     }
-    if (gamma.contains('pq')) return 'HDR10 · PQ';
+    if (gamma.contains('pq')) return _hdr10Plus ? 'HDR10+ · PQ' : 'HDR10 · PQ';
     if (gamma.contains('hlg')) return 'HLG';
     if (primaries.contains('2020')) return 'HDR · BT.2020';
     if (gamma.isEmpty && primaries.isEmpty) return '';
     return 'SDR';
+  }
+
+  /// Best-effort HDR10+ detection for the Windows/mpv path (see [_hdr10Plus]).
+  ///
+  /// mpv exposes no "has HDR10+" flag, so we read the ST2094-40 per-scene
+  /// dynamic-metadata sub-properties. These are non-zero only when the stream
+  /// actually carries dynamic metadata and — unlike `max-pq-y`/`sig-peak` — are
+  /// not synthesised by `hdr-compute-peak`, so they don't false-positive on plain
+  /// HDR10. Any missing property / error leaves us at "HDR10 · PQ".
+  Future<void> _probeHdr10Plus(VideoParams params) async {
+    if (!Platform.isWindows) return;
+    final gamma = params.gamma?.toLowerCase() ?? '';
+    if (!gamma.contains('pq')) {
+      // Not PQ -> can't be HDR10+. Clear any stale detection from a prior stream.
+      _hdr10Plus = false;
+      return;
+    }
+    if (_hdr10Plus || _probingHdr10Plus) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    _probingHdr10Plus = true;
+    try {
+      for (final prop in const [
+        'video-params/scene-max-r',
+        'video-params/scene-max-g',
+        'video-params/scene-max-b',
+        'video-params/scene-avg',
+      ]) {
+        final raw = (await platform.getProperty(prop)).trim();
+        final value = double.tryParse(raw);
+        if (value != null && value > 0) {
+          _hdr10Plus = true;
+          _logPlayback('hdr10+ detected via $prop=$value');
+          unawaited(_syncWindowsNativeControlState());
+          break;
+        }
+      }
+    } catch (_) {
+      // Property unavailable on this mpv build -> stay at HDR10 (conservative).
+    } finally {
+      _probingHdr10Plus = false;
+    }
   }
 
   String _codecLabel(String? codec) {
