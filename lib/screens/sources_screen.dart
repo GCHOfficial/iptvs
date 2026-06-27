@@ -5,6 +5,7 @@ import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
+import '../sources/expiry_service.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -39,9 +40,12 @@ class _SourcesScreenState extends State<SourcesScreen> {
   String? _activeId;
   bool _loading = true;
 
+  // Cached expiry results keyed by source id. Populated on first load and
+  // refreshed whenever the source list changes (add / edit / delete).
+  final Map<String, ExpiryResult?> _expiry = {};
+
   // One focus node per source row, so we can land focus back on a specific
-  // card after returning from the edit/add route (otherwise Navigator restores
-  // focus to the Edit icon the user activated).
+  // card after returning from the edit/add route.
   final Map<String, FocusNode> _cardFocus = {};
 
   @override
@@ -77,6 +81,23 @@ class _SourcesScreenState extends State<SourcesScreen> {
       _activeId = active;
       _loading = false;
     });
+    _refreshExpiry(list);
+  }
+
+  /// Fetch expiry for any sources we don't have a result for yet, plus any
+  /// whose config changed since the last fetch (detected by id presence).
+  void _refreshExpiry(List<SourceConfig> sources) {
+    for (final config in sources) {
+      if (_expiry.containsKey(config.id)) continue; // already fetched
+      _expiry[config.id] = null; // mark as in-flight
+      ExpiryService.instance.fetchExpiry(config).then((result) {
+        if (!mounted) return;
+        setState(() => _expiry[config.id] = result);
+      });
+    }
+    // Prune stale entries (source deleted)
+    final ids = sources.map((s) => s.id).toSet();
+    _expiry.removeWhere((id, _) => !ids.contains(id));
   }
 
   Future<void> _add() async {
@@ -86,7 +107,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
     );
     if (saved != true) return;
     await _reload();
-    // Land focus on the newly added source row (fall back to the first card).
     final added = _sources
         .map((s) => s.id)
         .firstWhere((id) => !before.contains(id), orElse: () => '');
@@ -102,6 +122,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
       ),
     );
     if (saved != true) return;
+    // Force expiry re-fetch for this source since credentials may have changed
+    _expiry.remove(c.id);
     await _reload();
     _focusCard(c.id);
   }
@@ -111,10 +133,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
     await _reload();
   }
 
-  /// Move a source one slot up (delta -1) or down (delta +1) and persist the new
-  /// order. Keeps the active selection and refocuses the moved row. Note: cloud
-  /// sync orders cloud-managed sources from the panel on the next pull, so this
-  /// is most useful for the order among local-only sources.
   Future<void> _move(SourceConfig c, int delta) async {
     final i = _sources.indexWhere((s) => s.id == c.id);
     final j = i + delta;
@@ -146,6 +164,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
       ),
     );
     if (ok == true) {
+      _expiry.remove(c.id);
       await widget.store.delete(c.id);
       await _reload();
     }
@@ -167,7 +186,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
                     builder: (_) => CloudSyncScreen(store: widget.store),
                   ),
                 );
-                // A pull may have changed the source list; refresh on return.
                 await _reload();
               },
             ),
@@ -184,8 +202,6 @@ class _SourcesScreenState extends State<SourcesScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      // A FilledButton (rather than a FAB) so it shows the same accent/white
-      // focus ring as the "Save source" / "Save" buttons under a D-pad.
       floatingActionButton: FilledButton.icon(
         onPressed: _add,
         icon: const Icon(Icons.add),
@@ -214,6 +230,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
                   focusNode: _focusNodeFor(c.id),
                   canMoveUp: i > 0,
                   canMoveDown: i < _sources.length - 1,
+                  expiry: _expiry[c.id], // null = loading, ExpiryResult = done
                   onActivate: () => _activate(c),
                   onMoveUp: () => _move(c, -1),
                   onMoveDown: () => _move(c, 1),
@@ -226,6 +243,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Source card
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _SourceCard extends StatefulWidget {
   final SourceConfig config;
   final bool active;
@@ -233,6 +254,7 @@ class _SourceCard extends StatefulWidget {
   final FocusNode? focusNode;
   final bool canMoveUp;
   final bool canMoveDown;
+  final ExpiryResult? expiry; // null while loading
   final VoidCallback onActivate;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
@@ -251,6 +273,7 @@ class _SourceCard extends StatefulWidget {
     required this.onEdit,
     required this.onDelete,
     this.focusNode,
+    this.expiry,
     super.key,
   });
 
@@ -259,10 +282,6 @@ class _SourceCard extends StatefulWidget {
 }
 
 class _SourceCardState extends State<_SourceCard> {
-  // The row's action buttons are skip-traversal so automatic/directional
-  // navigation (Up/Down) never lands on them — vertical arrows only ever stop
-  // on the row card. Left/Right step through them explicitly, in order:
-  // card → up → down → edit → delete (see _handleDirectional).
   final FocusNode _upNode = FocusNode(skipTraversal: true);
   final FocusNode _downNode = FocusNode(skipTraversal: true);
   final FocusNode _editNode = FocusNode(skipTraversal: true);
@@ -290,8 +309,6 @@ class _SourceCardState extends State<_SourceCard> {
     }
   }
 
-  // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
-  // skip-traversal, so vertical movement only finds adjacent row cards).
   List<FocusNode?> get _chain =>
       [widget.focusNode, _upNode, _downNode, _editNode, _deleteNode];
 
@@ -304,13 +321,11 @@ class _SourceCardState extends State<_SourceCard> {
         if (idx >= 0 && idx < chain.length - 1) {
           chain[idx + 1]?.requestFocus();
         }
-        // On the last button there is nothing further right — consume.
         return null;
       case TraversalDirection.left:
         if (idx > 0) {
           chain[idx - 1]?.requestFocus();
         } else {
-          // On the card (or unknown): leave the row leftwards.
           focused?.focusInDirection(intent.direction);
         }
         return null;
@@ -381,12 +396,12 @@ class _SourceCardState extends State<_SourceCard> {
                         fontSize: 12,
                       ),
                     ),
+                    // ── Expiry label ────────────────────────────────────────
+                    const SizedBox(height: 6),
+                    _ExpiryBadge(expiry: widget.expiry),
                   ],
                 ),
               ),
-              // Move up/down are always enabled so they stay in the Left/Right
-              // focus chain on every row; the parent clamps at the ends and the
-              // icon dims when there's nowhere to go.
               IconButton(
                 focusNode: _upNode,
                 icon: Icon(
@@ -427,6 +442,152 @@ class _SourceCardState extends State<_SourceCard> {
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Expiry badge widget
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ExpiryBadge extends StatelessWidget {
+  final ExpiryResult? expiry; // null = still loading
+
+  const _ExpiryBadge({this.expiry});
+
+  @override
+  Widget build(BuildContext context) {
+    // While the fetch is in-flight show a subtle shimmer-like placeholder
+    if (expiry == null) {
+      return Container(
+        height: 16,
+        width: 80,
+        decoration: BoxDecoration(
+          color: AppColors.line.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(4),
+        ),
+      );
+    }
+
+    final result = expiry!;
+
+    // Network / parse error
+    if (result.hasFailed) {
+      return _badge(
+        icon: Icons.error_outline,
+        label: 'Expiry unavailable',
+        color: AppColors.textLo,
+        bg: AppColors.panelHi,
+      );
+    }
+
+    // Unknown — source type doesn't expose expiry (M3U without param, Stalker
+    // with no date field)
+    if (result.isUnknown) {
+      return _badge(
+        icon: Icons.help_outline,
+        label: 'Expiry unknown',
+        color: AppColors.textLo,
+        bg: AppColors.panelHi,
+      );
+    }
+
+    final dt = result.expiresAt!;
+    final now = DateTime.now();
+    final diff = dt.difference(now);
+    final days = diff.inDays;
+
+    if (diff.isNegative) {
+      return _badge(
+        icon: Icons.block_outlined,
+        label: 'Expired ${_ago(-diff)}',
+        color: const Color(0xFFFF4D6D),
+        bg: const Color(0xFF3A0010),
+      );
+    }
+
+    if (days == 0) {
+      return _badge(
+        icon: Icons.warning_amber_outlined,
+        label: 'Expires today',
+        color: const Color(0xFFFFA94D),
+        bg: const Color(0xFF3A2000),
+      );
+    }
+
+    if (days <= 7) {
+      return _badge(
+        icon: Icons.warning_amber_outlined,
+        label: 'Expires in ${days}d',
+        color: const Color(0xFFFFA94D),
+        bg: const Color(0xFF3A2000),
+      );
+    }
+
+    if (days <= 30) {
+      return _badge(
+        icon: Icons.schedule_outlined,
+        label: 'Expires in ${days}d',
+        color: const Color(0xFFFACC15),
+        bg: const Color(0xFF2E2500),
+      );
+    }
+
+    // More than 30 days: show the date
+    return _badge(
+      icon: Icons.check_circle_outline,
+      label: 'Expires ${_formatDate(dt)}',
+      color: const Color(0xFF4ADE80),
+      bg: const Color(0xFF0D2B18),
+    );
+  }
+
+  Widget _badge({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required Color bg,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDate(DateTime dt) {
+    final months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+  }
+
+  String _ago(Duration d) {
+    if (d.inDays > 0) return '${d.inDays}d ago';
+    if (d.inHours > 0) return '${d.inHours}h ago';
+    return 'moments ago';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unchanged below — ActivePill, FieldSpec, EditSourceScreen, MetadataSettings
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _ActivePill extends StatelessWidget {
   const _ActivePill();
