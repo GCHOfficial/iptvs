@@ -106,6 +106,7 @@ struct NativeControlState {
   std::wstring epg_now_desc;
   std::wstring epg_next_title;
   double epg_next_start_ms = 0.0;
+  double epg_next_stop_ms = 0.0;
 };
 
 NativeControlState g_native_control_state;
@@ -1137,7 +1138,11 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
                   RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
-      DrawTextWithFont(paint_hdc, L"Next · " + s.epg_next_title, l.epg_next,
+      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" - " +
+                                      FormatClockHm(s.epg_next_stop_ms);
+      DrawTextWithFont(paint_hdc,
+                       L"Next: " + s.epg_next_title + L" (" + next_range + L")",
+                       l.epg_next,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                        epg_meta_font, RGB(184, 190, 204));
     }
@@ -1944,6 +1949,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "epgNextTitle", L"");
   g_native_control_state.epg_next_start_ms =
       EncodableDoubleArg(args, "epgNextStartMs", 0.0);
+  g_native_control_state.epg_next_stop_ms =
+      EncodableDoubleArg(args, "epgNextStopMs", 0.0);
 
   if (BottomControlsHeight() != prev_bottom_height) {
     native_controls_region_dirty_ = true;

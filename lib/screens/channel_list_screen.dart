@@ -750,7 +750,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       scrollCacheExtent: const ScrollCacheExtent.pixels(
         120,
       ), // keep nearby rows built for D-pad without over-prefetching logos
-      itemExtent: 124,
       itemCount: visible.length,
       itemBuilder: (context, i) {
         final c = visible[i];
@@ -1154,9 +1153,16 @@ class _ChannelTile extends StatelessWidget {
     required this.onTap,
   });
 
+  static String _formatProgrammeTime(DateTime time) {
+    final hours = time.hour.toString().padLeft(2, '0');
+    final minutes = time.minute.toString().padLeft(2, '0');
+    return '$hours:$minutes';
+  }
+
   @override
   Widget build(BuildContext context) {
     final current = now;
+    final upcoming = next;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1177,6 +1183,7 @@ class _ChannelTile extends StatelessWidget {
             const SizedBox(width: 14),
             Expanded(
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -1187,24 +1194,16 @@ class _ChannelTile extends StatelessWidget {
                   ),
                   if (current != null) ...[
                     const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const _LivePill(),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            current.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: AppColors.textLo,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ],
+                    Text(
+                      'Live · ${_formatProgrammeTime(current.start)} – ${_formatProgrammeTime(current.stop)} · ${current.title}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 12,
+                      ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(3),
                       child: LinearProgressIndicator(
@@ -1212,11 +1211,11 @@ class _ChannelTile extends StatelessWidget {
                         minHeight: 3,
                       ),
                     ),
-                    if (next != null)
+                    if (upcoming != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
-                          'Next · ${next!.title}',
+                          'Next · ${_formatProgrammeTime(upcoming.start)} – ${_formatProgrammeTime(upcoming.stop)} · ${upcoming.title}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(

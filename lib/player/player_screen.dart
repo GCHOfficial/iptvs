@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
+import '../player/now_programme_overlay.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 
@@ -1178,18 +1179,55 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.seek(pos < Duration.zero ? Duration.zero : pos);
   }
 
-  Widget _title() => Flexible(
-    child: Text(
-      widget.title,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(
-        color: Colors.white,
-        fontSize: 18,
-        fontWeight: FontWeight.w600,
+  Widget _title() {
+    final now = widget.epgNow;
+    return Flexible(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            widget.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (now != null) ...[
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Text(
+                  _formatProgrammeTime(now.start),
+                  style: const TextStyle(
+                    color: AppColors.textLo,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _formatProgrammeTime(now.stop),
+                  style: const TextStyle(
+                    color: AppColors.textLo,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
       ),
-    ),
-  );
+    );
+  }
+
+  static String _formatProgrammeTime(DateTime time) {
+    final hours = time.hour.toString().padLeft(2, '0');
+    final minutes = time.minute.toString().padLeft(2, '0');
+    return '$hours:$minutes';
+  }
 
   List<Widget> _desktopBottomBar() => [
     const MaterialDesktopPlayOrPauseButton(),
@@ -1271,6 +1309,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
             child: Stack(
               children: [
                 Positioned.fill(child: _playbackSurface()),
+                if (widget.epgNow != null)
+                  Positioned(
+                    top: 74,
+                    left: 18,
+                    right: 18,
+                    child: NowProgrammeOverlay(
+                      programme: widget.epgNow!,
+                      nextProgramme: widget.epgNext,
+                    ),
+                  ),
                 if (_error != null) Positioned.fill(child: _errorOverlay()),
                 // Windows draws its own "Reconnecting…" in the native overlay;
                 // this covers the embedded media_kit path.
