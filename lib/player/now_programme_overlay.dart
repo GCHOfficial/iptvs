@@ -31,7 +31,7 @@ class NowProgrammeOverlay extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 14,
+                fontSize: 16,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -44,7 +44,7 @@ class NowProgrammeOverlay extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: AppColors.textLo,
-                    fontSize: 12,
+                    fontSize: 13,
                   ),
                 ),
               ),
@@ -57,7 +57,7 @@ class NowProgrammeOverlay extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: AppColors.textLo,
-                    fontSize: 12,
+                    fontSize: 13,
                   ),
                 ),
               ),
