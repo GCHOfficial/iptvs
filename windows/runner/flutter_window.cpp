@@ -5,10 +5,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+#include <wingdi.h>
+#pragma comment(lib, "Msimg32.lib")
 
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
@@ -393,6 +396,45 @@ void FillRectColor(HDC hdc, const RECT &rect, COLORREF color) {
   HBRUSH brush = CreateSolidBrush(color);
   FillRect(hdc, &rect, brush);
   DeleteObject(brush);
+}
+
+HBITMAP Create32BitDIBSection(HDC hdc, int width, int height, void **bits) {
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = width;
+  bmi.bmiHeader.biHeight = -height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  return CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
+void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
+                                       int width,
+                                       int height,
+                                       const RECT &rect,
+                                       COLORREF background_color,
+                                       BYTE background_alpha) {
+  const uint32_t background_rgb = (GetRValue(background_color)) |
+                                  (GetGValue(background_color) << 8) |
+                                  (GetBValue(background_color) << 16);
+  for (int y = rect.top; y < rect.bottom; ++y) {
+    uint32_t *row = pixels + (y * width);
+    for (int x = rect.left; x < rect.right; ++x) {
+      uint32_t &pixel = row[x];
+      const uint32_t rgb = pixel & 0x00FFFFFF;
+      uint32_t alpha = pixel >> 24;
+      if (rgb == background_rgb) {
+        alpha = background_alpha;
+      } else if (alpha == 0) {
+        alpha = 0xFF;
+      }
+      const uint32_t red = (GetRValue(pixel) * alpha + 127) / 255;
+      const uint32_t green = (GetGValue(pixel) * alpha + 127) / 255;
+      const uint32_t blue = (GetBValue(pixel) * alpha + 127) / 255;
+      pixel = (alpha << 24) | (blue << 16) | (green << 8) | red;
+    }
+  }
 }
 
 void FillRoundRect(HDC hdc, const RECT &rect, int radius, COLORREF color) {
@@ -789,14 +831,6 @@ std::wstring TruncateBadge(const std::wstring &text, size_t max_len) {
 std::vector<std::pair<std::wstring, std::wstring>> InfoRows() {
   std::vector<std::pair<std::wstring, std::wstring>> rows;
   const auto &s = g_native_control_state;
-  if (s.is_live) {
-    if (!s.epg_now_title.empty()) {
-      rows.push_back({L"Now", s.epg_now_title});
-    }
-    if (!s.epg_next_title.empty()) {
-      rows.push_back({L"Next", s.epg_next_title});
-    }
-  }
   if (s.video_width > 0 && s.video_height > 0) {
     rows.push_back({L"Resolution", std::to_wstring(s.video_width) + L"×" +
                                        std::to_wstring(s.video_height)});
@@ -902,6 +936,13 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
   }
   const RECT panel = InfoPanelRect(rect);
   FillRoundRect(hdc, panel, 12, RGB(10, 11, 16));
+  HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(123, 108, 246));
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, border_pen));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+  RoundRect(hdc, panel.left, panel.top, panel.right, panel.bottom, 12, 12);
+  SelectObject(hdc, old_brush);
+  SelectObject(hdc, old_pen);
+  DeleteObject(border_pen);
   HFONT header_font = UiFont(11, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, L"STREAM INFO",
@@ -1020,13 +1061,30 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   }
 
   HDC paint_hdc = CreateCompatibleDC(hdc);
-  HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
+  void *bits = nullptr;
+  HBITMAP bitmap = Create32BitDIBSection(hdc, width, height, &bits);
   HBITMAP old_bitmap = static_cast<HBITMAP>(SelectObject(paint_hdc, bitmap));
 
-  FillRectColor(paint_hdc, rect, RGB(3, 4, 7));
+  ZeroMemory(bits, width * height * 4);
+  const RECT top = TopControlsRect(rect);
+  const RECT bottom = BottomControlsRect(rect);
+  const uint32_t bg_pixel = 0x33000000; // 20% opaque black
+  uint32_t *pixels = static_cast<uint32_t *>(bits);
+  for (int y = top.top; y < top.bottom; ++y) {
+    uint32_t *row = pixels + y * width;
+    for (int x = 0; x < width; ++x) {
+      row[x] = bg_pixel;
+    }
+  }
+  for (int y = bottom.top; y < bottom.bottom; ++y) {
+    uint32_t *row = pixels + y * width;
+    for (int x = 0; x < width; ++x) {
+      row[x] = bg_pixel;
+    }
+  }
+
   SetBkMode(paint_hdc, TRANSPARENT);
 
-  const RECT top = TopControlsRect(rect);
   const int top_cy = (top.top + top.bottom) / 2;
   DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
                  L"\xE72B");
@@ -1175,11 +1233,34 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   }
 
   PaintListMenu(paint_hdc, rect);
+  RECT info_panel_rect = {0};
   if (HasInfoPanel()) {
     PaintInfoPanel(paint_hdc, rect);
+    info_panel_rect = InfoPanelRect(rect);
   }
 
-  BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
+  const RECT top_bar = TopControlsRect(rect);
+  const RECT bottom_bar = BottomControlsRect(rect);
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, top_bar,
+                                     RGB(3, 4, 7), 0x1A);
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, bottom_bar,
+                                     RGB(3, 4, 7), 0x1A);
+  if (info_panel_rect.right > info_panel_rect.left &&
+      info_panel_rect.bottom > info_panel_rect.top) {
+    NormalizeNativeControlBitmapAlpha(pixels, width, height, info_panel_rect,
+                                       RGB(10, 11, 16), 0xFF);
+  }
+
+  HDC screen_dc = GetDC(nullptr);
+  SIZE size = {width, height};
+  POINT pt_src = {0, 0};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  if (!UpdateLayeredWindow(hwnd, screen_dc, nullptr, &size, paint_hdc,
+                           &pt_src, 0, &blend, ULW_ALPHA)) {
+    BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
+  }
+  ReleaseDC(nullptr, screen_dc);
+
   SelectObject(paint_hdc, old_bitmap);
   DeleteObject(bitmap);
   DeleteDC(paint_hdc);
@@ -1464,7 +1545,7 @@ void EnsureNativeControlsClass() {
   window_class.lpszClassName = kNativeControlsClassName;
   window_class.style = CS_HREDRAW | CS_VREDRAW;
   window_class.hInstance = GetModuleHandle(nullptr);
-  window_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  window_class.hbrBackground = nullptr;
   window_class.lpfnWndProc = NativeControlsWndProc;
   RegisterClass(&window_class);
   registered = true;
@@ -1680,7 +1761,7 @@ void FlutterWindow::CreateNativeControls() {
   }
   if (!native_controls_overlay_) {
     native_controls_overlay_ =
-        CreateWindowEx(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                        kNativeControlsClassName, L"", WS_POPUP, 0, 0, 1, 1,
                        parent, nullptr, GetModuleHandle(nullptr), nullptr);
     SetWindowLongPtr(native_controls_overlay_, GWLP_USERDATA,

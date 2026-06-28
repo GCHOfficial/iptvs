@@ -1364,6 +1364,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
           topButtonBar: _topBar(desktop: false),
+          backdropColor: Colors.black.withOpacity(0.20),
         ),
         fullscreen: MaterialVideoControlsThemeData(
           seekBarThumbColor: AppColors.accent,
@@ -1372,6 +1373,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
           topButtonBar: _topBar(desktop: false),
+          backdropColor: Colors.black.withOpacity(0.20),
         ),
         child: Video(controller: _controller!),
       ),
