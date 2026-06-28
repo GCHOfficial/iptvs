@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/app_database.dart';
 import '../data/library_repository.dart';
@@ -30,20 +31,48 @@ class _HomeShellState extends State<HomeShell> {
   List<MetadataProvider> _metadataProviders = const [];
   LibraryRepository? _repo;
   bool _loading = true;
+  bool Function(KeyEvent event)? _keyboardLogger;
 
   @override
   void initState() {
     super.initState();
+    assert(() {
+      _installKeyboardLogger();
+      return true;
+    }());
     _loadActive();
   }
 
   @override
   void dispose() {
+    if (_keyboardLogger case final logger?) {
+      HardwareKeyboard.instance.removeHandler(logger);
+      _keyboardLogger = null;
+    }
     _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();
     }
     super.dispose();
+  }
+
+  void _installKeyboardLogger() {
+    bool logger(KeyEvent event) {
+      final focus = FocusManager.instance.primaryFocus;
+      final focusLabel = focus?.debugLabel ?? focus?.context?.widget.runtimeType.toString() ?? 'none';
+      final keyLabel = event.logicalKey.keyLabel.isNotEmpty
+          ? event.logicalKey.keyLabel
+          : (event.logicalKey.debugName ?? event.logicalKey.keyId.toString());
+      debugPrint(
+        '[iptvs.keys] type=${event.runtimeType} logical=$keyLabel '
+        'physical=${event.physicalKey.debugName ?? event.physicalKey.usbHidUsage.toString()} '
+        'focus=$focusLabel',
+      );
+      return false;
+    }
+
+    _keyboardLogger = logger;
+    HardwareKeyboard.instance.addHandler(logger);
   }
 
   Future<void> _loadActive() async {
