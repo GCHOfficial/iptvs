@@ -86,18 +86,23 @@ that have the data, reusing their existing auth.
 - **Redaction:** all URLs/errors go through the providers' existing `redactUrl` /
   `redactStalkerDiagnostic`. No raw credential-bearing URL is ever logged — fixes the
   PR's `debugPrint('...$url')` violations.
-- **Date parsing:** extract the pure parser (`parseExpiryValue` + helpers) into a small
-  standalone module (`lib/sources/expiry.dart`) used by both `XtreamSource` and
-  `StalkerSource`. **Wire `_parseNamedMonthDate` into `parseExpiryValue`** (the author
-  intended it but never called it) so named dates actually parse — this both removes the
-  `unused_element` warning and makes the failing named-date test pass. Drop
-  `_parseNonIsoDate` if it remains genuinely unreachable after that.
+- **Date parsing:** extract the pure parser (`parseExpiryValue`) into a small standalone
+  module (`lib/sources/expiry.dart`) used by both `XtreamSource` and `StalkerSource`.
+  Keep only the formats these providers actually emit: **Unix timestamp** (seconds or
+  ms) and **ISO-8601 / `YYYY-MM-DD[ HH:MM:SS]`** (via `DateTime.tryParse` with a
+  `space→T` normalization). **Remove the speculative named-month parsing**
+  (`_parseNamedMonthDate`, `_parseNonIsoDate`, the named-month regex branch) and delete
+  `test/expiry_service_named_date_test.dart` — Xtream returns a Unix `exp_date` and
+  Stalker returns ISO-style dates, so "June 19, 2026" is a format neither provider
+  produces. This removes both the `unused_element` warnings and the failing test in one
+  stroke. (If implementation surfaces a real provider using another format, add it then,
+  with a test.)
 - **UI:** keep the PR's `_ExpiryBadge` in `sources_screen` (loading shimmer / date /
   "expired" / "unavailable" / "unknown" states). Build each source from its config and
-  call `subscriptionExpiry()`. **Trigger lazily** (not an automatic network fan-out to
-  every provider on every screen open); exact trigger (e.g. per-card on first
-  display, or a manual "check" affordance) settled in the implementation plan. Results
-  cached in screen state keyed by source id, pruned on delete, re-fetched on edit.
+  call `subscriptionExpiry()`. **Trigger: lazy per-card fetch on first display** — each
+  card fetches its own expiry when it first becomes visible, never an automatic fan-out
+  to every provider on screen open. Results cached in screen state keyed by source id,
+  pruned on delete, re-fetched on edit.
 
 **Testing:** the pure date parser is unit-tested, including the previously-failing
 `'June 19, 2026, 8:34 pm'` case. Provider methods use a fake/`DemoSource` default for the
@@ -111,9 +116,9 @@ that have the data, reusing their existing auth.
 - Next-programme **start–stop time labels** on the channel-list tile.
 - Player **title** now/next info — formatted as a clean time range (e.g.
   `20:00 – 21:00 · <title>`), carrying the same information the dropped overlay box did.
-- Live **EPG strip** enrichment: next-programme interval (`epg_next_stop_ms` plumbed
-  through to the Windows overlay so the strip shows the next slot's time range). This is
-  how we "make existing EPG info as informative without a separate box."
+- Live **EPG strip** enrichment: next-programme interval (`Next · HH:MM – HH:MM ·
+  <title>`) across **all three renderers** — see Cross-platform parity. This is how we
+  "make existing EPG info as informative without a separate box."
 - Control **backdrop** (`backdropColor` ~20% black) on the embedded controls.
 - **Restore-list-focus-after-playback** (channel_list_screen): on returning from the
   player, refocus the last-played item when still visible, else the first item — a real
@@ -149,6 +154,38 @@ that have the data, reusing their existing auth.
 
 ---
 
+---
+
+## Cross-platform parity (must hold for every change)
+
+The player overlay has **three renderers** that must stay in lockstep (CLAUDE.md: the
+Android Compose overlay is "at parity with the Windows overlay"): the embedded
+`media_kit` Flutter widgets, the Windows GDI overlay (`flutter_window.cpp`), and the
+Android Compose overlay (`android/.../player/`). The PR enriched only Windows + the
+embedded path and **left Android untouched** — this rework closes that gap.
+
+- **EPG strip — next-programme interval.** The enriched format is
+  `Next · HH:MM – HH:MM · <title>`, consistent across all three renderers and the
+  channel-list tile:
+  - Embedded Flutter (`player_screen` title / EPG line) — Dart.
+  - Windows GDI strip (`epg_next_stop_ms` already plumbed by the PR) — C++.
+  - **Android Compose `LiveEpgStrip`** (`PlayerControls.kt`) — currently renders
+    `Next · <title>` only; update it to include the time range. `epgNextStopMs` is
+    already passed over the MethodChannel and received as `EXTRA_EPG_NEXT_STOP`, so this
+    is render-only — **Kotlin change the PR missed.**
+- **Info panel — drop redundant Now/Next.** The PR removed the Now/Next rows from the
+  Windows native info panel (the strip already shows them). Mirror this in Android
+  `InfoPanel.kt` (the `state.epgNext?.let { add("Next" to it.title) }` row) for parity.
+- **Dropped overlay box** (`NowProgrammeOverlay`) only ever rendered on the embedded
+  Flutter path (Windows/Android draw native overlays on top), so removing it affects only
+  that path; the enriched title/line replaces it there.
+- **Expiry + M3U⇄Xtream** are pure Dart + HTTP through existing helpers — inherently
+  platform-agnostic; they work identically on Windows, Android (phone + TV), and desktop.
+- **Restore-list-focus-after-playback** is Flutter-level (`channel_list_screen`), so it
+  applies on every platform and TV remotes without per-platform work.
+- **Aspect/speed/focus reverts** restore the embedded-path controls; the native overlays
+  keep their own (unchanged) aspect/speed menus, which already match the restored lists.
+
 ## Out of scope / non-goals
 
 - No change to the playback resolution path, cloud sync, or database schema.
@@ -160,4 +197,7 @@ that have the data, reusing their existing auth.
 - `flutter analyze` reports **0 issues**.
 - `flutter test` is green (incl. the named-date and M3U⇄Xtream unit tests).
 - CI `analyze-test`, Windows build, and Android APK build all pass.
-- Maintainer visually verifies the Windows overlay alpha + D-pad nav on a Windows device.
+- EPG strip shows the next-programme time range identically on the embedded, Windows, and
+  Android overlays (cross-platform parity holds).
+- Maintainer visually verifies the Windows overlay alpha + D-pad nav on a Windows device,
+  and the enriched EPG strip on an Android TV device.
