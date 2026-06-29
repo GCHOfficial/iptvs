@@ -6,6 +6,7 @@ import '../data/cloud_config.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
+import '../sources/xtream_source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -531,7 +532,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     }
   }
 
-  void _save() {
+  Future<void> _save() async {
     final specs = _specs(_kind);
     for (final s in specs) {
       if (s.required && _controller(s.key).text.trim().isEmpty) {
@@ -545,15 +546,50 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       for (final s in specs) s.key: _controller(s.key).text.trim(),
     };
     final label = _label.text.trim().isEmpty ? _kind.name : _label.text.trim();
-    final config = SourceConfig(
+    var config = SourceConfig(
       id: widget.existing?.id ?? newSourceId(),
       kind: _kind,
       label: label,
       fields: fields,
     );
-    widget.store.save(config).then((_) {
-      if (mounted) Navigator.of(context).pop(true);
-    });
+    if (_kind == SourceKind.m3u) {
+      final converted = await _maybeConvertM3uToXtream(config);
+      if (converted != null) config = converted;
+    }
+    await widget.store.save(config);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  /// If the M3U playlist URL is really an Xtream panel (`get.php`) whose
+  /// `player_api.php` authenticates, return an equivalent Xtream config so the
+  /// user gets Movies/Series. Returns null to keep the source as a flat M3U.
+  Future<SourceConfig?> _maybeConvertM3uToXtream(SourceConfig m3u) async {
+    final uri = Uri.tryParse(m3u.fields['playlistUrl'] ?? '');
+    if (uri == null) return null;
+    final creds = xtreamCredentialsFromUrl(uri);
+    if (creds == null) return null;
+    final probe = XtreamSource(
+      host: creds.host,
+      username: creds.username,
+      password: creds.password,
+    );
+    try {
+      await probe.connect(); // player_api auth check; throws on failure
+    } catch (_) {
+      return null; // not a working Xtream panel → keep as M3U
+    } finally {
+      await probe.dispose();
+    }
+    return SourceConfig(
+      id: m3u.id,
+      kind: SourceKind.xtream,
+      label: m3u.label,
+      fields: {
+        'host': creds.host,
+        'username': creds.username,
+        'password': creds.password,
+      },
+    );
   }
 
   @override
