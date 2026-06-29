@@ -5,10 +5,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+#include <wingdi.h>
+#pragma comment(lib, "Msimg32.lib")
 
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
@@ -52,6 +55,22 @@ bool g_native_video_cursor_visible = true;
 POINT g_last_video_mouse{-1, -1};
 POINT g_last_controls_mouse{-1, -1};
 int g_native_menu_scroll_offset = 0;
+int g_native_focus_index = 0;
+
+enum class NativeFocusItem {
+  kBack,
+  kPlay,
+  kSeekBack,
+  kSeekForward,
+  kMute,
+  kSpeed,
+  kAudio,
+  kSubtitles,
+  kAspect,
+  kInfo,
+  kFullscreen,
+  kGoLive,
+};
 
 HWND NativeControlsOwner(HWND hwnd) {
   if (HWND owner = GetWindow(hwnd, GW_OWNER)) {
@@ -106,6 +125,7 @@ struct NativeControlState {
   std::wstring epg_now_desc;
   std::wstring epg_next_title;
   double epg_next_start_ms = 0.0;
+  double epg_next_stop_ms = 0.0;
 };
 
 NativeControlState g_native_control_state;
@@ -394,6 +414,45 @@ void FillRectColor(HDC hdc, const RECT &rect, COLORREF color) {
   DeleteObject(brush);
 }
 
+HBITMAP Create32BitDIBSection(HDC hdc, int width, int height, void **bits) {
+  BITMAPINFO bmi{};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = width;
+  bmi.bmiHeader.biHeight = -height;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  return CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
+void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
+                                       int width,
+                                       int height,
+                                       const RECT &rect,
+                                       COLORREF background_color,
+                                       BYTE background_alpha) {
+  const uint32_t background_rgb = (GetRValue(background_color)) |
+                                  (GetGValue(background_color) << 8) |
+                                  (GetBValue(background_color) << 16);
+  for (int y = rect.top; y < rect.bottom; ++y) {
+    uint32_t *row = pixels + (y * width);
+    for (int x = rect.left; x < rect.right; ++x) {
+      uint32_t &pixel = row[x];
+      const uint32_t rgb = pixel & 0x00FFFFFF;
+      uint32_t alpha = pixel >> 24;
+      if (rgb == background_rgb) {
+        alpha = background_alpha;
+      } else if (alpha == 0) {
+        alpha = 0xFF;
+      }
+      const uint32_t red = (GetRValue(pixel) * alpha + 127) / 255;
+      const uint32_t green = (GetGValue(pixel) * alpha + 127) / 255;
+      const uint32_t blue = (GetBValue(pixel) * alpha + 127) / 255;
+      pixel = (alpha << 24) | (blue << 16) | (green << 8) | red;
+    }
+  }
+}
+
 void FillRoundRect(HDC hdc, const RECT &rect, int radius, COLORREF color) {
   HBRUSH brush = CreateSolidBrush(color);
   HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
@@ -425,11 +484,14 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
   DeleteObject(icon_font);
 }
 
-void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label) {
-  FillRoundRect(hdc, rect, 12, RGB(18, 20, 28));
+void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label,
+                    bool active = false) {
+  const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
+  const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
+  FillRoundRect(hdc, rect, 12, bg);
   HFONT font = UiFont(13, FW_SEMIBOLD);
   DrawTextWithFont(hdc, label, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                   font, RGB(232, 235, 244));
+                   font, fg);
   DeleteObject(font);
 }
 
@@ -597,6 +659,103 @@ int MenuAnchorX(const BottomLayout &l) {
     return (l.speed.left + l.speed.right) / 2;
   default:
     return (l.fullscreen.left + l.fullscreen.right) / 2;
+  }
+}
+
+std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
+  std::vector<NativeFocusItem> out;
+  out.push_back(NativeFocusItem::kBack);
+  out.push_back(NativeFocusItem::kPlay);
+  if (l.has_seek) {
+    out.push_back(NativeFocusItem::kSeekBack);
+    out.push_back(NativeFocusItem::kSeekForward);
+  }
+  out.push_back(NativeFocusItem::kMute);
+  // Match visual order: LIVE is leftmost in the right cluster, before CC/audio,
+  // aspect, info, and fullscreen.
+  if (l.has_go_live) out.push_back(NativeFocusItem::kGoLive);
+  if (l.has_speed) out.push_back(NativeFocusItem::kSpeed);
+  if (l.has_audio) out.push_back(NativeFocusItem::kAudio);
+  if (l.has_subtitles) out.push_back(NativeFocusItem::kSubtitles);
+  out.push_back(NativeFocusItem::kAspect);
+  out.push_back(NativeFocusItem::kInfo);
+  out.push_back(NativeFocusItem::kFullscreen);
+  return out;
+}
+
+std::string CommandForFocusedItem(NativeFocusItem item) {
+  switch (item) {
+  case NativeFocusItem::kBack:
+    return "back";
+  case NativeFocusItem::kPlay:
+    return "playPause";
+  case NativeFocusItem::kSeekBack:
+    return "seekBack";
+  case NativeFocusItem::kSeekForward:
+    return "seekForward";
+  case NativeFocusItem::kMute:
+    return "muteToggle";
+  case NativeFocusItem::kSpeed:
+    return "menu:speed";
+  case NativeFocusItem::kAudio:
+    return "menu:audio";
+  case NativeFocusItem::kSubtitles:
+    return "menu:subtitles";
+  case NativeFocusItem::kAspect:
+    return "aspect";
+  case NativeFocusItem::kInfo:
+    return "info";
+  case NativeFocusItem::kFullscreen:
+    return "fullscreen";
+  case NativeFocusItem::kGoLive:
+    return "goLive";
+  }
+  return "show";
+}
+
+void EnsureSelectedMenuVisible();
+
+void ApplyOverlayOwnedCommand(HWND controls_hwnd,
+                              HWND owner_hwnd,
+                              const std::string &command) {
+  if (command.rfind("menu:", 0) == 0) {
+    const NativeMenuKind kind = command == "menu:audio"
+                                    ? NativeMenuKind::kAudio
+                                : command == "menu:subtitles"
+                                    ? NativeMenuKind::kSubtitles
+                                : command == "menu:speed"
+                                    ? NativeMenuKind::kSpeed
+                                    : NativeMenuKind::kNone;
+    if (g_native_control_state.open_menu == kind) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
+    } else {
+      g_native_control_state.open_menu = kind;
+      g_native_control_state.info_open = false;
+      g_native_menu_scroll_offset = 0;
+      EnsureSelectedMenuVisible();
+    }
+    if (owner_hwnd) {
+      KillTimer(owner_hwnd, kNativeControlsHideTimer);
+      PostMessage(owner_hwnd, kNativeControlsLayoutMessage, 0, 0);
+    }
+    if (controls_hwnd) {
+      InvalidateRect(controls_hwnd, nullptr, FALSE);
+    }
+    return;
+  }
+
+  if (command == "info") {
+    g_native_control_state.info_open = !g_native_control_state.info_open;
+    if (g_native_control_state.info_open) {
+      g_native_control_state.open_menu = NativeMenuKind::kNone;
+    }
+    if (owner_hwnd) {
+      KillTimer(owner_hwnd, kNativeControlsHideTimer);
+      PostMessage(owner_hwnd, kNativeControlsLayoutMessage, 0, 0);
+    }
+    if (controls_hwnd) {
+      InvalidateRect(controls_hwnd, nullptr, FALSE);
+    }
   }
 }
 
@@ -788,14 +947,6 @@ std::wstring TruncateBadge(const std::wstring &text, size_t max_len) {
 std::vector<std::pair<std::wstring, std::wstring>> InfoRows() {
   std::vector<std::pair<std::wstring, std::wstring>> rows;
   const auto &s = g_native_control_state;
-  if (s.is_live) {
-    if (!s.epg_now_title.empty()) {
-      rows.push_back({L"Now", s.epg_now_title});
-    }
-    if (!s.epg_next_title.empty()) {
-      rows.push_back({L"Next", s.epg_next_title});
-    }
-  }
   if (s.video_width > 0 && s.video_height > 0) {
     rows.push_back({L"Resolution", std::to_wstring(s.video_width) + L"×" +
                                        std::to_wstring(s.video_height)});
@@ -901,6 +1052,13 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
   }
   const RECT panel = InfoPanelRect(rect);
   FillRoundRect(hdc, panel, 12, RGB(10, 11, 16));
+  HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(123, 108, 246));
+  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, border_pen));
+  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+  RoundRect(hdc, panel.left, panel.top, panel.right, panel.bottom, 12, 12);
+  SelectObject(hdc, old_brush);
+  SelectObject(hdc, old_pen);
+  DeleteObject(border_pen);
   HFONT header_font = UiFont(11, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, L"STREAM INFO",
@@ -1019,16 +1177,46 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   }
 
   HDC paint_hdc = CreateCompatibleDC(hdc);
-  HBITMAP bitmap = CreateCompatibleBitmap(hdc, width, height);
+  void *bits = nullptr;
+  HBITMAP bitmap = Create32BitDIBSection(hdc, width, height, &bits);
   HBITMAP old_bitmap = static_cast<HBITMAP>(SelectObject(paint_hdc, bitmap));
 
-  FillRectColor(paint_hdc, rect, RGB(3, 4, 7));
+  ZeroMemory(bits, width * height * 4);
+  const RECT top = TopControlsRect(rect);
+  const RECT bottom = BottomControlsRect(rect);
+  const uint32_t bg_pixel = 0x33000000; // 20% opaque black
+  uint32_t *pixels = static_cast<uint32_t *>(bits);
+  for (int y = top.top; y < top.bottom; ++y) {
+    uint32_t *row = pixels + y * width;
+    for (int x = 0; x < width; ++x) {
+      row[x] = bg_pixel;
+    }
+  }
+  for (int y = bottom.top; y < bottom.bottom; ++y) {
+    uint32_t *row = pixels + y * width;
+    for (int x = 0; x < width; ++x) {
+      row[x] = bg_pixel;
+    }
+  }
+
   SetBkMode(paint_hdc, TRANSPARENT);
 
-  const RECT top = TopControlsRect(rect);
+  const BottomLayout l = ComputeBottomLayout(rect);
+  const auto focusables = FocusableItems(l);
+  if (!focusables.empty()) {
+    g_native_focus_index =
+        std::clamp(g_native_focus_index, 0,
+                   static_cast<int>(focusables.size()) - 1);
+  } else {
+    g_native_focus_index = 0;
+  }
+  const auto is_focused = [&](NativeFocusItem item) {
+    return !focusables.empty() && focusables[g_native_focus_index] == item;
+  };
+
   const int top_cy = (top.top + top.bottom) / 2;
   DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
-                 L"\xE72B");
+                 L"\xE72B", is_focused(NativeFocusItem::kBack));
 
   // Top-right badges, stacked leftward: clock, LIVE, dynamic range, resolution,
   // fps, then source name.
@@ -1082,15 +1270,19 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                    title_font, RGB(246, 247, 251));
   DeleteObject(title_font);
 
-  const BottomLayout l = ComputeBottomLayout(rect);
-  DrawIconButton(paint_hdc, l.play,
-                 g_native_control_state.playing ? L"\xE769" : L"\xE768", true);
+  DrawIconButton(
+      paint_hdc, l.play,
+      g_native_control_state.playing ? L"\xE769" : L"\xE768",
+      is_focused(NativeFocusItem::kPlay));
   if (l.has_seek) {
-    DrawTextButton(paint_hdc, l.seek_back, L"-10");
-    DrawTextButton(paint_hdc, l.seek_forward, L"+10");
+    DrawTextButton(paint_hdc, l.seek_back, L"-10",
+                   is_focused(NativeFocusItem::kSeekBack));
+    DrawTextButton(paint_hdc, l.seek_forward, L"+10",
+                   is_focused(NativeFocusItem::kSeekForward));
   }
   DrawIconButton(paint_hdc, l.mute,
-                 g_native_control_state.volume <= 0 ? L"\xE74F" : L"\xE767");
+                 g_native_control_state.volume <= 0 ? L"\xE74F" : L"\xE767",
+                 is_focused(NativeFocusItem::kMute));
   DrawSlider(paint_hdc, l.volume,
              std::clamp(g_native_control_state.volume / 100.0, 0.0, 1.0), 5);
 
@@ -1116,7 +1308,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DrawTextWithFont(paint_hdc, s.epg_now_title, l.epg_title,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                      epg_title_font, RGB(238, 240, 247));
-    HFONT epg_meta_font = UiFont(12, FW_SEMIBOLD);
+    HFONT epg_meta_font = UiFont(14, FW_SEMIBOLD);
     const std::wstring range = FormatClockHm(s.epg_now_start_ms) + L" – " +
                                FormatClockHm(s.epg_now_stop_ms);
     DrawTextWithFont(paint_hdc, range, l.epg_time,
@@ -1137,7 +1329,11 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
                   RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
-      DrawTextWithFont(paint_hdc, L"Next · " + s.epg_next_title, l.epg_next,
+      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" - " +
+                                      FormatClockHm(s.epg_next_stop_ms);
+      DrawTextWithFont(paint_hdc,
+                       L"Next: " + s.epg_next_title + L" (" + next_range + L")",
+                       l.epg_next,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                        epg_meta_font, RGB(184, 190, 204));
     }
@@ -1147,34 +1343,73 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
 
   if (l.has_speed) {
     DrawTextButton(paint_hdc, l.speed,
-                   ShortSpeed(g_native_control_state.selected_speed_id));
+                   ShortSpeed(g_native_control_state.selected_speed_id),
+                   is_focused(NativeFocusItem::kSpeed));
   }
   if (l.has_audio) {
     DrawIconButton(paint_hdc, l.audio, L"\xE8D6",
-                   g_native_control_state.open_menu == NativeMenuKind::kAudio);
+                   is_focused(NativeFocusItem::kAudio) ||
+                       g_native_control_state.open_menu == NativeMenuKind::kAudio);
   }
   if (l.has_subtitles) {
     DrawIconButton(
         paint_hdc, l.subtitles, L"\xE190",
-        g_native_control_state.open_menu == NativeMenuKind::kSubtitles);
+        is_focused(NativeFocusItem::kSubtitles) ||
+            g_native_control_state.open_menu == NativeMenuKind::kSubtitles);
   }
   DrawTextButton(paint_hdc, l.aspect,
                  g_native_control_state.aspect_label.empty()
                      ? L"Fit"
-                     : g_native_control_state.aspect_label);
-  DrawIconButton(paint_hdc, l.info, L"\xE946", g_native_control_state.info_open);
+                     : g_native_control_state.aspect_label,
+                 is_focused(NativeFocusItem::kAspect));
+  DrawIconButton(paint_hdc, l.info, L"\xE946",
+                 is_focused(NativeFocusItem::kInfo) ||
+                     g_native_control_state.info_open);
   DrawIconButton(paint_hdc, l.fullscreen,
-                 g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740");
+                 g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740",
+                 is_focused(NativeFocusItem::kFullscreen));
   if (l.has_go_live) {
-    DrawTextButton(paint_hdc, l.go_live, L"LIVE");
+    DrawTextButton(paint_hdc, l.go_live, L"LIVE",
+                   is_focused(NativeFocusItem::kGoLive));
   }
 
   PaintListMenu(paint_hdc, rect);
+  RECT info_panel_rect = {0};
   if (HasInfoPanel()) {
     PaintInfoPanel(paint_hdc, rect);
+    info_panel_rect = InfoPanelRect(rect);
   }
 
-  BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
+  const RECT top_bar = TopControlsRect(rect);
+  const RECT bottom_bar = BottomControlsRect(rect);
+  // Normalize top/bottom bar alpha to match the 20% backdrop used in Dart.
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, top_bar,
+                                     RGB(3, 4, 7), 0x33);
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, bottom_bar,
+                                     RGB(3, 4, 7), 0x33);
+  // If a menu is open (audio/subtitles/speed), make its background
+  // semi-opaque (~40%) so the menu is easier to read.
+  RECT menu_rect = CurrentMenuRect(rect);
+  if (menu_rect.right > menu_rect.left && menu_rect.bottom > menu_rect.top) {
+    NormalizeNativeControlBitmapAlpha(pixels, width, height, menu_rect,
+                                       RGB(8, 9, 14), 0x66);
+  }
+  if (info_panel_rect.right > info_panel_rect.left &&
+      info_panel_rect.bottom > info_panel_rect.top) {
+    NormalizeNativeControlBitmapAlpha(pixels, width, height, info_panel_rect,
+                                       RGB(10, 11, 16), 0xFF);
+  }
+
+  HDC screen_dc = GetDC(nullptr);
+  SIZE size = {width, height};
+  POINT pt_src = {0, 0};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  if (!UpdateLayeredWindow(hwnd, screen_dc, nullptr, &size, paint_hdc,
+                           &pt_src, 0, &blend, ULW_ALPHA)) {
+    BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
+  }
+  ReleaseDC(nullptr, screen_dc);
+
   SelectObject(paint_hdc, old_bitmap);
   DeleteObject(bitmap);
   DeleteDC(paint_hdc);
@@ -1295,6 +1530,16 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     break;
   case WM_MOUSEACTIVATE:
     return MA_NOACTIVATE;
+  case WM_KEYDOWN:
+  case WM_KEYUP:
+  case WM_SYSKEYDOWN:
+  case WM_SYSKEYUP:
+    if (HWND parent = NativeControlsOwner(hwnd)) {
+      PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+      PostMessage(parent, message, wparam, lparam);
+      return 0;
+    }
+    break;
   case WM_MOUSEMOVE:
     if (!HasPointerMoved(lparam, &g_last_controls_mouse)) {
       return 0;
@@ -1313,39 +1558,8 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
         hwnd, control_kind, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
     // Menu open/close and the info panel are owned entirely by the overlay; they
     // don't round-trip to Dart (the option lists arrive via setControlState).
-    if (command.rfind("menu:", 0) == 0) {
-      const NativeMenuKind kind = command == "menu:audio"
-                                      ? NativeMenuKind::kAudio
-                                  : command == "menu:subtitles"
-                                      ? NativeMenuKind::kSubtitles
-                                  : command == "menu:speed"
-                                      ? NativeMenuKind::kSpeed
-                                      : NativeMenuKind::kNone;
-      if (g_native_control_state.open_menu == kind) {
-        g_native_control_state.open_menu = NativeMenuKind::kNone;
-      } else {
-        g_native_control_state.open_menu = kind;
-        g_native_control_state.info_open = false;
-        g_native_menu_scroll_offset = 0;
-        EnsureSelectedMenuVisible();
-      }
-      if (HWND parent = NativeControlsOwner(hwnd)) {
-        KillTimer(parent, kNativeControlsHideTimer);
-        PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
-      }
-      InvalidateRect(hwnd, nullptr, FALSE);
-      return 0;
-    }
-    if (command == "info") {
-      g_native_control_state.info_open = !g_native_control_state.info_open;
-      if (g_native_control_state.info_open) {
-        g_native_control_state.open_menu = NativeMenuKind::kNone;
-      }
-      if (HWND parent = NativeControlsOwner(hwnd)) {
-        KillTimer(parent, kNativeControlsHideTimer);
-        PostMessage(parent, kNativeControlsLayoutMessage, 0, 0);
-      }
-      InvalidateRect(hwnd, nullptr, FALSE);
+    ApplyOverlayOwnedCommand(hwnd, NativeControlsOwner(hwnd), command);
+    if (command.rfind("menu:", 0) == 0 || command == "info") {
       return 0;
     }
     if (command.rfind("audioTrack:", 0) == 0 ||
@@ -1459,7 +1673,7 @@ void EnsureNativeControlsClass() {
   window_class.lpszClassName = kNativeControlsClassName;
   window_class.style = CS_HREDRAW | CS_VREDRAW;
   window_class.hInstance = GetModuleHandle(nullptr);
-  window_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  window_class.hbrBackground = nullptr;
   window_class.lpfnWndProc = NativeControlsWndProc;
   RegisterClass(&window_class);
   registered = true;
@@ -1513,6 +1727,111 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_KEYDOWN && native_video_surface_ != nullptr) {
+    if (wparam == VK_ESCAPE) {
+      ShowNativeControls(true);
+      NotifyNativeControlCommand("back");
+      return 0;
+    }
+
+    const bool is_activate =
+        wparam == VK_RETURN || wparam == VK_SPACE || wparam == VK_SELECT;
+    const bool is_nav = wparam == VK_LEFT || wparam == VK_RIGHT ||
+                        wparam == VK_UP || wparam == VK_DOWN;
+    if (is_activate || is_nav) {
+      const bool was_controls_visible = native_controls_visible_;
+      ShowNativeControls(true);
+      ScheduleNativeControlsHide();
+
+      // First OK/Enter press only reveals HUD; activation happens on the next
+      // press after the user has moved focus.
+      if (is_activate && !was_controls_visible) {
+        InvalidateNativeControls();
+        return 0;
+      }
+
+      RECT rect;
+      GetClientRect(hwnd, &rect);
+      const BottomLayout l = ComputeBottomLayout(rect);
+      const auto focusables = FocusableItems(l);
+      if (!focusables.empty()) {
+        g_native_focus_index = std::clamp(g_native_focus_index, 0,
+                                          static_cast<int>(focusables.size()) -
+                                              1);
+        const auto focus_index_of = [&](NativeFocusItem item) {
+          auto it = std::find(focusables.begin(), focusables.end(), item);
+          if (it == focusables.end()) return -1;
+          return static_cast<int>(it - focusables.begin());
+        };
+
+        if (is_nav) {
+          if (wparam == VK_UP) {
+            const int back_index = focus_index_of(NativeFocusItem::kBack);
+            if (back_index >= 0) g_native_focus_index = back_index;
+          } else if (wparam == VK_DOWN) {
+            if (focusables[g_native_focus_index] == NativeFocusItem::kBack) {
+              const int play_index = focus_index_of(NativeFocusItem::kPlay);
+              if (play_index >= 0) g_native_focus_index = play_index;
+            }
+          } else {
+            std::vector<int> bottom_indices;
+            for (int i = 0; i < static_cast<int>(focusables.size()); ++i) {
+              if (focusables[i] != NativeFocusItem::kBack) {
+                bottom_indices.push_back(i);
+              }
+            }
+            if (!bottom_indices.empty()) {
+              if (focusables[g_native_focus_index] == NativeFocusItem::kBack) {
+                g_native_focus_index = (wparam == VK_LEFT)
+                    ? bottom_indices.back()
+                    : bottom_indices.front();
+              } else {
+                int current_bottom_pos = 0;
+                for (int i = 0; i < static_cast<int>(bottom_indices.size()); ++i) {
+                  if (bottom_indices[i] == g_native_focus_index) {
+                    current_bottom_pos = i;
+                    break;
+                  }
+                }
+                const int dir = (wparam == VK_LEFT) ? -1 : 1;
+                const int count = static_cast<int>(bottom_indices.size());
+                current_bottom_pos = (current_bottom_pos + dir + count) % count;
+                g_native_focus_index = bottom_indices[current_bottom_pos];
+              }
+            }
+          }
+          InvalidateNativeControls();
+          return 0;
+        }
+
+        if (!native_controls_visible_) {
+          InvalidateNativeControls();
+          return 0;
+        }
+
+        const std::string command =
+            CommandForFocusedItem(focusables[g_native_focus_index]);
+        ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, command);
+        if (command.rfind("menu:", 0) == 0 || command == "info") {
+          InvalidateNativeControls();
+          return 0;
+        }
+        const bool pauses_playback =
+            command == "playPause" && g_native_control_state.playing;
+        const bool fullscreen_toggle = command == "fullscreen";
+        if (fullscreen_toggle) {
+          native_controls_pinned_ = true;
+        }
+        NotifyNativeControlCommand(command);
+        if (pauses_playback || fullscreen_toggle) {
+          KillTimer(hwnd, kNativeControlsHideTimer);
+        }
+        InvalidateNativeControls();
+        return 0;
+      }
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -1610,6 +1929,7 @@ HWND FlutterWindow::CreateNativeVideoSurface() {
     ShowWindow(native_video_surface_, SW_SHOW);
     SetWindowPos(native_video_surface_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetFocus(native_video_surface_);
     CreateNativeControls();
     return native_video_surface_;
   }
@@ -1625,9 +1945,7 @@ HWND FlutterWindow::CreateNativeVideoSurface() {
   if (native_video_surface_) {
     SetWindowPos(native_video_surface_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (flutter_controller_ && flutter_controller_->view()) {
-      SetFocus(flutter_controller_->view()->GetNativeWindow());
-    }
+    SetFocus(native_video_surface_);
   }
   CreateNativeControls();
   return native_video_surface_;
@@ -1675,7 +1993,7 @@ void FlutterWindow::CreateNativeControls() {
   }
   if (!native_controls_overlay_) {
     native_controls_overlay_ =
-        CreateWindowEx(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        CreateWindowEx(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                        kNativeControlsClassName, L"", WS_POPUP, 0, 0, 1, 1,
                        parent, nullptr, GetModuleHandle(nullptr), nullptr);
     SetWindowLongPtr(native_controls_overlay_, GWLP_USERDATA,
@@ -1823,6 +2141,12 @@ void FlutterWindow::ShowNativeControls(bool visible) {
     }
     g_last_controls_mouse = {-1, -1};
   }
+
+  // Keep keyboard focus on the native video surface while native playback is
+  // active, so D-pad / keyboard input always routes through the native handler.
+  if (native_video_surface_ && GetFocus() != native_video_surface_) {
+    SetFocus(native_video_surface_);
+  }
 }
 
 void FlutterWindow::ApplyNativeControlsVisibility() {
@@ -1944,6 +2268,8 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableStringArg(args, "epgNextTitle", L"");
   g_native_control_state.epg_next_start_ms =
       EncodableDoubleArg(args, "epgNextStartMs", 0.0);
+  g_native_control_state.epg_next_stop_ms =
+      EncodableDoubleArg(args, "epgNextStopMs", 0.0);
 
   if (BottomControlsHeight() != prev_bottom_height) {
     native_controls_region_dirty_ = true;
