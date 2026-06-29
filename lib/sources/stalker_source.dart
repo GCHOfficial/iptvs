@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
+import 'expiry.dart';
 import 'source.dart';
 
 /// A MAG set-top-box profile emulated to the portal.
@@ -675,6 +676,28 @@ class StalkerSource implements Source {
     final secs = v is int ? v : int.tryParse('$v');
     if (secs == null || secs == 0) return null;
     return DateTime.fromMillisecondsSinceEpoch(secs * 1000);
+  }
+
+  @override
+  Future<DateTime?> subscriptionExpiry() async {
+    final r = await _call({'type': 'account_info', 'action': 'get_main_info'});
+    final js = r['js'];
+    if (js is! Map) return null;
+    for (final key in const [
+      'end_date',
+      'expire_billing_date',
+      'subscription_expire',
+      'exp_date',
+    ]) {
+      final parsed = parseExpiryValue(js[key]);
+      if (parsed != null) return parsed;
+    }
+    final tariff = js['tariff'];
+    if (tariff is Map) {
+      final parsed = parseExpiryValue(tariff['expire_date']);
+      if (parsed != null) return parsed;
+    }
+    return null;
   }
 
   @override

@@ -203,5 +203,8 @@ class DemoSource implements Source {
   }
 
   @override
+  Future<DateTime?> subscriptionExpiry() async => null;
+
+  @override
   Future<void> dispose() async {}
 }

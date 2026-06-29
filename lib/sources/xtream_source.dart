@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../data/net.dart';
+import 'expiry.dart';
 import 'source.dart';
 import 'xmltv.dart';
 
@@ -292,6 +293,14 @@ class XtreamSource implements Source {
       headers: {HttpHeaders.userAgentHeader: 'VLC/3.0.20 LibVLC/3.0.20'},
       isLive: false,
     );
+  }
+
+  @override
+  Future<DateTime?> subscriptionExpiry() async {
+    final info = await _api({});
+    final user = info is Map ? info['user_info'] : null;
+    if (user is! Map) return null;
+    return parseExpiryValue(user['exp_date']);
   }
 
   @override

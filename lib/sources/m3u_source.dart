@@ -118,6 +118,9 @@ class M3uSource implements Source {
       throw UnsupportedError('M3U source only exposes playlist channels');
 
   @override
+  Future<DateTime?> subscriptionExpiry() async => null;
+
+  @override
   Future<void> dispose() async => _http.close(force: true);
 
   // ── parsing ────────────────────────────────────────────────────────────
