@@ -64,6 +64,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
   final ScrollController _scrollController = ScrollController();
+  final FocusNode _firstChannelFocusNode = FocusNode();
+  final FocusNode _lastPlayedLiveChannelFocusNode = FocusNode();
+  String? _lastPlayedLiveChannelId;
+  final Map<ContentKind, FocusNode> _firstMediaFocusNodes = {
+    ContentKind.movie: FocusNode(),
+    ContentKind.series: FocusNode(),
+  };
+  final Map<ContentKind, String?> _lastPlayedMediaId = {
+    ContentKind.movie: null,
+    ContentKind.series: null,
+  };
 
   @override
   void initState() {
@@ -79,9 +90,36 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void dispose() {
     _epgTimer?.cancel();
     _searchTimer?.cancel();
+    _firstChannelFocusNode.dispose();
+    _lastPlayedLiveChannelFocusNode.dispose();
+    for (final node in _firstMediaFocusNodes.values) {
+      node.dispose();
+    }
     _searchController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _restoreListFocusAfterPlayback() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_tab == ContentKind.live) {
+        if (_visible.isEmpty) return;
+        final targetId = _lastPlayedLiveChannelId;
+        final hasTarget =
+            targetId != null && _visible.any((channel) => channel.id == targetId);
+        if (hasTarget) {
+          _lastPlayedLiveChannelFocusNode.requestFocus();
+        } else {
+          _firstChannelFocusNode.requestFocus();
+        }
+        return;
+      }
+      if (_tab == ContentKind.movie || _tab == ContentKind.series) {
+        if (_visibleMedia(_tab).isEmpty) return;
+        _firstMediaFocusNodes[_tab]?.requestFocus();
+      }
+    });
   }
 
   Future<void> _load({bool forceRefresh = false}) async {
@@ -376,6 +414,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       );
       final stream = await widget.repo.resolve(channel);
       if (!mounted) return;
+      _lastPlayedLiveChannelId = channel.id;
       await navigator.push(
         MaterialPageRoute(
           builder: (_) => PlayerScreen(
@@ -387,6 +426,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           ),
         ),
       );
+      _restoreListFocusAfterPlayback();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
     } finally {
@@ -430,6 +470,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       );
       final stream = await widget.repo.resolveMedia(item);
       if (!mounted) return;
+      if (_tab == ContentKind.movie || _tab == ContentKind.series) {
+        _lastPlayedMediaId[_tab] = item.id;
+      }
       await navigator.push(
         MaterialPageRoute(
           builder: (_) => PlayerScreen(
@@ -439,6 +482,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           ),
         ),
       );
+      _restoreListFocusAfterPlayback();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
     } finally {
@@ -759,7 +803,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           now: _now[c.id],
           next: _next[c.id],
           enabled: !_resolving,
-          autofocus: i == 0,
+          autofocus: _lastPlayedLiveChannelId == null
+              ? i == 0
+              : c.id == _lastPlayedLiveChannelId,
+          focusNode: c.id == _lastPlayedLiveChannelId
+              ? _lastPlayedLiveChannelFocusNode
+              : i == 0
+              ? _firstChannelFocusNode
+              : null,
           onTap: () => _play(c),
         );
       },
@@ -808,6 +859,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 860;
+        final lastPlayedId = _lastPlayedMediaId[kind];
+        final hasLastVisible =
+            lastPlayedId != null &&
+            visible.any((media) => media.id == lastPlayedId);
         if (!wide) {
           return ListView.builder(
             controller: _scrollController,
@@ -824,7 +879,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               }
               return _MediaListTile(
                 item: visible[i],
-                autofocus: i == 0,
+                autofocus: hasLastVisible
+                    ? visible[i].id == lastPlayedId
+                    : i == 0,
+                focusNode: hasLastVisible
+                    ? (visible[i].id == lastPlayedId
+                          ? _firstMediaFocusNodes[kind]
+                          : null)
+                    : (i == 0 ? _firstMediaFocusNodes[kind] : null),
                 onTap: () => _openMedia(visible[i]),
               );
             },
@@ -852,7 +914,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             }
             return _MediaGridTile(
               item: visible[i],
-              autofocus: i == 0,
+              autofocus: hasLastVisible
+                  ? visible[i].id == lastPlayedId
+                  : i == 0,
+              focusNode: hasLastVisible
+                  ? (visible[i].id == lastPlayedId
+                        ? _firstMediaFocusNodes[kind]
+                        : null)
+                  : (i == 0 ? _firstMediaFocusNodes[kind] : null),
               onTap: () => _openMedia(visible[i]),
             );
           },
@@ -1143,6 +1212,7 @@ class _ChannelTile extends StatelessWidget {
   final Programme? next;
   final bool enabled;
   final bool autofocus;
+  final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _ChannelTile({
@@ -1151,8 +1221,12 @@ class _ChannelTile extends StatelessWidget {
     required this.next,
     required this.enabled,
     required this.autofocus,
+    this.focusNode,
     required this.onTap,
   });
+
+  static String _hm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
@@ -1166,6 +1240,7 @@ class _ChannelTile extends StatelessWidget {
 
     return FocusableCard(
       autofocus: autofocus,
+      focusNode: focusNode,
       scrollOnFocus: false,
       onTap: onTap,
       child: Padding(
@@ -1187,22 +1262,11 @@ class _ChannelTile extends StatelessWidget {
                   ),
                   if (current != null) ...[
                     const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const _LivePill(),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            current.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: AppColors.textLo,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ],
+                    Text(
+                      'Live · ${_hm(current.start)} – ${_hm(current.stop)} · ${current.title}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: AppColors.textLo, fontSize: 12),
                     ),
                     const SizedBox(height: 8),
                     ClipRRect(
@@ -1216,13 +1280,10 @@ class _ChannelTile extends StatelessWidget {
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
-                          'Next · ${next!.title}',
+                          'Next · ${_hm(next!.start)} – ${_hm(next!.stop)} · ${next!.title}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 12,
-                          ),
+                          style: const TextStyle(color: AppColors.textLo, fontSize: 12),
                         ),
                       ),
                   ],
@@ -1319,44 +1380,6 @@ class _LogoState extends State<_Logo> {
 int _imageCacheSize(BuildContext context, double logicalSize) {
   final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
   return (logicalSize * dpr).round();
-}
-
-class _LivePill extends StatelessWidget {
-  const _LivePill();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: AppColors.live.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: const BoxDecoration(
-              color: AppColors.live,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 4),
-          const Text(
-            'LIVE',
-            style: TextStyle(
-              color: AppColors.live,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// The bordered shell shared by the category dropdowns. Reflects the focus of
@@ -1517,11 +1540,13 @@ class _MediaCategoryDropdown extends StatelessWidget {
 class _MediaListTile extends StatelessWidget {
   final MediaItem item;
   final bool autofocus;
+  final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _MediaListTile({
     required this.item,
     required this.autofocus,
+    this.focusNode,
     required this.onTap,
   });
 
@@ -1529,6 +1554,7 @@ class _MediaListTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return FocusableCard(
       autofocus: autofocus,
+      focusNode: focusNode,
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1604,11 +1630,13 @@ class _MediaListTile extends StatelessWidget {
 class _MediaGridTile extends StatelessWidget {
   final MediaItem item;
   final bool autofocus;
+  final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _MediaGridTile({
     required this.item,
     required this.autofocus,
+    this.focusNode,
     required this.onTap,
   });
 
@@ -1616,6 +1644,7 @@ class _MediaGridTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return FocusableCard(
       autofocus: autofocus,
+      focusNode: focusNode,
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(10),
