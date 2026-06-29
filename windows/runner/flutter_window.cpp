@@ -431,9 +431,9 @@ void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
                                        const RECT &rect,
                                        COLORREF background_color,
                                        BYTE background_alpha) {
-  const uint32_t background_rgb = (GetRValue(background_color)) |
+  const uint32_t background_rgb = (GetBValue(background_color)) |
                                   (GetGValue(background_color) << 8) |
-                                  (GetBValue(background_color) << 16);
+                                  (GetRValue(background_color) << 16);
   for (int y = rect.top; y < rect.bottom; ++y) {
     uint32_t *row = pixels + (y * width);
     for (int x = rect.left; x < rect.right; ++x) {
