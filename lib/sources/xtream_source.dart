@@ -543,3 +543,43 @@ class XtreamSource implements Source {
     return null;
   }
 }
+
+/// Credentials extracted from a URL that points at an Xtream Codes panel
+/// (typically a `get.php` playlist link). [host] is `scheme://host[:port]`.
+class XtreamCredentials {
+  final String host;
+  final String username;
+  final String password;
+  const XtreamCredentials({
+    required this.host,
+    required this.username,
+    required this.password,
+  });
+}
+
+/// Pulls Xtream credentials out of [uri] when it looks like a panel link —
+/// either `http://user:pass@host/...` or `?username=…&password=…`. Returns
+/// null when host/username/password aren't all present.
+XtreamCredentials? xtreamCredentialsFromUrl(Uri uri) {
+  String? username;
+  String? password;
+  if (uri.userInfo.isNotEmpty) {
+    final parts = uri.userInfo.split(':');
+    if (parts.length >= 2) {
+      username = parts[0];
+      password = parts.sublist(1).join(':');
+    }
+  }
+  username ??= uri.queryParameters['username'];
+  password ??= uri.queryParameters['password'];
+  if (username == null ||
+      username.isEmpty ||
+      password == null ||
+      password.isEmpty) {
+    return null;
+  }
+  if (uri.host.isEmpty) return null;
+  final scheme = uri.scheme.isEmpty ? 'http' : uri.scheme;
+  final host = '$scheme://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+  return XtreamCredentials(host: host, username: username, password: password);
+}
