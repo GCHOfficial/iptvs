@@ -269,6 +269,51 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
+  DateTime? _expiry;
+  bool _expiryLoading = true;
+  bool _expiryFailed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchExpiry();
+  }
+
+  Future<void> _fetchExpiry() async {
+    if (mounted) {
+      setState(() {
+        _expiryLoading = true;
+        _expiryFailed = false;
+      });
+    }
+    final source = widget.config.build();
+    try {
+      final value = await source.subscriptionExpiry();
+      if (!mounted) return;
+      setState(() {
+        _expiry = value;
+        _expiryLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _expiryFailed = true;
+        _expiryLoading = false;
+      });
+    } finally {
+      await source.dispose();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _SourceCard old) {
+    super.didUpdateWidget(old);
+    if (old.config.fields.toString() != widget.config.fields.toString() ||
+        old.config.kind != widget.config.kind) {
+      _fetchExpiry();
+    }
+  }
+
   @override
   void dispose() {
     _upNode.dispose();
@@ -382,6 +427,12 @@ class _SourceCardState extends State<_SourceCard> {
                         fontSize: 12,
                       ),
                     ),
+                    const SizedBox(height: 6),
+                    _ExpiryBadge(
+                      loading: _expiryLoading,
+                      failed: _expiryFailed,
+                      expiry: _expiry,
+                    ),
                   ],
                 ),
               ),
@@ -427,6 +478,55 @@ class _SourceCardState extends State<_SourceCard> {
       ),
     );
   }
+}
+
+class _ExpiryBadge extends StatelessWidget {
+  final bool loading;
+  final bool failed;
+  final DateTime? expiry;
+  const _ExpiryBadge({
+    required this.loading,
+    required this.failed,
+    required this.expiry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return Container(
+        height: 16,
+        width: 90,
+        decoration: BoxDecoration(
+          color: AppColors.line.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(4),
+        ),
+      );
+    }
+    if (failed) {
+      return _chip(Icons.error_outline, 'Expiry unavailable', AppColors.textLo);
+    }
+    final e = expiry;
+    if (e == null) {
+      return _chip(Icons.help_outline, 'Expiry unknown', AppColors.textLo);
+    }
+    final expired = e.isBefore(DateTime.now());
+    final label =
+        '${expired ? 'Expired' : 'Expires'} ${e.year}-${e.month.toString().padLeft(2, '0')}-${e.day.toString().padLeft(2, '0')}';
+    return _chip(
+      expired ? Icons.warning_amber_rounded : Icons.event_available,
+      label,
+      expired ? Colors.redAccent : AppColors.textLo,
+    );
+  }
+
+  Widget _chip(IconData icon, String label, Color color) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(color: color, fontSize: 12)),
+        ],
+      );
 }
 
 class _ActivePill extends StatelessWidget {
