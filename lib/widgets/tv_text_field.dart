@@ -27,6 +27,7 @@ class TvTextField extends StatefulWidget {
   final bool autofocus;
   final TextInputAction? textInputAction;
   final double? height;
+  final FocusNode? cellFocusNode;
 
   /// Optional persistent label rendered above the field. Preferred over a
   /// floating label for credential forms (it stays visible once text is entered).
@@ -45,6 +46,7 @@ class TvTextField extends StatefulWidget {
     this.textInputAction,
     this.height,
     this.label,
+    this.cellFocusNode,
   });
 
   @override
@@ -57,6 +59,8 @@ class _TvTextFieldState extends State<TvTextField> {
   bool _editing = false;
   bool _cellFocused = false;
 
+  FocusNode get _effectiveCellFocus => widget.cellFocusNode ?? _cellFocus;
+
   @override
   void initState() {
     super.initState();
@@ -66,7 +70,9 @@ class _TvTextFieldState extends State<TvTextField> {
   @override
   void dispose() {
     _fieldFocus.removeListener(_onFieldFocusChange);
-    _cellFocus.dispose();
+    if (widget.cellFocusNode == null) {
+      _cellFocus.dispose();
+    }
     _fieldFocus.dispose();
     super.dispose();
   }
@@ -92,7 +98,7 @@ class _TvTextFieldState extends State<TvTextField> {
     if (!_editing) return;
     setState(() => _editing = false);
     _fieldFocus.unfocus();
-    if (refocusCell) _cellFocus.requestFocus();
+    if (refocusCell) _effectiveCellFocus.requestFocus();
   }
 
   @override
@@ -129,7 +135,7 @@ class _TvTextFieldState extends State<TvTextField> {
         if (!didPop && _editing) _exitEdit();
       },
       child: FocusableActionDetector(
-        focusNode: _cellFocus,
+        focusNode: _effectiveCellFocus,
         autofocus: widget.autofocus,
         mouseCursor: SystemMouseCursors.text,
         onShowFocusHighlight: (v) {

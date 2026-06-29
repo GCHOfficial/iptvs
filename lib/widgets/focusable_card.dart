@@ -12,6 +12,8 @@ class FocusableCard extends StatefulWidget {
   final VoidCallback onTap;
   final bool autofocus;
   final bool scrollOnFocus;
+  final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
+  final String? debugLabel;
 
   /// Optional external focus node, so a parent can move focus to this card
   /// programmatically (e.g. land on a specific row after returning from a
@@ -25,6 +27,8 @@ class FocusableCard extends StatefulWidget {
     this.autofocus = false,
     this.scrollOnFocus = true,
     this.focusNode,
+    this.onKeyEvent,
+    this.debugLabel,
   });
 
   @override
@@ -33,6 +37,11 @@ class FocusableCard extends StatefulWidget {
 
 class _FocusableCardState extends State<FocusableCard> {
   bool _focused = false;
+  late final FocusNode _ownedFocusNode = FocusNode(
+    debugLabel: widget.debugLabel ?? 'FocusableCard',
+  );
+
+  FocusNode get _effectiveFocusNode => widget.focusNode ?? _ownedFocusNode;
 
   void _onHighlight(bool value) {
     if (mounted) setState(() => _focused = value);
@@ -51,40 +60,51 @@ class _FocusableCardState extends State<FocusableCard> {
   }
 
   @override
+  void dispose() {
+    _ownedFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: FocusableActionDetector(
-        autofocus: widget.autofocus,
-        focusNode: widget.focusNode,
-        mouseCursor: SystemMouseCursors.click,
-        onShowFocusHighlight: _onHighlight,
-        actions: {
-          ActivateIntent: CallbackAction<ActivateIntent>(
-            onInvoke: (_) {
-              widget.onTap();
-              return null;
-            },
-          ),
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          decoration: BoxDecoration(
-            color: _focused ? AppColors.panelHi : AppColors.panel,
-            borderRadius: BorderRadius.circular(AppRadius.tile),
-            border: Border.all(
-              color: _focused ? AppColors.accent : AppColors.line,
-              width: _focused ? 2 : 1,
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: widget.onKeyEvent,
+        child: FocusableActionDetector(
+          autofocus: widget.autofocus,
+          focusNode: _effectiveFocusNode,
+          mouseCursor: SystemMouseCursors.click,
+          onShowFocusHighlight: _onHighlight,
+          actions: {
+            ActivateIntent: CallbackAction<ActivateIntent>(
+              onInvoke: (_) {
+                widget.onTap();
+                return null;
+              },
             ),
-          ),
-          child: Material(
-            type: MaterialType.transparency,
-            child: InkWell(
-              canRequestFocus: false,
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            decoration: BoxDecoration(
+              color: _focused ? AppColors.panelHi : AppColors.panel,
               borderRadius: BorderRadius.circular(AppRadius.tile),
-              hoverColor: AppColors.panelHi,
-              onTap: widget.onTap,
-              child: widget.child,
+              border: Border.all(
+                color: _focused ? AppColors.accent : AppColors.line,
+                width: _focused ? 2 : 1,
+              ),
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                canRequestFocus: false,
+                borderRadius: BorderRadius.circular(AppRadius.tile),
+                hoverColor: AppColors.panelHi,
+                onTap: widget.onTap,
+                child: widget.child,
+              ),
             ),
           ),
         ),
