@@ -442,18 +442,9 @@ class _SourceCardState extends State<_SourceCard> {
                         fontSize: 12,
                       ),
                     ),
-<<<<<<< HEAD
-                    const SizedBox(height: 6),
-                    _ExpiryBadge(
-                      loading: _expiryLoading,
-                      failed: _expiryFailed,
-                      expiry: _expiry,
-                    ),
-=======
                     // ── Expiry label ────────────────────────────────────────
                     const SizedBox(height: 6),
                     _ExpiryBadge(expiry: widget.expiry),
->>>>>>> playground/layout-playground
                   ],
                 ),
               ),
@@ -498,24 +489,6 @@ class _SourceCardState extends State<_SourceCard> {
   }
 }
 
-<<<<<<< HEAD
-class _ExpiryBadge extends StatelessWidget {
-  final bool loading;
-  final bool failed;
-  final DateTime? expiry;
-  const _ExpiryBadge({
-    required this.loading,
-    required this.failed,
-    required this.expiry,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (loading) {
-      return Container(
-        height: 16,
-        width: 90,
-=======
 // ─────────────────────────────────────────────────────────────────────────────
 // Expiry badge widget
 // ─────────────────────────────────────────────────────────────────────────────
@@ -532,48 +505,12 @@ class _ExpiryBadge extends StatelessWidget {
       return Container(
         height: 16,
         width: 80,
->>>>>>> playground/layout-playground
         decoration: BoxDecoration(
           color: AppColors.line.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(4),
         ),
       );
     }
-<<<<<<< HEAD
-    if (failed) {
-      return _chip(Icons.error_outline, 'Expiry unavailable', AppColors.textLo);
-    }
-    final e = expiry;
-    if (e == null) {
-      return _chip(Icons.help_outline, 'Expiry unknown', AppColors.textLo);
-    }
-    final expired = e.isBefore(DateTime.now());
-    final label =
-        '${expired ? 'Expired' : 'Expires'} ${e.year}-${e.month.toString().padLeft(2, '0')}-${e.day.toString().padLeft(2, '0')}';
-    return _chip(
-      expired ? Icons.warning_amber_rounded : Icons.event_available,
-      label,
-      expired ? Colors.redAccent : AppColors.textLo,
-    );
-  }
-
-  Widget _chip(IconData icon, String label, Color color) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: color, fontSize: 12),
-            ),
-          ),
-        ],
-      );
-}
-
-=======
 
     final result = expiry!;
 
@@ -698,7 +635,7 @@ class _ExpiryBadge extends StatelessWidget {
 // Unchanged below — ActivePill, FieldSpec, EditSourceScreen, MetadataSettings
 // ─────────────────────────────────────────────────────────────────────────────
 
->>>>>>> playground/layout-playground
+
 class _ActivePill extends StatelessWidget {
   const _ActivePill();
 
