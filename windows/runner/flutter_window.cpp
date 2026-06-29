@@ -1329,10 +1329,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
                   RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
-      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" - " +
+      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" – " +
                                       FormatClockHm(s.epg_next_stop_ms);
       DrawTextWithFont(paint_hdc,
-                       L"Next: " + s.epg_next_title + L" (" + next_range + L")",
+                       L"Next · " + next_range + L" · " + s.epg_next_title,
                        l.epg_next,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                        epg_meta_font, RGB(184, 190, 204));
