@@ -1178,18 +1178,44 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.seek(pos < Duration.zero ? Duration.zero : pos);
   }
 
-  Widget _title() => Flexible(
-    child: Text(
-      widget.title,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(
-        color: Colors.white,
-        fontSize: 18,
-        fontWeight: FontWeight.w600,
+  Widget _title() {
+    final now = widget.epgNow;
+    final next = widget.epgNext;
+    return Flexible(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            widget.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+          ),
+          if (now != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+          ],
+          if (next != null)
+            Text(
+              'Next · ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+            ),
+        ],
       ),
-    ),
-  );
+    );
+  }
+
+  static String _hm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   List<Widget> _desktopBottomBar() => [
     const MaterialDesktopPlayOrPauseButton(),
@@ -1312,6 +1338,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           seekBarThumbColor: AppColors.accent,
           seekBarPositionColor: AppColors.accent,
           buttonBarButtonColor: Colors.white,
+          backdropColor: Colors.black.withValues(alpha: 0.20),
           displaySeekBar: !_isLive,
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
@@ -1320,6 +1347,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         fullscreen: MaterialVideoControlsThemeData(
           seekBarThumbColor: AppColors.accent,
           seekBarPositionColor: AppColors.accent,
+          backdropColor: Colors.black.withValues(alpha: 0.20),
           displaySeekBar: !_isLive,
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
