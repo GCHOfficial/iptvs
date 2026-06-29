@@ -6,6 +6,7 @@ import '../data/cloud_config.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
+import '../sources/xtream_source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -268,6 +269,51 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
+  DateTime? _expiry;
+  bool _expiryLoading = true;
+  bool _expiryFailed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchExpiry();
+  }
+
+  Future<void> _fetchExpiry() async {
+    if (mounted) {
+      setState(() {
+        _expiryLoading = true;
+        _expiryFailed = false;
+      });
+    }
+    final source = widget.config.build();
+    try {
+      final value = await source.subscriptionExpiry();
+      if (!mounted) return;
+      setState(() {
+        _expiry = value;
+        _expiryLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _expiryFailed = true;
+        _expiryLoading = false;
+      });
+    } finally {
+      await source.dispose();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _SourceCard old) {
+    super.didUpdateWidget(old);
+    if (old.config.fields.toString() != widget.config.fields.toString() ||
+        old.config.kind != widget.config.kind) {
+      _fetchExpiry();
+    }
+  }
+
   @override
   void dispose() {
     _upNode.dispose();
@@ -381,6 +427,12 @@ class _SourceCardState extends State<_SourceCard> {
                         fontSize: 12,
                       ),
                     ),
+                    const SizedBox(height: 6),
+                    _ExpiryBadge(
+                      loading: _expiryLoading,
+                      failed: _expiryFailed,
+                      expiry: _expiry,
+                    ),
                   ],
                 ),
               ),
@@ -426,6 +478,61 @@ class _SourceCardState extends State<_SourceCard> {
       ),
     );
   }
+}
+
+class _ExpiryBadge extends StatelessWidget {
+  final bool loading;
+  final bool failed;
+  final DateTime? expiry;
+  const _ExpiryBadge({
+    required this.loading,
+    required this.failed,
+    required this.expiry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return Container(
+        height: 16,
+        width: 90,
+        decoration: BoxDecoration(
+          color: AppColors.line.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(4),
+        ),
+      );
+    }
+    if (failed) {
+      return _chip(Icons.error_outline, 'Expiry unavailable', AppColors.textLo);
+    }
+    final e = expiry;
+    if (e == null) {
+      return _chip(Icons.help_outline, 'Expiry unknown', AppColors.textLo);
+    }
+    final expired = e.isBefore(DateTime.now());
+    final label =
+        '${expired ? 'Expired' : 'Expires'} ${e.year}-${e.month.toString().padLeft(2, '0')}-${e.day.toString().padLeft(2, '0')}';
+    return _chip(
+      expired ? Icons.warning_amber_rounded : Icons.event_available,
+      label,
+      expired ? Colors.redAccent : AppColors.textLo,
+    );
+  }
+
+  Widget _chip(IconData icon, String label, Color color) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: color, fontSize: 12),
+            ),
+          ),
+        ],
+      );
 }
 
 class _ActivePill extends StatelessWidget {
@@ -531,7 +638,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     }
   }
 
-  void _save() {
+  Future<void> _save() async {
     final specs = _specs(_kind);
     for (final s in specs) {
       if (s.required && _controller(s.key).text.trim().isEmpty) {
@@ -545,15 +652,50 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       for (final s in specs) s.key: _controller(s.key).text.trim(),
     };
     final label = _label.text.trim().isEmpty ? _kind.name : _label.text.trim();
-    final config = SourceConfig(
+    var config = SourceConfig(
       id: widget.existing?.id ?? newSourceId(),
       kind: _kind,
       label: label,
       fields: fields,
     );
-    widget.store.save(config).then((_) {
-      if (mounted) Navigator.of(context).pop(true);
-    });
+    if (_kind == SourceKind.m3u) {
+      final converted = await _maybeConvertM3uToXtream(config);
+      if (converted != null) config = converted;
+    }
+    await widget.store.save(config);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  /// If the M3U playlist URL is really an Xtream panel (`get.php`) whose
+  /// `player_api.php` authenticates, return an equivalent Xtream config so the
+  /// user gets Movies/Series. Returns null to keep the source as a flat M3U.
+  Future<SourceConfig?> _maybeConvertM3uToXtream(SourceConfig m3u) async {
+    final uri = Uri.tryParse(m3u.fields['playlistUrl'] ?? '');
+    if (uri == null) return null;
+    final creds = xtreamCredentialsFromUrl(uri);
+    if (creds == null) return null;
+    final probe = XtreamSource(
+      host: creds.host,
+      username: creds.username,
+      password: creds.password,
+    );
+    try {
+      await probe.connect(); // player_api auth check; throws on failure
+    } catch (_) {
+      return null; // not a working Xtream panel → keep as M3U
+    } finally {
+      await probe.dispose();
+    }
+    return SourceConfig(
+      id: m3u.id,
+      kind: SourceKind.xtream,
+      label: m3u.label,
+      fields: {
+        'host': creds.host,
+        'username': creds.username,
+        'password': creds.password,
+      },
+    );
   }
 
   @override

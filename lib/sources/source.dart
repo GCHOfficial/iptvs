@@ -282,4 +282,9 @@ abstract class Source {
 
   /// Release any held resources.
   Future<void> dispose() async {}
+
+  /// The subscription's expiry date, or null when the provider doesn't expose
+  /// one (M3U/Demo) or it can't be determined. Implementations must redact any
+  /// URL that reaches a log or error.
+  Future<DateTime?> subscriptionExpiry() async => null;
 }
