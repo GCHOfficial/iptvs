@@ -2,7 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
-import 'package:flutter/services.dart' show KeyRepeatEvent;
+import 'package:flutter/services.dart'
+  show
+  HardwareKeyboard,
+      KeyDownEvent,
+      KeyEvent,
+      KeyRepeatEvent,
+      KeyUpEvent,
+      LogicalKeyboardKey;
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
@@ -16,6 +25,12 @@ import 'diagnostics_screen.dart';
 
 const _toolbarControlHeight = 40.0;
 const _autoMetadataEnrichmentLimit = 40;
+
+enum _LiveFocusArea { category, channels, search, unknown }
+
+class _MoveRightToChannelsIntent extends Intent {
+  const _MoveRightToChannelsIntent();
+}
 
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
@@ -64,9 +79,28 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
   final ScrollController _scrollController = ScrollController();
-  final FocusNode _firstChannelFocusNode = FocusNode();
-  final FocusNode _lastPlayedLiveChannelFocusNode = FocusNode();
+  final FocusNode _liveSearchCellFocusNode = FocusNode(
+    debugLabel: 'live.search.cell',
+  );
+  final FocusNode _firstChannelFocusNode = FocusNode(
+    debugLabel: 'live.channel.first',
+  );
+  final Map<String, FocusNode> _liveChannelFocusNodes = {};
+  final Map<String, FocusNode> _liveCategoryFocusNodes = {};
+  _LiveFocusArea _lastLiveFocusArea = _LiveFocusArea.unknown;
   String? _lastPlayedLiveChannelId;
+  String? _lastFocusedLiveChannelId;
+  bool _downHoldFromChannels = false;
+  final Map<String, String> _lastBrowsedLiveChannelByCategory = {};
+  String? _previewChannelId;
+  StreamInfo? _previewStream;
+  bool _previewLoading = false;
+  String? _previewError;
+  int _previewRequestId = 0;
+  late final Player _previewPlayer = Player();
+  late final VideoController _previewController = VideoController(
+    _previewPlayer,
+  );
   final Map<ContentKind, FocusNode> _firstMediaFocusNodes = {
     ContentKind.movie: FocusNode(),
     ContentKind.series: FocusNode(),
@@ -79,6 +113,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   @override
   void initState() {
     super.initState();
+    HardwareKeyboard.instance.addHandler(_handleLiveGlobalKeyEvent);
     _load();
     _epgTimer = Timer.periodic(
       const Duration(minutes: 1),
@@ -88,10 +123,18 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleLiveGlobalKeyEvent);
     _epgTimer?.cancel();
     _searchTimer?.cancel();
+    _liveSearchCellFocusNode.dispose();
     _firstChannelFocusNode.dispose();
-    _lastPlayedLiveChannelFocusNode.dispose();
+    for (final node in _liveChannelFocusNodes.values) {
+      node.dispose();
+    }
+    for (final node in _liveCategoryFocusNodes.values) {
+      node.dispose();
+    }
+    unawaited(_previewPlayer.dispose());
     for (final node in _firstMediaFocusNodes.values) {
       node.dispose();
     }
@@ -109,7 +152,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         final hasTarget =
             targetId != null && _visible.any((channel) => channel.id == targetId);
         if (hasTarget) {
-          _lastPlayedLiveChannelFocusNode.requestFocus();
+          if (_visible.isNotEmpty && _visible.first.id == targetId) {
+            _firstChannelFocusNode.requestFocus();
+          } else {
+            _focusNodeForLiveChannel(targetId).requestFocus();
+          }
         } else {
           _firstChannelFocusNode.requestFocus();
         }
@@ -120,6 +167,294 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _firstMediaFocusNodes[_tab]?.requestFocus();
       }
     });
+  }
+
+  void _focusChannelsFromCategory() {
+    final visible = _visible;
+    if (visible.isEmpty) return;
+    final categoryKey = _liveCategoryKey(_categoryId);
+    final resumeId = _lastBrowsedLiveChannelByCategory[categoryKey];
+    final hasResume =
+      resumeId != null && visible.any((channel) => channel.id == resumeId);
+    final resumeIndex =
+        hasResume ? visible.indexWhere((channel) => channel.id == resumeId) : -1;
+    if (hasResume && resumeIndex > 0 && _scrollController.hasClients) {
+      const estimatedChannelRowExtent = 104.0;
+      final targetOffset = resumeIndex * estimatedChannelRowExtent;
+      final maxOffset = _scrollController.position.maxScrollExtent;
+      _scrollController.jumpTo(targetOffset.clamp(0, maxOffset));
+    }
+    final FocusNode targetNode =
+      hasResume && visible.first.id != resumeId
+        ? _focusNodeForLiveChannel(resumeId)
+        : _firstChannelFocusNode;
+    targetNode.requestFocus();
+    _reassertLiveFocus(
+      targetNode,
+      shouldRetry: (label) =>
+          label.startsWith('live.category.') || label == 'Focus',
+      attempts: 4,
+    );
+    _reassertLiveFocus(
+      _firstChannelFocusNode,
+      shouldRetry: (label) =>
+          label.startsWith('live.category.') || label == 'Focus',
+      attempts: 6,
+    );
+    _lastLiveFocusArea = _LiveFocusArea.channels;
+  }
+
+  String _liveCategoryKey(String? categoryId) => categoryId ?? '__all__';
+
+  FocusNode _focusNodeForLiveChannel(String channelId) {
+    return _liveChannelFocusNodes.putIfAbsent(
+      channelId,
+      () => FocusNode(debugLabel: 'live.channel.$channelId'),
+    );
+  }
+
+  void _rememberBrowsedLiveChannel(String channelId) {
+    _lastBrowsedLiveChannelByCategory[_liveCategoryKey(_categoryId)] = channelId;
+  }
+
+  void _focusCategoryFromChannels() {
+    _downHoldFromChannels = false;
+    final categoryNode = _focusNodeForCategory(_categoryId);
+    categoryNode.requestFocus();
+    _reassertLiveFocus(
+      categoryNode,
+      shouldRetry: (label) =>
+          label.startsWith('live.channel.') || label == 'Focus',
+      attempts: 4,
+    );
+    _lastLiveFocusArea = _LiveFocusArea.category;
+  }
+
+  void _focusLiveChannelByIndex(List<Channel> visible, int index) {
+    if (visible.isEmpty) return;
+    final clamped = index.clamp(0, visible.length - 1);
+    if (clamped == 0) {
+      _firstChannelFocusNode.requestFocus();
+      return;
+    }
+    final node = _focusNodeForLiveChannel(visible[clamped].id);
+    if (node.context == null && _scrollController.hasClients) {
+      const estimatedChannelRowExtent = 104.0;
+      final maxOffset = _scrollController.position.maxScrollExtent;
+      final targetOffset = (clamped * estimatedChannelRowExtent).clamp(
+        0,
+        maxOffset,
+      ).toDouble();
+      _scrollController.jumpTo(targetOffset);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (node.context != null) {
+          node.requestFocus();
+          return;
+        }
+        if (_scrollController.hasClients) {
+          final nudged = (_scrollController.position.pixels +
+                  estimatedChannelRowExtent)
+              .clamp(0, _scrollController.position.maxScrollExtent)
+              .toDouble();
+          _scrollController.jumpTo(nudged);
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          node.requestFocus();
+        });
+      });
+      return;
+    }
+    node.requestFocus();
+  }
+
+  void _moveDownInLiveChannels(String channelId) {
+    final visible = _visible;
+    if (visible.isEmpty) return;
+    final currentIndex = visible.indexWhere((channel) => channel.id == channelId);
+    if (currentIndex < 0) return;
+    final nextIndex = (currentIndex + 1) % visible.length;
+    if (nextIndex == 0) {
+      _lastFocusedLiveChannelId = visible.first.id;
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_firstChannelFocusNode.context != null) {
+          _firstChannelFocusNode.requestFocus();
+          return;
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _firstChannelFocusNode.requestFocus();
+        });
+      });
+      return;
+    }
+    _lastFocusedLiveChannelId = visible[nextIndex].id;
+    _focusLiveChannelByIndex(visible, nextIndex);
+  }
+
+  String? _channelIdFromFocusLabel(String label) {
+    if (label == 'live.channel.first') {
+      final visible = _visible;
+      return visible.isEmpty ? null : visible.first.id;
+    }
+    const prefix = 'live.channel.';
+    if (!label.startsWith(prefix)) return null;
+    final id = label.substring(prefix.length);
+    if (id.isEmpty || id == 'first') return null;
+    return id;
+  }
+
+  void _reassertLiveFocus(
+    FocusNode targetNode, {
+    required bool Function(String label) shouldRetry,
+    int attempts = 3,
+  }) {
+    if (attempts <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+      if (!shouldRetry(label)) return;
+      targetNode.requestFocus();
+      _reassertLiveFocus(
+        targetNode,
+        shouldRetry: shouldRetry,
+        attempts: attempts - 1,
+      );
+    });
+  }
+
+  bool _handleLiveGlobalKeyEvent(KeyEvent event) {
+    if (_tab != ContentKind.live) return false;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown && event is KeyUpEvent) {
+      _downHoldFromChannels = false;
+      return false;
+    }
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+
+    if (key != LogicalKeyboardKey.arrowDown) {
+      _downHoldFromChannels = false;
+    }
+
+    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    if (key == LogicalKeyboardKey.arrowRight &&
+        label.startsWith('live.category.')) {
+      _focusChannelsFromCategory();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      final channelId = _channelIdFromFocusLabel(label);
+      if (channelId != null) {
+        _downHoldFromChannels = true;
+        _lastFocusedLiveChannelId = channelId;
+        _moveDownInLiveChannels(channelId);
+        return true;
+      }
+      // Once a Down hold started in channels, keep all subsequent Down events
+      // locked to channel navigation until key-up to avoid pane leakage.
+      if (_downHoldFromChannels) {
+        final visible = _visible;
+        if (visible.isEmpty) return true;
+        final fallbackId = _lastFocusedLiveChannelId ?? visible.first.id;
+        _moveDownInLiveChannels(fallbackId);
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  KeyEventResult _handleLiveSearchCellKey(FocusNode node, KeyEvent event) {
+    if (_tab != ContentKind.live) return KeyEventResult.ignored;
+    if (!_liveSearchCellFocusNode.hasFocus) return KeyEventResult.ignored;
+    if (event.logicalKey != LogicalKeyboardKey.arrowDown) {
+      return KeyEventResult.ignored;
+    }
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.handled;
+    }
+    _focusChannelsFromCategory();
+    return KeyEventResult.handled;
+  }
+
+  _LiveFocusArea _focusAreaFromLabel(String label) {
+    if (label.startsWith('live.category.')) return _LiveFocusArea.category;
+    if (label.startsWith('live.channel.')) return _LiveFocusArea.channels;
+    if (label == 'live.search.cell') return _LiveFocusArea.search;
+    return _LiveFocusArea.unknown;
+  }
+
+  KeyEventResult _handleLivePaneFallbackKey(FocusNode node, KeyEvent event) {
+    if (_tab != ContentKind.live) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent &&
+        event is! KeyRepeatEvent &&
+        event is! KeyUpEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    final area = _focusAreaFromLabel(label);
+    if (area != _LiveFocusArea.unknown) {
+      _lastLiveFocusArea = area;
+      if (area == _LiveFocusArea.channels) {
+        final focusedChannelId = _channelIdFromFocusLabel(label);
+        if (focusedChannelId != null) {
+          _lastFocusedLiveChannelId = focusedChannelId;
+        } else if (label == 'live.channel.first' && _visible.isNotEmpty) {
+          _lastFocusedLiveChannelId = _visible.first.id;
+        }
+      }
+    }
+
+    final key = event.logicalKey;
+
+    if (label.startsWith('live.category.') &&
+        key == LogicalKeyboardKey.arrowRight) {
+      _focusChannelsFromCategory();
+      return KeyEventResult.handled;
+    }
+    if (label.startsWith('live.channel.') && key == LogicalKeyboardKey.arrowLeft) {
+      _focusCategoryFromChannels();
+      return KeyEventResult.handled;
+    }
+
+    if (label.startsWith('live.category.') &&
+        key == LogicalKeyboardKey.arrowDown &&
+        (event is KeyDownEvent || event is KeyRepeatEvent) &&
+        _downHoldFromChannels) {
+      final visible = _visible;
+      if (visible.isNotEmpty) {
+        _moveDownInLiveChannels(_lastFocusedLiveChannelId ?? visible.first.id);
+      }
+      return KeyEventResult.handled;
+    }
+
+    // If focus transiently lands on an unlabeled node, route based on the last
+    // known pane so navigation stays deterministic.
+    if (label == 'Focus') {
+      if (key == LogicalKeyboardKey.arrowRight &&
+          _lastLiveFocusArea == _LiveFocusArea.category) {
+        _focusChannelsFromCategory();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowLeft &&
+          _lastLiveFocusArea == _LiveFocusArea.channels) {
+        _focusCategoryFromChannels();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.arrowDown &&
+          _lastLiveFocusArea == _LiveFocusArea.search) {
+        _focusChannelsFromCategory();
+        return KeyEventResult.handled;
+      }
+    }
+
+    return KeyEventResult.ignored;
   }
 
   Future<void> _load({bool forceRefresh = false}) async {
@@ -346,6 +681,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     );
   }
 
+  FocusNode _focusNodeForCategory(String? categoryId) {
+    final key = categoryId ?? 'all';
+    return _liveCategoryFocusNodes.putIfAbsent(
+      key,
+      () => FocusNode(debugLabel: 'live.category.$key'),
+    );
+  }
+
   Future<void> _searchMedia(ContentKind kind, String query) async {
     final categoryId = _mediaCategoryId[kind];
     setState(() {
@@ -404,16 +747,62 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
-    setState(() => _resolving = true);
-    final navigator = Navigator.of(context);
+    final samePreviewChannel = _previewChannelId == channel.id;
+    if (samePreviewChannel && _previewStream != null) {
+      await _openLivePlayer(channel, _previewStream!);
+      return;
+    }
+    await _startLivePreview(channel);
+  }
+
+  Future<void> _startLivePreview(Channel channel) async {
+    if (_previewLoading) return;
     final messenger = ScaffoldMessenger.of(context);
+    final requestId = ++_previewRequestId;
+    setState(() {
+      _previewChannelId = channel.id;
+      _previewLoading = true;
+      _previewError = null;
+      _previewStream = null;
+    });
     try {
       DiagnosticsLog.instance.add(
         'library',
-        'resolve live source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
+        'preview live source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       final stream = await widget.repo.resolve(channel);
-      if (!mounted) return;
+      if (!mounted || requestId != _previewRequestId) return;
+      await _previewPlayer.open(
+        Media(stream.url, httpHeaders: stream.headers),
+      );
+      await _previewPlayer.setVolume(70);
+      if (!mounted || requestId != _previewRequestId) return;
+      setState(() {
+        _previewStream = stream;
+        _previewLoading = false;
+        _previewError = null;
+      });
+    } catch (e) {
+      if (!mounted || requestId != _previewRequestId) return;
+      setState(() {
+        _previewLoading = false;
+        _previewError = '$e';
+      });
+      messenger.showSnackBar(SnackBar(content: Text('Could not preview: $e')));
+    }
+  }
+
+  Future<void> _openLivePlayer(Channel channel, StreamInfo stream) async {
+    setState(() => _resolving = true);
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final shouldResumePreview = _previewChannelId == channel.id;
+    try {
+      await _previewPlayer.pause();
+      DiagnosticsLog.instance.add(
+        'library',
+        'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
+      );
       _lastPlayedLiveChannelId = channel.id;
       await navigator.push(
         MaterialPageRoute(
@@ -426,6 +815,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           ),
         ),
       );
+      if (shouldResumePreview && _previewStream != null && mounted) {
+        await _previewPlayer.play();
+      }
       _restoreListFocusAfterPlayback();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
@@ -448,6 +840,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not open: $e')));
     }
+  }
+
+  Future<void> _stopLivePreviewPlayback({bool clearSelection = false}) async {
+    try {
+      await _previewPlayer.stop();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _previewLoading = false;
+      _previewError = null;
+      _previewStream = null;
+      if (clearSelection) {
+        _previewChannelId = null;
+      }
+    });
   }
 
   void _replaceMediaItem(MediaItem replacement) {
@@ -581,6 +988,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void _selectTab(ContentKind kind) {
     if (_tab == kind) return;
     final previous = _tab;
+    if (previous == ContentKind.live && kind != ContentKind.live) {
+      unawaited(_stopLivePreviewPlayback());
+    }
     setState(() {
       _tab = kind;
       _query = '';
@@ -619,16 +1029,23 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   IconButton(
                     tooltip: 'Sources',
                     icon: const Icon(Icons.dns_outlined),
-                    onPressed: widget.onManageSources,
+                    onPressed: () {
+                      unawaited(_stopLivePreviewPlayback());
+                      widget.onManageSources?.call();
+                    },
                   ),
                 IconButton(
                   tooltip: 'Diagnostics',
                   icon: const Icon(Icons.bug_report_outlined),
-                  onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => const DiagnosticsScreen(),
-                    ),
-                  ),
+                  onPressed: () async {
+                    await _stopLivePreviewPlayback();
+                    if (!context.mounted) return;
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const DiagnosticsScreen(),
+                      ),
+                    );
+                  },
                 ),
                 IconButton(
                   tooltip: 'Refresh from source',
@@ -670,6 +1087,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 _searchController.clear();
                 _setQuery('');
               },
+              searchCellFocusNode:
+                  _tab == ContentKind.live ? _liveSearchCellFocusNode : null,
+              onSearchCellKeyEvent: _handleLiveSearchCellKey,
               categoryControl: _tab == ContentKind.live
                   ? _CategoryDropdown(
                       categories: _categories,
@@ -788,30 +1208,108 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         ),
       );
     }
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-      scrollCacheExtent: const ScrollCacheExtent.pixels(
-        120,
-      ), // keep nearby rows built for D-pad without over-prefetching logos
-      itemExtent: 124,
-      itemCount: visible.length,
-      itemBuilder: (context, i) {
-        final c = visible[i];
-        return _ChannelTile(
-          channel: c,
-          now: _now[c.id],
-          next: _next[c.id],
-          enabled: !_resolving,
-          autofocus: _lastPlayedLiveChannelId == null
-              ? i == 0
-              : c.id == _lastPlayedLiveChannelId,
-          focusNode: c.id == _lastPlayedLiveChannelId
-              ? _lastPlayedLiveChannelFocusNode
-              : i == 0
+    final preview =
+      _all.where((c) => c.id == _previewChannelId).firstOrNull ??
+      _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
+      visible.first;
+
+    Widget buildChannelList({EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16)}) {
+      return ListView.builder(
+        controller: _scrollController,
+        padding: padding,
+        scrollCacheExtent: const ScrollCacheExtent.pixels(
+          120,
+        ), // keep nearby rows built for D-pad without over-prefetching logos
+        itemCount: visible.length,
+        itemBuilder: (context, i) {
+          final c = visible[i];
+          return _ChannelTile(
+            channel: c,
+            now: _now[c.id],
+            next: _next[c.id],
+            debugLabel: 'live.channel.${c.id}',
+            enabled: !_resolving,
+            autofocus: _lastPlayedLiveChannelId == null
+                ? i == 0
+                : c.id == _lastPlayedLiveChannelId,
+            focusNode: i == 0
               ? _firstChannelFocusNode
-              : null,
-          onTap: () => _play(c),
+              : _focusNodeForLiveChannel(c.id),
+            onTap: () => _play(c),
+            selected: c.id == _previewChannelId,
+            onMoveLeftToCategory: () {
+              _rememberBrowsedLiveChannel(c.id);
+              _focusCategoryFromChannels();
+            },
+            onMoveDown: () {
+              _moveDownInLiveChannels(c.id);
+            },
+          );
+        },
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 980) return buildChannelList();
+        return Focus(
+          canRequestFocus: false,
+          skipTraversal: true,
+          onKeyEvent: _handleLivePaneFallbackKey,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 240,
+                  child: _LiveCategoryPane(
+                    categories: _categories,
+                    selectedCategoryId: _categoryId,
+                    selectedFocusNode: _focusNodeForCategory(_categoryId),
+                    onSelected: (value) {
+                      setState(() {
+                        _categoryId = value;
+                      });
+                      _scrollToTop();
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        _focusNodeForCategory(_categoryId).requestFocus();
+                        _lastLiveFocusArea = _LiveFocusArea.category;
+                      });
+                    },
+                    onMoveRightToChannels: () {
+                      _focusChannelsFromCategory();
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    children: [
+                      _LivePreviewPanel(
+                        channel: preview,
+                        now: _now[preview.id],
+                        next: _next[preview.id],
+                        previewController: _previewController,
+                        previewActive: _previewChannelId == preview.id,
+                        previewLoading:
+                            _previewLoading && _previewChannelId == preview.id,
+                        previewError: _previewChannelId == preview.id
+                            ? _previewError
+                            : null,
+                      ),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: buildChannelList(
+                          padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         );
       },
     );
@@ -1062,6 +1560,8 @@ class _Toolbar extends StatelessWidget {
   final String hintText;
   final ValueChanged<String> onQueryChanged;
   final VoidCallback onClearQuery;
+  final FocusNode? searchCellFocusNode;
+  final KeyEventResult Function(FocusNode, KeyEvent)? onSearchCellKeyEvent;
   final Widget categoryControl;
   final Widget? actionControl;
 
@@ -1071,6 +1571,8 @@ class _Toolbar extends StatelessWidget {
     required this.hintText,
     required this.onQueryChanged,
     required this.onClearQuery,
+    this.searchCellFocusNode,
+    this.onSearchCellKeyEvent,
     required this.categoryControl,
     this.actionControl,
   });
@@ -1084,6 +1586,7 @@ class _Toolbar extends StatelessWidget {
           controller: searchController,
           hintText: hintText,
           height: _toolbarControlHeight,
+          cellFocusNode: searchCellFocusNode,
           onChanged: onQueryChanged,
           textInputAction: TextInputAction.search,
           prefixIcon: const Icon(Icons.search, size: 20),
@@ -1098,7 +1601,11 @@ class _Toolbar extends StatelessWidget {
 
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-          child: narrow
+          child: Focus(
+            canRequestFocus: false,
+            skipTraversal: true,
+            onKeyEvent: onSearchCellKeyEvent,
+            child: narrow
               ? Column(
                   children: [
                     search,
@@ -1128,6 +1635,7 @@ class _Toolbar extends StatelessWidget {
                     if (action != null) ...[const SizedBox(width: 8), action],
                   ],
                 ),
+          ),
         );
       },
     );
@@ -1206,14 +1714,369 @@ class _ToolbarIconButtonState extends State<_ToolbarIconButton> {
   }
 }
 
+class _LiveCategoryPane extends StatelessWidget {
+  final List<Category> categories;
+  final String? selectedCategoryId;
+  final FocusNode selectedFocusNode;
+  final ValueChanged<String?> onSelected;
+  final VoidCallback onMoveRightToChannels;
+
+  const _LiveCategoryPane({
+    required this.categories,
+    required this.selectedCategoryId,
+    required this.selectedFocusNode,
+    required this.onSelected,
+    required this.onMoveRightToChannels,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final items = <({String? id, String label})>[
+      (id: null, label: 'All channels'),
+      ...categories.map((category) => (id: category.id, label: category.title)),
+    ];
+    return Shortcuts(
+      shortcuts: {
+        LogicalKeySet(LogicalKeyboardKey.arrowRight):
+            _MoveRightToChannelsIntent(),
+      },
+      child: Actions(
+        actions: {
+          _MoveRightToChannelsIntent: CallbackAction<_MoveRightToChannelsIntent>(
+            onInvoke: (_) {
+              onMoveRightToChannels();
+              return null;
+            },
+          ),
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.panel,
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+            border: Border.all(color: AppColors.line),
+          ),
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(8, 4, 8, 8),
+                child: Text(
+                  'Playlists',
+                  style: TextStyle(
+                    color: AppColors.textLo,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Expanded(
+                // Build all category rows so the selected focus target stays mounted
+                // even when off-screen; this makes channel->category->channel
+                // round-trips deterministic under D-pad navigation.
+                child: ListView(
+                  children: [
+                    for (final item in items)
+                      Builder(
+                        builder: (context) {
+                          final selected = item.id == selectedCategoryId;
+                          return FocusableCard(
+                            autofocus: selected,
+                            focusNode: selected ? selectedFocusNode : null,
+                            debugLabel:
+                                'live.category.${item.id == null ? 'all' : item.id}',
+                            onKeyEvent: (node, event) {
+                              final isRight =
+                                  event.logicalKey == LogicalKeyboardKey.arrowRight;
+                              if (!isRight) return KeyEventResult.ignored;
+                              onMoveRightToChannels();
+                              return KeyEventResult.handled;
+                            },
+                            onTap: () => onSelected(item.id),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 10,
+                              ),
+                              child: Text(
+                                item.label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: selected
+                                      ? AppColors.textHi
+                                      : AppColors.textLo,
+                                  fontWeight:
+                                      selected ? FontWeight.w700 : FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LivePreviewPanel extends StatelessWidget {
+  final Channel channel;
+  final Programme? now;
+  final Programme? next;
+  final VideoController previewController;
+  final bool previewActive;
+  final bool previewLoading;
+  final String? previewError;
+
+  const _LivePreviewPanel({
+    required this.channel,
+    required this.now,
+    required this.next,
+    required this.previewController,
+    required this.previewActive,
+    required this.previewLoading,
+    required this.previewError,
+  });
+
+  String _fmt(DateTime time) {
+    final h = time.hour.toString().padLeft(2, '0');
+    final m = time.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final current = now;
+    final upcoming = next;
+    double? progress;
+    if (current != null) {
+      final total = current.stop.difference(current.start).inSeconds;
+      final elapsed = DateTime.now().difference(current.start).inSeconds;
+      progress = total <= 0 ? null : (elapsed / total).clamp(0.0, 1.0);
+    }
+    return Container(
+      height: 190,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(AppRadius.tile),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF101B2B), Color(0xFF0A111B)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxHeight < 182;
+          final titleSize = compact ? 20.0 : 24.0;
+          final infoSize = compact ? 14.0 : 16.0;
+          final previewWidth = compact ? 220.0 : 250.0;
+          return Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Container(
+                  width: previewWidth,
+              decoration: BoxDecoration(
+                color: AppColors.panel,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.line),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (previewActive && !previewLoading && previewError == null)
+                      Focus(
+                        canRequestFocus: false,
+                        skipTraversal: true,
+                        descendantsAreFocusable: false,
+                        child: IgnorePointer(
+                          child: Video(
+                            controller: previewController,
+                            controls: NoVideoControls,
+                          ),
+                        ),
+                      )
+                    else if (channel.logo != null && channel.logo!.isNotEmpty)
+                      Image.network(
+                        channel.logo!,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const Icon(
+                          Icons.live_tv_rounded,
+                          color: AppColors.textLo,
+                          size: 42,
+                        ),
+                      )
+                    else
+                      const Icon(
+                        Icons.live_tv_rounded,
+                        color: AppColors.textLo,
+                        size: 42,
+                      ),
+                    if (previewLoading)
+                      Container(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        alignment: Alignment.center,
+                        child: const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    if (previewError != null)
+                      Container(
+                        color: Colors.black.withValues(alpha: 0.62),
+                        alignment: Alignment.center,
+                        padding: const EdgeInsets.all(10),
+                        child: const Text(
+                          'Preview unavailable',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (previewActive && !previewLoading)
+                      Align(
+                        alignment: Alignment.bottomLeft,
+                        child: Container(
+                          margin: const EdgeInsets.all(8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            'Preview',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        channel.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: AppColors.textHi,
+                          fontSize: titleSize,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      if (current != null)
+                        Text(
+                          '${_fmt(current.start)} - ${_fmt(current.stop)} · ${current.title}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: AppColors.textHi,
+                            fontSize: infoSize,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        )
+                      else
+                        const Text(
+                          'No programme information',
+                          style: TextStyle(color: AppColors.textLo, fontSize: 14),
+                        ),
+                      if (progress != null) ...[
+                        const SizedBox(height: 6),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: progress,
+                            minHeight: 4,
+                            backgroundColor: AppColors.line,
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                              AppColors.accent,
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (!compact &&
+                          current?.description != null &&
+                          current!.description!.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          current.description!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                      const Spacer(),
+                      if (!compact && previewActive && !previewLoading)
+                        const Text(
+                          'Press OK again to open fullscreen',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: AppColors.textLo, fontSize: 11),
+                        ),
+                      if (!compact && previewActive && !previewLoading)
+                        const SizedBox(height: 4),
+                      if (upcoming != null)
+                        Text(
+                          'Next · ${_fmt(upcoming.start)} - ${_fmt(upcoming.stop)} · ${upcoming.title}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 13,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _ChannelTile extends StatelessWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
   final bool enabled;
   final bool autofocus;
+  final bool selected;
   final FocusNode? focusNode;
+  final String? debugLabel;
   final VoidCallback onTap;
+  final VoidCallback onMoveLeftToCategory;
+  final VoidCallback onMoveDown;
 
   const _ChannelTile({
     required this.channel,
@@ -1221,16 +2084,24 @@ class _ChannelTile extends StatelessWidget {
     required this.next,
     required this.enabled,
     required this.autofocus,
+    required this.selected,
     this.focusNode,
+    this.debugLabel,
     required this.onTap,
+    required this.onMoveLeftToCategory,
+    required this.onMoveDown,
   });
 
-  static String _hm(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  static String _formatProgrammeTime(DateTime time) {
+    final hours = time.hour.toString().padLeft(2, '0');
+    final minutes = time.minute.toString().padLeft(2, '0');
+    return '$hours:$minutes';
+  }
 
   @override
   Widget build(BuildContext context) {
     final current = now;
+    final upcoming = next;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1241,7 +2112,22 @@ class _ChannelTile extends StatelessWidget {
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
-      scrollOnFocus: false,
+      debugLabel: debugLabel ?? 'live.channel.${channel.id}',
+      scrollOnFocus: true,
+      onKeyEvent: (node, event) {
+        final isLeft = event.logicalKey == LogicalKeyboardKey.arrowLeft;
+        final isDown = event.logicalKey == LogicalKeyboardKey.arrowDown;
+        if (!isLeft && !isDown) return KeyEventResult.ignored;
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.handled;
+        }
+        if (isLeft) {
+          onMoveLeftToCategory();
+          return KeyEventResult.handled;
+        }
+        onMoveDown();
+        return KeyEventResult.handled;
+      },
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1252,6 +2138,7 @@ class _ChannelTile extends StatelessWidget {
             const SizedBox(width: 14),
             Expanded(
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -1263,27 +2150,37 @@ class _ChannelTile extends StatelessWidget {
                   if (current != null) ...[
                     const SizedBox(height: 6),
                     Text(
-                      'Live · ${_hm(current.start)} – ${_hm(current.stop)} · ${current.title}',
+                      'Live · ${_formatProgrammeTime(current.start)} – ${_formatProgrammeTime(current.stop)} · ${current.title}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 12,
+                      ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(3),
                       child: LinearProgressIndicator(
                         value: progress,
                         minHeight: 3,
+                        backgroundColor: AppColors.line,
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          AppColors.accent,
+                        ),
                       ),
                     ),
-                    if (next != null)
+                    if (upcoming != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
-                          'Next · ${_hm(next!.start)} – ${_hm(next!.stop)} · ${next!.title}',
+                          'Next · ${_formatProgrammeTime(upcoming.start)} – ${_formatProgrammeTime(upcoming.stop)} · ${upcoming.title}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                   ],
@@ -1292,7 +2189,9 @@ class _ChannelTile extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Icon(
-              Icons.play_arrow_rounded,
+              selected
+                  ? Icons.play_circle_fill_rounded
+                  : Icons.play_arrow_rounded,
               color: enabled ? AppColors.accent : AppColors.textLo,
             ),
           ],
@@ -1380,6 +2279,44 @@ class _LogoState extends State<_Logo> {
 int _imageCacheSize(BuildContext context, double logicalSize) {
   final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
   return (logicalSize * dpr).round();
+}
+
+class _LivePill extends StatelessWidget {
+  const _LivePill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: AppColors.live.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: const BoxDecoration(
+              color: AppColors.live,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 4),
+          const Text(
+            'LIVE',
+            style: TextStyle(
+              color: AppColors.live,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// The bordered shell shared by the category dropdowns. Reflects the focus of

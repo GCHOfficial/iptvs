@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
+import '../player/now_programme_overlay.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 
@@ -62,60 +63,47 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
-  bool _liveSynced = true;
-  // Live reconnect watchdog (Windows / embedded media_kit; Android reconnects in
-  // its native Activity). Reload the source when a live stream stalls or errors.
+  
+  // Platform / native surface state
+  final bool _usesWindowsNativeSurface = Platform.isWindows;
   bool _buffering = false;
-  bool _reconnecting = false;
-  int _stalledSinceMs = 0;
-  int _lastReconnectMs = 0;
-  int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
-  static const int _kStallReconnectMs = 8000;
-  static const int _kMaxBackoffMs = 30000;
-  late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
+  String _lastVideoParamsLog = '';
+  int? _windowsNativeSurface;
+  bool _nativePlaybackLaunched = false;
+  bool _nativeTeardownScheduled = false;
   bool _isNativeFullscreen = false;
   bool _nativeControlsVisible = true;
-  bool _nativeTeardownScheduled = false;
-  bool _loggedActiveVo = false;
-  bool _loggedHwdec = false;
-  String? _lastVideoParamsLog;
-  // HDR10+ detection (Windows/mpv). mpv has no clean "has HDR10+" flag, so we
-  // infer it from the ST2094-40 scene dynamic-metadata sub-properties — which are
-  // zero for plain HDR10 and, unlike max-pq-y, aren't synthesised by
-  // `hdr-compute-peak`. Conservative: stays false (→ "HDR10 · PQ") on any
-  // absence/error, only flips true once a PQ stream clearly carries scene metadata.
+  DateTime? _ignoreNativeInputUntil;
+
+  // Live reconnect state
+  bool _liveSynced = true;
+  bool _reconnecting = false;
+  int _stalledSinceMs = 0;
+  int _reconnectAttempt = 0;
+  int _lastReconnectMs = 0;
+  static const int _kStallReconnectMs = 8000;
+  static const int _kMaxBackoffMs = 30000;
+
+  // HDR / video logging probes
   bool _hdr10Plus = false;
   bool _probingHdr10Plus = false;
-  DateTime? _ignoreNativeInputUntil;
-  int? _windowsNativeSurface;
-  // Index into [_aspectModes]. Starts at "Fill" to match the panscan=1.0 the
-  // native surface is configured with in [_configureNativePlayer].
-  int _aspectModeIndex = 1;
+  bool _loggedActiveVo = false;
+  bool _loggedHwdec = false;
 
-  static const List<double> _speedOptions = <double>[
-    0.5,
-    0.75,
-    1.0,
-    1.25,
-    1.5,
-    2.0,
+  // Playback shortcuts root focus
+  final FocusNode _rootFocusNode = FocusNode();
+
+  // Aspect / speed options
+  final List<_AspectMode> _aspectModes = const [
+    _AspectMode('Fit', '0', 'no'),
+    _AspectMode('Fill', '1', 'no'),
   ];
-
-  static const List<_AspectMode> _aspectModes = <_AspectMode>[
-    _AspectMode('Fit', '0.0', 'no'),
-    _AspectMode('Fill', '1.0', 'no'),
-    _AspectMode('16:9', '0.0', '16:9'),
-    _AspectMode('4:3', '0.0', '4:3'),
-  ];
-
-  bool get _usesWindowsNativeSurface => Platform.isWindows;
-
+  int _aspectModeIndex = 0;
+  final List<double> _speedOptions = const [0.5, 1.0, 1.5, 2.0];
   @override
   void initState() {
     super.initState();
-    // Both native-player platforms call back over this channel: Windows sends
-    // input/control/closed events for its GDI overlay; Android sends `nativeClosed`
     // when its native Activity finishes. Without the Android handler, backing out
     // of the native player leaves this route stranded on the black overlay until a
     // second Back press — register it so `nativeClosed` pops us straight to the list.
@@ -237,6 +225,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     _open();
   }
+
+  
 
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
@@ -1148,6 +1138,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _scheduleWindowsNativeTeardown();
     }
     _disposePlayerNonBlocking();
+    // Dispose the root focus node used for playback shortcuts.
+    _rootFocusNode.dispose();
     super.dispose();
   }
 
@@ -1180,7 +1172,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Widget _title() {
     final now = widget.epgNow;
-    final next = widget.epgNext;
     return Flexible(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1191,31 +1182,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
           ),
           if (now != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Text(
+                  _formatProgrammeTime(now.start),
+                  style: const TextStyle(
+                    color: AppColors.textLo,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _formatProgrammeTime(now.stop),
+                  style: const TextStyle(
+                    color: AppColors.textLo,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
             ),
           ],
-          if (next != null)
-            Text(
-              'Next · ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
-            ),
         ],
       ),
     );
   }
 
-  static String _hm(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  static String _formatProgrammeTime(DateTime time) {
+    final hours = time.hour.toString().padLeft(2, '0');
+    final minutes = time.minute.toString().padLeft(2, '0');
+    return '$hours:$minutes';
+  }
 
   List<Widget> _desktopBottomBar() => [
     const MaterialDesktopPlayOrPauseButton(),
@@ -1245,58 +1248,82 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.escape): () {
-            _handlePlaybackInput();
-            _back();
-          },
-          const SingleActivator(LogicalKeyboardKey.space): () {
-            _handlePlaybackInput();
-            _player.playOrPause();
-          },
-          const SingleActivator(LogicalKeyboardKey.select): () {
-            _handlePlaybackInput();
-            _player.playOrPause();
-          },
-          const SingleActivator(LogicalKeyboardKey.enter): () {
-            _handlePlaybackInput();
-            _player.playOrPause();
-          },
-          const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () {
-            _handlePlaybackInput();
-            _player.playOrPause();
-          },
-          const SingleActivator(LogicalKeyboardKey.mediaPlay): () {
-            _handlePlaybackInput();
-            _player.play();
-          },
-          const SingleActivator(LogicalKeyboardKey.mediaPause): () {
-            _handlePlaybackInput();
-            _player.pause();
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-            _handlePlaybackInput();
-            _seekBy(-10);
-          },
-          const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-            _handlePlaybackInput();
-            _seekBy(10);
-          },
-          const SingleActivator(LogicalKeyboardKey.keyF): () {
-            _handlePlaybackInput();
-            _toggleNativeFullscreen();
-          },
-        },
-        child: Listener(
-          onPointerHover: (_) => _handlePlaybackInput(),
-          onPointerDown: (_) => _handlePlaybackInput(),
-          onPointerMove: (_) => _handlePlaybackInput(),
-          child: Focus(
-            autofocus: true,
+      body: Listener(
+        onPointerHover: (_) => _handlePlaybackInput(),
+        onPointerDown: (_) => _handlePlaybackInput(),
+        onPointerMove: (_) => _handlePlaybackInput(),
+        child: Focus(
+          focusNode: _rootFocusNode,
+          autofocus: true,
+          child: CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.escape): () {
+                _handlePlaybackInput();
+                _back();
+              },
+              const SingleActivator(LogicalKeyboardKey.space): () async {
+                _handlePlaybackInput();
+                await _player.playOrPause();
+                FocusScope.of(context).nextFocus();
+              },
+              const SingleActivator(LogicalKeyboardKey.select): () async {
+                _handlePlaybackInput();
+                await _player.playOrPause();
+                FocusScope.of(context).nextFocus();
+              },
+              const SingleActivator(LogicalKeyboardKey.enter): () async {
+                _handlePlaybackInput();
+                await _player.playOrPause();
+                FocusScope.of(context).nextFocus();
+              },
+              const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () async {
+                _handlePlaybackInput();
+                await _player.playOrPause();
+                FocusScope.of(context).nextFocus();
+              },
+              const SingleActivator(LogicalKeyboardKey.mediaPlay): () {
+                _handlePlaybackInput();
+                _player.play();
+              },
+              const SingleActivator(LogicalKeyboardKey.mediaPause): () {
+                _handlePlaybackInput();
+                _player.pause();
+              },
+              const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+                if (FocusManager.instance.primaryFocus == _rootFocusNode) {
+                  _handlePlaybackInput();
+                  _seekBy(-10);
+                }
+              },
+              const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+                if (FocusManager.instance.primaryFocus == _rootFocusNode) {
+                  _handlePlaybackInput();
+                  _seekBy(10);
+                }
+              },
+              const SingleActivator(LogicalKeyboardKey.keyF): () {
+                _handlePlaybackInput();
+                _toggleNativeFullscreen();
+              },
+            },
             child: Stack(
               children: [
                 Positioned.fill(child: _playbackSurface()),
+                if (widget.epgNow != null)
+                  Positioned(
+                    top: 74,
+                    left: 18,
+                    right: 18,
+                    child: ExcludeSemantics(
+                      child: Focus(
+                        canRequestFocus: false,
+                        child: NowProgrammeOverlay(
+                          programme: widget.epgNow!,
+                          nextProgramme: widget.epgNext,
+                        ),
+                      ),
+                    ),
+                  ),
                 if (_error != null) Positioned.fill(child: _errorOverlay()),
                 // Windows draws its own "Reconnecting…" in the native overlay;
                 // this covers the embedded media_kit path.
@@ -1338,20 +1365,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
           seekBarThumbColor: AppColors.accent,
           seekBarPositionColor: AppColors.accent,
           buttonBarButtonColor: Colors.white,
-          backdropColor: Colors.black.withValues(alpha: 0.20),
           displaySeekBar: !_isLive,
           automaticallyImplySkipNextButton: false,
           automaticallyImplySkipPreviousButton: false,
-          topButtonBar: _topBar(desktop: false),
-        ),
-        fullscreen: MaterialVideoControlsThemeData(
-          seekBarThumbColor: AppColors.accent,
-          seekBarPositionColor: AppColors.accent,
-          backdropColor: Colors.black.withValues(alpha: 0.20),
-          displaySeekBar: !_isLive,
-          automaticallyImplySkipNextButton: false,
-          automaticallyImplySkipPreviousButton: false,
-          topButtonBar: _topBar(desktop: false),
+topButtonBar: _topBar(desktop: false),
+           backdropColor: Colors.black.withValues(alpha: 0.20),
+         ),
+         fullscreen: MaterialVideoControlsThemeData(
+           seekBarThumbColor: AppColors.accent,
+           seekBarPositionColor: AppColors.accent,
+           displaySeekBar: !_isLive,
+           automaticallyImplySkipNextButton: false,
+           automaticallyImplySkipPreviousButton: false,
+           topButtonBar: _topBar(desktop: false),
+           backdropColor: Colors.black.withValues(alpha: 0.20),
         ),
         child: Video(controller: _controller!),
       ),
