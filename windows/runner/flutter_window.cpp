@@ -56,6 +56,7 @@ POINT g_last_video_mouse{-1, -1};
 POINT g_last_controls_mouse{-1, -1};
 int g_native_menu_scroll_offset = 0;
 int g_native_focus_index = 0;
+bool g_native_keyboard_focus_visible = false;
 
 enum class NativeFocusItem {
   kBack,
@@ -1211,7 +1212,8 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     g_native_focus_index = 0;
   }
   const auto is_focused = [&](NativeFocusItem item) {
-    return !focusables.empty() && focusables[g_native_focus_index] == item;
+    return g_native_keyboard_focus_visible && !focusables.empty() &&
+           focusables[g_native_focus_index] == item;
   };
 
   const int top_cy = (top.top + top.bottom) / 2;
@@ -1262,7 +1264,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   kNeutralBg, kNeutralFg);
   }
 
-  HFONT title_font = UiFont(18, FW_BOLD);
+  HFONT title_font = UiFont(22, FW_BOLD);
   DrawTextWithFont(paint_hdc, g_native_control_state.title,
                    RectFrom(66, top.top, MaxInt(80, badge_right - 12),
                             top.bottom),
@@ -1304,11 +1306,11 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
 
   if (l.has_epg) {
     const auto &s = g_native_control_state;
-    HFONT epg_title_font = UiFont(14, FW_SEMIBOLD);
+    HFONT epg_title_font = UiFont(17, FW_SEMIBOLD);
     DrawTextWithFont(paint_hdc, s.epg_now_title, l.epg_title,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                      epg_title_font, RGB(238, 240, 247));
-    HFONT epg_meta_font = UiFont(14, FW_SEMIBOLD);
+    HFONT epg_meta_font = UiFont(16, FW_SEMIBOLD);
     const std::wstring range = FormatClockHm(s.epg_now_start_ms) + L" – " +
                                FormatClockHm(s.epg_now_stop_ms);
     DrawTextWithFont(paint_hdc, range, l.epg_time,
@@ -1329,10 +1331,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
                   RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
-      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" – " +
+      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" - " +
                                       FormatClockHm(s.epg_next_stop_ms);
       DrawTextWithFont(paint_hdc,
-                       L"Next · " + next_range + L" · " + s.epg_next_title,
+                       L"Next: " + s.epg_next_title + L" (" + next_range + L")",
                        l.epg_next,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                        epg_meta_font, RGB(184, 190, 204));
@@ -1391,8 +1393,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // semi-opaque (~40%) so the menu is easier to read.
   RECT menu_rect = CurrentMenuRect(rect);
   if (menu_rect.right > menu_rect.left && menu_rect.bottom > menu_rect.top) {
+    const BYTE menu_alpha =
+        g_native_control_state.open_menu == NativeMenuKind::kSubtitles
+            ? 0x66
+            : 0xFF;
     NormalizeNativeControlBitmapAlpha(pixels, width, height, menu_rect,
-                                       RGB(8, 9, 14), 0x66);
+                                       RGB(8, 9, 14), menu_alpha);
   }
   if (info_panel_rect.right > info_panel_rect.left &&
       info_panel_rect.bottom > info_panel_rect.top) {
@@ -1541,6 +1547,9 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     }
     break;
   case WM_MOUSEMOVE:
+    // Mouse interaction takes over from keyboard navigation, so hide the
+    // keyboard focus ring until arrows/OK are used again.
+    g_native_keyboard_focus_visible = false;
     if (!HasPointerMoved(lparam, &g_last_controls_mouse)) {
       return 0;
     }
@@ -1552,6 +1561,7 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
     }
     break;
   case WM_LBUTTONDOWN: {
+    g_native_keyboard_focus_visible = false;
     const int control_kind =
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
@@ -1739,6 +1749,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     const bool is_nav = wparam == VK_LEFT || wparam == VK_RIGHT ||
                         wparam == VK_UP || wparam == VK_DOWN;
     if (is_activate || is_nav) {
+      g_native_keyboard_focus_visible = true;
       const bool was_controls_visible = native_controls_visible_;
       ShowNativeControls(true);
       ScheduleNativeControlsHide();
