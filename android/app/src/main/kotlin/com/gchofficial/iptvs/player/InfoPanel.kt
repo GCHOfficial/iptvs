@@ -30,10 +30,6 @@ fun InfoPanel(
     modifier: Modifier = Modifier,
 ) {
     val rows = buildList {
-        if (state.isLive) {
-            state.epgNow?.let { add("Now" to it.title) }
-            state.epgNext?.let { add("Next" to it.title) }
-        }
         if (state.videoWidth > 0 && state.videoHeight > 0) {
             add("Resolution" to "${state.videoWidth} × ${state.videoHeight}")
         }

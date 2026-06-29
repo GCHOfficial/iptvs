@@ -829,7 +829,7 @@ private fun LiveEpgStrip(now: EpgEntry, next: EpgEntry?, nowMillis: Long) {
         next?.let {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Next · ${it.title}",
+                text = "Next · ${clockHm(it.startMs)} – ${clockHm(it.stopMs)} · ${it.title}",
                 color = PlayerColors.TextLo,
                 fontFamily = InterFontFamily,
                 fontSize = 12.sp,
