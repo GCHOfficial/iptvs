@@ -1264,22 +1264,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
               const SingleActivator(LogicalKeyboardKey.space): () async {
                 _handlePlaybackInput();
                 await _player.playOrPause();
-                FocusScope.of(context).nextFocus();
+                // ignore: use_build_context_synchronously
+                if (mounted) FocusScope.of(context).nextFocus();
               },
               const SingleActivator(LogicalKeyboardKey.select): () async {
                 _handlePlaybackInput();
                 await _player.playOrPause();
-                FocusScope.of(context).nextFocus();
+                // ignore: use_build_context_synchronously
+                if (mounted) FocusScope.of(context).nextFocus();
               },
               const SingleActivator(LogicalKeyboardKey.enter): () async {
                 _handlePlaybackInput();
                 await _player.playOrPause();
-                FocusScope.of(context).nextFocus();
+                // ignore: use_build_context_synchronously
+                if (mounted) FocusScope.of(context).nextFocus();
               },
               const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () async {
                 _handlePlaybackInput();
                 await _player.playOrPause();
-                FocusScope.of(context).nextFocus();
+                // ignore: use_build_context_synchronously
+                if (mounted) FocusScope.of(context).nextFocus();
               },
               const SingleActivator(LogicalKeyboardKey.mediaPlay): () {
                 _handlePlaybackInput();

@@ -288,51 +288,6 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
-  DateTime? _expiry;
-  bool _expiryLoading = true;
-  bool _expiryFailed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchExpiry();
-  }
-
-  Future<void> _fetchExpiry() async {
-    if (mounted) {
-      setState(() {
-        _expiryLoading = true;
-        _expiryFailed = false;
-      });
-    }
-    final source = widget.config.build();
-    try {
-      final value = await source.subscriptionExpiry();
-      if (!mounted) return;
-      setState(() {
-        _expiry = value;
-        _expiryLoading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _expiryFailed = true;
-        _expiryLoading = false;
-      });
-    } finally {
-      await source.dispose();
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant _SourceCard old) {
-    super.didUpdateWidget(old);
-    if (old.config.fields.toString() != widget.config.fields.toString() ||
-        old.config.kind != widget.config.kind) {
-      _fetchExpiry();
-    }
-  }
-
   @override
   void dispose() {
     _upNode.dispose();

@@ -48,21 +48,22 @@ class M3uSource implements Source {
   @override
   Future<void> connect() async {
     if (_xtreamSource != null) {
-      await _xtreamSource!.connect();
+      await _xtreamSource.connect();
     }
   }
 
   @override
   Future<List<Category>> categories() async {
     await _ensureParsed();
-    return _categories!;
+    return _categories ?? const [];
   }
 
   @override
   Future<List<Channel>> channels({String? categoryId}) async {
     await _ensureParsed();
-    if (categoryId == null) return _channels!;
-    return _channels!.where((c) => c.categoryId == categoryId).toList();
+    final all = _channels ?? const [];
+    if (categoryId == null) return all;
+    return all.where((c) => c.categoryId == categoryId).toList();
   }
 
   @override
@@ -92,7 +93,7 @@ class M3uSource implements Source {
       }
     }
     if (_xtreamSource != null) {
-      return _xtreamSource!.epg(channels);
+      return _xtreamSource.epg(channels);
     }
     return const [];
   }
@@ -100,7 +101,7 @@ class M3uSource implements Source {
   @override
   Future<List<MediaCategory>> mediaCategories(ContentKind kind) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.mediaCategories(kind);
+      return _xtreamSource.mediaCategories(kind);
     }
     return const [];
   }
@@ -113,7 +114,7 @@ class M3uSource implements Source {
     int? maxPages,
   }) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.mediaItems(
+      return _xtreamSource.mediaItems(
         kind,
         categoryId: categoryId,
         parent: parent,
@@ -131,7 +132,7 @@ class M3uSource implements Source {
     int page = 1,
   }) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.mediaItemsPage(
+      return _xtreamSource.mediaItemsPage(
         kind,
         categoryId: categoryId,
         parent: parent,
@@ -148,7 +149,7 @@ class M3uSource implements Source {
     String? categoryId,
   }) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.searchMedia(
+      return _xtreamSource.searchMedia(
         kind,
         query,
         categoryId: categoryId,
@@ -160,7 +161,7 @@ class M3uSource implements Source {
   @override
   Future<MediaItem> mediaDetails(MediaItem item) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.mediaDetails(item);
+      return _xtreamSource.mediaDetails(item);
     }
     return item;
   }
@@ -168,7 +169,7 @@ class M3uSource implements Source {
   @override
   Future<StreamInfo> resolveMedia(MediaItem item) async {
     if (_xtreamSource != null) {
-      return _xtreamSource!.resolveMedia(item);
+      return _xtreamSource.resolveMedia(item);
     }
     throw UnsupportedError('M3U source only exposes playlist channels');
   }
@@ -247,7 +248,7 @@ class M3uSource implements Source {
   }
 
   @visibleForTesting
-  static _XtreamCredentials? extractXtreamCredentials(Uri uri) =>
+  static XtreamCredentials? extractXtreamCredentials(Uri uri) =>
       _extractXtreamCredentials(uri);
 
   static XtreamSource? _xtreamSourceFromPlaylist(
@@ -266,7 +267,7 @@ class M3uSource implements Source {
     );
   }
 
-  static _XtreamCredentials? _extractXtreamCredentials(Uri uri) {
+  static XtreamCredentials? _extractXtreamCredentials(Uri uri) {
     String? username;
     String? password;
 
@@ -288,7 +289,7 @@ class M3uSource implements Source {
     if (hostName.isEmpty) return null;
     final scheme = uri.scheme.isEmpty ? 'http' : uri.scheme;
     final host = '$scheme://$hostName${uri.hasPort ? ':${uri.port}' : ''}';
-    return _XtreamCredentials(host: host, username: username, password: password);
+    return XtreamCredentials(host: host, username: username, password: password);
   }
 
   Future<Uint8List> _download(Uri uri) async {
@@ -305,12 +306,12 @@ class M3uSource implements Source {
   }
 }
 
-class _XtreamCredentials {
+class XtreamCredentials {
   final String host;
   final String username;
   final String password;
 
-  const _XtreamCredentials({
+  const XtreamCredentials({
     required this.host,
     required this.username,
     required this.password,

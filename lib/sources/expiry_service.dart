@@ -62,8 +62,10 @@ DateTime? _findExpirySubstring(String raw) {
       RegExp(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}(?:,?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)?\b', caseSensitive: false),
     ]) {
       for (final match in pattern.allMatches(candidate)) {
-        final parsed = parseExpiryValue(match.group(0));
-        if (parsed != null) return parsed;
+        final dateStr = match.group(0)!;
+        // Try direct date parsing to avoid infinite recursion
+        final parsed = DateTime.tryParse(dateStr) ?? _parseNonIsoDate(dateStr) ?? _parseNamedMonthDate(dateStr);
+        if (parsed != null && parsed.year >= 2000 && parsed.year <= 2100) return parsed;
       }
     }
   }

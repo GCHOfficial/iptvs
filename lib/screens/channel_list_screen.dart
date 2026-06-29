@@ -1783,7 +1783,7 @@ class _LiveCategoryPane extends StatelessWidget {
                             autofocus: selected,
                             focusNode: selected ? selectedFocusNode : null,
                             debugLabel:
-                                'live.category.${item.id == null ? 'all' : item.id}',
+                                'live.category.${item.id ?? 'all'}',
                             onKeyEvent: (node, event) {
                               final isRight =
                                   event.logicalKey == LogicalKeyboardKey.arrowRight;
@@ -2279,44 +2279,6 @@ class _LogoState extends State<_Logo> {
 int _imageCacheSize(BuildContext context, double logicalSize) {
   final dpr = MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0);
   return (logicalSize * dpr).round();
-}
-
-class _LivePill extends StatelessWidget {
-  const _LivePill();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: AppColors.live.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: const BoxDecoration(
-              color: AppColors.live,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 4),
-          const Text(
-            'LIVE',
-            style: TextStyle(
-              color: AppColors.live,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// The bordered shell shared by the category dropdowns. Reflects the focus of
