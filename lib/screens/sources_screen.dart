@@ -381,9 +381,9 @@ class _SourceCardState extends State<_SourceCard> {
         onTap: widget.onActivate,
         child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              Container(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final icon = Container(
                 width: 44,
                 height: 44,
                 alignment: Alignment.center,
@@ -395,9 +395,8 @@ class _SourceCardState extends State<_SourceCard> {
                   _kindIcon(widget.config.kind),
                   color: widget.active ? AppColors.accent : AppColors.textLo,
                 ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
+              );
+              final info = Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -435,44 +434,67 @@ class _SourceCardState extends State<_SourceCard> {
                     ),
                   ],
                 ),
-              ),
+              );
               // Move up/down are always enabled so they stay in the Left/Right
               // focus chain on every row; the parent clamps at the ends and the
               // icon dims when there's nowhere to go.
-              IconButton(
-                focusNode: _upNode,
-                icon: Icon(
-                  Icons.keyboard_arrow_up,
-                  color: widget.canMoveUp ? AppColors.textLo : AppColors.line,
+              final actions = <Widget>[
+                IconButton(
+                  focusNode: _upNode,
+                  icon: Icon(
+                    Icons.keyboard_arrow_up,
+                    color: widget.canMoveUp ? AppColors.textLo : AppColors.line,
+                  ),
+                  tooltip: 'Move up',
+                  onPressed: widget.onMoveUp,
                 ),
-                tooltip: 'Move up',
-                onPressed: widget.onMoveUp,
-              ),
-              IconButton(
-                focusNode: _downNode,
-                icon: Icon(
-                  Icons.keyboard_arrow_down,
-                  color: widget.canMoveDown ? AppColors.textLo : AppColors.line,
+                IconButton(
+                  focusNode: _downNode,
+                  icon: Icon(
+                    Icons.keyboard_arrow_down,
+                    color:
+                        widget.canMoveDown ? AppColors.textLo : AppColors.line,
+                  ),
+                  tooltip: 'Move down',
+                  onPressed: widget.onMoveDown,
                 ),
-                tooltip: 'Move down',
-                onPressed: widget.onMoveDown,
-              ),
-              IconButton(
-                focusNode: _editNode,
-                icon: const Icon(Icons.edit_outlined, color: AppColors.textLo),
-                tooltip: 'Edit',
-                onPressed: widget.onEdit,
-              ),
-              IconButton(
-                focusNode: _deleteNode,
-                icon: const Icon(
-                  Icons.delete_outline,
-                  color: AppColors.textLo,
+                IconButton(
+                  focusNode: _editNode,
+                  icon: const Icon(
+                    Icons.edit_outlined,
+                    color: AppColors.textLo,
+                  ),
+                  tooltip: 'Edit',
+                  onPressed: widget.onEdit,
                 ),
-                tooltip: 'Delete',
-                onPressed: widget.onDelete,
-              ),
-            ],
+                IconButton(
+                  focusNode: _deleteNode,
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    color: AppColors.textLo,
+                  ),
+                  tooltip: 'Delete',
+                  onPressed: widget.onDelete,
+                ),
+              ];
+              // On phones the four action buttons crush the text if kept on the
+              // same row, so drop them onto a second row beneath the content.
+              if (constraints.maxWidth < 560) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [icon, const SizedBox(width: 14), info]),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: actions,
+                    ),
+                  ],
+                );
+              }
+              return Row(
+                children: [icon, const SizedBox(width: 14), info, ...actions],
+              );
+            },
           ),
         ),
       ),
