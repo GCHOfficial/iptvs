@@ -1,6 +1,9 @@
 import { supabase, KIND_FIELDS } from './supabase.js';
 
 const app = document.getElementById('app');
+// Profiles per account are capped server-side (a BEFORE INSERT trigger); mirror
+// the limit here to disable the add button and explain why before the round-trip.
+const MAX_PROFILES = 20;
 let session = null;
 let tab = 'sources';
 // Profiles: an account holds several; sources/metadata are scoped to the one
@@ -273,13 +276,15 @@ async function renderProfiles() {
   if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
   profiles = data;
   const nextPos = data.length ? Math.max(...data.map((p) => p.position ?? 0)) + 1 : 0;
+  const atCap = data.length >= MAX_PROFILES;
   view().innerHTML = `
     <p class="muted hint">Each profile is its own source list, metadata, and favorites. Devices pick which profile to sync.</p>
     <div class="rows">
       ${data.map((p, i) => profileRow(p, i, data.length)).join('')}
     </div>
-    <button id="addp" class="primary">+ Add profile</button>`;
-  document.getElementById('addp').onclick = () => addProfile(nextPos);
+    <button id="addp" class="primary" ${atCap ? 'disabled' : ''}>+ Add profile</button>
+    ${atCap ? `<p class="muted hint" style="margin-top:10px">Profile limit reached (${MAX_PROFILES}).</p>` : ''}`;
+  if (!atCap) document.getElementById('addp').onclick = () => addProfile(nextPos);
   for (const el of view().querySelectorAll('[data-rename]'))
     el.onclick = () => renameProfile(el.dataset.rename, data);
   for (const el of view().querySelectorAll('[data-del]'))
