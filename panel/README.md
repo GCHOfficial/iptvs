@@ -27,8 +27,13 @@ GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
 ## What it does
 
 - **Login** — magic-link email only (no passwords, no OAuth).
-- **Sources** — CRUD over your `sources` rows; field shapes mirror
+- **Profiles** — an account holds multiple named profiles, each its own source list,
+  metadata, and favorites. A selector in the header chooses the working profile;
+  the **Profiles** tab adds / renames / deletes / reorders them. A `Default` profile
+  is created automatically. Sources and metadata are scoped to the selected profile.
+- **Sources** — CRUD over the selected profile's `sources` rows; field shapes mirror
   `lib/sources/source_config.dart` per kind (Stalker / Xtream / M3U / Demo).
   Reorder with ↑/↓ — devices show sources in this order.
-- **Metadata** — your TMDB/TVDB/MDBList keys + auto-enrich toggle.
-- **Devices** — pair by entering a device's code (`claim_pairing` RPC), rename, revoke.
+- **Metadata** — the selected profile's TMDB/TVDB/MDBList keys + auto-enrich toggle.
+- **Devices** — pair by entering a device's code (`claim_pairing` RPC), rename, revoke;
+  each device shows which profile it's syncing. Devices choose their profile on-device.

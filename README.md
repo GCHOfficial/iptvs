@@ -25,15 +25,18 @@ element can't.
   rings, "OK to edit" fields and sliders). One universal APK serves phone + TV.
 - **EPG & metadata** — XMLTV EPG with now/next and a live progress strip; posters,
   overviews, and ratings pulled from TMDB / TVDB / MDBList.
+- **Favorites & per-source settings** — star live channels, movies, and series into a
+  **Favorites** row at the top of each list; disable categories you don't care about on
+  a per-source settings screen so they vanish from browsing.
 - **Resilient live playback** — auto-reconnect with backoff when a live stream
   stalls or drops, plus a "Go to live" control.
 - **Native overlays** — a Windows (D3D11) and Android (Compose) player overlay at
   parity: play/pause, ±10s, scrubber, audio/subtitle/speed menus, aspect cycle,
   resolution/HDR/FPS/clock badges, and an info panel.
-- **Optional web panel** — manage and reorder your source list from a browser and pull
-  it onto each device by entering a short pairing code (or push a device's list back up),
-  with **no login on the TV**. Off unless built with cloud config. See
-  [Cloud sync](#cloud-sync-optional).
+- **Optional web panel** — manage your sources from a browser as one or more **profiles**
+  (separate setups on one account), and pull a profile onto each device by entering a short
+  pairing code (or push a device's set back up), with **no login on the TV**. Off unless
+  built with cloud config. See [Cloud sync](#cloud-sync-optional).
 
 ## Platforms
 
@@ -75,8 +78,15 @@ CI expectation: `flutter analyze` is clean and `flutter test` is green.
 Maintaining a source list with a TV remote is painful, so iptvs can optionally talk to
 a **web panel** — a static site on GitHub Pages backed by [Supabase](https://supabase.com) —
 where you manage, reorder, and keep your sources and metadata keys with a real keyboard.
-Each device pulls the list down after a one-time **pairing code**, so there is **no login
-on the TV** — and can optionally **push** its own list back up (newest change wins).
+The live panel is at **<https://gchofficial.github.io/iptvs/>**. Each device pulls a list
+down after a one-time **pairing code**, so there is **no login on the TV** — and can
+optionally **push** its own set back up (newest change wins).
+
+- **Profiles** — an account can hold several named **profiles**, each its own complete
+  setup: source list, metadata keys, disabled categories, and favorites. A device pairs to
+  the account, then picks which profile to sync (switchable any time). Profiles are
+  created and renamed in the panel; the device just selects one. A single-profile account
+  behaves exactly like before.
 
 - **Private by design** — sources are isolated per account by Postgres row-level security;
   the app and panel ship only the public anon/publishable key, and the `service_role` key is

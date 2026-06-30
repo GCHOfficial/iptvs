@@ -181,7 +181,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
               onPressed: () async {
                 await Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) => CloudSyncScreen(store: widget.store),
+                    builder: (_) =>
+                        CloudSyncScreen(store: widget.store, db: widget.db),
                   ),
                 );
                 // A pull may have changed the source list; refresh on return.

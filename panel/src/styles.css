@@ -28,6 +28,7 @@ body {
 }
 .bar nav { display: flex; gap: 6px; flex: 1; flex-wrap: wrap; }
 .bar > button { flex-shrink: 0; }
+.profile-select { width: auto; flex-shrink: 0; max-width: 180px; }
 
 .brand {
   display: inline-flex;
@@ -124,5 +125,6 @@ input, select {
   .bar { padding: 12px 16px; }
   .brand { flex: 1 1 100%; }
   .bar nav { flex: 1 1 auto; }
+  .profile-select { flex: 1 1 100%; max-width: none; }
   main, .login { padding: 20px 16px; }
 }

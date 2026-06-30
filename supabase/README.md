@@ -13,6 +13,19 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   (`..._two_way_push.sql`) are the only device→cloud write path — owner-scoped via
   `current_device_owner()`, so an unpaired anon caller is rejected and a payload
   can't reach another account's rows.
+- **Profiles** (`..._profiles.sql`) — an account holds multiple named **profiles**,
+  each its own source list + metadata config + per-source `settings` (hidden
+  categories) + `favorites`. `sources`/`metadata_configs` gain a `profile_id`
+  (`metadata_configs` is re-keyed to one row per profile); `devices` gain
+  `active_profile_id` (which profile that device syncs). The push RPCs take a
+  `p_profile_id` and verify it belongs to the caller's account; new
+  `push_favorites` and `set_device_profile` RPCs follow the same owner-scoped
+  pattern. The migration backfills a `Default` profile for every existing owner
+  (idempotent), so a single-profile account is unchanged. Owner-scoping remains the
+  security boundary — `profile_id` is only an added filter, and a paired device can
+  already read all of its owner's data. The legacy 1-arg `push_sources`/
+  `push_metadata` delegate to the device's `active_profile_id` so older app builds
+  stay scoped to one profile.
 
 ## One-time setup
 
@@ -52,6 +65,8 @@ Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy ano
 - [ ] Anonymous session has **no direct** INSERT/UPDATE/DELETE on any table (writes need a real account).
 - [ ] `push_sources`/`push_metadata` reject an **unpaired** anonymous caller (no owner).
 - [ ] A `push_sources` payload can't create/modify/delete rows for another account (owner-scoped).
-- [ ] Account A cannot read or write account B's rows.
+- [ ] `push_sources`/`push_metadata`/`push_favorites`/`set_device_profile` reject a
+      `profile_id` the caller's account doesn't own.
+- [ ] Account A cannot read or write account B's profiles, sources, or favorites.
 - [ ] `claim_pairing` rejects an anonymous claimer, an expired code, and an already-claimed code.
 - [ ] Deleting a `devices` row immediately revokes that device's read access (and its push).
