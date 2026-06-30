@@ -153,6 +153,11 @@ class _TvTextFieldState extends State<TvTextField> {
           onTap: _enterEdit,
           child: Container(
             height: widget.height,
+            // Center the inner field within a fixed-height cell. Without this the
+            // Container hands the TextField a tight height; under isDense Android's
+            // InputDecorator then pins the hint to the top (Windows happens to
+            // center it) — the long-standing Android-only hint misalignment.
+            alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
               color: highlighted ? AppColors.panelHi : AppColors.panel,
               borderRadius: BorderRadius.circular(AppRadius.tile),
