@@ -18,6 +18,7 @@ import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/source_hint_parser.dart';
 import '../sources/source.dart';
+import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -37,10 +38,15 @@ class _MoveRightToChannelsIntent extends Intent {
 /// now/next EPG (when the source provides it).
 class ChannelListScreen extends StatefulWidget {
   final LibraryRepository repo;
+
+  /// The active source's config, carrying per-source preferences (e.g. hidden
+  /// categories). Read for presentation only — browsing filters key off it.
+  final SourceConfig config;
   final VoidCallback? onManageSources;
   const ChannelListScreen({
     super.key,
     required this.repo,
+    required this.config,
     this.onManageSources,
   });
 
@@ -127,6 +133,25 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       const Duration(minutes: 1),
       (_) => _refreshNowNext(),
     );
+  }
+
+  @override
+  void didUpdateWidget(covariant ChannelListScreen old) {
+    super.didUpdateWidget(old);
+    // Source settings may have changed while we were away (the config is a fresh
+    // object after a reload). If the category currently selected was just
+    // disabled, fall back to "All" so we don't show an empty, unselectable view.
+    if (!identical(old.config, widget.config)) {
+      if (_hiddenCategories(ContentKind.live).contains(_categoryId)) {
+        _categoryId = null;
+      }
+      for (final kind in const [ContentKind.movie, ContentKind.series]) {
+        if (_hiddenCategories(kind).contains(_mediaCategoryId[kind])) {
+          _mediaCategoryId[kind] = null;
+          _loadMedia(kind);
+        }
+      }
+    }
   }
 
   @override
@@ -779,9 +804,30 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
+  /// Category ids the user disabled for [kind] in source settings.
+  Set<String> _hiddenCategories(ContentKind kind) =>
+      widget.config.hiddenCategoryIds(kind);
+
+  /// Live categories with disabled ones removed (for the pane/dropdown).
+  List<Category> get _visibleCategories {
+    final hidden = _hiddenCategories(ContentKind.live);
+    if (hidden.isEmpty) return _categories;
+    return _categories.where((c) => !hidden.contains(c.id)).toList();
+  }
+
+  /// Media categories for [kind] with disabled ones removed.
+  List<MediaCategory> _visibleMediaCategories(ContentKind kind) {
+    final all = _media[kind]?.categories ?? const <MediaCategory>[];
+    final hidden = _hiddenCategories(kind);
+    if (hidden.isEmpty) return all;
+    return all.where((c) => !hidden.contains(c.id)).toList();
+  }
+
   List<Channel> get _visible {
     final q = _query.trim().toLowerCase();
+    final hidden = _hiddenCategories(ContentKind.live);
     return _all.where((c) {
+      if (hidden.contains(c.categoryId)) return false;
       if (_categoryId != null && c.categoryId != _categoryId) return false;
       if (q.isNotEmpty && !c.name.toLowerCase().contains(q)) return false;
       return true;
@@ -790,11 +836,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   List<MediaItem> _visibleMedia(ContentKind kind) {
     final q = _query.trim().toLowerCase();
+    final hidden = _hiddenCategories(kind);
     if (q.length >= 2 && _mediaSearchQuery[kind] == _query.trim()) {
-      return _mediaSearchResults[kind] ?? const <MediaItem>[];
+      final results = _mediaSearchResults[kind] ?? const <MediaItem>[];
+      if (hidden.isEmpty) return results;
+      return results
+          .where((item) => !hidden.contains(item.categoryId))
+          .toList();
     }
     final items = _media[kind]?.items ?? const <MediaItem>[];
     return items.where((item) {
+      if (hidden.contains(item.categoryId)) return false;
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
@@ -1230,7 +1282,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   ? null
                   : (_tab == ContentKind.live
                       ? _CategoryDropdown(
-                          categories: _categories,
+                          categories: _visibleCategories,
                           value: _categoryId,
                           onChanged: (v) {
                             setState(() => _categoryId = v);
@@ -1238,7 +1290,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                           },
                         )
                       : _MediaCategoryDropdown(
-                          categories: _media[_tab]?.categories ?? const [],
+                          categories: _visibleMediaCategories(_tab),
                           value: _mediaCategoryId[_tab],
                           onChanged: (v) {
                             setState(() {
@@ -1415,7 +1467,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 SizedBox(
                   width: 240,
                   child: _LiveCategoryPane(
-                    categories: _categories,
+                    categories: _visibleCategories,
                     selectedCategoryId: _categoryId,
                     selectedFocusNode: _focusNodeForCategory(_categoryId),
                     onSelected: (value) {

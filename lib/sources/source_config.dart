@@ -37,11 +37,18 @@ class SourceConfig {
   final String label;
   final Map<String, String> fields;
 
+  /// Per-source user preferences (not credentials) — e.g. hidden categories.
+  /// Kept separate from [fields] so [build] never sees them and they can ride
+  /// the source row into the cloud as a single `settings` blob. Free-form so new
+  /// preferences don't require schema changes.
+  final Map<String, dynamic> settings;
+
   const SourceConfig({
     required this.id,
     required this.kind,
     required this.label,
     required this.fields,
+    this.settings = const {},
   });
 
   Source build() {
@@ -80,11 +87,62 @@ class SourceConfig {
     return (v == null || v.isEmpty) ? null : v;
   }
 
+  SourceConfig copyWith({
+    String? id,
+    SourceKind? kind,
+    String? label,
+    Map<String, String>? fields,
+    Map<String, dynamic>? settings,
+  }) =>
+      SourceConfig(
+        id: id ?? this.id,
+        kind: kind ?? this.kind,
+        label: label ?? this.label,
+        fields: fields ?? this.fields,
+        settings: settings ?? this.settings,
+      );
+
+  /// Category ids the user has hidden for [kind] (live channels / movies /
+  /// series). Empty when nothing is hidden. Reads the JSON-shaped
+  /// `settings['hiddenCategories'][kind.name]`.
+  Set<String> hiddenCategoryIds(ContentKind kind) {
+    final hidden = settings['hiddenCategories'];
+    if (hidden is! Map) return const {};
+    final list = hidden[kind.name];
+    if (list is! List) return const {};
+    return list.map((e) => e.toString()).toSet();
+  }
+
+  /// A copy with [kind]'s hidden-category set replaced by [ids]. An empty set
+  /// clears the entry (and the whole map when nothing remains hidden) so a
+  /// fully-enabled source serializes back to no `settings`.
+  SourceConfig withHiddenCategories(ContentKind kind, Set<String> ids) {
+    final existing = settings['hiddenCategories'];
+    final hidden = <String, dynamic>{
+      if (existing is Map)
+        for (final entry in existing.entries) entry.key.toString(): entry.value,
+    };
+    if (ids.isEmpty) {
+      hidden.remove(kind.name);
+    } else {
+      hidden[kind.name] = (ids.toList()..sort());
+    }
+    final next = <String, dynamic>{...settings};
+    if (hidden.isEmpty) {
+      next.remove('hiddenCategories');
+    } else {
+      next['hiddenCategories'] = hidden;
+    }
+    return copyWith(settings: next);
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'kind': kind.name,
         'label': label,
         'fields': fields,
+        // Omit when empty so legacy/preference-free configs serialize unchanged.
+        if (settings.isNotEmpty) 'settings': settings,
       };
 
   factory SourceConfig.fromJson(Map<String, dynamic> j) => SourceConfig(
@@ -92,5 +150,7 @@ class SourceConfig {
         kind: SourceKind.values.byName(j['kind'] as String),
         label: j['label'] as String,
         fields: Map<String, String>.from(j['fields'] as Map),
+        settings:
+            (j['settings'] as Map?)?.cast<String, dynamic>() ?? const {},
       );
 }

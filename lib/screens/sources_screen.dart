@@ -11,6 +11,7 @@ import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
+import 'source_settings_screen.dart';
 
 IconData _kindIcon(SourceKind k) {
   switch (k) {
@@ -103,6 +104,21 @@ class _SourcesScreenState extends State<SourcesScreen> {
       ),
     );
     if (saved != true) return;
+    await _reload();
+    _focusCard(c.id);
+  }
+
+  Future<void> _openSettings(SourceConfig c) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SourceSettingsScreen(
+          store: widget.store,
+          db: widget.db,
+          config: c,
+        ),
+      ),
+    );
+    // Settings are saved as they're toggled; refresh so the card reflects them.
     await _reload();
     _focusCard(c.id);
   }
@@ -218,6 +234,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
                   onActivate: () => _activate(c),
                   onMoveUp: () => _move(c, -1),
                   onMoveDown: () => _move(c, 1),
+                  onSettings: () => _openSettings(c),
                   onEdit: () => _edit(c),
                   onDelete: () => _delete(c),
                 );
@@ -237,6 +254,7 @@ class _SourceCard extends StatefulWidget {
   final VoidCallback onActivate;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final VoidCallback onSettings;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -249,6 +267,7 @@ class _SourceCard extends StatefulWidget {
     required this.onActivate,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.onSettings,
     required this.onEdit,
     required this.onDelete,
     this.focusNode,
@@ -266,6 +285,7 @@ class _SourceCardState extends State<_SourceCard> {
   // card → up → down → edit → delete (see _handleDirectional).
   final FocusNode _upNode = FocusNode(skipTraversal: true);
   final FocusNode _downNode = FocusNode(skipTraversal: true);
+  final FocusNode _settingsNode = FocusNode(skipTraversal: true);
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
@@ -318,6 +338,7 @@ class _SourceCardState extends State<_SourceCard> {
   void dispose() {
     _upNode.dispose();
     _downNode.dispose();
+    _settingsNode.dispose();
     _editNode.dispose();
     _deleteNode.dispose();
     super.dispose();
@@ -338,8 +359,14 @@ class _SourceCardState extends State<_SourceCard> {
 
   // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
   // skip-traversal, so vertical movement only finds adjacent row cards).
-  List<FocusNode?> get _chain =>
-      [widget.focusNode, _upNode, _downNode, _editNode, _deleteNode];
+  List<FocusNode?> get _chain => [
+        widget.focusNode,
+        _upNode,
+        _downNode,
+        _settingsNode,
+        _editNode,
+        _deleteNode,
+      ];
 
   Object? _handleDirectional(DirectionalFocusIntent intent) {
     final focused = FocusManager.instance.primaryFocus;
@@ -457,6 +484,15 @@ class _SourceCardState extends State<_SourceCard> {
                   ),
                   tooltip: 'Move down',
                   onPressed: widget.onMoveDown,
+                ),
+                IconButton(
+                  focusNode: _settingsNode,
+                  icon: const Icon(
+                    Icons.tune,
+                    color: AppColors.textLo,
+                  ),
+                  tooltip: 'Settings',
+                  onPressed: widget.onSettings,
                 ),
                 IconButton(
                   focusNode: _editNode,
