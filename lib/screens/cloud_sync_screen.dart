@@ -245,30 +245,47 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         const SizedBox(height: 20),
         Center(
-          child: InkWell(
-            onTap: _code == null ? null : _copyCode,
-            borderRadius: BorderRadius.circular(12),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
-              decoration: BoxDecoration(
-                color: AppColors.panelHi,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _code?.code ?? '········',
-                    style: const TextStyle(
-                      fontSize: 40,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 8,
-                      fontFeatures: [FontFeature.tabularFigures()],
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 360),
+            child: InkWell(
+              onTap: _code == null ? null : _copyCode,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 18,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.panelHi,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    // Balances the trailing copy icon so the code stays centered.
+                    const SizedBox(width: 38),
+                    // Scale the code down so any glyph mix fits the box on a
+                    // narrow phone instead of overflowing.
+                    Expanded(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.center,
+                        child: Text(
+                          _code?.code ?? '········',
+                          maxLines: 1,
+                          style: const TextStyle(
+                            fontSize: 40,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 8,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 14),
-                  const Icon(Icons.copy_rounded, color: AppColors.textLo),
-                ],
+                    const SizedBox(width: 14),
+                    const Icon(Icons.copy_rounded, color: AppColors.textLo),
+                  ],
+                ),
               ),
             ),
           ),
