@@ -43,11 +43,17 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   }
 
   Future<void> _load() async {
-    final live = await widget.db.readCategories(_config.id);
+    // The cache is keyed by the credential-derived [Source.id] (e.g.
+    // `stalker:portal|mac`), NOT the [SourceConfig] UUID — so resolve the
+    // built source's id to read the categories browsing stored.
+    final source = _config.build();
+    final sourceId = source.id;
+    await source.dispose();
+    final live = await widget.db.readCategories(sourceId);
     final movies =
-        await widget.db.readMediaCategories(_config.id, ContentKind.movie);
+        await widget.db.readMediaCategories(sourceId, ContentKind.movie);
     final series =
-        await widget.db.readMediaCategories(_config.id, ContentKind.series);
+        await widget.db.readMediaCategories(sourceId, ContentKind.series);
     if (!mounted) return;
     setState(() {
       _live = live;
