@@ -6,6 +6,25 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/tv_text_field.dart';
+
+/// The next hidden-category set when bulk-toggling [affected]: [hide] true adds
+/// them all (union), false reveals them (difference). Pure so the bulk Show
+/// all / Hide all controls — which operate on the *filtered* subset and must
+/// leave off-screen categories untouched — stay unit-testable.
+Set<String> bulkToggleHidden(
+  Set<String> current,
+  Iterable<String> affected, {
+  required bool hide,
+}) {
+  final next = current.toSet();
+  if (hide) {
+    next.addAll(affected);
+  } else {
+    next.removeAll(affected);
+  }
+  return next;
+}
 
 /// Per-source preferences. The first capability is enabling/disabling
 /// categories: a disabled category (and everything in it) is hidden from
@@ -36,10 +55,19 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   List<MediaCategory> _series = const [];
   bool _loading = true;
 
+  final TextEditingController _searchController = TextEditingController();
+  String _query = '';
+
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -63,13 +91,62 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     });
   }
 
-  Future<void> _toggle(ContentKind kind, String categoryId) async {
-    final hidden = _config.hiddenCategoryIds(kind).toSet();
-    if (!hidden.add(categoryId)) hidden.remove(categoryId);
-    final next = _config.withHiddenCategories(kind, hidden);
+  /// All categories for [kind] as a uniform (id, title) list.
+  List<({String id, String title})> _all(ContentKind kind) {
+    switch (kind) {
+      case ContentKind.live:
+        return _live.map((c) => (id: c.id, title: c.title)).toList();
+      case ContentKind.movie:
+        return _movies.map((c) => (id: c.id, title: c.title)).toList();
+      case ContentKind.series:
+        return _series.map((c) => (id: c.id, title: c.title)).toList();
+      case ContentKind.season:
+      case ContentKind.episode:
+        return const [];
+    }
+  }
+
+  /// [kind]'s categories matching the current search query.
+  List<({String id, String title})> _filtered(ContentKind kind) {
+    final q = _query.trim().toLowerCase();
+    final all = _all(kind);
+    if (q.isEmpty) return all;
+    return all.where((c) => c.title.toLowerCase().contains(q)).toList();
+  }
+
+  Future<void> _save(SourceConfig next) async {
     setState(() => _config = next);
     await widget.store.save(next);
   }
+
+  Future<void> _toggle(ContentKind kind, String categoryId) async {
+    final hidden = _config.hiddenCategoryIds(kind).toSet();
+    if (!hidden.add(categoryId)) hidden.remove(categoryId);
+    await _save(_config.withHiddenCategories(kind, hidden));
+  }
+
+  /// Show/Hide every currently-visible (filtered) category of [kind]. Off-screen
+  /// categories keep their state (the helper merges rather than replaces).
+  Future<void> _bulkSection(ContentKind kind, {required bool hide}) async {
+    final ids = _filtered(kind).map((c) => c.id);
+    final next = bulkToggleHidden(_config.hiddenCategoryIds(kind), ids, hide: hide);
+    await _save(_config.withHiddenCategories(kind, next));
+  }
+
+  /// Show/Hide the filtered categories across all three kinds in one save.
+  Future<void> _bulkAll({required bool hide}) async {
+    var next = _config;
+    for (final kind in ContentKind.values) {
+      final ids = _filtered(kind).map((c) => c.id);
+      next = next.withHiddenCategories(
+        kind,
+        bulkToggleHidden(next.hiddenCategoryIds(kind), ids, hide: hide),
+      );
+    }
+    await _save(next);
+  }
+
+  bool get _hasAnyMatch => ContentKind.values.any((k) => _filtered(k).isNotEmpty);
 
   @override
   Widget build(BuildContext context) {
@@ -88,43 +165,103 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                     style: TextStyle(color: AppColors.textLo),
                   ),
                 ),
-                _section('Live TV', ContentKind.live,
-                    _live.map((c) => (id: c.id, title: c.title))),
-                _section('Movies', ContentKind.movie,
-                    _movies.map((c) => (id: c.id, title: c.title))),
-                _section('Series', ContentKind.series,
-                    _series.map((c) => (id: c.id, title: c.title))),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
+                  child: TvTextField(
+                    controller: _searchController,
+                    hintText: 'Search categories',
+                    autofocus: true,
+                    textInputAction: TextInputAction.search,
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.clear, size: 18),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _query = '');
+                            },
+                          ),
+                    onChanged: (v) => setState(() => _query = v),
+                  ),
+                ),
+                if (_hasAnyMatch)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _BulkButton(
+                            label: 'Show all',
+                            icon: Icons.visibility,
+                            onTap: () => _bulkAll(hide: false),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _BulkButton(
+                            label: 'Hide all',
+                            icon: Icons.visibility_off_outlined,
+                            onTap: () => _bulkAll(hide: true),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                _section('Live TV', ContentKind.live),
+                _section('Movies', ContentKind.movie),
+                _section('Series', ContentKind.series),
               ],
             ),
     );
   }
 
-  Widget _section(
-    String title,
-    ContentKind kind,
-    Iterable<({String id, String title})> categories,
-  ) {
-    final items = categories.toList();
+  Widget _section(String title, ContentKind kind) {
+    final items = _filtered(kind);
+    final total = _all(kind).length;
     final hidden = _config.hiddenCategoryIds(kind);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(6, 16, 6, 6),
-          child: Text(
-            title,
-            style: const TextStyle(
-              color: AppColors.textLo,
-              fontWeight: FontWeight.w700,
-            ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: AppColors.textLo,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              if (items.isNotEmpty) ...[
+                _BulkButton(
+                  label: 'Show all',
+                  icon: Icons.visibility,
+                  dense: true,
+                  onTap: () => _bulkSection(kind, hide: false),
+                ),
+                const SizedBox(width: 6),
+                _BulkButton(
+                  label: 'Hide all',
+                  icon: Icons.visibility_off_outlined,
+                  dense: true,
+                  onTap: () => _bulkSection(kind, hide: true),
+                ),
+              ],
+            ],
           ),
         ),
         if (items.isEmpty)
-          const Padding(
-            padding: EdgeInsets.fromLTRB(6, 0, 6, 8),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 0, 6, 8),
             child: Text(
-              'Browse this source once to load its categories.',
-              style: TextStyle(color: AppColors.textLo, fontSize: 12),
+              total == 0
+                  ? 'Browse this source once to load its categories.'
+                  : 'No categories match your search.',
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
             ),
           )
         else
@@ -132,7 +269,6 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
             _CategoryToggleRow(
               title: item.title,
               enabled: !hidden.contains(item.id),
-              autofocus: kind == ContentKind.live && item.id == items.first.id,
               onToggle: () => _toggle(kind, item.id),
             ),
       ],
@@ -140,23 +276,65 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   }
 }
 
+/// A compact pill action used for the Show all / Hide all controls. D-pad
+/// navigable via [FocusableCard], matching [_CategoryToggleRow].
+class _BulkButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool dense;
+  final VoidCallback onTap;
+
+  const _BulkButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.dense = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: dense ? 10 : 12,
+          vertical: dense ? 7 : 10,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: dense ? 16 : 18, color: AppColors.textLo),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: AppColors.textHi,
+                fontSize: dense ? 12 : 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CategoryToggleRow extends StatelessWidget {
   final String title;
   final bool enabled;
-  final bool autofocus;
   final VoidCallback onToggle;
 
   const _CategoryToggleRow({
     required this.title,
     required this.enabled,
-    required this.autofocus,
     required this.onToggle,
   });
 
   @override
   Widget build(BuildContext context) {
     return FocusableCard(
-      autofocus: autofocus,
       onTap: onToggle,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
