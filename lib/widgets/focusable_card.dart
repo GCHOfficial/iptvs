@@ -10,6 +10,10 @@ import '../theme.dart';
 class FocusableCard extends StatefulWidget {
   final Widget child;
   final VoidCallback onTap;
+
+  /// Optional long-press handler (touch only). Used on phones to open a
+  /// preview before committing to fullscreen; null on TV/desktop.
+  final VoidCallback? onLongPress;
   final bool autofocus;
   final bool scrollOnFocus;
   final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
@@ -24,6 +28,7 @@ class FocusableCard extends StatefulWidget {
     super.key,
     required this.child,
     required this.onTap,
+    this.onLongPress,
     this.autofocus = false,
     this.scrollOnFocus = true,
     this.focusNode,
@@ -103,6 +108,7 @@ class _FocusableCardState extends State<FocusableCard> {
                 borderRadius: BorderRadius.circular(AppRadius.tile),
                 hoverColor: AppColors.panelHi,
                 onTap: widget.onTap,
+                onLongPress: widget.onLongPress,
                 child: widget.child,
               ),
             ),

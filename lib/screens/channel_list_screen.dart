@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
@@ -151,17 +152,35 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     super.dispose();
   }
 
+  /// On Android (phone + TV) previews are deliberate: started by an explicit
+  /// OK press (TV split-pane) or long-press (phone), and they carry audio
+  /// because the user asked for them. On desktop they auto-start muted after a
+  /// short focus debounce, mouse-hover style.
+  bool get _deliberatePreview => Platform.isAndroid;
+
   void _onChannelFocusChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
-      if (_previewChannelId == channel.id) {
+      if (!_deliberatePreview && _previewChannelId == channel.id) {
         _previewTimer?.cancel();
+      }
+      return;
+    }
+
+    if (_deliberatePreview) {
+      // No auto-preview on a TV remote: just let the info panel follow focus,
+      // and drop any preview still playing for a different channel.
+      if (_lastFocusedLiveChannelId != channel.id) {
+        setState(() => _lastFocusedLiveChannelId = channel.id);
+      }
+      if (_previewChannelId != null && _previewChannelId != channel.id) {
+        unawaited(_stopLivePreviewPlayback(clearSelection: true));
       }
       return;
     }
 
     _previewTimer?.cancel();
 
-    // Debounce for 500ms
+    // Debounce for 500ms (desktop mouse/keyboard).
     _previewTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
       final isWide = MediaQuery.of(context).size.width >= 950;
@@ -833,10 +852,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       await _openLivePlayer(channel, _previewStream!);
       return;
     }
-    await _startLivePreview(channel);
+    // First OK starts the preview; on a TV remote it's deliberate, so unmuted.
+    await _startLivePreview(channel, muted: !_deliberatePreview);
   }
 
-  Future<void> _startLivePreview(Channel channel) async {
+  Future<void> _startLivePreview(Channel channel, {bool muted = true}) async {
     if (_previewLoading) return;
     final messenger = ScaffoldMessenger.of(context);
     final requestId = ++_previewRequestId;
@@ -856,8 +876,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       await _previewPlayer.open(
         Media(stream.url, httpHeaders: stream.headers),
       );
-      // MUTE BY DEFAULT FOR PREVIEW
-      await _previewPlayer.setVolume(0);
+      // Desktop auto-previews are muted; deliberate (OK / long-press) previews
+      // carry audio.
+      await _previewPlayer.setVolume(muted ? 0 : 100);
       if (!mounted || requestId != _previewRequestId) return;
       setState(() {
         _previewStream = stream;
@@ -921,6 +942,39 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _previewChannelId = null;
       }
     });
+  }
+
+  /// Phone-only: open a compact, audible preview of [channel] in a bottom
+  /// sheet (tap on a tile still goes straight to fullscreen). Reuses the single
+  /// preview player; the sheet's Play button hands off to fullscreen.
+  Future<void> _showPreviewSheet(Channel channel) async {
+    if (_resolving) return;
+    unawaited(_startLivePreview(channel, muted: false));
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) => _PhonePreviewSheet(
+        player: _previewPlayer,
+        controller: _previewController,
+        channel: channel,
+        now: _now[channel.id],
+        next: _next[channel.id],
+        onPlay: () {
+          final stream = _previewStream;
+          Navigator.of(sheetContext).pop();
+          if (stream != null && _previewChannelId == channel.id) {
+            unawaited(_openLivePlayer(channel, stream));
+          } else {
+            unawaited(_play(channel));
+          }
+        },
+      ),
+    );
+    await _stopLivePreviewPlayback(clearSelection: true);
   }
 
   Future<void> _openMedia(MediaItem item) async {
@@ -1292,10 +1346,22 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         ),
       );
     }
-    final preview =
-      _all.where((c) => c.id == _previewChannelId).firstOrNull ??
-      _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
-      visible.first;
+    // On a TV remote the panel follows D-pad focus (it shows the focused
+    // channel's logo + EPG until OK starts a preview); on desktop it follows
+    // the auto-preview selection.
+    final preview = _deliberatePreview
+        ? (_all.where((c) => c.id == _lastFocusedLiveChannelId).firstOrNull ??
+            _all.where((c) => c.id == _previewChannelId).firstOrNull ??
+            _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
+            visible.first)
+        : (_all.where((c) => c.id == _previewChannelId).firstOrNull ??
+            _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
+            visible.first);
+
+    // Phones have no split-pane preview, so offer a deliberate preview via
+    // long-press; tap still goes straight to fullscreen.
+    final allowLongPressPreview =
+        _deliberatePreview && MediaQuery.of(context).size.width < 950;
 
     Widget buildChannelList({EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16)}) {
       return ListView.builder(
@@ -1320,6 +1386,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               ? _firstChannelFocusNode
               : _focusNodeForLiveChannel(c.id),
             onTap: () => _play(c),
+            onLongPress:
+                allowLongPressPreview ? () => _showPreviewSheet(c) : null,
             selected: c.id == _previewChannelId,
             onMoveLeftToCategory: () {
               _rememberBrowsedLiveChannel(c.id);
@@ -1381,6 +1449,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         previewError: _previewChannelId == preview.id
                             ? _previewError
                             : null,
+                        deliberate: _deliberatePreview,
                       ),
                       const SizedBox(height: 8),
                       Expanded(
@@ -1921,6 +1990,10 @@ class _LivePreviewPanel extends StatelessWidget {
   final bool previewLoading;
   final String? previewError;
 
+  /// When true (TV remote), OK starts the preview rather than auto-previewing
+  /// on focus, so the hint invites a first OK to preview.
+  final bool deliberate;
+
   const _LivePreviewPanel({
     required this.channel,
     required this.now,
@@ -1929,12 +2002,21 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.previewActive,
     required this.previewLoading,
     required this.previewError,
+    required this.deliberate,
   });
 
   String _fmt(DateTime time) {
     final h = time.hour.toString().padLeft(2, '0');
     final m = time.minute.toString().padLeft(2, '0');
     return '$h:$m';
+  }
+
+  String? get _hint {
+    if (previewActive && previewError == null) {
+      return 'Press OK/Select to play fullscreen';
+    }
+    if (deliberate) return 'Press OK/Select to preview';
+    return null;
   }
 
   @override
@@ -2122,15 +2204,18 @@ class _LivePreviewPanel extends StatelessWidget {
                         ),
                       ],
                       const Spacer(),
-                      if (!compact && previewActive && !previewLoading)
-                        const Text(
-                          'Press OK/Select to play fullscreen',
+                      if (!compact && !previewLoading && _hint != null) ...[
+                        Text(
+                          _hint!,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: AppColors.textLo, fontSize: 11),
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 11,
+                          ),
                         ),
-                      if (!compact && previewActive && !previewLoading)
                         const SizedBox(height: 4),
+                      ],
                       if (upcoming != null)
                         Text(
                           'Next · ${_fmt(upcoming.start)} - ${_fmt(upcoming.stop)} · ${upcoming.title}',
@@ -2153,6 +2238,145 @@ class _LivePreviewPanel extends StatelessWidget {
   }
 }
 
+/// Phone-only bottom sheet: a compact, audible live preview with a Play button.
+/// Reuses the screen's single preview player/controller.
+class _PhonePreviewSheet extends StatefulWidget {
+  final Player player;
+  final VideoController controller;
+  final Channel channel;
+  final Programme? now;
+  final Programme? next;
+  final VoidCallback onPlay;
+
+  const _PhonePreviewSheet({
+    required this.player,
+    required this.controller,
+    required this.channel,
+    required this.now,
+    required this.next,
+    required this.onPlay,
+  });
+
+  @override
+  State<_PhonePreviewSheet> createState() => _PhonePreviewSheetState();
+}
+
+class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
+  late bool _buffering = widget.player.state.buffering;
+  StreamSubscription<bool>? _bufferingSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _bufferingSub = widget.player.stream.buffering.listen((b) {
+      if (mounted) setState(() => _buffering = b);
+    });
+  }
+
+  @override
+  void dispose() {
+    _bufferingSub?.cancel();
+    super.dispose();
+  }
+
+  String _fmt(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final current = widget.now;
+    final upcoming = widget.next;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: AppColors.line,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Container(color: Colors.black),
+                    Video(
+                      controller: widget.controller,
+                      controls: NoVideoControls,
+                    ),
+                    if (_buffering)
+                      const Center(
+                        child: SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              widget.channel.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textHi,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            if (current != null)
+              Text(
+                '${_fmt(current.start)} - ${_fmt(current.stop)} · ${current.title}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textHi, fontSize: 14),
+              )
+            else
+              const Text(
+                'No programme information',
+                style: TextStyle(color: AppColors.textLo, fontSize: 14),
+              ),
+            if (upcoming != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Next · ${_fmt(upcoming.start)} - ${_fmt(upcoming.stop)} · ${upcoming.title}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 13),
+              ),
+            ],
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: widget.onPlay,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('Play fullscreen'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ChannelTile extends StatelessWidget {
   final Channel channel;
   final Programme? now;
@@ -2163,6 +2387,7 @@ class _ChannelTile extends StatelessWidget {
   final FocusNode? focusNode;
   final String? debugLabel;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
   final VoidCallback onMoveLeftToCategory;
   final VoidCallback onMoveDown;
 
@@ -2176,6 +2401,7 @@ class _ChannelTile extends StatelessWidget {
     this.focusNode,
     this.debugLabel,
     required this.onTap,
+    this.onLongPress,
     required this.onMoveLeftToCategory,
     required this.onMoveDown,
   });
@@ -2217,6 +2443,7 @@ class _ChannelTile extends StatelessWidget {
         return KeyEventResult.handled;
       },
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
