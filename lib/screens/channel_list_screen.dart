@@ -28,6 +28,10 @@ import 'diagnostics_screen.dart';
 const _toolbarControlHeight = 40.0;
 const _autoMetadataEnrichmentLimit = 40;
 
+/// Sentinel category id for the synthetic "Favorites" entry shown at the top of
+/// each content kind's category list. Never a real provider category.
+const kFavoritesCategoryId = '__favorites__';
+
 enum _LiveFocusArea { category, channels, search, unknown }
 
 class _MoveRightToChannelsIntent extends Intent {
@@ -73,6 +77,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final Map<ContentKind, String> _mediaSearchQuery = {};
   Map<String, Programme> _now = const {};
   Map<String, Programme> _next = const {};
+  // Favorited item ids per content kind (live channels / movies / series).
+  final Map<ContentKind, Set<String>> _favorites = {};
   String? _categoryId;
   String _query = '';
 
@@ -564,6 +570,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _fromCache = snap.fromCache;
         _loading = false;
       });
+      await _loadFavorites(ContentKind.live);
       await _refreshNowNext();
     } catch (e) {
       if (!mounted) return;
@@ -586,7 +593,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   Future<void> _loadMedia(ContentKind kind, {bool forceRefresh = false}) async {
-    final categoryId = _mediaCategoryId[kind];
+    final categoryId = _effectiveMediaLoadCategory(kind);
     setState(() {
       _cancelMediaEnrichment(kind);
       _mediaLoading[kind] = true;
@@ -607,6 +614,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _media[kind] = snap;
         _mediaLoading[kind] = false;
       });
+      unawaited(_loadFavorites(kind));
       if (widget.repo.autoEnrichMetadata) {
         unawaited(_autoEnrichMediaItems(kind, snap.items));
       }
@@ -621,7 +629,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   Future<void> _loadMoreMedia(ContentKind kind) async {
     if (_mediaLoadingMore[kind] == true) return;
-    final categoryId = _mediaCategoryId[kind];
+    final categoryId = _effectiveMediaLoadCategory(kind);
     final existingIds = {
       for (final item in _media[kind]?.items ?? const <MediaItem>[]) item.id,
     };
@@ -770,7 +778,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   Future<void> _searchMedia(ContentKind kind, String query) async {
-    final categoryId = _mediaCategoryId[kind];
+    final categoryId = _effectiveMediaLoadCategory(kind);
     setState(() {
       _cancelMediaEnrichment(kind);
       _mediaSearching[kind] = true;
@@ -808,6 +816,75 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Set<String> _hiddenCategories(ContentKind kind) =>
       widget.config.hiddenCategoryIds(kind);
 
+  Set<String> _favoriteIds(ContentKind kind) =>
+      _favorites[kind] ?? const <String>{};
+
+  bool _isFavorite(ContentKind kind, String id) =>
+      _favoriteIds(kind).contains(id);
+
+  Future<void> _loadFavorites(ContentKind kind) async {
+    final ids =
+        await widget.repo.db.readFavoriteIds(widget.repo.source.id, kind);
+    if (!mounted) return;
+    setState(() => _favorites[kind] = ids);
+  }
+
+  Future<void> _toggleFavorite(ContentKind kind, String id) async {
+    final set = {..._favoriteIds(kind)};
+    final nowFavorite = !set.contains(id);
+    if (nowFavorite) {
+      set.add(id);
+    } else {
+      set.remove(id);
+    }
+    await widget.repo.db.setFavorite(
+      widget.repo.source.id,
+      kind,
+      id,
+      nowFavorite,
+    );
+    if (!mounted) return;
+    setState(() {
+      _favorites[kind] = set;
+      // Emptying the Favorites view leaves nothing to select — fall back to All.
+      if (set.isEmpty) {
+        if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
+          _categoryId = null;
+        } else if (_mediaCategoryId[kind] == kFavoritesCategoryId) {
+          _mediaCategoryId[kind] = null;
+        }
+      }
+    });
+  }
+
+  /// The real category id to load from the source for [kind] — the Favorites
+  /// pseudo-category isn't a provider category, so it loads the full "All" set
+  /// and is filtered client-side.
+  String? _effectiveMediaLoadCategory(ContentKind kind) {
+    final selected = _mediaCategoryId[kind];
+    return selected == kFavoritesCategoryId ? null : selected;
+  }
+
+  /// Live categories shown in the pane/dropdown: the Favorites entry (only when
+  /// something is favorited) followed by the enabled provider categories.
+  List<Category> get _liveCategoriesForUi {
+    final cats = _visibleCategories;
+    if (_favoriteIds(ContentKind.live).isEmpty) return cats;
+    return [
+      const Category(id: kFavoritesCategoryId, title: 'Favorites'),
+      ...cats,
+    ];
+  }
+
+  List<MediaCategory> _mediaCategoriesForUi(ContentKind kind) {
+    final cats = _visibleMediaCategories(kind);
+    if (_favoriteIds(kind).isEmpty) return cats;
+    return [
+      MediaCategory(id: kFavoritesCategoryId, title: 'Favorites', kind: kind),
+      ...cats,
+    ];
+  }
+
   /// Live categories with disabled ones removed (for the pane/dropdown).
   List<Category> get _visibleCategories {
     final hidden = _hiddenCategories(ContentKind.live);
@@ -825,10 +902,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   List<Channel> get _visible {
     final q = _query.trim().toLowerCase();
+    final favoritesView = _categoryId == kFavoritesCategoryId;
+    final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
     return _all.where((c) {
-      if (hidden.contains(c.categoryId)) return false;
-      if (_categoryId != null && c.categoryId != _categoryId) return false;
+      if (favoritesView) {
+        // Favorites are explicit picks, shown even from a disabled category.
+        if (!favs!.contains(c.id)) return false;
+      } else {
+        if (hidden.contains(c.categoryId)) return false;
+        if (_categoryId != null && c.categoryId != _categoryId) return false;
+      }
       if (q.isNotEmpty && !c.name.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
@@ -836,17 +920,23 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   List<MediaItem> _visibleMedia(ContentKind kind) {
     final q = _query.trim().toLowerCase();
+    final favoritesView = _mediaCategoryId[kind] == kFavoritesCategoryId;
+    final favs = favoritesView ? _favoriteIds(kind) : null;
     final hidden = _hiddenCategories(kind);
     if (q.length >= 2 && _mediaSearchQuery[kind] == _query.trim()) {
       final results = _mediaSearchResults[kind] ?? const <MediaItem>[];
-      if (hidden.isEmpty) return results;
-      return results
-          .where((item) => !hidden.contains(item.categoryId))
-          .toList();
+      return results.where((item) {
+        if (favoritesView) return favs!.contains(item.id);
+        return !hidden.contains(item.categoryId);
+      }).toList();
     }
     final items = _media[kind]?.items ?? const <MediaItem>[];
     return items.where((item) {
-      if (hidden.contains(item.categoryId)) return false;
+      if (favoritesView) {
+        if (!favs!.contains(item.id)) return false;
+      } else {
+        if (hidden.contains(item.categoryId)) return false;
+      }
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
@@ -1015,6 +1105,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         channel: channel,
         now: _now[channel.id],
         next: _next[channel.id],
+        favorite: _isFavorite(ContentKind.live, channel.id),
+        onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
         onPlay: () {
           final stream = _previewStream;
           Navigator.of(sheetContext).pop();
@@ -1094,6 +1186,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       builder: (context) => _MediaDetailsSheet(
         repo: widget.repo,
         item: item,
+        favorite: _isFavorite(item.kind, item.id),
+        onToggleFavorite: () => _toggleFavorite(item.kind, item.id),
         onChanged: _replaceMediaItem,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
@@ -1141,7 +1235,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           : 'Showing ${_fmt(count)} $label',
     );
     final categoryId = _mediaCategoryId[kind];
-    if (categoryId != null) {
+    if (categoryId == kFavoritesCategoryId) {
+      b.write(' in Favorites');
+    } else if (categoryId != null) {
       MediaCategory? category;
       for (final candidate in snap?.categories ?? const <MediaCategory>[]) {
         if (candidate.id == categoryId) {
@@ -1282,7 +1378,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   ? null
                   : (_tab == ContentKind.live
                       ? _CategoryDropdown(
-                          categories: _visibleCategories,
+                          categories: _liveCategoriesForUi,
                           value: _categoryId,
                           onChanged: (v) {
                             setState(() => _categoryId = v);
@@ -1290,7 +1386,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                           },
                         )
                       : _MediaCategoryDropdown(
-                          categories: _visibleMediaCategories(_tab),
+                          categories: _mediaCategoriesForUi(_tab),
                           value: _mediaCategoryId[_tab],
                           onChanged: (v) {
                             setState(() {
@@ -1429,6 +1525,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             channel: c,
             now: _now[c.id],
             next: _next[c.id],
+            favorite: _isFavorite(ContentKind.live, c.id),
             debugLabel: 'live.channel.${c.id}',
             enabled: !_resolving,
             autofocus: _lastPlayedLiveChannelId == null
@@ -1467,7 +1564,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 SizedBox(
                   width: 240,
                   child: _LiveCategoryPane(
-                    categories: _visibleCategories,
+                    categories: _liveCategoriesForUi,
                     selectedCategoryId: _categoryId,
                     selectedFocusNode: _focusNodeForCategory(_categoryId),
                     onSelected: (value) {
@@ -1502,6 +1599,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                             ? _previewError
                             : null,
                         deliberate: _deliberatePreview,
+                        favorite: _isFavorite(ContentKind.live, preview.id),
+                        onToggleFavorite: () =>
+                            _toggleFavorite(ContentKind.live, preview.id),
                       ),
                       const SizedBox(height: 8),
                       Expanded(
@@ -1582,6 +1682,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               }
               return _MediaListTile(
                 item: visible[i],
+                favorite: _isFavorite(kind, visible[i].id),
                 autofocus: hasLastVisible
                     ? visible[i].id == lastPlayedId
                     : i == 0,
@@ -1617,6 +1718,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             }
             return _MediaGridTile(
               item: visible[i],
+              favorite: _isFavorite(kind, visible[i].id),
               autofocus: hasLastVisible
                   ? visible[i].id == lastPlayedId
                   : i == 0,
@@ -2045,6 +2147,8 @@ class _LivePreviewPanel extends StatelessWidget {
   /// When true (TV remote), OK starts the preview rather than auto-previewing
   /// on focus, so the hint invites a first OK to preview.
   final bool deliberate;
+  final bool favorite;
+  final VoidCallback onToggleFavorite;
 
   const _LivePreviewPanel({
     required this.channel,
@@ -2055,6 +2159,8 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.previewLoading,
     required this.previewError,
     required this.deliberate,
+    required this.favorite,
+    required this.onToggleFavorite,
   });
 
   String _fmt(DateTime time) {
@@ -2200,15 +2306,25 @@ class _LivePreviewPanel extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        channel.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: AppColors.textHi,
-                          fontSize: titleSize,
-                          fontWeight: FontWeight.w800,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              channel.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: AppColors.textHi,
+                                fontSize: titleSize,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          _FavoriteButton(
+                            favorite: favorite,
+                            onPressed: onToggleFavorite,
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 8),
                       if (current != null)
@@ -2290,6 +2406,39 @@ class _LivePreviewPanel extends StatelessWidget {
   }
 }
 
+/// Focusable star toggle used in the per-item surfaces (live preview panel,
+/// phone preview sheet, media details sheet). On TV it's reached by D-pad (e.g.
+/// Up from the top channel into the preview panel); OK/Enter toggles it.
+class _FavoriteButton extends StatelessWidget {
+  final bool favorite;
+  final VoidCallback onPressed;
+
+  const _FavoriteButton({required this.favorite, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: favorite ? 'Remove from favorites' : 'Add to favorites',
+      icon: Icon(
+        favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+        color: favorite ? AppColors.accent : AppColors.textLo,
+      ),
+      onPressed: onPressed,
+    );
+  }
+}
+
+/// Non-interactive favorited marker for list/grid tiles (no focus stop).
+class _FavoriteBadge extends StatelessWidget {
+  final double size;
+  const _FavoriteBadge({this.size = 18});
+
+  @override
+  Widget build(BuildContext context) {
+    return Icon(Icons.star_rounded, size: size, color: AppColors.accent);
+  }
+}
+
 /// Phone-only bottom sheet: a compact, audible live preview with a Play button.
 /// Reuses the screen's single preview player/controller.
 class _PhonePreviewSheet extends StatefulWidget {
@@ -2298,6 +2447,8 @@ class _PhonePreviewSheet extends StatefulWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
+  final bool favorite;
+  final VoidCallback onToggleFavorite;
   final VoidCallback onPlay;
 
   const _PhonePreviewSheet({
@@ -2306,6 +2457,8 @@ class _PhonePreviewSheet extends StatefulWidget {
     required this.channel,
     required this.now,
     required this.next,
+    required this.favorite,
+    required this.onToggleFavorite,
     required this.onPlay,
   });
 
@@ -2315,6 +2468,7 @@ class _PhonePreviewSheet extends StatefulWidget {
 
 class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
   late bool _buffering = widget.player.state.buffering;
+  late bool _favorite = widget.favorite;
   StreamSubscription<bool>? _bufferingSub;
 
   @override
@@ -2381,15 +2535,28 @@ class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
               ),
             ),
             const SizedBox(height: 14),
-            Text(
-              widget.channel.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppColors.textHi,
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.channel.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textHi,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                _FavoriteButton(
+                  favorite: _favorite,
+                  onPressed: () {
+                    setState(() => _favorite = !_favorite);
+                    widget.onToggleFavorite();
+                  },
+                ),
+              ],
             ),
             const SizedBox(height: 6),
             if (current != null)
@@ -2433,6 +2600,7 @@ class _ChannelTile extends StatelessWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
+  final bool favorite;
   final bool enabled;
   final bool autofocus;
   final bool selected;
@@ -2447,6 +2615,7 @@ class _ChannelTile extends StatelessWidget {
     required this.channel,
     required this.now,
     required this.next,
+    required this.favorite,
     required this.enabled,
     required this.autofocus,
     required this.selected,
@@ -2554,6 +2723,10 @@ class _ChannelTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (favorite) ...[
+              const SizedBox(width: 8),
+              const _FavoriteBadge(),
+            ],
             const SizedBox(width: 8),
             Icon(
               selected
@@ -2805,12 +2978,14 @@ class _MediaCategoryDropdown extends StatelessWidget {
 
 class _MediaListTile extends StatelessWidget {
   final MediaItem item;
+  final bool favorite;
   final bool autofocus;
   final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _MediaListTile({
     required this.item,
+    required this.favorite,
     required this.autofocus,
     this.focusNode,
     required this.onTap,
@@ -2879,6 +3054,10 @@ class _MediaListTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (favorite) ...[
+              const SizedBox(width: 8),
+              const _FavoriteBadge(),
+            ],
             const SizedBox(width: 8),
             Icon(
               item.kind == ContentKind.movie
@@ -2895,12 +3074,14 @@ class _MediaListTile extends StatelessWidget {
 
 class _MediaGridTile extends StatelessWidget {
   final MediaItem item;
+  final bool favorite;
   final bool autofocus;
   final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _MediaGridTile({
     required this.item,
+    required this.favorite,
     required this.autofocus,
     this.focusNode,
     required this.onTap,
@@ -2941,6 +3122,19 @@ class _MediaGridTile extends StatelessWidget {
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: _RatingBadge(rating: item.rating, compact: true),
+                        ),
+                      ),
+                    if (favorite)
+                      Positioned(
+                        top: 6,
+                        right: 6,
+                        child: Container(
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            color: AppColors.ink.withValues(alpha: 0.75),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const _FavoriteBadge(size: 16),
                         ),
                       ),
                   ],
@@ -3188,12 +3382,16 @@ class _Poster extends StatelessWidget {
 class _MediaDetailsSheet extends StatefulWidget {
   final LibraryRepository repo;
   final MediaItem item;
+  final bool favorite;
+  final VoidCallback onToggleFavorite;
   final VoidCallback? onPlay;
   final ValueChanged<MediaItem>? onChanged;
 
   const _MediaDetailsSheet({
     required this.repo,
     required this.item,
+    required this.favorite,
+    required this.onToggleFavorite,
     required this.onPlay,
     this.onChanged,
   });
@@ -3204,6 +3402,7 @@ class _MediaDetailsSheet extends StatefulWidget {
 
 class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
   late MediaItem _item = widget.item;
+  late bool _favorite = widget.favorite;
   late Future<ExternalMetadata?> _metadataFuture = _loadMetadata();
   late final Future<List<MediaItem>>? _seasonsFuture = _loadSeasonsIfNeeded();
   final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
@@ -3288,11 +3487,25 @@ class _MediaDetailsSheetState extends State<_MediaDetailsSheet> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  _item.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleLarge,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                    _FavoriteButton(
+                      favorite: _favorite,
+                      onPressed: () {
+                        setState(() => _favorite = !_favorite);
+                        widget.onToggleFavorite();
+                      },
+                    ),
+                  ],
                 ),
                 if (_item.year != null || _hasRating(_item)) ...[
                   const SizedBox(height: 6),

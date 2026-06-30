@@ -16,7 +16,7 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
-  static const schemaVersion = 8;
+  static const schemaVersion = 9;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -71,6 +71,7 @@ class AppDatabase {
         ''');
         await _createProgrammes(db);
         await _createMediaTables(db);
+        await _createFavorites(db);
         await db.execute(
           'CREATE INDEX idx_channels_source ON channels(source_id)',
         );
@@ -108,6 +109,12 @@ class AppDatabase {
           // `_createMediaTables` built every media table except external_metadata,
           // so it was missing until now. Idempotent (CREATE TABLE IF NOT EXISTS).
           await _createExternalMetadata(db);
+        }
+        if (oldV < 9) {
+          // User favorites. `_createFavorites` lives outside `_createMediaTables`,
+          // so this repair branch covers every upgrade path (incl. pre-v3, which
+          // skips the v3+ media ALTER branches). Idempotent.
+          await _createFavorites(db);
         }
       },
     );
@@ -319,6 +326,80 @@ class AppDatabase {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_external_metadata_provider ON external_metadata(provider, provider_key)',
     );
+  }
+
+  static Future<void> _createFavorites(Database db) async {
+    // Favorited live channels / movies / series, keyed by their source-stable
+    // ids. Deliberately separate from `channels` / `media_items` so a library
+    // refresh (which replaces those rows) never drops a user's favorites.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS favorites (
+        source_id  TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        item_id    TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, item_id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_favorites_source_kind ON favorites(source_id, kind)',
+    );
+  }
+
+  // ── favorites ─────────────────────────────────────────────────────────────
+
+  /// The set of favorited item ids for [sourceId] / [kind].
+  Future<Set<String>> readFavoriteIds(String sourceId, ContentKind kind) async {
+    final rows = await _db.query(
+      'favorites',
+      columns: ['item_id'],
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+    );
+    return {for (final r in rows) r['item_id'] as String};
+  }
+
+  Future<bool> isFavorite(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+  ) async {
+    final rows = await _db.query(
+      'favorites',
+      columns: ['item_id'],
+      where: 'source_id = ? AND kind = ? AND item_id = ?',
+      whereArgs: [sourceId, kind.name, itemId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  /// Adds or removes a favorite. Returns the new favorited state.
+  Future<bool> setFavorite(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+    bool favorite,
+  ) async {
+    if (favorite) {
+      await _db.insert(
+        'favorites',
+        {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'item_id': itemId,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } else {
+      await _db.delete(
+        'favorites',
+        where: 'source_id = ? AND kind = ? AND item_id = ?',
+        whereArgs: [sourceId, kind.name, itemId],
+      );
+    }
+    return favorite;
   }
 
   // ── channels / categories ───────────────────────────────────────────────
