@@ -182,6 +182,68 @@ void main() {
     });
   });
 
+  group('AppDatabase favorites', () {
+    test('adds, reads, and removes favorites per source and kind', () async {
+      final db = await AppDatabase.openAt(dbPath());
+
+      expect(await db.readFavoriteIds('src1', ContentKind.live), isEmpty);
+      expect(await db.isFavorite('src1', ContentKind.live, 'ch1'), isFalse);
+
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+      await db.setFavorite('src1', ContentKind.live, 'ch2', true);
+      await db.setFavorite('src1', ContentKind.movie, 'm1', true);
+
+      expect(
+        await db.readFavoriteIds('src1', ContentKind.live),
+        {'ch1', 'ch2'},
+      );
+      // Kinds are independent.
+      expect(await db.readFavoriteIds('src1', ContentKind.movie), {'m1'});
+      expect(await db.readFavoriteIds('src1', ContentKind.series), isEmpty);
+      // Sources are independent.
+      expect(await db.readFavoriteIds('src2', ContentKind.live), isEmpty);
+      expect(await db.isFavorite('src1', ContentKind.live, 'ch1'), isTrue);
+
+      // Toggling off removes it; re-adding is idempotent (no PK clash).
+      await db.setFavorite('src1', ContentKind.live, 'ch1', false);
+      await db.setFavorite('src1', ContentKind.live, 'ch2', true);
+      expect(await db.readFavoriteIds('src1', ContentKind.live), {'ch2'});
+      await db.close();
+    });
+
+    test('survives a library refresh (replaceLibrary)', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+      );
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+
+      // A refresh wipes and rewrites channels/categories...
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+      );
+
+      // ...but favorites are a separate table and persist.
+      expect(await db.readFavoriteIds('src1', ContentKind.live), {'ch1'});
+      await db.close();
+    });
+
+    test('fresh create exposes a usable favorites table', () async {
+      // Regression guard mirroring the external_metadata fix: onCreate (not just
+      // the v8->9 repair branch) must build favorites.
+      final db = await AppDatabase.openAt(dbPath());
+      await db.setFavorite('src1', ContentKind.series, 's1', true);
+      expect(await db.readFavoriteIds('src1', ContentKind.series), {'s1'});
+      await db.close();
+    });
+  });
+
   group('LibraryRepository', () {
     test('fetches from the source on a cold load, then serves from cache', () async {
       final db = await AppDatabase.openAt(dbPath());
