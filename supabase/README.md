@@ -38,10 +38,27 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
    **Anonymous sign-ins** (devices rely on them). The panel uses magic-link only.
 4. **Auth → URL configuration**: add the GitHub Pages panel URL to the redirect allow-list.
 5. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
-   the only expected warnings are the five intentional `SECURITY DEFINER` RPCs (three
-   pairing + `push_sources`/`push_metadata`, all callable by `authenticated`), the
-   anonymous-access policies on the tables (devices read by design), and Supabase's own
-   `rls_auto_enable`. The push RPCs are revoked from `anon` (they need a real session).
+   the only expected warnings are the intentional `SECURITY DEFINER` RPCs (the three
+   pairing RPCs, `push_sources`/`push_metadata`/`push_favorites`, and `set_device_profile`,
+   all callable by `authenticated`), the anonymous-access policies on the tables (devices
+   read by design), and Supabase's own `rls_auto_enable`. The push RPCs are revoked from
+   `anon` (they need a real session).
+
+> **Applying a migration out-of-band? Repair the version afterward.** When you apply a
+> migration file through the **MCP `apply_migration` tool** or the **dashboard SQL editor**
+> (rather than `supabase db push` / the GitHub integration), the remote ledger records it
+> under a *freshly generated* version timestamp — not the file's `<version>_` prefix. The
+> next `supabase db push` / "Supabase Preview" then fails with **"Remote migration versions
+> not found in local migrations directory"** because the recorded version has no matching
+> file. Fix it by aligning the ledger to the committed filename:
+> ```sql
+> update supabase_migrations.schema_migrations
+>    set version = '<file_version>'   -- e.g. 20260630000000, the file's prefix
+>  where name = '<migration_name>' and version = '<generated_version>';
+> ```
+> (Equivalent to `supabase migration repair --status applied <file_version>` when the CLI is
+> linked.) The committed `supabase/migrations/*.sql` files are the source of truth; the remote
+> ledger should match their version prefixes exactly.
 
 ## Wiring the clients
 
