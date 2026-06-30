@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/cloud_sync.dart';
+import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 
 void main() {
@@ -46,6 +47,35 @@ void main() {
       expect(config.label, '');
       expect(config.fields, isEmpty);
       expect(config.kind, SourceKind.demo);
+    });
+
+    test('reads per-source settings (hidden categories) when present', () {
+      final config = cloudRowToConfig({
+        'id': 'id3',
+        'kind': 'xtream',
+        'label': 'P',
+        'fields': {'host': 'h', 'username': 'u', 'password': 'p'},
+        'settings': {
+          'hiddenCategories': {
+            'live': ['c1', 'c2'],
+          },
+        },
+      });
+
+      expect(config.hiddenCategoryIds(ContentKind.live), {'c1', 'c2'});
+      expect(config.hiddenCategoryIds(ContentKind.movie), isEmpty);
+    });
+
+    test('defaults settings to empty when the column is absent (legacy row)', () {
+      final config = cloudRowToConfig({
+        'id': 'id4',
+        'kind': 'm3u',
+        'label': '',
+        'fields': {'playlistUrl': 'http://x/list.m3u'},
+      });
+
+      expect(config.settings, isEmpty);
+      expect(config.hiddenCategoryIds(ContentKind.live), isEmpty);
     });
 
     test('throws on an unknown kind (defends against bad cloud data)', () {

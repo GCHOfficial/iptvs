@@ -39,7 +39,7 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/data/app_database.dart`** — local SQLite cache (channels, categories, EPG, movies/series, paging state, external metadata), keyed by `Source.id`. Schema is versioned (`schemaVersion`) with a hand-rolled `onUpgrade`. See "Database migrations" below.
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider` implementations enriching `MediaItem`s with posters/overviews/ratings. `ratingsOnly` providers (MDBList) only contribute ratings and run after a visual provider has matched.
 - **`lib/data/source_store.dart`** — persists `SourceConfig`s (credentials included) in the OS keychain via `flutter_secure_storage`, plus the active source and metadata config.
-- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs (add/edit/delete/activate, plus ↑/↓ reorder persisted via `SourceStore.setAll`); `diagnostics_screen.dart` views/export the in-memory log. Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
+- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs (add/edit/delete/activate, plus ↑/↓ reorder persisted via `SourceStore.setAll`, and a per-source settings entry); `source_settings_screen.dart` toggles a source's categories on/off (persisted on `SourceConfig.settings`, filtered in the channel list); favorites are tagged from the per-item surfaces (live preview panel / phone preview sheet / media details sheet) and surface as a "Favorites" entry atop each category list; `diagnostics_screen.dart` views/export the in-memory log. Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
 - **`lib/widgets/`** — shared UI widgets: `focusable_card.dart` (`FocusableCard`, the D-pad-navigable list/grid tile) and `tv_text_field.dart` (`TvTextField`, the edit-mode text input). Both are central to TV navigation.
 - **`lib/player/player_screen.dart`** — playback. See "Player" below.
 
@@ -70,11 +70,19 @@ itself and the app is unchanged.
 - **Backend**: Supabase (the only free option bundling Postgres + Auth + RLS + a client SDK that's
   safe to call directly from a static page). Schema + the entire security boundary live in
   [`supabase/migrations/`](supabase/migrations/) (timestamped `<version>_<name>.sql`, the first is the
-  schema + RLS) — read the first file's header before changing it. Four tables (`sources`,
+  schema + RLS) — read the first file's header before changing it. Five tables (`profiles`, `sources`,
   `metadata_configs`, `devices`, `pairings`) with **deny-by-default RLS** (no policy = no access) and
-  five `SECURITY DEFINER` RPCs (three pairing: `request_pairing`/`pairing_status`/`claim_pairing`; two
-  push: `push_sources`/`push_metadata`). Migrations are applied to the live project and re-applying is
-  idempotent; the Supabase GitHub integration auto-applies new ones on push.
+  `SECURITY DEFINER` RPCs: three pairing (`request_pairing`/`pairing_status`/`claim_pairing`), the
+  profile-scoped push (`push_sources`/`push_metadata`/`push_favorites`, each `(payload, p_profile_id)`),
+  and `set_device_profile`. Migrations are applied to the live project and re-applying is idempotent;
+  the Supabase GitHub integration auto-applies new ones on push.
+- **Profiles**: an account holds multiple named `profiles`; each is a complete setup — its `sources`
+  (which carry a `profile_id` and a per-source `settings` jsonb for hidden categories),
+  `metadata_configs` (re-keyed to one row per profile), and the profile's `favorites` jsonb. A device's
+  `devices.active_profile_id` is which profile it syncs; the device picks it (panel only creates/renames
+  profiles). The `..._profiles.sql` migration backfills a `Default` profile per existing owner, so a
+  single-profile account is unchanged. Owner-scoping stays the security boundary (`profile_id` is only an
+  added filter); legacy 1-arg `push_*` delegate to the device's active profile for older app builds.
 - **Open-source security model**: the Supabase URL + **anon/publishable** key ship in the app and the
   panel (safe *by design* — access is gated only by RLS). The `service_role` key must never appear in
   any client or this repo. Devices authenticate as **anonymous** Supabase users with **no direct table
@@ -89,12 +97,16 @@ itself and the app is unchanged.
 - **Pairing flow (code-based, works on every platform)**: the device shows a code
   ([`cloud_sync_screen.dart`](lib/screens/cloud_sync_screen.dart)); the user enters it in the panel's
   Devices page; the device polls `pairing_status` until claimed, then pulls. Once paired, the screen
-  also offers **Pull now** / **Push to panel** (push confirms first, since it overwrites the panel).
+  shows a **profile picker** (list the account's profiles, switch → `set_device_profile` + re-pull) and
+  offers **Pull now** / **Push to panel** (push confirms first, since it overwrites that profile).
 - **Flutter side**: [`cloud_config.dart`](lib/data/cloud_config.dart) (build-time `--dart-define`
   `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
-  [`cloud_sync.dart`](lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, `pullSources`/
-  `pullMetadata` and `pushSources`/`pushMetadata`, all writing through the existing `SourceStore` —
-  cloud-managed source ids are tracked in secure storage so a pull replaces the managed set in panel
+  [`cloud_sync.dart`](lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, profile selection
+  (`listProfiles`/`activeProfileId`/`setProfile`), and profile-scoped `pullSources`/`pullMetadata`/
+  `pullFavorites` + `pushSources`/`pushMetadata`/`pushFavorites`. Sources/metadata write through
+  `SourceStore`; favorites use `AppDatabase` and are mapped between the credential-derived `Source.id`
+  (local key) and the `SourceConfig` UUID (cloud key) via `config.build().id`. Cloud-managed source ids
+  are tracked in secure storage so a pull replaces the managed set in panel
   order but leaves local-only sources alone). Source ids are UUIDs (`newSourceId`/`isUuid` in
   [`source_config.dart`](lib/sources/source_config.dart)) so they round-trip through the `uuid`-typed
   cloud column; push rewrites any legacy non-UUID id first. [`secure_local_storage.dart`](lib/data/secure_local_storage.dart)
@@ -112,7 +124,7 @@ itself and the app is unchanged.
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 8`. When changing the schema: bump `schemaVersion`, add an `onUpgrade` branch, and make new tables/columns idempotent (`CREATE TABLE IF NOT EXISTS`, the `_isDuplicateColumn` guard for `ALTER`). Note the design: upgrading from before v3 calls `_createMediaTables`, which builds the *current* media schema, so the later `oldV >= 3` ALTER branches are intentionally skipped for those users — so **any table `_createMediaTables` doesn't create must also have an `oldV < N` repair branch**, or fresh installs and pre-v3 upgrades miss it. (This was the v7 `external_metadata` bug: it was created only in the `oldV >= 3 && oldV < 7` branch, so fresh installs landed at v7 without it and every metadata query crashed; v8 adds it to `_createMediaTables` and an `oldV < 8` repair branch.) `AppDatabase.openAt(path)` is a `@visibleForTesting` seam that opens/migrates a DB without `path_provider` — used by `test/persistence_test.dart`.
+`AppDatabase` is at `schemaVersion = 9` (v9 added the `favorites` table — channels/movies/series the user starred, keyed `(source_id, kind, item_id)`, deliberately separate from `channels`/`media_items` so a library refresh never drops favorites; created in `_createFavorites` via both `onCreate` and an `oldV < 9` repair branch). When changing the schema: bump `schemaVersion`, add an `onUpgrade` branch, and make new tables/columns idempotent (`CREATE TABLE IF NOT EXISTS`, the `_isDuplicateColumn` guard for `ALTER`). Note the design: upgrading from before v3 calls `_createMediaTables`, which builds the *current* media schema, so the later `oldV >= 3` ALTER branches are intentionally skipped for those users — so **any table `_createMediaTables` doesn't create must also have an `oldV < N` repair branch**, or fresh installs and pre-v3 upgrades miss it. (This was the v7 `external_metadata` bug: it was created only in the `oldV >= 3 && oldV < 7` branch, so fresh installs landed at v7 without it and every metadata query crashed; v8 adds it to `_createMediaTables` and an `oldV < 8` repair branch.) `AppDatabase.openAt(path)` is a `@visibleForTesting` seam that opens/migrates a DB without `path_provider` — used by `test/persistence_test.dart`.
 
 ## Player
 

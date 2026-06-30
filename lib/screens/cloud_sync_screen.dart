@@ -4,28 +4,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
 import '../data/source_store.dart';
 import '../theme.dart';
+import '../widgets/focusable_card.dart';
 
 /// Pairs this device with a web-panel account and pulls its source list down.
 /// No login happens here: the device shows a short code, the user enters it in
 /// the panel (on a real keyboard), and this screen polls until it's claimed.
 class CloudSyncScreen extends StatefulWidget {
   final SourceStore store;
+  final AppDatabase db;
 
   /// Inject a fake in tests; defaults to the live Supabase-backed [CloudSync].
   final CloudSync? sync;
 
-  const CloudSyncScreen({super.key, required this.store, this.sync});
+  const CloudSyncScreen({
+    super.key,
+    required this.store,
+    required this.db,
+    this.sync,
+  });
 
   @override
   State<CloudSyncScreen> createState() => _CloudSyncScreenState();
 }
 
 class _CloudSyncScreenState extends State<CloudSyncScreen> {
-  late final CloudSync _sync = widget.sync ?? CloudSync();
+  late final CloudSync _sync = widget.sync ?? CloudSync(db: widget.db);
 
   bool _loading = true;
   bool _paired = false;
@@ -34,6 +42,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   String? _status;
   PairingCode? _code;
   Timer? _poll;
+  List<CloudProfile> _profiles = const [];
+  String? _activeProfileId;
 
   @override
   void initState() {
@@ -52,6 +62,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       await _sync.ensureAnonSession();
       if (await _sync.isPaired()) {
         if (mounted) setState(() => _paired = true);
+        await _loadProfiles();
       } else {
         await _newCode();
       }
@@ -59,6 +70,47 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// Load the account's profiles and the device's active one, defaulting to the
+  /// first profile when the device hasn't picked one yet.
+  Future<void> _loadProfiles() async {
+    final profiles = await _sync.listProfiles();
+    var active = await _sync.activeProfileId();
+    if (active == null && profiles.isNotEmpty) {
+      active = profiles.first.id;
+      try {
+        await _sync.setProfile(active);
+      } catch (_) {
+        // Best-effort; the user can pick explicitly below.
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _profiles = profiles;
+      _activeProfileId = active;
+    });
+  }
+
+  Future<void> _switchProfile(String id) async {
+    if (id == _activeProfileId || _busy) return;
+    setState(() => _busy = true);
+    try {
+      await _sync.setProfile(id);
+      if (!mounted) return;
+      setState(() {
+        _activeProfileId = id;
+        _busy = false;
+      });
+      await _pull();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = '$e';
+          _busy = false;
+        });
+      }
     }
   }
 
@@ -88,6 +140,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         _poll?.cancel();
         if (!mounted) return;
         setState(() => _paired = true);
+        await _loadProfiles();
         await _pull(initial: true);
       }
     } catch (_) {
@@ -96,14 +149,20 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   Future<void> _pull({bool initial = false}) async {
+    final profileId = _activeProfileId;
+    if (profileId == null) {
+      setState(() => _error = 'No profile to sync — create one in the panel.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
       _status = null;
     });
     try {
-      final count = await _sync.pullSources(widget.store);
-      final metadata = await _sync.pullMetadata(widget.store);
+      final count = await _sync.pullSources(widget.store, profileId);
+      final metadata = await _sync.pullMetadata(widget.store, profileId);
+      await _sync.pullFavorites(widget.store, profileId);
       if (!mounted) return;
       final sources = 'Synced $count source${count == 1 ? '' : 's'}';
       setState(() => _status = '${initial ? 'Paired — ' : ''}$sources'
@@ -147,10 +206,11 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Push to panel?'),
-        content: const Text(
-          'This replaces the source list and metadata settings in the panel '
-          'with the ones on this device. Anything in the panel that isn\'t on '
-          'this device will be removed.',
+        content: Text(
+          'This replaces the source list, metadata settings, and favorites of '
+          'the selected profile ($_activeProfileName) with the ones on this '
+          'device. Anything in that profile that isn\'t on this device will be '
+          'removed.',
         ),
         actions: [
           TextButton(
@@ -165,22 +225,36 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ),
     );
     if (confirmed != true) return;
+    final profileId = _activeProfileId;
+    if (profileId == null) {
+      setState(() => _error = 'No profile selected.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
       _status = null;
     });
     try {
-      final count = await _sync.pushSources(widget.store);
-      await _sync.pushMetadata(widget.store);
+      final count = await _sync.pushSources(widget.store, profileId);
+      await _sync.pushMetadata(widget.store, profileId);
+      await _sync.pushFavorites(widget.store, profileId);
       if (!mounted) return;
       setState(() => _status =
-          'Pushed $count source${count == 1 ? '' : 's'} · metadata to the panel.');
+          'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
+          'to $_activeProfileName.');
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  String get _activeProfileName {
+    for (final p in _profiles) {
+      if (p.id == _activeProfileId) return p.name.isEmpty ? 'profile' : p.name;
+    }
+    return 'the profile';
   }
 
   Future<void> _unpair() async {
@@ -343,12 +417,13 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         const SizedBox(height: 8),
         const Text(
-          'Sync this device with the panel. Pull replaces the cloud-managed '
-          'sources and metadata here with the panel\'s (sources you added '
-          'locally are kept). Push sends this device\'s list and metadata up, '
-          'replacing the panel\'s. Newest change wins.',
+          'Sync this device with a profile in the panel. Pull replaces the '
+          'cloud-managed sources, metadata, and favorites here with the '
+          'profile\'s (sources you added locally are kept). Push sends this '
+          'device\'s set up, replacing the profile\'s. Newest change wins.',
           style: TextStyle(color: AppColors.textLo),
         ),
+        ..._profileSection(),
         const SizedBox(height: 24),
         FilledButton.icon(
           onPressed: _busy ? null : () => _pull(),
@@ -374,4 +449,87 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           label: const Text('Unpair this device'),
         ),
       ];
+
+  /// The profile picker: lists the account's profiles, highlights the active
+  /// one, and switches (then re-pulls) on selection. Profiles are created and
+  /// renamed in the web panel.
+  List<Widget> _profileSection() {
+    if (_profiles.isEmpty) {
+      return const [
+        SizedBox(height: 20),
+        Text(
+          'No profiles yet — create one in the panel, then pull.',
+          style: TextStyle(color: AppColors.textLo),
+        ),
+      ];
+    }
+    return [
+      const SizedBox(height: 20),
+      const Text(
+        'Profile',
+        style: TextStyle(fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        'Pick which profile this device syncs.',
+        style: TextStyle(color: AppColors.textLo, fontSize: 12),
+      ),
+      const SizedBox(height: 10),
+      for (var i = 0; i < _profiles.length; i++)
+        _ProfileRow(
+          name: _profiles[i].name.isEmpty ? 'Profile' : _profiles[i].name,
+          selected: _profiles[i].id == _activeProfileId,
+          autofocus: _profiles[i].id == _activeProfileId,
+          onTap: _busy ? null : () => _switchProfile(_profiles[i].id),
+        ),
+    ];
+  }
+}
+
+class _ProfileRow extends StatelessWidget {
+  final String name;
+  final bool selected;
+  final bool autofocus;
+  final VoidCallback? onTap;
+
+  const _ProfileRow({
+    required this.name,
+    required this.selected,
+    required this.autofocus,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      autofocus: autofocus,
+      onTap: onTap ?? () {},
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_unchecked,
+              size: 20,
+              color: selected ? AppColors.accent : AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: selected ? AppColors.textHi : AppColors.textLo,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

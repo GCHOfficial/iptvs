@@ -3,10 +3,15 @@ import { supabase, KIND_FIELDS } from './supabase.js';
 const app = document.getElementById('app');
 let session = null;
 let tab = 'sources';
+// Profiles: an account holds several; sources/metadata are scoped to the one
+// selected here. `profiles === null` means "not loaded yet".
+let profiles = null;
+let currentProfileId = localStorage.getItem('iptvs_profile') || null;
 
 // Re-render whenever auth changes (login, logout, magic-link return).
 supabase.auth.onAuthStateChange((_event, s) => {
   session = s;
+  profiles = null; // reload per session
   render();
 });
 supabase.auth.getSession().then(({ data }) => {
@@ -14,8 +19,32 @@ supabase.auth.getSession().then(({ data }) => {
   render();
 });
 
-function render() {
+// Load the account's profiles, creating a Default when there are none (so
+// sources have somewhere to attach), and settle on a valid current profile.
+async function ensureProfiles() {
+  const { data, error } = await supabase.from('profiles').select('*').order('position');
+  if (error) { profiles = []; return; }
+  profiles = data;
+  if (profiles.length === 0) {
+    const { data: created } = await supabase
+      .from('profiles')
+      .insert({ owner: session.user.id, name: 'Default', position: 0 })
+      .select()
+      .single();
+    if (created) profiles = [created];
+  }
+  if (!currentProfileId || !profiles.some((p) => p.id === currentProfileId)) {
+    currentProfileId = profiles[0]?.id ?? null;
+  }
+  if (currentProfileId) localStorage.setItem('iptvs_profile', currentProfileId);
+}
+
+const profileName = (id) =>
+  (profiles ?? []).find((p) => p.id === id)?.name || 'Profile';
+
+async function render() {
   if (!session) return renderLogin();
+  if (profiles === null) await ensureProfiles();
   app.innerHTML = `
     <header class="bar">
       <span class="brand">
@@ -25,17 +54,28 @@ function render() {
       <nav>
         ${navButton('sources', 'Sources')}
         ${navButton('metadata', 'Metadata')}
+        ${navButton('profiles', 'Profiles')}
         ${navButton('devices', 'Devices')}
       </nav>
+      <select id="profile" class="profile-select" title="Active profile">
+        ${(profiles ?? []).map((p) =>
+          `<option value="${p.id}" ${p.id === currentProfileId ? 'selected' : ''}>${esc(p.name || 'Profile')}</option>`).join('')}
+      </select>
       <button id="logout" class="ghost">Sign out</button>
     </header>
     <main id="view"></main>`;
   document.getElementById('logout').onclick = () => supabase.auth.signOut();
+  document.getElementById('profile').onchange = (e) => {
+    currentProfileId = e.target.value;
+    localStorage.setItem('iptvs_profile', currentProfileId);
+    render();
+  };
   for (const b of app.querySelectorAll('[data-tab]')) {
     b.onclick = () => { tab = b.dataset.tab; render(); };
   }
   if (tab === 'sources') renderSources();
   else if (tab === 'metadata') renderMetadata();
+  else if (tab === 'profiles') renderProfiles();
   else renderDevices();
 }
 
@@ -89,15 +129,20 @@ function renderLogin() {
 
 async function renderSources() {
   view().innerHTML = '<p class="muted">Loading…</p>';
+  if (!currentProfileId) {
+    return (view().innerHTML =
+      '<p class="muted">Create a profile first (Profiles tab).</p>');
+  }
   const { data, error } = await supabase
     .from('sources')
     .select('*')
+    .eq('profile_id', currentProfileId)
     .order('position');
   if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
 
   const nextPos = data.length ? Math.max(...data.map((s) => s.position ?? 0)) + 1 : 0;
   view().innerHTML = `
-    <p class="muted hint">Devices show sources in this order. Use ↑ / ↓ to reorder.</p>
+    <p class="muted hint">Sources for <strong>${esc(profileName(currentProfileId))}</strong>. Devices show them in this order — use ↑ / ↓ to reorder.</p>
     <div class="rows">
       ${data.length ? data.map((s, i) => sourceRow(s, i, data.length)).join('') : '<p class="muted">No sources yet.</p>'}
     </div>
@@ -195,6 +240,7 @@ function editSource(existing, nextPos = 0) {
     }
     const row = {
       owner: session.user.id,
+      profile_id: currentProfileId,
       kind,
       label: (fd.get('label') ?? '').trim(),
       fields,
@@ -219,13 +265,108 @@ async function deleteSource(id) {
   renderSources();
 }
 
+// -------------------------------------------------------------- profiles
+
+async function renderProfiles() {
+  view().innerHTML = '<p class="muted">Loading…</p>';
+  const { data, error } = await supabase.from('profiles').select('*').order('position');
+  if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
+  profiles = data;
+  const nextPos = data.length ? Math.max(...data.map((p) => p.position ?? 0)) + 1 : 0;
+  view().innerHTML = `
+    <p class="muted hint">Each profile is its own source list, metadata, and favorites. Devices pick which profile to sync.</p>
+    <div class="rows">
+      ${data.map((p, i) => profileRow(p, i, data.length)).join('')}
+    </div>
+    <button id="addp" class="primary">+ Add profile</button>`;
+  document.getElementById('addp').onclick = () => addProfile(nextPos);
+  for (const el of view().querySelectorAll('[data-rename]'))
+    el.onclick = () => renameProfile(el.dataset.rename, data);
+  for (const el of view().querySelectorAll('[data-del]'))
+    el.onclick = () => deleteProfile(el.dataset.del, data.length);
+  for (const el of view().querySelectorAll('[data-up]'))
+    el.onclick = () => reorderProfiles(data, data.findIndex((p) => p.id === el.dataset.up), -1);
+  for (const el of view().querySelectorAll('[data-down]'))
+    el.onclick = () => reorderProfiles(data, data.findIndex((p) => p.id === el.dataset.down), 1);
+}
+
+function profileRow(p, i, n) {
+  const active = p.id === currentProfileId;
+  return `
+    <div class="row">
+      <div>
+        <div class="title">${esc(p.name || 'Profile')}${active ? ' · selected' : ''}</div>
+        <div class="muted">profile</div>
+      </div>
+      <div class="actions">
+        <button data-up="${p.id}" class="ghost icon" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button data-down="${p.id}" class="ghost icon" title="Move down" ${i === n - 1 ? 'disabled' : ''}>↓</button>
+        <button data-rename="${p.id}" class="ghost">Rename</button>
+        <button data-del="${p.id}" class="ghost danger" ${n === 1 ? 'disabled' : ''}>Delete</button>
+      </div>
+    </div>`;
+}
+
+async function addProfile(nextPos) {
+  const name = prompt('Profile name', '');
+  if (name === null) return;
+  const { error } = await supabase
+    .from('profiles')
+    .insert({ owner: session.user.id, name: name.trim() || 'Profile', position: nextPos });
+  if (error) return toast(error.message, true);
+  await ensureProfiles();
+  render();
+}
+
+async function renameProfile(id, data) {
+  const cur = data.find((p) => p.id === id);
+  const name = prompt('Profile name', cur?.name ?? '');
+  if (name === null) return;
+  const { error } = await supabase
+    .from('profiles')
+    .update({ name: name.trim() || 'Profile' })
+    .eq('id', id);
+  if (error) return toast(error.message, true);
+  await ensureProfiles();
+  render();
+}
+
+async function deleteProfile(id, count) {
+  if (count <= 1) return toast('Keep at least one profile.', true);
+  if (!confirm('Delete this profile? Its sources, metadata, and favorites are removed.')) return;
+  const { error } = await supabase.from('profiles').delete().eq('id', id);
+  if (error) return toast(error.message, true);
+  if (currentProfileId === id) currentProfileId = null; // re-settled by ensureProfiles
+  await ensureProfiles();
+  render();
+}
+
+// Swap a profile with its neighbour and persist normalized 0..n-1 positions.
+async function reorderProfiles(data, index, dir) {
+  const j = index + dir;
+  if (index < 0 || j < 0 || j >= data.length) return;
+  const arr = data.slice();
+  [arr[index], arr[j]] = [arr[j], arr[index]];
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].position === i) continue;
+    const { error } = await supabase.from('profiles').update({ position: i }).eq('id', arr[i].id);
+    if (error) return toast(error.message, true);
+  }
+  renderProfiles();
+}
+
 // ------------------------------------------------------------- metadata
 
 async function renderMetadata() {
   view().innerHTML = '<p class="muted">Loading…</p>';
+  if (!currentProfileId) {
+    return (view().innerHTML =
+      '<p class="muted">Create a profile first (Profiles tab).</p>');
+  }
   const { data } = await supabase
     .from('metadata_configs')
     .select('config')
+    .eq('profile_id', currentProfileId)
     .maybeSingle();
   const c = data?.config ?? { provider: 'tmdb', autoEnrich: true };
   view().innerHTML = `
@@ -257,7 +398,7 @@ async function renderMetadata() {
     };
     const { error } = await supabase
       .from('metadata_configs')
-      .upsert({ owner: session.user.id, config });
+      .upsert({ owner: session.user.id, profile_id: currentProfileId, config });
     toast(error ? error.message : 'Saved', !!error);
   };
 }
@@ -301,11 +442,12 @@ async function renderDevices() {
 }
 
 function deviceRow(d) {
+  const profile = d.active_profile_id ? profileName(d.active_profile_id) : '—';
   return `
     <div class="row">
       <div>
         <div class="title">${esc(d.label || 'Device')}</div>
-        <div class="muted">paired ${esc((d.created_at || '').slice(0, 10))}</div>
+        <div class="muted">paired ${esc((d.created_at || '').slice(0, 10))} · syncing ${esc(profile)}</div>
       </div>
       <div class="actions">
         <button data-rename="${d.device_uid}" class="ghost">Rename</button>
