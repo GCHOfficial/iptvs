@@ -1266,7 +1266,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                       },
                       onMoveRightToChannels: _focusChannelsFromCategory,
                       onPaneFallbackKey: _handleLivePaneFallbackKey,
-                      previewController: _previewController,
+                      previewControllerBuilder: () => _previewController,
                       previewLoading: _previewLoading,
                       previewError: _previewError,
                     )
@@ -1369,7 +1369,10 @@ class LiveTabView extends StatelessWidget {
   final VoidCallback onMoveRightToChannels;
   final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
 
-  final VideoController previewController;
+  /// Built lazily (only when the wide preview panel actually renders) so the
+  /// media_kit VideoController — and its native video-output — isn't created
+  /// during loading / on phones / when it's never shown.
+  final VideoController Function() previewControllerBuilder;
   final bool previewLoading;
   final String? previewError;
 
@@ -1401,7 +1404,7 @@ class LiveTabView extends StatelessWidget {
     required this.onCategorySelected,
     required this.onMoveRightToChannels,
     required this.onPaneFallbackKey,
-    required this.previewController,
+    required this.previewControllerBuilder,
     required this.previewLoading,
     required this.previewError,
   });
@@ -1506,7 +1509,7 @@ class LiveTabView extends StatelessWidget {
                         channel: preview,
                         now: now[preview.id],
                         next: next[preview.id],
-                        previewController: previewController,
+                        previewController: previewControllerBuilder(),
                         previewActive: previewChannelId == preview.id,
                         previewLoading:
                             previewLoading && previewChannelId == preview.id,
