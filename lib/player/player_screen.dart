@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../data/diagnostics_log.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import 'mpv_options.dart';
 
 /// Plays a resolved [StreamInfo] using media_kit (libmpv under the hood, so it
 /// handles HEVC / AC-3 / MPEG-TS that an HTML video element can't). Controls
@@ -26,6 +27,18 @@ class PlayerScreen extends StatefulWidget {
   final Programme? epgNow;
   final Programme? epgNext;
 
+  /// An already-open [Player]/[VideoController] to adopt instead of opening
+  /// [stream] fresh — passed when coming from a live preview that's already
+  /// playing this exact stream, so going fullscreen doesn't restart playback.
+  /// [PlayerScreen] does not own an adopted player: it never disposes it, that
+  /// stays the caller's responsibility. Ignored on Android when the native HDR
+  /// player launches (a separate Activity/hardware surface — no live decode
+  /// session can be handed to it) and, on Windows, only skips reopening the
+  /// media if the native HDR surface can still be created for the adopted
+  /// player; otherwise it falls back to a fresh open.
+  final Player? existingPlayer;
+  final VideoController? existingController;
+
   const PlayerScreen({
     super.key,
     required this.title,
@@ -33,6 +46,8 @@ class PlayerScreen extends StatefulWidget {
     this.sourceName,
     this.epgNow,
     this.epgNext,
+    this.existingPlayer,
+    this.existingController,
   });
 
   @override
@@ -53,18 +68,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const Duration _nativeOpenTimeout = Duration(seconds: 10);
   static const Duration _nativeExitTimeout = Duration(seconds: 3);
 
-  late final Player _player = Player(
-    configuration: PlayerConfiguration(
-      vo: _usesWindowsNativeSurface ? 'null' : null,
-      osc: _usesWindowsNativeSurface,
-      // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
-      bufferSize: 64 * 1024 * 1024,
-      logLevel: MPVLogLevel.warn,
-    ),
-  );
+  late final Player _player =
+      widget.existingPlayer ??
+      Player(
+        configuration: PlayerConfiguration(
+          vo: _usesWindowsNativeSurface ? 'null' : null,
+          osc: _usesWindowsNativeSurface,
+          // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
+          bufferSize: 64 * 1024 * 1024,
+          logLevel: MPVLogLevel.warn,
+        ),
+      );
   late final VideoController? _controller = _usesWindowsNativeSurface
       ? null
-      : VideoController(_player);
+      : (widget.existingController ?? VideoController(_player));
+
+  /// False when [_player] was adopted from an existing preview — it's owned by
+  /// the caller (e.g. [LivePreviewController]), so this screen must never
+  /// dispose it.
+  bool get _ownsPlayer => widget.existingPlayer == null;
+
+  /// True once this screen has re-pointed an adopted player's video output at
+  /// the Windows native HDR surface. That leaves the player's mpv `vo`/`wid`
+  /// pointed at a surface this route is about to tear down, so it's no longer
+  /// safe for the caller to keep using for embedded (texture) rendering —
+  /// reported back via the pop result so the caller discards it.
+  bool _didWindowsHotSwap = false;
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
   late final bool _isLive = widget.stream.isLive;
@@ -146,9 +175,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }),
     );
     // Track buffering for the live reconnect watchdog.
-    _subs.add(
-      _player.stream.buffering.listen((value) => _buffering = value),
-    );
+    _subs.add(_player.stream.buffering.listen((value) => _buffering = value));
     if (_isLive) {
       _reconnectTimer = Timer.periodic(
         const Duration(seconds: 1),
@@ -258,6 +285,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     if (await _tryOpenNativeHdrPlayer()) {
       if (mounted) setState(() => _nativePlaybackLaunched = true);
+      // The native Activity now owns playback of this stream from scratch —
+      // an adopted (preview) player isn't rendered anywhere and would just
+      // waste decode/bandwidth (and, if unmuted, double up audio) left
+      // running behind it.
+      if (widget.existingPlayer != null) unawaited(_player.pause());
       return;
     }
 
@@ -282,39 +314,57 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (widget.stream.headers.isNotEmpty && platform is NativePlayer) {
       await _setNativeHeaderOptions(platform, widget.stream.headers);
     }
-    await _player.open(
-      Media(
-        widget.stream.url,
-        httpHeaders: widget.stream.headers.isEmpty
-            ? null
-            : widget.stream.headers,
-      ),
-    );
+
+    // An adopted player is already open and playing this exact stream — the
+    // preview it came from resolved and opened it moments ago. On Windows that
+    // only holds once the native HDR surface above was actually created (the
+    // properties just applied re-pointed its video output at that surface); if
+    // surface creation failed, fall through to a fresh open like any other
+    // Windows playback. Off Windows there's no separate surface to switch —
+    // the embedded VideoController already adopted the same player/controller.
+    final adopting = widget.existingPlayer != null;
+    final canSkipOpen =
+        adopting && (!_usesWindowsNativeSurface || nativeWindowHandle != null);
+    if (canSkipOpen && _usesWindowsNativeSurface) _didWindowsHotSwap = true;
+    if (!canSkipOpen) {
+      await _player.open(
+        Media(
+          widget.stream.url,
+          httpHeaders: widget.stream.headers.isEmpty
+              ? null
+              : widget.stream.headers,
+        ),
+      );
+    }
     // Insurance against a muted/zero-volume default.
     await _player.setVolume(100);
+    if (canSkipOpen) await _player.play();
     _showNativeControls();
   }
 
   Future<bool> _tryOpenNativeHdrPlayer() async {
     if (!Platform.isAndroid) return false;
     try {
-      final opened = await _nativeHdrPlayer.invokeMethod<bool>('open', {
-        'url': widget.stream.url,
-        'title': widget.title,
-        if (widget.sourceName != null) 'sourceName': widget.sourceName,
-        'headers': widget.stream.headers,
-        'isLive': widget.stream.isLive,
-        ..._epgPayload(),
-        'subtitles': widget.stream.subtitles
-            .map(
-              (subtitle) => {
-                'url': subtitle.url,
-                'label': subtitle.label,
-                if (subtitle.language != null) 'language': subtitle.language,
-              },
-            )
-            .toList(growable: false),
-      }).timeout(_nativeOpenTimeout);
+      final opened = await _nativeHdrPlayer
+          .invokeMethod<bool>('open', {
+            'url': widget.stream.url,
+            'title': widget.title,
+            if (widget.sourceName != null) 'sourceName': widget.sourceName,
+            'headers': widget.stream.headers,
+            'isLive': widget.stream.isLive,
+            ..._epgPayload(),
+            'subtitles': widget.stream.subtitles
+                .map(
+                  (subtitle) => {
+                    'url': subtitle.url,
+                    'label': subtitle.label,
+                    if (subtitle.language != null)
+                      'language': subtitle.language,
+                  },
+                )
+                .toList(growable: false),
+          })
+          .timeout(_nativeOpenTimeout);
       _logPlayback(
         opened == true
             ? 'native hdr player launched platform=android'
@@ -336,10 +386,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<int?> _createWindowsNativeHdrSurface() async {
     if (!Platform.isWindows) return null;
     try {
-      final handle = await _nativeHdrPlayer.invokeMethod<int>('createSurface', {
-        'topInset': 0,
-        'bottomInset': 0,
-      }).timeout(_nativeOpenTimeout);
+      final handle = await _nativeHdrPlayer
+          .invokeMethod<int>('createSurface', {'topInset': 0, 'bottomInset': 0})
+          .timeout(_nativeOpenTimeout);
       if (handle == null || handle == 0) {
         _logPlayback('native hdr surface unavailable platform=windows');
         return null;
@@ -507,7 +556,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         break;
       case 'playPause':
         final wasPlaying = _player.state.playing;
-        if (_isLive && wasPlaying) _liveSynced = false; // pausing live -> behind
+        if (_isLive && wasPlaying) {
+          _liveSynced = false; // pausing live -> behind
+        }
         await _player.playOrPause();
         if (wasPlaying) _showNativeControls(scheduleHide: false);
         break;
@@ -578,8 +629,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _reconnectLive({required bool force}) async {
     if (!_isLive || !mounted) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final attemptGap =
-        ((_reconnectAttempt + 1) * _kStallReconnectMs).clamp(0, _kMaxBackoffMs);
+    final attemptGap = ((_reconnectAttempt + 1) * _kStallReconnectMs).clamp(
+      0,
+      _kMaxBackoffMs,
+    );
     final minGap = force ? _kStallReconnectMs : attemptGap;
     if (_lastReconnectMs != 0 && now - _lastReconnectMs < minGap) return;
     _reconnectAttempt++;
@@ -595,8 +648,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _player.open(
         Media(
           widget.stream.url,
-          httpHeaders:
-              widget.stream.headers.isEmpty ? null : widget.stream.headers,
+          httpHeaders: widget.stream.headers.isEmpty
+              ? null
+              : widget.stream.headers,
         ),
       );
     } catch (error) {
@@ -689,7 +743,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final tracks = _nativeSubtitleTracks();
     // Only surface the subtitles button when there is something to pick beyond
     // the Auto/Off defaults (e.g. most live IPTV has none).
-    final hasReal = tracks.any((track) => track.id != 'auto' && track.id != 'no');
+    final hasReal = tracks.any(
+      (track) => track.id != 'auto' && track.id != 'no',
+    );
     if (!hasReal) return const [];
     return tracks
         .map((track) => {'id': track.id, 'label': _subtitleTrackLabel(track)})
@@ -1001,24 +1057,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     int? nativeWindowHandle,
   ) async {
     final options = _isLive
-        ? const <String, String>{
-            // IPTV live streams do not benefit from a disk file cache, and it
-            // can fail on restricted temp/cache paths before playback starts.
-            'cache-on-disk': 'no',
-            'demuxer-max-back-bytes': '0',
-            'network-timeout': '15',
-            // Let ffmpeg transparently reconnect transient HTTP drops; the Dart
-            // watchdog reloads if a stall outlasts this.
-            'stream-lavf-o':
-                'reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,'
-                'reconnect_delay_max=5',
-            'demuxer-lavf-analyzeduration': '3',
-            'demuxer-lavf-probesize': '10000000',
-            'demuxer-lavf-o':
-                'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
-                'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
-                'analyzeduration=3000000,probesize=10000000',
-          }
+        ? kLiveMpvOptions
         : const <String, String>{
             // File-cache creation can fail for provider HTTP URLs on Windows,
             // and mpv still has the in-memory buffer configured above.
@@ -1059,19 +1098,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'secondary-sub-visibility': 'yes',
             'sub-use-margins': 'no',
           }
-        : !Platform.isWindows
-        ? const <String, String>{
-            // Flutter's texture path is effectively SDR outside native HDR
-            // surfaces. Ask mpv to map HDR/10-bit sources into a normal SDR
-            // target instead of relying on passthrough the texture may not
-            // expose correctly.
-            'target-prim': 'bt.709',
-            'target-trc': 'bt.1886',
-            'target-peak': '100',
-            'tone-mapping': 'bt.2390',
-            'hdr-compute-peak': 'yes',
-          }
-        : const <String, String>{};
+        : embeddedVideoOptionsForPlatform();
 
     final nativeWindowOptions = nativeWindowHandle == null
         ? const <String, String>{}
@@ -1081,17 +1108,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'keepaspect-window': 'yes',
           };
 
-    for (final entry in {
+    await applyMpvOptions(platform, {
       ...options,
       ...videoOptions,
       ...nativeWindowOptions,
-    }.entries) {
-      try {
-        await platform.setProperty(entry.key, entry.value);
-      } catch (error) {
-        _logPlayback('warn mpv option ${entry.key} failed: $error');
-      }
-    }
+    }, onWarn: (message) => _logPlayback('warn $message'));
   }
 
   // Logs which video output / decoder mpv actually initialized — tells us
@@ -1174,6 +1195,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _disposePlayerNonBlocking() {
+    if (!_ownsPlayer) return;
     final platform = _player.platform;
     if (Platform.isWindows && platform is NativePlayer) {
       unawaited(platform.dispose(synchronized: false));
@@ -1191,7 +1213,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _prepareWindowsNativeExit();
       _scheduleWindowsNativeTeardown(prepared: true);
     }
-    if (mounted && Navigator.of(context).canPop()) Navigator.of(context).pop();
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop(_didWindowsHotSwap);
+    }
   }
 
   void _seekBy(int seconds) {
@@ -1213,7 +1237,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
           ),
           if (now != null) ...[
             const SizedBox(height: 2),
