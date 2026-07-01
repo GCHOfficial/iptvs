@@ -882,8 +882,22 @@ class StalkerSource implements Source {
       number: int.tryParse('${ch['number'] ?? ch['num'] ?? ''}'),
       logo: _firstString(ch, ['logo', 'icon', 'stream_icon']),
       categoryId: _firstString(ch, ['tv_genre_id', 'genre_id', 'category_id']),
+      archiveDays: _archiveDays(ch),
       extra: extra,
     );
+  }
+
+  /// Catch-up window in days from a raw ITV channel row: `tv_archive_duration`
+  /// (days) when present, else a flag (`archive`/`allow_archive`) → default.
+  int _archiveDays(Map<String, dynamic> ch) {
+    final raw = ch['tv_archive_duration'] ?? ch['archive_duration'];
+    final days = raw is int ? raw : (int.tryParse('${raw ?? ''}') ?? 0);
+    if (days > 0) return days;
+    final on = ch['archive'] == 1 ||
+        ch['archive'] == '1' ||
+        ch['allow_archive'] == 1 ||
+        ch['allow_archive'] == '1';
+    return on ? kDefaultArchiveDays : 0;
   }
 
   MediaItem _mapMediaItem(

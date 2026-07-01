@@ -36,6 +36,12 @@ class Channel {
   final String? categoryId;
   final int? number;
 
+  /// How many days of catch-up / archive TV this channel exposes (0 = none).
+  /// First-class provider metadata — like [StreamInfo.isLive], it's set by the
+  /// [Source] and read provider-agnostically by the UI, never inferred. The
+  /// provider-specific bits needed to *build* an archive URL stay in [extra].
+  final int archiveDays;
+
   /// Provider-specific payload the owning [Source] knows how to interpret in
   /// [Source.resolve] — e.g. Stalker's `cmd`, Xtream's stream id. Keeps
   /// provider details out of the shared model.
@@ -47,9 +53,19 @@ class Channel {
     this.logo,
     this.categoryId,
     this.number,
+    this.archiveDays = 0,
     this.extra = const {},
   });
+
+  /// Whether this channel offers catch-up / archive playback.
+  bool get hasArchive => archiveDays > 0;
 }
+
+/// Fallback archive window when a provider flags a channel as catch-up capable
+/// but doesn't report how many days it retains. A conservative value so the
+/// guide still offers catch-up (the archive URL is built from a programme's own
+/// timestamp, not this count — this only bounds how far back the picker looks).
+const kDefaultArchiveDays = 7;
 
 @immutable
 class MediaItem {
