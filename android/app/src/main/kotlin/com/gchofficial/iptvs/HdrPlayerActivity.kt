@@ -1,7 +1,11 @@
 package com.gchofficial.iptvs
 
+import android.app.PictureInPictureParams
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
+import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -15,6 +19,7 @@ import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
 import com.gchofficial.iptvs.player.PlayerCallbacks
+import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
 import com.gchofficial.iptvs.player.SubtitleSpec
@@ -197,7 +202,57 @@ class HdrPlayerActivity : ComponentActivity() {
         super.onStop()
         progressTicker?.cancel()
         progressTicker = null
-        engine?.pause()
+        // Keep playing while in PiP (onStop can fire around the PiP window on
+        // some devices); only pause when actually backgrounded.
+        if (!uiState.inPip) engine?.pause()
+    }
+
+    /** Home / recents while playing → enter picture-in-picture instead of
+     *  backgrounding. No-op on devices without PiP (e.g. some Android TVs). */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (uiState.inPip || isFinishing || !uiState.isPlaying) return
+        if (!supportsPip()) return
+        runCatching { enterPictureInPictureMode(pipParams()) }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        uiState.inPip = isInPictureInPictureMode
+        if (isInPictureInPictureMode) {
+            // Collapse all chrome so the PiP window is video-only.
+            uiState.controlsVisible = false
+            uiState.openMenu = PlayerMenu.None
+            uiState.infoOpen = false
+        }
+    }
+
+    private fun supportsPip(): Boolean =
+        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun pipParams(): PictureInPictureParams {
+        val w = uiState.videoWidth
+        val h = uiState.videoHeight
+        // Android rejects extreme ratios; clamp to its allowed band, default 16:9.
+        val ratio = if (w > 0 && h > 0) {
+            Rational(w, h).coerceRatio()
+        } else {
+            Rational(16, 9)
+        }
+        return PictureInPictureParams.Builder().setAspectRatio(ratio).build()
+    }
+
+    /** Clamp to Android's accepted aspect band (~0.418..2.39) to avoid a crash. */
+    private fun Rational.coerceRatio(): Rational {
+        val value = numerator.toDouble() / denominator.toDouble()
+        return when {
+            value < 0.42 -> Rational(42, 100)
+            value > 2.39 -> Rational(239, 100)
+            else -> this
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

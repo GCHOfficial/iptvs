@@ -97,6 +97,9 @@ class PlayerUiState(
     var infoOpen by mutableStateOf(false)
     var controlsVisible by mutableStateOf(true)
 
+    /** In Android picture-in-picture: the overlay hides all chrome (video only). */
+    var inPip by mutableStateOf(false)
+
     // Set when the stream carries a video track the device can't decode (e.g.
     // Dolby Vision Profile 5 on non-DV hardware): audio plays but there's no
     // picture, so we surface why instead of leaving a blank/artwork screen.
