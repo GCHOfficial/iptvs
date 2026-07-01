@@ -85,6 +85,11 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_SUBTITLE_LANGUAGES,
                             ArrayList(subtitleRows.map { it.third }),
                         )
+                        // Frozen preview frame (JPEG bytes) shown behind the video
+                        // while the stream re-buffers, masking the reload gap.
+                        (args["placeholder"] as? ByteArray)?.let {
+                            putExtra(HdrPlayerActivity.EXTRA_PLACEHOLDER, it)
+                        }
                     }
                     startActivityForResult(intent, REQUEST_NATIVE_PLAYER)
                     result.success(true)

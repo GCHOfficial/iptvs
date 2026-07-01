@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
@@ -827,6 +828,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _lastPlayedLiveChannelId = channel.id;
+      // Grab the preview's current frame so the fullscreen player (esp. the
+      // Android native-HDR Activity, which reloads the stream from scratch) can
+      // show it as a frozen placeholder while it re-buffers — masking the black
+      // gap that reload would otherwise leave.
+      final placeholder =
+          (_preview.channelId == channel.id && _preview.stream != null)
+          ? await _capturePreviewFrame()
+          : null;
       // Pause the preview during handoff so its audio doesn't play behind the
       // fullscreen player (esp. the Android native-HDR path, which renders in a
       // separate Activity). Resumed below when adopted, or stopped by the caller
@@ -843,6 +852,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 epgNext: _live.next[channel.id],
                 existingPlayer: adoptPreview ? _preview.player : null,
                 existingController: adoptPreview ? _preview.controller : null,
+                placeholderFrame: placeholder,
               ),
             ),
           ) ??
@@ -864,6 +874,20 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
     } finally {
       if (mounted) setState(() => _resolving = false);
+    }
+  }
+
+  /// Captures the preview player's current frame (JPEG bytes) to hand to the
+  /// fullscreen player as a frozen placeholder. Raced against a short timeout so
+  /// a slow/failed capture never delays the handoff — a null just means the
+  /// fullscreen player falls back to its plain launch surface.
+  Future<Uint8List?> _capturePreviewFrame() async {
+    try {
+      return await _preview.player.screenshot().timeout(
+        const Duration(milliseconds: 150),
+      );
+    } catch (_) {
+      return null;
     }
   }
 
@@ -1147,42 +1171,58 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _scrollToTop();
   }
 
-  /// Peels one layer of the D-pad hierarchy per Back press instead of only
-  /// ever exiting: channel/media list → category pane (Live tab, wide layout)
-  /// → content-kind tabs → then actually leaves the screen. Lets a long
-  /// channel list be escaped in a couple of presses instead of arrowing up
-  /// item by item.
+  /// Peels one D-pad rung per Back press, keyed off what's focused, and
+  /// **defaults to exiting the app** for anything above the content (search box,
+  /// tabs, app-bar buttons) — so Back leaves from the toolbar too, not only the
+  /// section tabs. Live (wide/TV) ladder: channel list → category sidebar (last
+  /// selected) → "All channels" highlight → search box → exit.
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
-    // Flutter invokes every registered PopScope when a pop is blocked, so
-    // defer entirely to TvTextField's own PopScope while its inner field is
-    // actually being edited — it already exits edit mode on Back.
-    if (FocusManager.instance.primaryFocus?.debugLabel == 'TvTextField.field') {
-      return;
-    }
-    if (_tabFocusNodes.values.any((node) => node.hasFocus)) {
-      // Nothing left to peel. This screen is HomeShell's root content (not a
-      // pushed route), so there may be nothing to pop to — fall back to the
-      // platform default (exit) rather than silently no-op.
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
-      } else {
-        SystemNavigator.pop();
-      }
-      return;
-    }
-    final isWideLive =
+    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    // Flutter invokes every registered PopScope when a pop is blocked, so defer
+    // entirely to TvTextField's own PopScope while its inner field is actually
+    // being edited — it already exits edit mode on Back.
+    if (label == 'TvTextField.field') return;
+
+    final wideLive =
         _tab == ContentKind.live && MediaQuery.of(context).size.width >= 950;
-    if (isWideLive) {
-      final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
-      if (_focusAreaFromLabel(label) == _LiveFocusArea.category) {
-        _tabFocusNodes[_tab]?.requestFocus();
-      } else {
+
+    // Live channel list → the category sidebar (wide) or straight to search
+    // (narrow, which has no sidebar).
+    if (label.startsWith('live.channel.')) {
+      if (wideLive) {
         _focusCategoryFromChannels();
+      } else {
+        _liveSearchCellFocusNode.requestFocus();
       }
       return;
     }
-    _tabFocusNodes[_tab]?.requestFocus();
+    // On "All channels" → the search box.
+    if (label == 'live.category.all') {
+      _liveSearchCellFocusNode.requestFocus();
+      _lastLiveFocusArea = _LiveFocusArea.search;
+      return;
+    }
+    // On a specific category → move the highlight to "All channels" without
+    // changing the current filter (the user presses OK to actually switch).
+    if (label.startsWith('live.category.')) {
+      _focusNodeForCategory(null).requestFocus();
+      _lastLiveFocusArea = _LiveFocusArea.category;
+      return;
+    }
+    // Movies/series grid → the content-kind tabs.
+    if (label.startsWith('media.')) {
+      _tabFocusNodes[_tab]?.requestFocus();
+      return;
+    }
+    // Search box, tabs, app-bar buttons, or anything unlabeled: nothing left to
+    // peel. This screen is HomeShell's root content (not a pushed route), so
+    // there may be nothing to pop to — fall back to the platform default (exit).
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    } else {
+      SystemNavigator.pop();
+    }
   }
 
   @override
@@ -1372,9 +1412,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         onCatchup: _showCatchupSheet,
                         categories: _liveCategoriesForUi,
                         selectedCategoryId: _categoryId,
-                        selectedCategoryFocusNode: _focusNodeForCategory(
-                          _categoryId,
-                        ),
+                        focusNodeForCategory: _focusNodeForCategory,
                         onCategorySelected: (value) {
                           setState(() => _categoryId = value);
                           _scheduleLiveFocusNodePrune();
@@ -1488,7 +1526,11 @@ class LiveTabView extends StatelessWidget {
 
   final List<Category> categories;
   final String? selectedCategoryId;
-  final FocusNode selectedCategoryFocusNode;
+
+  /// Stable focus node per category id (null → "All channels"), so Back can move
+  /// the highlight to a specific entry (e.g. "All channels") without changing the
+  /// filter. Each card wires up its own node.
+  final FocusNode Function(String? categoryId) focusNodeForCategory;
   final ValueChanged<String?> onCategorySelected;
   final VoidCallback onMoveRightToChannels;
   final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
@@ -1525,7 +1567,7 @@ class LiveTabView extends StatelessWidget {
     required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
-    required this.selectedCategoryFocusNode,
+    required this.focusNodeForCategory,
     required this.onCategorySelected,
     required this.onMoveRightToChannels,
     required this.onPaneFallbackKey,
@@ -1619,7 +1661,7 @@ class LiveTabView extends StatelessWidget {
                   child: _LiveCategoryPane(
                     categories: categories,
                     selectedCategoryId: selectedCategoryId,
-                    selectedFocusNode: selectedCategoryFocusNode,
+                    focusNodeForCategory: focusNodeForCategory,
                     onSelected: onCategorySelected,
                     onMoveRightToChannels: onMoveRightToChannels,
                   ),
@@ -2127,14 +2169,14 @@ class _ToolbarIconButtonState extends State<_ToolbarIconButton> {
 class _LiveCategoryPane extends StatelessWidget {
   final List<Category> categories;
   final String? selectedCategoryId;
-  final FocusNode selectedFocusNode;
+  final FocusNode Function(String? categoryId) focusNodeForCategory;
   final ValueChanged<String?> onSelected;
   final VoidCallback onMoveRightToChannels;
 
   const _LiveCategoryPane({
     required this.categories,
     required this.selectedCategoryId,
-    required this.selectedFocusNode,
+    required this.focusNodeForCategory,
     required this.onSelected,
     required this.onMoveRightToChannels,
   });
@@ -2189,7 +2231,7 @@ class _LiveCategoryPane extends StatelessWidget {
                           final selected = item.id == selectedCategoryId;
                           return FocusableCard(
                             autofocus: selected,
-                            focusNode: selected ? selectedFocusNode : null,
+                            focusNode: focusNodeForCategory(item.id),
                             debugLabel: 'live.category.${item.id ?? 'all'}',
                             onKeyEvent: (node, event) {
                               final isRight =
@@ -3296,6 +3338,7 @@ class _MediaListTile extends StatelessWidget {
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
+      debugLabel: 'media.item.${item.id}',
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -3389,6 +3432,7 @@ class _MediaGridTile extends StatelessWidget {
     return FocusableCard(
       autofocus: autofocus,
       focusNode: focusNode,
+      debugLabel: 'media.item.${item.id}',
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(10),

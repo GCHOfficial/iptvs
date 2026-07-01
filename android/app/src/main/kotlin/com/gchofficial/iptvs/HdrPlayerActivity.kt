@@ -3,6 +3,8 @@ package com.gchofficial.iptvs
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.util.Log
 import android.util.Rational
@@ -46,6 +48,8 @@ class HdrPlayerActivity : ComponentActivity() {
     private val engineState = mutableStateOf<PlaybackEngine?>(null)
     private var engine: PlaybackEngine? = null
     private var progressTicker: Job? = null
+    // Frozen preview frame shown over the video surface until playback starts.
+    private var placeholderBitmap: Bitmap? = null
 
     // Live reconnect watchdog: when a live stream stalls (buffering) or drops
     // (ended / error), reload it with capped backoff until playback resumes.
@@ -81,6 +85,11 @@ class HdrPlayerActivity : ComponentActivity() {
         // the button below simply won't show on devices that report the feature missing.
         uiState.supportsPip = supportsPip()
 
+        placeholderBitmap = intent.getByteArrayExtra(EXTRA_PLACEHOLDER)?.let { bytes ->
+            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+        }
+        uiState.placeholderVisible = placeholderBitmap != null
+
         startWithExoPlayer()
 
         setContent {
@@ -89,6 +98,7 @@ class HdrPlayerActivity : ComponentActivity() {
                     state = uiState,
                     videoView = active.view,
                     callbacks = playerCallbacks(),
+                    placeholder = placeholderBitmap,
                 )
             }
         }
@@ -200,6 +210,10 @@ class HdrPlayerActivity : ComponentActivity() {
             while (isActive) {
                 engine?.syncProgress()
                 pollLiveReconnect()
+                // Real playback is up → drop the frozen preview frame.
+                if (uiState.placeholderVisible && uiState.isPlaying && !uiState.isBuffering) {
+                    uiState.placeholderVisible = false
+                }
                 delay(500)
             }
         }
@@ -244,6 +258,11 @@ class HdrPlayerActivity : ComponentActivity() {
             uiState.controlsVisible = false
             uiState.openMenu = PlayerMenu.None
             uiState.infoOpen = false
+            // This Activity shares MainActivity's task; behind the PiP window sits
+            // the Flutter handoff route, which is a black fill. Recede the task so
+            // the launcher shows behind the floating PiP window instead of black.
+            // The PiP window lives in its own pinned stack and stays on top.
+            moveTaskToBack(false)
         }
     }
 
@@ -295,6 +314,8 @@ class HdrPlayerActivity : ComponentActivity() {
     override fun onDestroy() {
         engine?.release()
         engine = null
+        placeholderBitmap?.recycle()
+        placeholderBitmap = null
         super.onDestroy()
     }
 
@@ -376,6 +397,7 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_SUBTITLE_URLS = "subtitle_urls"
         const val EXTRA_SUBTITLE_LABELS = "subtitle_labels"
         const val EXTRA_SUBTITLE_LANGUAGES = "subtitle_languages"
+        const val EXTRA_PLACEHOLDER = "placeholder"
         private const val TAG = "iptvs.hdr"
 
         // Live reconnect watchdog thresholds.

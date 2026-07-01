@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
@@ -33,17 +34,31 @@ class LivePreviewController extends ChangeNotifier {
   Player get player => _player ??= _createPlayer();
 
   VideoController? _controller;
-  VideoController get controller => _controller ??= VideoController(player);
+  // Force hardware decode for the preview via the controller config — the only
+  // place `hwdec` sticks (media_kit sets it at controller creation, overriding
+  // setProperty). On a weak TV box the default `auto-safe` silently drops to
+  // software decode, playing 4K HEVC in slow-motion at ~100% CPU. Android-only;
+  // other platforms keep media_kit's default.
+  VideoController get controller =>
+      _controller ??= VideoController(
+        player,
+        configuration: Platform.isAndroid
+            ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
+            : const VideoControllerConfiguration(),
+      );
+
+  StreamSubscription<VideoParams>? _hwdecProbe;
+  bool _loggedHwdec = false;
 
   Player _createPlayer() {
     final player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
     );
     // Unlike the fullscreen player, previews never get a native HDR/HWND surface —
-    // they're always the embedded (texture) path, and were previously left on mpv's
-    // untuned defaults. That meant no hardware-decode hint at all, so decode cost on
-    // Android scaled directly with source resolution. Apply the same live-stream +
-    // embedded-path tuning the fullscreen player uses for its own embedded fallback.
+    // they're always the embedded (texture) path. Apply the same live-stream
+    // network/demuxer tuning + tone-map-to-SDR options the fullscreen embedded
+    // fallback uses. (Hardware decode is set separately on the VideoController
+    // config above — that's the one place `hwdec` isn't overridden.)
     final platform = player.platform;
     if (platform is NativePlayer) {
       unawaited(
@@ -52,8 +67,29 @@ class LivePreviewController extends ChangeNotifier {
           ...embeddedVideoOptionsForPlatform(),
         }),
       );
+      // Log the decoder mpv actually engaged once frames start flowing, so the
+      // exportable diagnostics confirm hardware decode (not a silent software
+      // fallback) on the low-power TV boxes where this matters.
+      _hwdecProbe = player.stream.videoParams.listen((_) {
+        if (_loggedHwdec) return;
+        unawaited(_logPreviewHwdec(platform));
+      });
     }
     return player;
+  }
+
+  Future<void> _logPreviewHwdec(NativePlayer platform) async {
+    if (_loggedHwdec) return;
+    try {
+      final hwdec = (await platform.getProperty('hwdec-current')).trim();
+      if (hwdec.isEmpty || hwdec == 'no') return; // decoder not up yet / software
+      _loggedHwdec = true;
+      unawaited(_hwdecProbe?.cancel());
+      _hwdecProbe = null;
+      DiagnosticsLog.instance.add('library', 'preview active hwdec=$hwdec');
+    } catch (_) {
+      // Property unavailable on this build — leave the probe running.
+    }
   }
 
   /// Channel currently selected for preview (may still be loading), or null.
@@ -141,6 +177,9 @@ class LivePreviewController extends ChangeNotifier {
   /// The next [start] call builds a fresh one.
   Future<void> discardPlayer() async {
     final player = _player;
+    unawaited(_hwdecProbe?.cancel());
+    _hwdecProbe = null;
+    _loggedHwdec = false;
     _player = null;
     _controller = null;
     channelId = null;
@@ -154,6 +193,7 @@ class LivePreviewController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_hwdecProbe?.cancel());
     unawaited(_player?.dispose());
     super.dispose();
   }
