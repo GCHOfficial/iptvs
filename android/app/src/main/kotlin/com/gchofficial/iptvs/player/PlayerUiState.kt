@@ -100,6 +100,13 @@ class PlayerUiState(
     /** In Android picture-in-picture: the overlay hides all chrome (video only). */
     var inPip by mutableStateOf(false)
 
+    /**
+     * While true, the frozen preview frame handed in at launch is drawn over the
+     * (still-black) video surface, masking the reload gap. Cleared once real
+     * playback starts (playing && not buffering).
+     */
+    var placeholderVisible by mutableStateOf(false)
+
     /** Whether the device supports PiP at all — gates the manual "Enter PiP" button. */
     var supportsPip by mutableStateOf(false)
 

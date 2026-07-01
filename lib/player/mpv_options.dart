@@ -22,21 +22,31 @@ const Map<String, String> kLiveMpvOptions = {
       'analyzeduration=3000000,probesize=10000000',
 };
 
-/// Hardware-decode-friendly options for **embedded** (non-native-surface) playback
-/// on non-Windows platforms — notably Android, where the fallback/preview path
-/// renders through a Flutter texture rather than the native HDR Activity. Without
-/// these, mpv falls back to its untuned defaults, which on Android tends to mean
-/// software decode — fine at low resolutions but increasingly expensive as source
-/// resolution climbs. Also asks mpv to tone-map HDR/10-bit down to SDR, since
-/// Flutter's texture path can't display HDR passthrough.
+/// Tone-map-to-SDR options for **embedded** (non-native-surface) playback on
+/// non-Windows platforms — notably Android, where the fallback/preview path
+/// renders through a Flutter texture (which can't display HDR passthrough) rather
+/// than the native HDR Activity.
+///
+/// Note: `hwdec` is deliberately **not** here — `media_kit_video`'s
+/// [VideoController] sets `hwdec` itself at creation (default `auto-safe`),
+/// overriding any value set via `setProperty`, so decode mode must be chosen on
+/// the `VideoControllerConfiguration` ([kAndroidPreviewHwdec]) instead. Nor is
+/// `hdr-compute-peak` — its per-frame GPU histogram is expensive and pointless
+/// here (we tone-map to a fixed SDR target anyway).
 const Map<String, String> kEmbeddedAndroidVideoOptions = {
-  'hwdec': 'auto-safe',
   'target-prim': 'bt.709',
   'target-trc': 'bt.1886',
   'target-peak': '100',
   'tone-mapping': 'bt.2390',
-  'hdr-compute-peak': 'yes',
 };
+
+/// Decode mode for the embedded Android preview, applied on the
+/// [VideoController]'s configuration (the only place `hwdec` sticks — see
+/// [kEmbeddedAndroidVideoOptions]). `mediacodec-copy` forces real hardware decode
+/// on the device's codec and copies frames into the GL texture path, so it works
+/// with `vo=gpu`. The controller default `auto-safe` silently falls back to
+/// software on some weak TV boxes → 4K HEVC plays in slow-motion at ~100% CPU.
+const String kAndroidPreviewHwdec = 'mediacodec-copy';
 
 /// Applies [options] as mpv properties on [platform], warning via [onWarn]
 /// (non-fatal — a single bad property shouldn't abort playback) instead of

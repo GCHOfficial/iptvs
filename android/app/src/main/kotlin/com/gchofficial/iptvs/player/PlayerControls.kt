@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -58,7 +59,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -102,6 +105,7 @@ fun PlayerScreen(
     state: PlayerUiState,
     videoView: View,
     callbacks: PlayerCallbacks,
+    placeholder: android.graphics.Bitmap? = null,
 ) {
     val rootFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
@@ -191,6 +195,17 @@ fun PlayerScreen(
         // with the new engine's view.
         key(videoView) {
             AndroidView(factory = { videoView }, modifier = Modifier.fillMaxSize())
+        }
+
+        // Frozen preview frame over the (still-black) video surface until real
+        // playback starts — masks the reload gap when arriving from a preview.
+        if (placeholder != null && state.placeholderVisible) {
+            Image(
+                bitmap = placeholder.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
 
         // Tap layer (below the controls) toggles visibility on touch devices.

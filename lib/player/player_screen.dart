@@ -39,6 +39,12 @@ class PlayerScreen extends StatefulWidget {
   final Player? existingPlayer;
   final VideoController? existingController;
 
+  /// A frozen frame (JPEG bytes) captured from the preview this fullscreen open
+  /// came from. On Android the native HDR player shows it behind the video while
+  /// it re-buffers the stream, masking the black reload gap. Null when there was
+  /// no preview to capture (e.g. tapping a channel tile straight to fullscreen).
+  final Uint8List? placeholderFrame;
+
   const PlayerScreen({
     super.key,
     required this.title,
@@ -48,6 +54,7 @@ class PlayerScreen extends StatefulWidget {
     this.epgNext,
     this.existingPlayer,
     this.existingController,
+    this.placeholderFrame,
   });
 
   @override
@@ -352,6 +359,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
             if (widget.sourceName != null) 'sourceName': widget.sourceName,
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
+            if (widget.placeholderFrame != null)
+              'placeholder': widget.placeholderFrame,
             ..._epgPayload(),
             'subtitles': widget.stream.subtitles
                 .map(
