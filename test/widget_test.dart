@@ -365,6 +365,40 @@ void main() {
     });
   });
 
+  group('Xtream live channels', () {
+    test('maps the catch-up window from tv_archive fields', () async {
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        debugApi: (params) async {
+          expect(params['action'], 'get_live_streams');
+          return [
+            {
+              'stream_id': '1',
+              'name': 'Archive 5d',
+              'tv_archive': 1,
+              'tv_archive_duration': '5',
+            },
+            // Archive on but no duration reported → conservative default.
+            {'stream_id': '2', 'name': 'Archive no-dur', 'tv_archive': 1},
+            {'stream_id': '3', 'name': 'Archive off', 'tv_archive': 0},
+            {'stream_id': '4', 'name': 'Plain'},
+          ];
+        },
+      );
+
+      final chans = await source.channels();
+
+      expect(chans[0].archiveDays, 5);
+      expect(chans[0].hasArchive, isTrue);
+      expect(chans[1].archiveDays, kDefaultArchiveDays);
+      expect(chans[2].archiveDays, 0);
+      expect(chans[2].hasArchive, isFalse);
+      expect(chans[3].archiveDays, 0);
+    });
+  });
+
   group('Xtream series mapping', () {
     final source = XtreamSource(
       host: 'http://example.invalid',

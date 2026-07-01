@@ -69,6 +69,8 @@ void main() {
       final channels = await db.readChannels('src1');
       expect(channels, hasLength(1));
       expect(channels.first.name, 'Channel One');
+      // The v9->v10 ALTER added archive_days with a 0 default for legacy rows.
+      expect(channels.first.archiveDays, 0);
       expect(await db.lastSynced('src1'), isNotNull);
 
       // Tables added across later versions are now usable.
@@ -119,10 +121,16 @@ void main() {
           version: 7,
           onCreate: (db, _) async {
             // Minimal v7-era shape: just enough that the v7->8 branch is the
-            // only thing that can create external_metadata.
+            // only thing that can create external_metadata. `channels` has
+            // existed since v1, so include it — the v9->v10 ALTER targets it.
             await db.execute(
               'CREATE TABLE sources (id TEXT PRIMARY KEY, name TEXT NOT NULL, '
               'synced_at INTEGER, epg_synced_at INTEGER)',
+            );
+            await db.execute(
+              'CREATE TABLE channels (source_id TEXT NOT NULL, id TEXT NOT NULL, '
+              'name TEXT NOT NULL, number INTEGER, logo TEXT, category_id TEXT, '
+              'extra TEXT, PRIMARY KEY (source_id, id))',
             );
           },
         ),
@@ -240,6 +248,29 @@ void main() {
       final db = await AppDatabase.openAt(dbPath());
       await db.setFavorite('src1', ContentKind.series, 's1', true);
       expect(await db.readFavoriteIds('src1', ContentKind.series), {'s1'});
+      await db.close();
+    });
+  });
+
+  group('AppDatabase channels', () {
+    test('persists a channel catch-up window across replaceLibrary', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [
+          Channel(id: 'arch', name: 'Archive', categoryId: 'c1', archiveDays: 5),
+          Channel(id: 'plain', name: 'Plain', categoryId: 'c1'),
+        ],
+      );
+
+      final channels = await db.readChannels('src1');
+      final byId = {for (final c in channels) c.id: c};
+      expect(byId['arch']!.archiveDays, 5);
+      expect(byId['arch']!.hasArchive, isTrue);
+      expect(byId['plain']!.archiveDays, 0);
+      expect(byId['plain']!.hasArchive, isFalse);
       await db.close();
     });
   });

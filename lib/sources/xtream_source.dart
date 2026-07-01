@@ -102,6 +102,7 @@ class XtreamSource implements Source {
             ? m['stream_icon'] as String
             : null,
         categoryId: m['category_id']?.toString(),
+        archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
         extra: {
           'streamId': streamId,
           if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
@@ -537,6 +538,16 @@ class XtreamSource implements Source {
     if (value is int) return value;
     if (value == null) return null;
     return int.tryParse(value.toString());
+  }
+
+  /// Catch-up window in days from a live-stream's `tv_archive` (0/1) and
+  /// `tv_archive_duration` (days). Archive off → 0; on but duration
+  /// missing/zero → [kDefaultArchiveDays].
+  int _archiveDays(dynamic archive, dynamic duration) {
+    final on = archive == 1 || archive == '1' || archive == true;
+    if (!on) return 0;
+    final days = _parseInt(duration) ?? 0;
+    return days > 0 ? days : kDefaultArchiveDays;
   }
 
   double? _parseDouble(String? value) {
