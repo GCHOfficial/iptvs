@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/net.dart';
 import 'expiry.dart';
@@ -315,7 +315,20 @@ class XtreamSource implements Source {
       queryParameters: {'username': username, 'password': password, ...params},
     );
     final bytes = await _download(uri);
-    return jsonDecode(utf8.decode(bytes, allowMalformed: true));
+    return _decodeJson(bytes);
+  }
+
+  /// Catalog responses (`get_vod_streams`/`get_live_streams`) can be many MB;
+  /// decoding them on the UI thread stalls the frame. Offload big payloads to a
+  /// background isolate, but decode small ones inline — isolate spawn overhead
+  /// would dominate for the many tiny auth/category calls.
+  static const _isolateJsonThreshold = 256 * 1024;
+
+  Future<dynamic> _decodeJson(Uint8List bytes) {
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(_decodeJsonBytes(bytes));
+    }
+    return compute(_decodeJsonBytes, bytes);
   }
 
   Future<Uint8List> _download(Uri uri) async {
@@ -552,6 +565,12 @@ class XtreamSource implements Source {
     return null;
   }
 }
+
+/// Isolate entrypoint: decode UTF-8 JSON bytes. Top-level + pure so it can run
+/// under [compute]. Returns the raw decoded tree (List/Map of primitives),
+/// which is sendable back across the isolate port.
+dynamic _decodeJsonBytes(Uint8List bytes) =>
+    jsonDecode(utf8.decode(bytes, allowMalformed: true));
 
 /// Credentials extracted from a URL that points at an Xtream Codes panel
 /// (typically a `get.php` playlist link). [host] is `scheme://host[:port]`.
