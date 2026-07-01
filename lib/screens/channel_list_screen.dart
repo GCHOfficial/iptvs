@@ -24,6 +24,7 @@ import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
+import 'live_controller.dart';
 import 'media_tab_controller.dart';
 
 const _toolbarControlHeight = 40.0;
@@ -58,25 +59,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final _searchController = TextEditingController();
 
   ContentKind _tab = ContentKind.live;
-  List<Category> _categories = const [];
-  List<Channel> _all = const [];
+  // Live channel/category/EPG data + load lifecycle live in a controller; the
+  // screen keeps the live focus/D-pad state and preview player (see below).
+  late final LiveController _live;
   // Movies/series browsing state + async ops live in a controller per kind;
   // both persist for the screen's lifetime so state survives tab switches.
   late final Map<ContentKind, MediaTabController> _mediaControllers;
   MediaTabController _media(ContentKind kind) => _mediaControllers[kind]!;
-  Map<String, Programme> _now = const {};
-  Map<String, Programme> _next = const {};
   // Favorited item ids per content kind (live channels / movies / series).
   final Map<ContentKind, Set<String>> _favorites = {};
   String? _categoryId;
   String _query = '';
 
-  bool _loading = true;
   bool _resolving = false;
-  String? _error;
-  DateTime? _syncedAt;
-  bool _fromCache = false;
-  Timer? _epgTimer;
   Timer? _searchTimer;
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
@@ -109,6 +104,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   @override
   void initState() {
     super.initState();
+    _live = LiveController(repo: widget.repo)..addListener(_onLiveChanged);
     _mediaControllers = {
       for (final kind in const [ContentKind.movie, ContentKind.series])
         kind: MediaTabController(
@@ -124,11 +120,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _onChannelFocusChanged(visible.first, _firstChannelFocusNode.hasFocus);
       }
     });
-    _load();
-    _epgTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => _refreshNowNext(),
-    );
+    _loadLive();
+    _live.startEpgRefresh();
+  }
+
+  void _onLiveChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// Load live channels (via the controller) plus the focus-node prune and
+  /// favorites, which stay in the screen.
+  Future<void> _loadLive({bool forceRefresh = false}) async {
+    await _live.load(forceRefresh: forceRefresh);
+    if (!mounted) return;
+    _scheduleLiveFocusNodePrune();
+    await _loadFavorites(ContentKind.live);
   }
 
   @override
@@ -177,7 +183,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleLiveGlobalKeyEvent);
-    _epgTimer?.cancel();
+    _live.dispose();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
     _liveSearchCellFocusNode.dispose();
@@ -236,7 +242,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   Channel? _findChannelById(String id) {
-    for (final c in _all) {
+    for (final c in _live.channels) {
       if (c.id == id) return c;
     }
     return null;
@@ -303,7 +309,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _lastLiveFocusArea = _LiveFocusArea.channels;
   }
 
-  String _liveCategoryKey(String? categoryId) => categoryId ?? '__all__';
+  String _liveCategoryKey(String? categoryId) => categoryId ?? '__live.channels__';
 
   FocusNode _focusNodeForLiveChannel(String channelId) {
     return _liveChannelFocusNodes.putIfAbsent(
@@ -587,48 +593,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return KeyEventResult.ignored;
   }
 
-  Future<void> _load({bool forceRefresh = false}) async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final snap = await widget.repo.load(forceRefresh: forceRefresh);
-      if (!mounted) return;
-      DiagnosticsLog.instance.add(
-        'library',
-        'loaded live source=${widget.repo.source.name} channels=${snap.channels.length} force=$forceRefresh cache=${snap.fromCache}',
-      );
-      setState(() {
-        _categories = snap.categories;
-        _all = snap.channels;
-        _syncedAt = snap.syncedAt;
-        _fromCache = snap.fromCache;
-        _loading = false;
-      });
-      _scheduleLiveFocusNodePrune();
-      await _loadFavorites(ContentKind.live);
-      await _refreshNowNext();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = '$e';
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _refreshNowNext() async {
-    try {
-      final nn = await widget.repo.nowNext();
-      if (!mounted) return;
-      setState(() {
-        _now = nn.now;
-        _next = nn.next;
-      });
-    } catch (_) {}
-  }
-
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
@@ -716,8 +680,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   /// Live categories with disabled ones removed (for the pane/dropdown).
   List<Category> get _visibleCategories {
     final hidden = _hiddenCategories(ContentKind.live);
-    if (hidden.isEmpty) return _categories;
-    return _categories.where((c) => !hidden.contains(c.id)).toList();
+    if (hidden.isEmpty) return _live.categories;
+    return _live.categories.where((c) => !hidden.contains(c.id)).toList();
   }
 
   /// Media categories for [kind] with disabled ones removed.
@@ -733,7 +697,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final favoritesView = _categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
-    return _all.where((c) {
+    return _live.channels.where((c) {
       if (favoritesView) {
         // Favorites are explicit picks, shown even from a disabled category.
         if (!favs!.contains(c.id)) return false;
@@ -799,8 +763,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               title: channel.name,
               stream: stream,
               sourceName: widget.repo.source.name,
-              epgNow: _now[channel.id],
-              epgNext: _next[channel.id],
+              epgNow: _live.now[channel.id],
+              epgNext: _live.next[channel.id],
             ),
           ),
         );
@@ -884,8 +848,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             title: channel.name,
             stream: stream,
             sourceName: widget.repo.source.name,
-            epgNow: _now[channel.id],
-            epgNext: _next[channel.id],
+            epgNow: _live.now[channel.id],
+            epgNext: _live.next[channel.id],
           ),
         ),
       );
@@ -932,8 +896,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         player: _previewPlayer,
         controller: _previewController,
         channel: channel,
-        now: _now[channel.id],
-        next: _next[channel.id],
+        now: _live.now[channel.id],
+        next: _live.next[channel.id],
         favorite: _isFavorite(ContentKind.live, channel.id),
         onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
         onPlay: () {
@@ -1040,11 +1004,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   String _statusLine(int count) {
     final b = StringBuffer('${_fmt(count)} channels');
-    if (_syncedAt != null) {
+    if (_live.syncedAt != null) {
       b.write(
-        _fromCache
-            ? ' · cached, synced ${_ago(_syncedAt!)}'
-            : ' · synced ${_ago(_syncedAt!)}',
+        _live.fromCache
+            ? ' · cached, synced ${_ago(_live.syncedAt!)}'
+            : ' · synced ${_ago(_live.syncedAt!)}',
       );
     }
     return b.toString();
@@ -1161,11 +1125,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 IconButton(
                   tooltip: 'Refresh from source',
                   icon: const Icon(Icons.refresh),
-                  onPressed: _loading ||
+                  onPressed: _live.loading ||
                           (_tab != ContentKind.live && _media(_tab).loading)
                       ? null
                       : () => _tab == ContentKind.live
-                            ? _load(forceRefresh: true)
+                            ? _loadLive(forceRefresh: true)
                             : _loadMediaTab(_tab, forceRefresh: true),
                 ),
                 const SizedBox(width: 4),
@@ -1287,7 +1251,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   String _statusText(int visibleLiveCount) {
     if (_tab == ContentKind.live) {
-      return _loading ? '' : _statusLine(visibleLiveCount);
+      return _live.loading ? '' : _statusLine(visibleLiveCount);
     }
     if (_media(_tab).loading) return '';
     if (_media(_tab).searching) return 'Searching provider...';
@@ -1302,8 +1266,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   Widget _body(List<Channel> visible) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) {
+    if (_live.loading) return const Center(child: CircularProgressIndicator());
+    if (_live.error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -1311,13 +1275,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Couldn\'t load this source.\n$_error',
+                'Couldn\'t load this source.\n$_live.error',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: AppColors.textLo),
               ),
               const SizedBox(height: 16),
               FilledButton(
-                onPressed: () => _load(forceRefresh: true),
+                onPressed: () => _loadLive(forceRefresh: true),
                 child: const Text('Try again'),
               ),
             ],
@@ -1337,12 +1301,12 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     // channel's logo + EPG until OK starts a preview); on desktop it follows
     // the auto-preview selection.
     final preview = _deliberatePreview
-        ? (_all.where((c) => c.id == _lastFocusedLiveChannelId).firstOrNull ??
-            _all.where((c) => c.id == _previewChannelId).firstOrNull ??
-            _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
+        ? (_live.channels.where((c) => c.id == _lastFocusedLiveChannelId).firstOrNull ??
+            _live.channels.where((c) => c.id == _previewChannelId).firstOrNull ??
+            _live.channels.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
             visible.first)
-        : (_all.where((c) => c.id == _previewChannelId).firstOrNull ??
-            _all.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
+        : (_live.channels.where((c) => c.id == _previewChannelId).firstOrNull ??
+            _live.channels.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
             visible.first);
 
     // Phones have no split-pane preview, so offer a deliberate preview via
@@ -1362,8 +1326,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           final c = visible[i];
           return _ChannelTile(
             channel: c,
-            now: _now[c.id],
-            next: _next[c.id],
+            now: _live.now[c.id],
+            next: _live.next[c.id],
             favorite: _isFavorite(ContentKind.live, c.id),
             debugLabel: 'live.channel.${c.id}',
             enabled: !_resolving,
@@ -1429,8 +1393,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                     children: [
                       _LivePreviewPanel(
                         channel: preview,
-                        now: _now[preview.id],
-                        next: _next[preview.id],
+                        now: _live.now[preview.id],
+                        next: _live.next[preview.id],
                         previewController: _previewController,
                         previewActive: _previewChannelId == preview.id,
                         previewLoading:
