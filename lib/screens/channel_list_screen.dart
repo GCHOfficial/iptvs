@@ -25,6 +25,7 @@ import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
 import 'live_controller.dart';
+import 'live_preview_controller.dart';
 import 'media_tab_controller.dart';
 
 const _toolbarControlHeight = 40.0;
@@ -90,21 +91,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   String? _lastFocusedLiveChannelId;
   bool _downHoldFromChannels = false;
   final Map<String, String> _lastBrowsedLiveChannelByCategory = {};
-  String? _previewChannelId;
-  StreamInfo? _previewStream;
-  bool _previewLoading = false;
-  String? _previewError;
-  int _previewRequestId = 0;
-  late final Player _previewPlayer = Player();
-  late final VideoController _previewController = VideoController(
-    _previewPlayer,
-  );
+  // Live preview player + its state live in a controller; the screen keeps the
+  // focus-driven preview trigger (below), fullscreen playback, and the phone
+  // preview sheet, which drive it.
+  late final LivePreviewController _preview;
+  // Focus-debounce for desktop auto-preview (stays here — it's focus timing).
   Timer? _previewTimer;
 
   @override
   void initState() {
     super.initState();
     _live = LiveController(repo: widget.repo)..addListener(_onLiveChanged);
+    _preview = LivePreviewController(repo: widget.repo, onError: _showSnack)
+      ..addListener(_onLiveChanged);
     _mediaControllers = {
       for (final kind in const [ContentKind.movie, ContentKind.series])
         kind: MediaTabController(
@@ -184,6 +183,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_handleLiveGlobalKeyEvent);
     _live.dispose();
+    _preview.dispose();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
     _liveSearchCellFocusNode.dispose();
@@ -194,7 +194,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     for (final node in _liveCategoryFocusNodes.values) {
       node.dispose();
     }
-    unawaited(_previewPlayer.dispose());
     for (final controller in _mediaControllers.values) {
       controller.dispose();
     }
@@ -211,7 +210,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   void _onChannelFocusChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
-      if (!_deliberatePreview && _previewChannelId == channel.id) {
+      if (!_deliberatePreview && _preview.channelId == channel.id) {
         _previewTimer?.cancel();
       }
       return;
@@ -223,8 +222,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (_lastFocusedLiveChannelId != channel.id) {
         setState(() => _lastFocusedLiveChannelId = channel.id);
       }
-      if (_previewChannelId != null && _previewChannelId != channel.id) {
-        unawaited(_stopLivePreviewPlayback(clearSelection: true));
+      if (_preview.channelId != null && _preview.channelId != channel.id) {
+        unawaited(_preview.stop(clearSelection: true));
       }
       return;
     }
@@ -236,7 +235,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (!mounted) return;
       final isWide = MediaQuery.of(context).size.width >= 950;
       if (isWide && _tab == ContentKind.live) {
-        _startLivePreview(channel);
+        _preview.start(channel);
       }
     });
   }
@@ -782,61 +781,22 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
 
     // On wide screens, check if we're already previewing
-    final samePreviewChannel = _previewChannelId == channel.id;
-    if (samePreviewChannel && _previewStream != null) {
-      await _openLivePlayer(channel, _previewStream!);
+    final samePreviewChannel = _preview.channelId == channel.id;
+    if (samePreviewChannel && _preview.stream != null) {
+      await _openLivePlayer(channel, _preview.stream!);
       return;
     }
     // First OK starts the preview; on a TV remote it's deliberate, so unmuted.
-    await _startLivePreview(channel, muted: !_deliberatePreview);
-  }
-
-  Future<void> _startLivePreview(Channel channel, {bool muted = true}) async {
-    if (_previewLoading) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final requestId = ++_previewRequestId;
-    setState(() {
-      _previewChannelId = channel.id;
-      _previewLoading = true;
-      _previewError = null;
-      _previewStream = null;
-    });
-    try {
-      DiagnosticsLog.instance.add(
-        'library',
-        'preview live source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
-      );
-      final stream = await widget.repo.resolve(channel);
-      if (!mounted || requestId != _previewRequestId) return;
-      await _previewPlayer.open(
-        Media(stream.url, httpHeaders: stream.headers),
-      );
-      // Desktop auto-previews are muted; deliberate (OK / long-press) previews
-      // carry audio.
-      await _previewPlayer.setVolume(muted ? 0 : 100);
-      if (!mounted || requestId != _previewRequestId) return;
-      setState(() {
-        _previewStream = stream;
-        _previewLoading = false;
-        _previewError = null;
-      });
-    } catch (e) {
-      if (!mounted || requestId != _previewRequestId) return;
-      setState(() {
-        _previewLoading = false;
-        _previewError = '$e';
-      });
-      messenger.showSnackBar(SnackBar(content: Text('Could not preview: $e')));
-    }
+    await _preview.start(channel, muted: !_deliberatePreview);
   }
 
   Future<void> _openLivePlayer(Channel channel, StreamInfo stream) async {
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    final shouldResumePreview = _previewChannelId == channel.id;
+    final shouldResumePreview = _preview.channelId == channel.id;
     try {
-      await _previewPlayer.pause();
+      await _preview.pause();
       DiagnosticsLog.instance.add(
         'library',
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
@@ -853,8 +813,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           ),
         ),
       );
-      if (shouldResumePreview && _previewStream != null && mounted) {
-        await _previewPlayer.play();
+      if (shouldResumePreview && _preview.stream != null && mounted) {
+        await _preview.play();
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
@@ -864,27 +824,12 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
-  Future<void> _stopLivePreviewPlayback({bool clearSelection = false}) async {
-    try {
-      await _previewPlayer.stop();
-    } catch (_) {}
-    if (!mounted) return;
-    setState(() {
-      _previewLoading = false;
-      _previewError = null;
-      _previewStream = null;
-      if (clearSelection) {
-        _previewChannelId = null;
-      }
-    });
-  }
-
   /// Phone-only: open a compact, audible preview of [channel] in a bottom
   /// sheet (tap on a tile still goes straight to fullscreen). Reuses the single
   /// preview player; the sheet's Play button hands off to fullscreen.
   Future<void> _showPreviewSheet(Channel channel) async {
     if (_resolving) return;
-    unawaited(_startLivePreview(channel, muted: false));
+    unawaited(_preview.start(channel, muted: false));
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -893,17 +838,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (sheetContext) => _PhonePreviewSheet(
-        player: _previewPlayer,
-        controller: _previewController,
+        player: _preview.player,
+        controller: _preview.controller,
         channel: channel,
         now: _live.now[channel.id],
         next: _live.next[channel.id],
         favorite: _isFavorite(ContentKind.live, channel.id),
         onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
         onPlay: () {
-          final stream = _previewStream;
+          final stream = _preview.stream;
           Navigator.of(sheetContext).pop();
-          if (stream != null && _previewChannelId == channel.id) {
+          if (stream != null && _preview.channelId == channel.id) {
             unawaited(_openLivePlayer(channel, stream));
           } else {
             unawaited(_play(channel));
@@ -911,7 +856,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         },
       ),
     );
-    await _stopLivePreviewPlayback(clearSelection: true);
+    await _preview.stop(clearSelection: true);
   }
 
   Future<void> _openMedia(MediaItem item) async {
@@ -1065,7 +1010,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (_tab == kind) return;
     final previous = _tab;
     if (previous == ContentKind.live && kind != ContentKind.live) {
-      unawaited(_stopLivePreviewPlayback());
+      unawaited(_preview.stop());
     }
     if (previous != ContentKind.live) {
       _media(previous).clearSearch();
@@ -1105,7 +1050,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                     tooltip: 'Sources',
                     icon: const Icon(Icons.dns_outlined),
                     onPressed: () {
-                      unawaited(_stopLivePreviewPlayback());
+                      unawaited(_preview.stop());
                       widget.onManageSources?.call();
                     },
                   ),
@@ -1113,7 +1058,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   tooltip: 'Diagnostics',
                   icon: const Icon(Icons.bug_report_outlined),
                   onPressed: () async {
-                    await _stopLivePreviewPlayback();
+                    await _preview.stop();
                     if (!context.mounted) return;
                     await Navigator.of(context).push(
                       MaterialPageRoute(
@@ -1239,7 +1184,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                       firstChannelFocusNode: _firstChannelFocusNode,
                       focusNodeForChannel: _focusNodeForLiveChannel,
                       lastPlayedChannelId: _lastPlayedLiveChannelId,
-                      previewChannelId: _previewChannelId,
+                      previewChannelId: _preview.channelId,
                       isFavorite: (id) => _isFavorite(ContentKind.live, id),
                       onToggleFavorite: (id) =>
                           _toggleFavorite(ContentKind.live, id),
@@ -1266,9 +1211,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                       },
                       onMoveRightToChannels: _focusChannelsFromCategory,
                       onPaneFallbackKey: _handleLivePaneFallbackKey,
-                      previewControllerBuilder: () => _previewController,
-                      previewLoading: _previewLoading,
-                      previewError: _previewError,
+                      previewControllerBuilder: () => _preview.controller,
+                      previewLoading: _preview.loading,
+                      previewError: _preview.error,
                     )
                   : MediaTabView(
                       kind: _tab,
@@ -1319,11 +1264,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         : _live.channels.where((c) => c.id == id).firstOrNull;
     if (_deliberatePreview) {
       return byId(_lastFocusedLiveChannelId) ??
-          byId(_previewChannelId) ??
+          byId(_preview.channelId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;
     }
-    return byId(_previewChannelId) ??
+    return byId(_preview.channelId) ??
         byId(_lastPlayedLiveChannelId) ??
         visible.first;
   }
