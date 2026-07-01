@@ -2,10 +2,19 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:xml/xml.dart';
 import 'package:xml/xml_events.dart';
 
 import 'source.dart';
+
+/// Below this payload size, parse inline; above it, decode + parse on a
+/// background isolate. A real XMLTV guide is multi-MB (gzip-decode + a full XML
+/// event parse building thousands of [Programme]s), which would otherwise stall
+/// the UI thread on the ~3-hourly EPG refresh; small fixtures (tests, tiny
+/// guides) stay inline to avoid isolate-spawn overhead. Mirrors the M3U/Xtream
+/// offload.
+const _isolateXmltvThreshold = 64 * 1024;
 
 /// Parse XMLTV [bytes] (gzip-aware) into [Programme]s, keeping only programmes
 /// whose XMLTV `channel` id maps — via [tvgIdToChannelId] — to one of our
@@ -13,7 +22,20 @@ import 'source.dart';
 Future<List<Programme>> parseXmltv(
   Uint8List bytes,
   Map<String, String> tvgIdToChannelId,
+) {
+  if (bytes.length < _isolateXmltvThreshold) {
+    return _parseXmltvBytes((bytes, tvgIdToChannelId));
+  }
+  return compute(_parseXmltvBytes, (bytes, tvgIdToChannelId));
+}
+
+/// Top-level worker so it can run under [compute]. Takes a record of the raw
+/// [Uint8List] bytes and the tvg-id → channel-id map (both sendable across the
+/// isolate boundary), returns the mapped [Programme]s.
+Future<List<Programme>> _parseXmltvBytes(
+  (Uint8List, Map<String, String>) args,
 ) async {
+  final (bytes, tvgIdToChannelId) = args;
   // A .xml.gz file arrives as raw gzip (magic 0x1f 0x8b) with no transfer
   // encoding, so decompress it ourselves.
   final data = (bytes.length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)

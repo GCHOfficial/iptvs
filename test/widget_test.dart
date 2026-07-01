@@ -3,6 +3,9 @@
 // (Replaces the default counter widget test from `flutter create`, which
 // referenced the old app and no longer applies.)
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/metadata_config.dart';
@@ -53,6 +56,55 @@ void main() {
     test('returns null for malformed input', () {
       expect(parseXmltvTime(null), isNull);
       expect(parseXmltvTime('nope'), isNull);
+    });
+  });
+
+  group('parseXmltv', () {
+    Uint8List xmltv(String programmes) => Uint8List.fromList(
+          utf8.encode('<?xml version="1.0"?><tv>$programmes</tv>'),
+        );
+
+    String programme(String channel, {String title = 'Show'}) =>
+        '<programme channel="$channel" start="20240101120000 +0000" '
+        'stop="20240101130000 +0000"><title>$title</title>'
+        '<desc>Desc</desc></programme>';
+
+    test('maps tvg-ids to channel ids and drops unmapped programmes', () async {
+      final bytes = xmltv(
+        programme('tvg.one', title: 'One') +
+            programme('tvg.unknown', title: 'Nope') +
+            programme('tvg.two', title: 'Two'),
+      );
+      final progs = await parseXmltv(bytes, {
+        'tvg.one': 'ch1',
+        'tvg.two': 'ch2',
+      });
+
+      expect(progs.map((p) => p.channelId), ['ch1', 'ch2']);
+      expect(progs.first.title, 'One');
+      expect(progs.first.description, 'Desc');
+      expect(
+        progs.first.start.isAtSameMomentAs(DateTime.utc(2024, 1, 1, 12)),
+        isTrue,
+      );
+    });
+
+    test('parses a large guide through the background isolate', () async {
+      // Exceed the inline threshold so the compute() path runs; assert the
+      // record + List<Programme> round-trip across the isolate boundary and the
+      // mapping/filtering matches the inline path.
+      final many = StringBuffer();
+      for (var i = 0; i < 1500; i++) {
+        many.write(programme(i.isEven ? 'tvg.one' : 'tvg.skip', title: 'P$i'));
+      }
+      final bytes = xmltv(many.toString());
+      expect(bytes.length, greaterThan(64 * 1024));
+
+      final progs = await parseXmltv(bytes, {'tvg.one': 'ch1'});
+
+      expect(progs, hasLength(750)); // even indices only
+      expect(progs.every((p) => p.channelId == 'ch1'), isTrue);
+      expect(progs.first.title, 'P0');
     });
   });
 
