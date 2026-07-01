@@ -192,21 +192,24 @@ fun PlayerScreen(
         }
 
         // Tap layer (below the controls) toggles visibility on touch devices.
-        Box(
-            Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = {
-                            if (state.controlsVisible) {
-                                state.controlsVisible = false
-                            } else {
-                                poke()
-                            }
-                        },
-                    )
-                },
-        )
+        // Skipped in PiP: the tiny window shows video only, no control chrome.
+        if (!state.inPip) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                if (state.controlsVisible) {
+                                    state.controlsVisible = false
+                                } else {
+                                    poke()
+                                }
+                            },
+                        )
+                    },
+            )
+        }
 
         if (state.videoUnsupported) {
             UnsupportedVideoNotice(
@@ -220,7 +223,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = state.controlsVisible,
+            visible = state.controlsVisible && !state.inPip,
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
@@ -228,7 +231,7 @@ fun PlayerScreen(
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.
-        if (state.controlsVisible) {
+        if (state.controlsVisible && !state.inPip) {
             PlayerMenusLayer(state, callbacks) { poke() }
             if (state.infoOpen) {
                 InfoPanel(
