@@ -150,6 +150,57 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('ArrowLeft from a channel moves focus back to the category pane',
+      (tester) async {
+    // The reverse of the cross-pane move above (channel -> category); guards
+    // _ChannelTile's onMoveLeftToCategory wiring through _focusCategoryFromChannels.
+    await pumpWideScreen(tester);
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(
+      focusLabel() ?? '',
+      startsWith('live.category.'),
+      reason: 'ArrowLeft from a channel should focus the category pane',
+    );
+
+    await unmount(tester);
+  });
+
+  testWidgets('ArrowDown moves focus down the channel list', (tester) async {
+    // Guards the channel-list D-pad navigation (_moveDownInLiveChannels): from
+    // the first channel, ArrowDown lands on a different (non-first) channel.
+    await pumpWideScreen(tester);
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final label = focusLabel() ?? '';
+    expect(label, startsWith('live.channel.'));
+    expect(
+      label,
+      isNot('live.channel.first'),
+      reason: 'ArrowDown should advance to the next channel',
+    );
+
+    await unmount(tester);
+  });
+
   testWidgets('switching to the Series tab swaps out the live pane',
       (tester) async {
     await pumpWideScreen(tester);
