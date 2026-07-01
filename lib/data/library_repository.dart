@@ -163,6 +163,11 @@ class LibraryRepository {
 
   Future<StreamInfo> resolve(Channel channel) => source.resolve(channel);
 
+  /// Resolve a past [programme] on [channel] into a catch-up stream. Resolved at
+  /// play time (archive URLs are short-lived, like live).
+  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) =>
+      source.resolveArchive(channel, programme);
+
   Future<MediaLibrarySnapshot> loadMedia(
     ContentKind kind, {
     String? categoryId,

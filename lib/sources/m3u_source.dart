@@ -72,6 +72,10 @@ class M3uSource implements Source {
   }
 
   @override
+  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
+      throw UnsupportedError('M3U playlists do not support catch-up');
+
+  @override
   Future<List<Programme>> epg(List<Channel> channels) async {
     final url = epgUrl ?? _headerEpgUrl;
     if (url == null) return const [];

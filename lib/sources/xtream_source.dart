@@ -120,6 +120,35 @@ class XtreamSource implements Source {
   }
 
   @override
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async {
+    final streamId = channel.extra['streamId']?.toString() ?? channel.id;
+    final duration = programme.stop.difference(programme.start).inMinutes;
+    return StreamInfo(
+      url:
+          '$_base/timeshift/$username/$password/$duration/'
+          '${_timeshiftStart(programme.start)}/$streamId.$streamExtension',
+      isLive: false,
+    );
+  }
+
+  /// Xtream timeshift start stamp `Y-m-d:H-i`. XMLTV times are absolute, but the
+  /// endpoint expects the panel's local time; we use the device's local zone
+  /// (device ≈ panel region in practice). A per-source offset is the future
+  /// refinement if a panel sits in a different zone.
+  @visibleForTesting
+  static String timeshiftStart(DateTime start) => _timeshiftStart(start);
+
+  static String _timeshiftStart(DateTime start) {
+    final t = start.toLocal();
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${t.year.toString().padLeft(4, '0')}-${p2(t.month)}-${p2(t.day)}:'
+        '${p2(t.hour)}-${p2(t.minute)}';
+  }
+
+  @override
   Future<List<Programme>> epg(List<Channel> channels) async {
     final map = <String, String>{};
     for (final c in channels) {

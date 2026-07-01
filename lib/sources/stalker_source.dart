@@ -242,6 +242,32 @@ class StalkerSource implements Source {
   }
 
   @override
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async {
+    // Stalker catch-up: resolve the live URL, then append the portable archive
+    // params most portals honor (`utc` = programme start, `lutc` = now, both
+    // unix seconds). Resolve at play time — the archive URL is as short-lived as
+    // the live one it's built from.
+    final live = await resolve(channel);
+    final url = archiveUrl(live.url, programme.start, DateTime.now());
+    _debug('resolved archive id=${channel.id} url=${_redactUrl(url)}');
+    return StreamInfo(url: url, headers: live.headers, isLive: false);
+  }
+
+  /// Append Stalker catch-up params to a resolved live [liveUrl]: `utc` =
+  /// [start] and `lutc` = [now], both unix seconds. Pure so it's unit-testable
+  /// without the network create_link.
+  @visibleForTesting
+  static String archiveUrl(String liveUrl, DateTime start, DateTime now) {
+    final utc = start.toUtc().millisecondsSinceEpoch ~/ 1000;
+    final lutc = now.toUtc().millisecondsSinceEpoch ~/ 1000;
+    final sep = liveUrl.contains('?') ? '&' : '?';
+    return '$liveUrl${sep}utc=$utc&lutc=$lutc';
+  }
+
+  @override
   Future<List<Programme>> epg(List<Channel> channels) async {
     // Stalker keys EPG by channel id directly, so `channels` isn't needed.
     // Bulk EPG for all channels for the next few hours, keyed by channel id.

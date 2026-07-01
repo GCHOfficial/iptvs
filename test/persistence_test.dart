@@ -376,6 +376,25 @@ void main() {
       expect(within.map((p) => p.title), ['Yesterday']);
       await db.close();
     });
+
+    test('resolveArchive delegates to the source', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final repo = LibraryRepository(source: _FakeSource(), db: db);
+      // _FakeSource has no catch-up, so the passthrough surfaces its throw.
+      await expectLater(
+        repo.resolveArchive(
+          const Channel(id: 'ch1', name: 'One', archiveDays: 2),
+          Programme(
+            channelId: 'ch1',
+            start: DateTime(2024),
+            stop: DateTime(2024, 1, 1, 1),
+            title: 'X',
+          ),
+        ),
+        throwsUnsupportedError,
+      );
+      await db.close();
+    });
   });
 }
 
@@ -408,6 +427,10 @@ class _FakeSource implements Source {
   @override
   Future<StreamInfo> resolve(Channel channel) async =>
       const StreamInfo(url: 'http://stream');
+
+  @override
+  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
+      throw UnsupportedError('no catch-up');
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async => const [];
