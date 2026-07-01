@@ -147,6 +147,20 @@ class LibraryRepository {
   Future<({Map<String, Programme> now, Map<String, Programme> next})>
   nowNext() => db.nowNext(source.id, DateTime.now());
 
+  /// Cached programmes for [channel] over the catch-up window (its
+  /// [Channel.archiveDays] back to now), newest-last. Empty when the channel has
+  /// no archive or no cached EPG. The guide reads this to list past programmes.
+  Future<List<Programme>> archiveProgrammes(Channel channel) {
+    if (!channel.hasArchive) return Future.value(const []);
+    final now = DateTime.now();
+    return db.programmesForChannel(
+      source.id,
+      channel.id,
+      from: now.subtract(Duration(days: channel.archiveDays)),
+      to: now,
+    );
+  }
+
   Future<StreamInfo> resolve(Channel channel) => source.resolve(channel);
 
   Future<MediaLibrarySnapshot> loadMedia(
