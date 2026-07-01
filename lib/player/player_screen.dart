@@ -44,6 +44,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     'iptvs/native_hdr_player',
   );
 
+  // Ceilings for the lifecycle-critical native calls. Without these, a native
+  // side that connects but never replies (surface creation wedged, engine
+  // init hung) would leave the awaiting Dart future pending forever — the
+  // player route couldn't fall back to the embedded surface or be popped, so
+  // the app looks frozen. On timeout we take the same fallback path as an
+  // unavailable/failed native player.
+  static const Duration _nativeOpenTimeout = Duration(seconds: 10);
+  static const Duration _nativeExitTimeout = Duration(seconds: 3);
+
   late final Player _player = Player(
     configuration: PlayerConfiguration(
       vo: _usesWindowsNativeSurface ? 'null' : null,
@@ -305,13 +314,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
               },
             )
             .toList(growable: false),
-      });
+      }).timeout(_nativeOpenTimeout);
       _logPlayback(
         opened == true
             ? 'native hdr player launched platform=android'
             : 'native hdr player unavailable platform=android',
       );
       return opened == true;
+    } on TimeoutException {
+      _logPlayback('native hdr player timed out platform=android');
+      return false;
     } on MissingPluginException catch (error) {
       _logPlayback('native hdr player missing: $error');
       return false;
@@ -327,7 +339,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final handle = await _nativeHdrPlayer.invokeMethod<int>('createSurface', {
         'topInset': 0,
         'bottomInset': 0,
-      });
+      }).timeout(_nativeOpenTimeout);
       if (handle == null || handle == 0) {
         _logPlayback('native hdr surface unavailable platform=windows');
         return null;
@@ -337,6 +349,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _syncWindowsNativeControlState();
       _logPlayback('native hdr surface created platform=windows hwnd=$handle');
       return handle;
+    } on TimeoutException {
+      _logPlayback('native hdr surface timed out platform=windows');
+      return null;
     } on MissingPluginException catch (error) {
       _logPlayback('native hdr surface missing: $error');
       return null;
@@ -354,16 +369,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _prepareWindowsNativeExit() async {
     if (!Platform.isWindows) return;
+    unawaited(_player.setVolume(0));
+    unawaited(_player.pause());
     try {
-      unawaited(_player.setVolume(0));
-      unawaited(_player.pause());
-      await _nativeHdrPlayer.invokeMethod<bool>('prepareExit');
-      _windowsNativeSurface = null;
-      _isNativeFullscreen = false;
-      _nativeControlsVisible = true;
+      await _nativeHdrPlayer
+          .invokeMethod<bool>('prepareExit')
+          .timeout(_nativeExitTimeout);
+    } on TimeoutException {
+      _logPlayback('native hdr prepare exit timed out platform=windows');
     } catch (error) {
       _logPlayback('native hdr prepare exit failed: $error');
     }
+    // Tear down our own tracking regardless of the native reply — we're
+    // leaving the native surface, so a hung/failed prepareExit must not strand
+    // the Dart state (and block the route pop) with a stale surface handle.
+    _windowsNativeSurface = null;
+    _isNativeFullscreen = false;
+    _nativeControlsVisible = true;
   }
 
   Future<void> _setNativeFullscreen(bool fullscreen) async {
