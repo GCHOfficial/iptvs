@@ -33,9 +33,10 @@ jobs:
           channel: stable
           cache: true
       # The persistence tests use sqflite_common_ffi, which loads the system
-      # libsqlite3 at runtime.
-      - name: Install sqlite3
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0
+      # libsqlite3 at runtime; the channel-list focus tests build a media_kit
+      # preview player, which needs libmpv (MediaKit.ensureInitialized).
+      - name: Install native test deps
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0 libmpv-dev
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
