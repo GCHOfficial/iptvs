@@ -834,6 +834,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         next: _live.next[channel.id],
         favorite: _isFavorite(ContentKind.live, channel.id),
         onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
+        onCatchup:
+            channel.hasArchive ? () => _showCatchupSheet(channel) : null,
         onPlay: () {
           final stream = _preview.stream;
           Navigator.of(sheetContext).pop();
@@ -846,6 +848,76 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       ),
     );
     await _preview.stop(clearSelection: true);
+  }
+
+  /// Open the catch-up picker for an archive-capable [channel]: list its cached
+  /// past programmes and play the chosen one via [_playCatchup].
+  Future<void> _showCatchupSheet(Channel channel) async {
+    if (_resolving) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final programmes = await widget.repo.archiveProgrammes(channel);
+    if (!mounted) return;
+    if (programmes.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('No catch-up guide cached for this channel yet'),
+        ),
+      );
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) => _CatchupSheet(
+        channel: channel,
+        // Most recent first.
+        programmes: programmes.reversed.toList(),
+        onPlay: (programme) {
+          Navigator.of(sheetContext).pop();
+          unawaited(_playCatchup(channel, programme));
+        },
+      ),
+    );
+  }
+
+  /// Resolve a past [programme] to a catch-up stream and open it fullscreen.
+  Future<void> _playCatchup(Channel channel, Programme programme) async {
+    if (_resolving) return;
+    setState(() => _resolving = true);
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await _preview.pause();
+      DiagnosticsLog.instance.add(
+        'library',
+        'open catch-up source=${widget.repo.source.name} channel=${channel.name} programme=${programme.title} start=${programme.start.toIso8601String()}',
+      );
+      _lastPlayedLiveChannelId = channel.id;
+      final stream = await widget.repo.resolveArchive(channel, programme);
+      if (!mounted) return;
+      await navigator.push(
+        MaterialPageRoute(
+          builder: (_) => PlayerScreen(
+            title: '${channel.name} · ${programme.title}',
+            stream: stream,
+            sourceName: widget.repo.source.name,
+            epgNow: programme,
+          ),
+        ),
+      );
+      if (_preview.stream != null && mounted) await _preview.play();
+      _restoreListFocusAfterPlayback();
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not play catch-up: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
   }
 
   Future<void> _openMedia(MediaItem item) async {
@@ -1184,6 +1256,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         _focusCategoryFromChannels();
                       },
                       onChannelMoveDown: _moveDownInLiveChannels,
+                      onCatchup: _showCatchupSheet,
                       categories: _liveCategoriesForUi,
                       selectedCategoryId: _categoryId,
                       selectedCategoryFocusNode:
@@ -1296,6 +1369,9 @@ class LiveTabView extends StatelessWidget {
   final ValueChanged<String> onChannelMoveLeft;
   final ValueChanged<String> onChannelMoveDown;
 
+  /// Opens catch-up for a channel (called only for archive-capable channels).
+  final ValueChanged<Channel> onCatchup;
+
   final List<Category> categories;
   final String? selectedCategoryId;
   final FocusNode selectedCategoryFocusNode;
@@ -1332,6 +1408,7 @@ class LiveTabView extends StatelessWidget {
     required this.onLongPressChannel,
     required this.onChannelMoveLeft,
     required this.onChannelMoveDown,
+    required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
     required this.selectedCategoryFocusNode,
@@ -1453,6 +1530,9 @@ class LiveTabView extends StatelessWidget {
                         deliberate: deliberate,
                         favorite: isFavorite(preview.id),
                         onToggleFavorite: () => onToggleFavorite(preview.id),
+                        onCatchup: preview.hasArchive
+                            ? () => onCatchup(preview)
+                            : null,
                       ),
                       const SizedBox(height: 8),
                       Expanded(
@@ -2043,6 +2123,9 @@ class _LivePreviewPanel extends StatelessWidget {
   final bool favorite;
   final VoidCallback onToggleFavorite;
 
+  /// Opens catch-up; null when the channel has no archive.
+  final VoidCallback? onCatchup;
+
   const _LivePreviewPanel({
     required this.channel,
     required this.now,
@@ -2054,6 +2137,7 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.deliberate,
     required this.favorite,
     required this.onToggleFavorite,
+    required this.onCatchup,
   });
 
   String _fmt(DateTime time) {
@@ -2213,6 +2297,8 @@ class _LivePreviewPanel extends StatelessWidget {
                               ),
                             ),
                           ),
+                          if (onCatchup != null)
+                            _CatchupButton(onPressed: onCatchup!),
                           _FavoriteButton(
                             favorite: favorite,
                             onPressed: onToggleFavorite,
@@ -2332,6 +2418,177 @@ class _FavoriteBadge extends StatelessWidget {
   }
 }
 
+/// Opens the catch-up / archive picker. Shown on live surfaces only when the
+/// channel reports [Channel.hasArchive].
+class _CatchupButton extends StatelessWidget {
+  final VoidCallback onPressed;
+  const _CatchupButton({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: 'Catch-up',
+      icon: const Icon(Icons.history_rounded, color: AppColors.textLo),
+      onPressed: onPressed,
+    );
+  }
+}
+
+/// Bottom-sheet catch-up picker: the channel's cached past programmes, grouped
+/// by day (most recent first), each a D-pad-navigable row that plays the
+/// archive stream. [programmes] is expected newest-first.
+class _CatchupSheet extends StatelessWidget {
+  final Channel channel;
+  final List<Programme> programmes;
+  final void Function(Programme) onPlay;
+
+  const _CatchupSheet({
+    required this.channel,
+    required this.programmes,
+    required this.onPlay,
+  });
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  static String _pad2(int n) => n.toString().padLeft(2, '0');
+  static String _time(DateTime t) => '${_pad2(t.hour)}:${_pad2(t.minute)}';
+
+  static String _dayLabel(DateTime d) {
+    final now = DateTime.now();
+    final diff = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(d.year, d.month, d.day))
+        .inDays;
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Yesterday';
+    return '${d.year}-${_pad2(d.month)}-${_pad2(d.day)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.7,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.line,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.history_rounded,
+                    color: AppColors.accent,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Catch-up · ${channel.name}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textHi,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: ListView.builder(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                itemCount: programmes.length,
+                itemBuilder: (context, i) {
+                  final p = programmes[i];
+                  final showHeader =
+                      i == 0 || !_sameDay(programmes[i - 1].start, p.start);
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (showHeader)
+                        Padding(
+                          padding: EdgeInsets.only(
+                            top: i == 0 ? 4 : 14,
+                            bottom: 4,
+                            left: 4,
+                          ),
+                          child: Text(
+                            _dayLabel(p.start),
+                            style: const TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      FocusableCard(
+                        autofocus: i == 0,
+                        debugLabel: 'catchup.$i',
+                        onTap: () => onPlay(p),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 12,
+                          ),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 96,
+                                child: Text(
+                                  '${_time(p.start)}–${_time(p.stop)}',
+                                  style: const TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  p.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.textHi,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              const Icon(
+                                Icons.play_arrow_rounded,
+                                color: AppColors.textLo,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Phone-only bottom sheet: a compact, audible live preview with a Play button.
 /// Reuses the screen's single preview player/controller.
 class _PhonePreviewSheet extends StatefulWidget {
@@ -2344,6 +2601,9 @@ class _PhonePreviewSheet extends StatefulWidget {
   final VoidCallback onToggleFavorite;
   final VoidCallback onPlay;
 
+  /// Opens catch-up; null when the channel has no archive.
+  final VoidCallback? onCatchup;
+
   const _PhonePreviewSheet({
     required this.player,
     required this.controller,
@@ -2353,6 +2613,7 @@ class _PhonePreviewSheet extends StatefulWidget {
     required this.favorite,
     required this.onToggleFavorite,
     required this.onPlay,
+    required this.onCatchup,
   });
 
   @override
@@ -2442,6 +2703,13 @@ class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
                     ),
                   ),
                 ),
+                if (widget.onCatchup != null)
+                  _CatchupButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      widget.onCatchup!();
+                    },
+                  ),
                 _FavoriteButton(
                   favorite: _favorite,
                   onPressed: () {
