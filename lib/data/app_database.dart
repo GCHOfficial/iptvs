@@ -1087,6 +1087,30 @@ class AppDatabase {
     return (now: now, next: next);
   }
 
+  /// Cached programmes for one channel overlapping the `[from, to)` window,
+  /// ordered by start — the catch-up guide's data source. A programme overlaps
+  /// the window when it starts before `to` and ends after `from`. Served by
+  /// `idx_prog_lookup(source_id, channel_id, start)`.
+  Future<List<Programme>> programmesForChannel(
+    String sourceId,
+    String channelId, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final rows = await _db.rawQuery(
+      'SELECT channel_id, title, start, stop, description FROM programmes '
+      'WHERE source_id = ? AND channel_id = ? AND start < ? AND stop > ? '
+      'ORDER BY start',
+      [
+        sourceId,
+        channelId,
+        to.millisecondsSinceEpoch,
+        from.millisecondsSinceEpoch,
+      ],
+    );
+    return rows.map(_rowToProgramme).toList();
+  }
+
   Programme _rowToProgramme(Map<String, Object?> r) => Programme(
     channelId: r['channel_id'] as String,
     start: DateTime.fromMillisecondsSinceEpoch(r['start'] as int),

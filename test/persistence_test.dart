@@ -275,6 +275,50 @@ void main() {
     });
   });
 
+  group('AppDatabase programmes', () {
+    test('returns a channel\'s programmes overlapping a window, ordered',
+        () async {
+      final db = await AppDatabase.openAt(dbPath());
+      DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+      await db.replaceEpg('src1', [
+        Programme(channelId: 'ch1', start: t(8), stop: t(9), title: 'Early'),
+        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+        Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+        Programme(channelId: 'ch1', start: t(13), stop: t(14), title: 'Late'),
+        Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'Other'),
+      ]);
+
+      final progs = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(10),
+        to: t(12),
+      );
+      // Ordered by start; other channels excluded; out-of-window dropped.
+      expect(progs.map((p) => p.title), ['A', 'B']);
+
+      // Overlap, not containment: a window edge that cuts through A and B still
+      // includes both (A ends after `from`, B starts before `to`).
+      final overlap = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(10, 30),
+        to: t(11, 30),
+      );
+      expect(overlap.map((p) => p.title), ['A', 'B']);
+
+      // A window before any cached programme is empty.
+      final empty = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(0),
+        to: t(1),
+      );
+      expect(empty, isEmpty);
+      await db.close();
+    });
+  });
+
   group('LibraryRepository', () {
     test('fetches from the source on a cold load, then serves from cache', () async {
       final db = await AppDatabase.openAt(dbPath());
@@ -295,6 +339,41 @@ void main() {
       final forced = await repo.load(forceRefresh: true);
       expect(forced.fromCache, isFalse);
       expect(source.channelCalls, 2);
+      await db.close();
+    });
+
+    test('archiveProgrammes gates on archive and honours the window', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final repo = LibraryRepository(source: _FakeSource(), db: db);
+      final now = DateTime.now();
+
+      await db.replaceEpg('fake', [
+        // Inside a 2-day window (yesterday) and outside it (a week ago).
+        Programme(
+          channelId: 'ch1',
+          start: now.subtract(const Duration(days: 1, hours: 1)),
+          stop: now.subtract(const Duration(days: 1)),
+          title: 'Yesterday',
+        ),
+        Programme(
+          channelId: 'ch1',
+          start: now.subtract(const Duration(days: 7, hours: 1)),
+          stop: now.subtract(const Duration(days: 7)),
+          title: 'LastWeek',
+        ),
+      ]);
+
+      // A non-archive channel never touches the guide.
+      final none = await repo.archiveProgrammes(
+        const Channel(id: 'ch1', name: 'One'),
+      );
+      expect(none, isEmpty);
+
+      // A 2-day archive channel sees only the in-window programme.
+      final within = await repo.archiveProgrammes(
+        const Channel(id: 'ch1', name: 'One', archiveDays: 2),
+      );
+      expect(within.map((p) => p.title), ['Yesterday']);
       await db.close();
     });
   });
