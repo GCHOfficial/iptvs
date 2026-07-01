@@ -4,13 +4,14 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart'
-  show
-      HardwareKeyboard,
-      KeyDownEvent,
-      KeyEvent,
-      KeyRepeatEvent,
-      KeyUpEvent,
-      LogicalKeyboardKey;
+    show
+        HardwareKeyboard,
+        KeyDownEvent,
+        KeyEvent,
+        KeyRepeatEvent,
+        KeyUpEvent,
+        LogicalKeyboardKey,
+        SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -89,6 +90,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   final Map<String, FocusNode> _liveChannelFocusNodes = {};
   bool _liveFocusPruneScheduled = false;
   final Map<String, FocusNode> _liveCategoryFocusNodes = {};
+  // One stable focus node per content-kind tab chip, so a Back-key peel can jump
+  // focus straight to the current tab (and detect when focus is already there)
+  // instead of arrowing up item by item through a long list — see
+  // _handleRootBack. Deliberately plain FocusNodes, not a FocusScope: the whole
+  // screen relies on a single flat scope with FocusTraversalGroups so arrow-down
+  // flows tabs → toolbar → list, and a nested scope would trap that traversal.
+  final Map<ContentKind, FocusNode> _tabFocusNodes = {
+    ContentKind.live: FocusNode(debugLabel: 'content.tab.live'),
+    ContentKind.movie: FocusNode(debugLabel: 'content.tab.movie'),
+    ContentKind.series: FocusNode(debugLabel: 'content.tab.series'),
+  };
   _LiveFocusArea _lastLiveFocusArea = _LiveFocusArea.unknown;
   String? _lastPlayedLiveChannelId;
   String? _lastFocusedLiveChannelId;
@@ -172,13 +184,20 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   void _showSnack(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
   /// Load a media tab and its favorites together (favorites live in the parent,
   /// not the controller). [category] optionally switches category first.
-  void _loadMediaTab(ContentKind kind, {String? category, bool switchCategory = false, bool forceRefresh = false}) {
+  void _loadMediaTab(
+    ContentKind kind, {
+    String? category,
+    bool switchCategory = false,
+    bool forceRefresh = false,
+  }) {
     final controller = _media(kind);
     if (switchCategory) {
       unawaited(controller.setCategory(category));
@@ -198,6 +217,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _previewTimer?.cancel();
     _liveSearchCellFocusNode.dispose();
     _firstChannelFocusNode.dispose();
+    for (final node in _tabFocusNodes.values) {
+      node.dispose();
+    }
     for (final node in _liveChannelFocusNodes.values) {
       node.dispose();
     }
@@ -264,7 +286,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         if (_visible.isEmpty) return;
         final targetId = _lastPlayedLiveChannelId;
         final hasTarget =
-            targetId != null && _visible.any((channel) => channel.id == targetId);
+            targetId != null &&
+            _visible.any((channel) => channel.id == targetId);
         if (hasTarget) {
           if (_visible.isNotEmpty && _visible.first.id == targetId) {
             _firstChannelFocusNode.requestFocus();
@@ -289,17 +312,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     final categoryKey = _liveCategoryKey(_categoryId);
     final resumeId = _lastBrowsedLiveChannelByCategory[categoryKey];
     final hasResume =
-      resumeId != null && visible.any((channel) => channel.id == resumeId);
-    final resumeIndex =
-        hasResume ? visible.indexWhere((channel) => channel.id == resumeId) : -1;
+        resumeId != null && visible.any((channel) => channel.id == resumeId);
+    final resumeIndex = hasResume
+        ? visible.indexWhere((channel) => channel.id == resumeId)
+        : -1;
     if (hasResume && resumeIndex > 0 && _scrollController.hasClients) {
       const estimatedChannelRowExtent = 104.0;
       final targetOffset = resumeIndex * estimatedChannelRowExtent;
       final maxOffset = _scrollController.position.maxScrollExtent;
       _scrollController.jumpTo(targetOffset.clamp(0, maxOffset));
     }
-    final FocusNode targetNode =
-      hasResume && visible.first.id != resumeId
+    final FocusNode targetNode = hasResume && visible.first.id != resumeId
         ? _focusNodeForLiveChannel(resumeId)
         : _firstChannelFocusNode;
     targetNode.requestFocus();
@@ -318,22 +341,20 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _lastLiveFocusArea = _LiveFocusArea.channels;
   }
 
-  String _liveCategoryKey(String? categoryId) => categoryId ?? '__live.channels__';
+  String _liveCategoryKey(String? categoryId) =>
+      categoryId ?? '__live.channels__';
 
   FocusNode _focusNodeForLiveChannel(String channelId) {
-    return _liveChannelFocusNodes.putIfAbsent(
-      channelId,
-      () {
-        final node = FocusNode(debugLabel: 'live.channel.$channelId');
-        node.addListener(() {
-          final channel = _findChannelById(channelId);
-          if (channel != null) {
-            _onChannelFocusChanged(channel, node.hasFocus);
-          }
-        });
-        return node;
-      },
-    );
+    return _liveChannelFocusNodes.putIfAbsent(channelId, () {
+      final node = FocusNode(debugLabel: 'live.channel.$channelId');
+      node.addListener(() {
+        final channel = _findChannelById(channelId);
+        if (channel != null) {
+          _onChannelFocusChanged(channel, node.hasFocus);
+        }
+      });
+      return node;
+    });
   }
 
   /// Per-channel [FocusNode]s are created lazily as rows scroll into view. Left
@@ -359,7 +380,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   void _rememberBrowsedLiveChannel(String channelId) {
-    _lastBrowsedLiveChannelByCategory[_liveCategoryKey(_categoryId)] = channelId;
+    _lastBrowsedLiveChannelByCategory[_liveCategoryKey(_categoryId)] =
+        channelId;
   }
 
   void _focusCategoryFromChannels() {
@@ -386,10 +408,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (node.context == null && _scrollController.hasClients) {
       const estimatedChannelRowExtent = 104.0;
       final maxOffset = _scrollController.position.maxScrollExtent;
-      final targetOffset = (clamped * estimatedChannelRowExtent).clamp(
-        0,
-        maxOffset,
-      ).toDouble();
+      final targetOffset = (clamped * estimatedChannelRowExtent)
+          .clamp(0, maxOffset)
+          .toDouble();
       _scrollController.jumpTo(targetOffset);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -398,10 +419,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           return;
         }
         if (_scrollController.hasClients) {
-          final nudged = (_scrollController.position.pixels +
-                  estimatedChannelRowExtent)
-              .clamp(0, _scrollController.position.maxScrollExtent)
-              .toDouble();
+          final nudged =
+              (_scrollController.position.pixels + estimatedChannelRowExtent)
+                  .clamp(0, _scrollController.position.maxScrollExtent)
+                  .toDouble();
           _scrollController.jumpTo(nudged);
         }
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -417,7 +438,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void _moveDownInLiveChannels(String channelId) {
     final visible = _visible;
     if (visible.isEmpty) return;
-    final currentIndex = visible.indexWhere((channel) => channel.id == channelId);
+    final currentIndex = visible.indexWhere(
+      (channel) => channel.id == channelId,
+    );
     if (currentIndex < 0) return;
     final nextIndex = (currentIndex + 1) % visible.length;
     if (nextIndex == 0) {
@@ -563,7 +586,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _focusChannelsFromCategory();
       return KeyEventResult.handled;
     }
-    if (label.startsWith('live.channel.') && key == LogicalKeyboardKey.arrowLeft) {
+    if (label.startsWith('live.channel.') &&
+        key == LogicalKeyboardKey.arrowLeft) {
       _focusCategoryFromChannels();
       return KeyEventResult.handled;
     }
@@ -759,9 +783,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _restoreListFocusAfterPlayback();
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not play: $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Could not play: $e')));
         }
       } finally {
         if (mounted) setState(() => _resolving = false);
@@ -779,31 +803,61 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     await _preview.start(channel, muted: !_deliberatePreview);
   }
 
-  Future<void> _openLivePlayer(Channel channel, StreamInfo stream) async {
+  /// Opens fullscreen playback for [channel]/[stream]. When [reusePreview] and
+  /// the preview is already showing this exact channel, hands its live [Player]
+  /// straight to [PlayerScreen] instead of resolving/opening fresh — the stream
+  /// is already buffering, so going fullscreen doesn't restart it, and the
+  /// preview is resumed on return. Only the wide-screen preview panel reuses;
+  /// the phone sheet passes [reusePreview] false (there's no panel to return to,
+  /// and Android's native HDR player reloads regardless), so it opens fresh and
+  /// the caller stops the preview afterward.
+  Future<void> _openLivePlayer(
+    Channel channel,
+    StreamInfo stream, {
+    bool reusePreview = true,
+  }) async {
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    final shouldResumePreview = _preview.channelId == channel.id;
+    final adoptPreview = reusePreview && _preview.channelId == channel.id;
+    final previewWasMuted = adoptPreview && _preview.player.state.volume == 0;
     try {
-      await _preview.pause();
       DiagnosticsLog.instance.add(
         'library',
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _lastPlayedLiveChannelId = channel.id;
-      await navigator.push(
-        MaterialPageRoute(
-          builder: (_) => PlayerScreen(
-            title: channel.name,
-            stream: stream,
-            sourceName: widget.repo.source.name,
-            epgNow: _live.now[channel.id],
-            epgNext: _live.next[channel.id],
-          ),
-        ),
-      );
-      if (shouldResumePreview && _preview.stream != null && mounted) {
+      // Pause the preview during handoff so its audio doesn't play behind the
+      // fullscreen player (esp. the Android native-HDR path, which renders in a
+      // separate Activity). Resumed below when adopted, or stopped by the caller
+      // (phone sheet).
+      if (_preview.channelId == channel.id) await _preview.pause();
+      final hotSwapped =
+          await navigator.push<bool>(
+            MaterialPageRoute<bool>(
+              builder: (_) => PlayerScreen(
+                title: channel.name,
+                stream: stream,
+                sourceName: widget.repo.source.name,
+                epgNow: _live.now[channel.id],
+                epgNext: _live.next[channel.id],
+                existingPlayer: adoptPreview ? _preview.player : null,
+                existingController: adoptPreview ? _preview.controller : null,
+              ),
+            ),
+          ) ??
+          false;
+      if (!mounted) return;
+      if (hotSwapped) {
+        // The fullscreen player re-pointed this player's video output at the
+        // Windows native HDR surface, which just tore down — no longer safe
+        // to reuse for the preview's embedded texture.
+        await _preview.discardPlayer();
+      } else if (adoptPreview && _preview.stream != null) {
         await _preview.play();
+        // Fullscreen always plays at full volume; restore a muted (desktop
+        // auto-hover) preview instead of leaving it blaring once we return.
+        if (previewWasMuted) await _preview.player.setVolume(0);
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
@@ -834,13 +888,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         next: _live.next[channel.id],
         favorite: _isFavorite(ContentKind.live, channel.id),
         onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
-        onCatchup:
-            channel.hasArchive ? () => _showCatchupSheet(channel) : null,
+        onCatchup: channel.hasArchive ? () => _showCatchupSheet(channel) : null,
         onPlay: () {
           final stream = _preview.stream;
           Navigator.of(sheetContext).pop();
           if (stream != null && _preview.channelId == channel.id) {
-            unawaited(_openLivePlayer(channel, stream));
+            // Phone has no preview panel to return to and native HDR reloads
+            // anyway, so open fresh (no adoption) and stop the preview below.
+            unawaited(_openLivePlayer(channel, stream, reusePreview: false));
           } else {
             unawaited(_play(channel));
           }
@@ -1092,209 +1147,269 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _scrollToTop();
   }
 
+  /// Peels one layer of the D-pad hierarchy per Back press instead of only
+  /// ever exiting: channel/media list → category pane (Live tab, wide layout)
+  /// → content-kind tabs → then actually leaves the screen. Lets a long
+  /// channel list be escaped in a couple of presses instead of arrowing up
+  /// item by item.
+  void _handleRootBack(bool didPop, Object? result) {
+    if (didPop) return;
+    // Flutter invokes every registered PopScope when a pop is blocked, so
+    // defer entirely to TvTextField's own PopScope while its inner field is
+    // actually being edited — it already exits edit mode on Back.
+    if (FocusManager.instance.primaryFocus?.debugLabel == 'TvTextField.field') {
+      return;
+    }
+    if (_tabFocusNodes.values.any((node) => node.hasFocus)) {
+      // Nothing left to peel. This screen is HomeShell's root content (not a
+      // pushed route), so there may be nothing to pop to — fall back to the
+      // platform default (exit) rather than silently no-op.
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      } else {
+        SystemNavigator.pop();
+      }
+      return;
+    }
+    final isWideLive =
+        _tab == ContentKind.live && MediaQuery.of(context).size.width >= 950;
+    if (isWideLive) {
+      final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+      if (_focusAreaFromLabel(label) == _LiveFocusArea.category) {
+        _tabFocusNodes[_tab]?.requestFocus();
+      } else {
+        _focusCategoryFromChannels();
+      }
+      return;
+    }
+    _tabFocusNodes[_tab]?.requestFocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     final visible = _visible;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.repo.source.name),
-        // Group the actions so D-pad traversal treats them as one cluster (reached
-        // by going up to the bar), rather than the toolbar's "right" jumping
-        // straight to the rightmost icon.
-        actions: [
-          FocusTraversalGroup(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.onManageSources != null)
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: _handleRootBack,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.repo.source.name),
+          // Group the actions so D-pad traversal treats them as one cluster (reached
+          // by going up to the bar), rather than the toolbar's "right" jumping
+          // straight to the rightmost icon.
+          actions: [
+            FocusTraversalGroup(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (widget.onManageSources != null)
+                    IconButton(
+                      tooltip: 'Sources',
+                      icon: const Icon(Icons.dns_outlined),
+                      onPressed: () {
+                        unawaited(_preview.stop());
+                        widget.onManageSources?.call();
+                      },
+                    ),
                   IconButton(
-                    tooltip: 'Sources',
-                    icon: const Icon(Icons.dns_outlined),
-                    onPressed: () {
-                      unawaited(_preview.stop());
-                      widget.onManageSources?.call();
+                    tooltip: 'Diagnostics',
+                    icon: const Icon(Icons.bug_report_outlined),
+                    onPressed: () async {
+                      await _preview.stop();
+                      if (!context.mounted) return;
+                      await Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const DiagnosticsScreen(),
+                        ),
+                      );
                     },
                   ),
-                IconButton(
-                  tooltip: 'Diagnostics',
-                  icon: const Icon(Icons.bug_report_outlined),
-                  onPressed: () async {
-                    await _preview.stop();
-                    if (!context.mounted) return;
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const DiagnosticsScreen(),
-                      ),
-                    );
-                  },
-                ),
-                IconButton(
-                  tooltip: 'Refresh from source',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: _live.loading ||
-                          (_tab != ContentKind.live && _media(_tab).loading)
-                      ? null
-                      : () => _tab == ContentKind.live
-                            ? _loadLive(forceRefresh: true)
-                            : _loadMediaTab(_tab, forceRefresh: true),
-                ),
-                const SizedBox(width: 4),
-              ],
-            ),
-          ),
-        ],
-        bottom: _resolving
-            ? const PreferredSize(
-                preferredSize: Size.fromHeight(2),
-                child: LinearProgressIndicator(minHeight: 2),
-              )
-            : null,
-      ),
-      // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
-      // arrowing sideways into the AppBar's action cluster.
-      body: FocusTraversalGroup(
-        child: Column(
-          children: [
-            _ContentTabs(value: _tab, onChanged: _selectTab),
-            _Toolbar(
-              searchController: _searchController,
-              query: _query,
-              hintText: _tab == ContentKind.live
-                  ? 'Search channels'
-                  : _tab == ContentKind.movie
-                  ? 'Search movies'
-                  : 'Search series',
-              onQueryChanged: _setQuery,
-              onClearQuery: () {
-                _searchController.clear();
-                _setQuery('');
-              },
-              searchCellFocusNode:
-                  _tab == ContentKind.live ? _liveSearchCellFocusNode : null,
-              onSearchCellKeyEvent: _handleLiveSearchCellKey,
-              categoryControl: (_tab == ContentKind.live && MediaQuery.of(context).size.width >= 950)
-                  ? null
-                  : (_tab == ContentKind.live
-                      ? _CategoryDropdown(
-                          categories: _liveCategoriesForUi,
-                          value: _categoryId,
-                          onChanged: (v) {
-                            setState(() => _categoryId = v);
-                            _scheduleLiveFocusNodePrune();
-                            _scrollToTop();
-                          },
-                        )
-                      : _MediaCategoryDropdown(
-                          categories: _mediaCategoriesForUi(_tab),
-                          value: _media(_tab).categoryId,
-                          onChanged: (v) {
-                            final kind = _tab;
-                            _loadMediaTab(kind, category: v, switchCategory: true);
-                            _scrollToTop();
-                            if (_query.trim().length >= 2) {
-                              _searchTimer?.cancel();
-                              _searchTimer = Timer(
-                                const Duration(milliseconds: 250),
-                                () => _media(kind).search(_query.trim()),
-                              );
-                            }
-                          },
-                        )),
-              actionControl:
-                  _tab == ContentKind.live || !widget.repo.canEnrichMetadata
-                  ? null
-                  : _ToolbarIconButton(
-                      tooltip: _media(_tab).enriching
-                          ? 'Cancel metadata refresh'
-                          : 'Refresh displayed metadata',
-                      busy: _media(_tab).enriching,
-                      icon: _media(_tab).enriching
-                          ? Icons.stop_rounded
-                          : Icons.auto_awesome_outlined,
-                      onPressed:
-                          _media(_tab).loading || _media(_tab).searching
-                          ? null
-                          : _media(_tab).enriching
-                          ? _media(_tab).cancelEnrich
-                          : () => _media(_tab).enrichVisible(_visibleMedia(_tab)),
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  _statusText(visible.length),
-                  style: const TextStyle(color: AppColors.textLo, fontSize: 12),
-                ),
+                  IconButton(
+                    tooltip: 'Refresh from source',
+                    icon: const Icon(Icons.refresh),
+                    onPressed:
+                        _live.loading ||
+                            (_tab != ContentKind.live && _media(_tab).loading)
+                        ? null
+                        : () => _tab == ContentKind.live
+                              ? _loadLive(forceRefresh: true)
+                              : _loadMediaTab(_tab, forceRefresh: true),
+                  ),
+                  const SizedBox(width: 4),
+                ],
               ),
             ),
-            Expanded(
-              child: _tab == ContentKind.live
-                  ? LiveTabView(
-                      loading: _live.loading,
-                      error: _live.error,
-                      onRetry: () => _loadLive(forceRefresh: true),
-                      visible: visible,
-                      previewChannel: _resolvePreviewChannel(visible),
-                      now: _live.now,
-                      next: _live.next,
-                      deliberate: _deliberatePreview,
-                      resolving: _resolving,
-                      scrollController: _scrollController,
-                      firstChannelFocusNode: _firstChannelFocusNode,
-                      focusNodeForChannel: _focusNodeForLiveChannel,
-                      lastPlayedChannelId: _lastPlayedLiveChannelId,
-                      previewChannelId: _preview.channelId,
-                      isFavorite: (id) => _isFavorite(ContentKind.live, id),
-                      onToggleFavorite: (id) =>
-                          _toggleFavorite(ContentKind.live, id),
-                      onPlayChannel: _play,
-                      onLongPressChannel: _showPreviewSheet,
-                      onChannelMoveLeft: (id) {
-                        _rememberBrowsedLiveChannel(id);
-                        _focusCategoryFromChannels();
-                      },
-                      onChannelMoveDown: _moveDownInLiveChannels,
-                      onCatchup: _showCatchupSheet,
-                      categories: _liveCategoriesForUi,
-                      selectedCategoryId: _categoryId,
-                      selectedCategoryFocusNode:
-                          _focusNodeForCategory(_categoryId),
-                      onCategorySelected: (value) {
-                        setState(() => _categoryId = value);
-                        _scheduleLiveFocusNodePrune();
-                        _scrollToTop();
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (!mounted) return;
-                          _focusNodeForCategory(_categoryId).requestFocus();
-                          _lastLiveFocusArea = _LiveFocusArea.category;
-                        });
-                      },
-                      onMoveRightToChannels: _focusChannelsFromCategory,
-                      onPaneFallbackKey: _handleLivePaneFallbackKey,
-                      previewControllerBuilder: () => _preview.controller,
-                      previewLoading: _preview.loading,
-                      previewError: _preview.error,
-                    )
-                  : MediaTabView(
-                      kind: _tab,
-                      visible: _visibleMedia(_tab),
-                      snapshot: _media(_tab).snapshot,
-                      loading: _media(_tab).loading,
-                      loadingMore: _media(_tab).loadingMore,
-                      error: _media(_tab).error,
-                      showingSearch: _query.trim().length >= 2,
-                      lastPlayedId: _media(_tab).lastPlayedId,
-                      scrollController: _media(_tab).scrollController,
-                      firstFocusNode: _media(_tab).firstFocusNode,
-                      isFavorite: (id) => _isFavorite(_tab, id),
-                      onOpenMedia: _openMedia,
-                      onLoadMore: () => _media(_tab).loadMore(),
-                      onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
-                    ),
-            ),
           ],
+          bottom: _resolving
+              ? const PreferredSize(
+                  preferredSize: Size.fromHeight(2),
+                  child: LinearProgressIndicator(minHeight: 2),
+                )
+              : null,
+        ),
+        // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
+        // arrowing sideways into the AppBar's action cluster.
+        body: FocusTraversalGroup(
+          child: Column(
+            children: [
+              _ContentTabs(
+                value: _tab,
+                onChanged: _selectTab,
+                focusNodes: _tabFocusNodes,
+              ),
+              _Toolbar(
+                searchController: _searchController,
+                query: _query,
+                hintText: _tab == ContentKind.live
+                    ? 'Search channels'
+                    : _tab == ContentKind.movie
+                    ? 'Search movies'
+                    : 'Search series',
+                onQueryChanged: _setQuery,
+                onClearQuery: () {
+                  _searchController.clear();
+                  _setQuery('');
+                },
+                searchCellFocusNode: _tab == ContentKind.live
+                    ? _liveSearchCellFocusNode
+                    : null,
+                onSearchCellKeyEvent: _handleLiveSearchCellKey,
+                categoryControl:
+                    (_tab == ContentKind.live &&
+                        MediaQuery.of(context).size.width >= 950)
+                    ? null
+                    : (_tab == ContentKind.live
+                          ? _CategoryDropdown(
+                              categories: _liveCategoriesForUi,
+                              value: _categoryId,
+                              onChanged: (v) {
+                                setState(() => _categoryId = v);
+                                _scheduleLiveFocusNodePrune();
+                                _scrollToTop();
+                              },
+                            )
+                          : _MediaCategoryDropdown(
+                              categories: _mediaCategoriesForUi(_tab),
+                              value: _media(_tab).categoryId,
+                              onChanged: (v) {
+                                final kind = _tab;
+                                _loadMediaTab(
+                                  kind,
+                                  category: v,
+                                  switchCategory: true,
+                                );
+                                _scrollToTop();
+                                if (_query.trim().length >= 2) {
+                                  _searchTimer?.cancel();
+                                  _searchTimer = Timer(
+                                    const Duration(milliseconds: 250),
+                                    () => _media(kind).search(_query.trim()),
+                                  );
+                                }
+                              },
+                            )),
+                actionControl:
+                    _tab == ContentKind.live || !widget.repo.canEnrichMetadata
+                    ? null
+                    : _ToolbarIconButton(
+                        tooltip: _media(_tab).enriching
+                            ? 'Cancel metadata refresh'
+                            : 'Refresh displayed metadata',
+                        busy: _media(_tab).enriching,
+                        icon: _media(_tab).enriching
+                            ? Icons.stop_rounded
+                            : Icons.auto_awesome_outlined,
+                        onPressed:
+                            _media(_tab).loading || _media(_tab).searching
+                            ? null
+                            : _media(_tab).enriching
+                            ? _media(_tab).cancelEnrich
+                            : () => _media(
+                                _tab,
+                              ).enrichVisible(_visibleMedia(_tab)),
+                      ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _statusText(visible.length),
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: _tab == ContentKind.live
+                    ? LiveTabView(
+                        loading: _live.loading,
+                        error: _live.error,
+                        onRetry: () => _loadLive(forceRefresh: true),
+                        visible: visible,
+                        previewChannel: _resolvePreviewChannel(visible),
+                        now: _live.now,
+                        next: _live.next,
+                        deliberate: _deliberatePreview,
+                        resolving: _resolving,
+                        scrollController: _scrollController,
+                        firstChannelFocusNode: _firstChannelFocusNode,
+                        focusNodeForChannel: _focusNodeForLiveChannel,
+                        lastPlayedChannelId: _lastPlayedLiveChannelId,
+                        previewChannelId: _preview.channelId,
+                        isFavorite: (id) => _isFavorite(ContentKind.live, id),
+                        onToggleFavorite: (id) =>
+                            _toggleFavorite(ContentKind.live, id),
+                        onPlayChannel: _play,
+                        onLongPressChannel: _showPreviewSheet,
+                        onChannelMoveLeft: (id) {
+                          _rememberBrowsedLiveChannel(id);
+                          _focusCategoryFromChannels();
+                        },
+                        onChannelMoveDown: _moveDownInLiveChannels,
+                        onCatchup: _showCatchupSheet,
+                        categories: _liveCategoriesForUi,
+                        selectedCategoryId: _categoryId,
+                        selectedCategoryFocusNode: _focusNodeForCategory(
+                          _categoryId,
+                        ),
+                        onCategorySelected: (value) {
+                          setState(() => _categoryId = value);
+                          _scheduleLiveFocusNodePrune();
+                          _scrollToTop();
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _focusNodeForCategory(_categoryId).requestFocus();
+                            _lastLiveFocusArea = _LiveFocusArea.category;
+                          });
+                        },
+                        onMoveRightToChannels: _focusChannelsFromCategory,
+                        onPaneFallbackKey: _handleLivePaneFallbackKey,
+                        previewControllerBuilder: () => _preview.controller,
+                        previewLoading: _preview.loading,
+                        previewError: _preview.error,
+                      )
+                    : MediaTabView(
+                        kind: _tab,
+                        visible: _visibleMedia(_tab),
+                        snapshot: _media(_tab).snapshot,
+                        loading: _media(_tab).loading,
+                        loadingMore: _media(_tab).loadingMore,
+                        error: _media(_tab).error,
+                        showingSearch: _query.trim().length >= 2,
+                        lastPlayedId: _media(_tab).lastPlayedId,
+                        scrollController: _media(_tab).scrollController,
+                        firstFocusNode: _media(_tab).firstFocusNode,
+                        isFavorite: (id) => _isFavorite(_tab, id),
+                        onOpenMedia: _openMedia,
+                        onLoadMore: () => _media(_tab).loadMore(),
+                        onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1321,9 +1436,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   /// back to the last-played channel and finally the first visible one.
   Channel? _resolvePreviewChannel(List<Channel> visible) {
     if (visible.isEmpty) return null;
-    Channel? byId(String? id) => id == null
-        ? null
-        : _live.channels.where((c) => c.id == id).firstOrNull;
+    Channel? byId(String? id) =>
+        id == null ? null : _live.channels.where((c) => c.id == id).firstOrNull;
     if (_deliberatePreview) {
       return byId(_lastFocusedLiveChannelId) ??
           byId(_preview.channelId) ??
@@ -1447,8 +1561,9 @@ class LiveTabView extends StatelessWidget {
               : c.id == lastPlayedChannelId,
           focusNode: i == 0 ? firstChannelFocusNode : focusNodeForChannel(c.id),
           onTap: () => onPlayChannel(c),
-          onLongPress:
-              allowLongPressPreview ? () => onLongPressChannel(c) : null,
+          onLongPress: allowLongPressPreview
+              ? () => onLongPressChannel(c)
+              : null,
           selected: c.id == previewChannelId,
           onMoveLeftToCategory: () => onChannelMoveLeft(c.id),
           onMoveDown: () => onChannelMoveDown(c.id),
@@ -1473,10 +1588,7 @@ class LiveTabView extends StatelessWidget {
                 style: const TextStyle(color: AppColors.textLo),
               ),
               const SizedBox(height: 16),
-              FilledButton(
-                onPressed: onRetry,
-                child: const Text('Try again'),
-              ),
+              FilledButton(onPressed: onRetry, child: const Text('Try again')),
             ],
           ),
         ),
@@ -1623,10 +1735,7 @@ class MediaTabView extends StatelessWidget {
                 style: const TextStyle(color: AppColors.textLo),
               ),
               const SizedBox(height: 16),
-              FilledButton(
-                onPressed: onRetry,
-                child: const Text('Try again'),
-              ),
+              FilledButton(onPressed: onRetry, child: const Text('Try again')),
             ],
           ),
         ),
@@ -1713,7 +1822,15 @@ class _ContentTabs extends StatelessWidget {
   final ContentKind value;
   final ValueChanged<ContentKind> onChanged;
 
-  const _ContentTabs({required this.value, required this.onChanged});
+  /// Stable focus node per tab, owned by the screen so Back can jump focus here
+  /// (see [_ChannelListScreenState._handleRootBack]).
+  final Map<ContentKind, FocusNode> focusNodes;
+
+  const _ContentTabs({
+    required this.value,
+    required this.onChanged,
+    required this.focusNodes,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1731,6 +1848,7 @@ class _ContentTabs extends StatelessWidget {
               label: 'Live',
               selected: value == ContentKind.live,
               autofocus: value == ContentKind.live,
+              focusNode: focusNodes[ContentKind.live],
               onTap: () => onChanged(ContentKind.live),
             ),
             const SizedBox(width: 8),
@@ -1739,6 +1857,7 @@ class _ContentTabs extends StatelessWidget {
               label: 'Movies',
               selected: value == ContentKind.movie,
               autofocus: value == ContentKind.movie,
+              focusNode: focusNodes[ContentKind.movie],
               onTap: () => onChanged(ContentKind.movie),
             ),
             const SizedBox(width: 8),
@@ -1747,6 +1866,7 @@ class _ContentTabs extends StatelessWidget {
               label: 'Series',
               selected: value == ContentKind.series,
               autofocus: value == ContentKind.series,
+              focusNode: focusNodes[ContentKind.series],
               onTap: () => onChanged(ContentKind.series),
             ),
           ],
@@ -1761,6 +1881,7 @@ class _TabChip extends StatefulWidget {
   final String label;
   final bool selected;
   final bool autofocus;
+  final FocusNode? focusNode;
   final VoidCallback onTap;
 
   const _TabChip({
@@ -1769,6 +1890,7 @@ class _TabChip extends StatefulWidget {
     required this.selected,
     required this.autofocus,
     required this.onTap,
+    this.focusNode,
   });
 
   @override
@@ -1787,6 +1909,7 @@ class _TabChipState extends State<_TabChip> {
     final fg = active ? Colors.white : AppColors.textHi;
     return FocusableActionDetector(
       autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
       mouseCursor: SystemMouseCursors.click,
       onShowFocusHighlight: (v) {
         if (mounted) setState(() => _focused = v);
@@ -1899,14 +2022,14 @@ class _Toolbar extends StatelessWidget {
                             child: category == null
                                 ? action!
                                 : (action == null
-                                    ? category
-                                    : Row(
-                                        children: [
-                                          Expanded(child: category),
-                                          const SizedBox(width: 8),
-                                          action,
-                                        ],
-                                      )),
+                                      ? category
+                                      : Row(
+                                          children: [
+                                            Expanded(child: category),
+                                            const SizedBox(width: 8),
+                                            action,
+                                          ],
+                                        )),
                           ),
                         ),
                       ],
@@ -2029,12 +2152,13 @@ class _LiveCategoryPane extends StatelessWidget {
       },
       child: Actions(
         actions: {
-          _MoveRightToChannelsIntent: CallbackAction<_MoveRightToChannelsIntent>(
-            onInvoke: (_) {
-              onMoveRightToChannels();
-              return null;
-            },
-          ),
+          _MoveRightToChannelsIntent:
+              CallbackAction<_MoveRightToChannelsIntent>(
+                onInvoke: (_) {
+                  onMoveRightToChannels();
+                  return null;
+                },
+              ),
         },
         child: Container(
           decoration: BoxDecoration(
@@ -2066,11 +2190,11 @@ class _LiveCategoryPane extends StatelessWidget {
                           return FocusableCard(
                             autofocus: selected,
                             focusNode: selected ? selectedFocusNode : null,
-                            debugLabel:
-                                'live.category.${item.id ?? 'all'}',
+                            debugLabel: 'live.category.${item.id ?? 'all'}',
                             onKeyEvent: (node, event) {
                               final isRight =
-                                  event.logicalKey == LogicalKeyboardKey.arrowRight;
+                                  event.logicalKey ==
+                                  LogicalKeyboardKey.arrowRight;
                               if (!isRight) return KeyEventResult.ignored;
                               onMoveRightToChannels();
                               return KeyEventResult.handled;
@@ -2089,8 +2213,9 @@ class _LiveCategoryPane extends StatelessWidget {
                                   color: selected
                                       ? AppColors.textHi
                                       : AppColors.textLo,
-                                  fontWeight:
-                                      selected ? FontWeight.w700 : FontWeight.w500,
+                                  fontWeight: selected
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
                                 ),
                               ),
                             ),
@@ -2198,7 +2323,9 @@ class _LivePreviewPanel extends StatelessWidget {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        if (previewActive && !previewLoading && previewError == null)
+                        if (previewActive &&
+                            !previewLoading &&
+                            previewError == null)
                           Focus(
                             canRequestFocus: false,
                             skipTraversal: true,
@@ -2210,7 +2337,8 @@ class _LivePreviewPanel extends StatelessWidget {
                               ),
                             ),
                           )
-                        else if (channel.logo != null && channel.logo!.isNotEmpty)
+                        else if (channel.logo != null &&
+                            channel.logo!.isNotEmpty)
                           Image.network(
                             channel.logo!,
                             fit: BoxFit.cover,
@@ -2320,7 +2448,10 @@ class _LivePreviewPanel extends StatelessWidget {
                       else
                         const Text(
                           'No programme information',
-                          style: TextStyle(color: AppColors.textLo, fontSize: 14),
+                          style: TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 14,
+                          ),
                         ),
                       if (progress != null) ...[
                         const SizedBox(height: 6),
@@ -2456,9 +2587,11 @@ class _CatchupSheet extends StatelessWidget {
 
   static String _dayLabel(DateTime d) {
     final now = DateTime.now();
-    final diff = DateTime(now.year, now.month, now.day)
-        .difference(DateTime(d.year, d.month, d.day))
-        .inDays;
+    final diff = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).difference(DateTime(d.year, d.month, d.day)).inDays;
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Yesterday';
     return '${d.year}-${_pad2(d.month)}-${_pad2(d.day)}';
@@ -2884,10 +3017,7 @@ class _ChannelTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (favorite) ...[
-              const SizedBox(width: 8),
-              const _FavoriteBadge(),
-            ],
+            if (favorite) ...[const SizedBox(width: 8), const _FavoriteBadge()],
             const SizedBox(width: 8),
             Icon(
               selected
@@ -3039,8 +3169,9 @@ class _DropdownFrameState extends State<_DropdownFrame> {
       child: Focus(
         canRequestFocus: false,
         skipTraversal: true,
-        onKeyEvent: (_, event) =>
-            event is KeyRepeatEvent ? KeyEventResult.handled : KeyEventResult.ignored,
+        onKeyEvent: (_, event) => event is KeyRepeatEvent
+            ? KeyEventResult.handled
+            : KeyEventResult.ignored,
         child: DropdownButtonHideUnderline(child: widget.builder(_node)),
       ),
     );
@@ -3082,7 +3213,11 @@ class _CategoryDropdown extends StatelessWidget {
           ...categories.map(
             (c) => DropdownMenuItem<String?>(
               value: c.id,
-              child: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              child: Text(
+                c.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ),
         ],
@@ -3127,7 +3262,11 @@ class _MediaCategoryDropdown extends StatelessWidget {
           ...categories.map(
             (c) => DropdownMenuItem<String?>(
               value: c.id,
-              child: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              child: Text(
+                c.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ),
         ],
@@ -3215,10 +3354,7 @@ class _MediaListTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (favorite) ...[
-              const SizedBox(width: 8),
-              const _FavoriteBadge(),
-            ],
+            if (favorite) ...[const SizedBox(width: 8), const _FavoriteBadge()],
             const SizedBox(width: 8),
             Icon(
               item.kind == ContentKind.movie
@@ -3282,7 +3418,10 @@ class _MediaGridTile extends StatelessWidget {
                             color: AppColors.ink.withValues(alpha: 0.75),
                             borderRadius: BorderRadius.circular(6),
                           ),
-                          child: _RatingBadge(rating: item.rating, compact: true),
+                          child: _RatingBadge(
+                            rating: item.rating,
+                            compact: true,
+                          ),
                         ),
                       ),
                     if (favorite)

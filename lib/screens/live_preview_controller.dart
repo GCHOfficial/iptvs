@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../player/mpv_options.dart';
 import '../sources/source.dart';
 
 /// Owns the live split-pane/phone **preview** player and its state — the
@@ -29,10 +30,31 @@ class LivePreviewController extends ChangeNotifier {
   LivePreviewController({required this.repo, this.onError});
 
   Player? _player;
-  Player get player => _player ??= Player();
+  Player get player => _player ??= _createPlayer();
 
   VideoController? _controller;
   VideoController get controller => _controller ??= VideoController(player);
+
+  Player _createPlayer() {
+    final player = Player(
+      configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
+    );
+    // Unlike the fullscreen player, previews never get a native HDR/HWND surface —
+    // they're always the embedded (texture) path, and were previously left on mpv's
+    // untuned defaults. That meant no hardware-decode hint at all, so decode cost on
+    // Android scaled directly with source resolution. Apply the same live-stream +
+    // embedded-path tuning the fullscreen player uses for its own embedded fallback.
+    final platform = player.platform;
+    if (platform is NativePlayer) {
+      unawaited(
+        applyMpvOptions(platform, {
+          ...kLiveMpvOptions,
+          ...embeddedVideoOptionsForPlatform(),
+        }),
+      );
+    }
+    return player;
+  }
 
   /// Channel currently selected for preview (may still be loading), or null.
   String? channelId;
@@ -109,6 +131,24 @@ class LivePreviewController extends ChangeNotifier {
 
   Future<void> play() async {
     if (_player != null) await _player!.play();
+  }
+
+  /// Disposes the current player entirely and clears preview state. Used when
+  /// the fullscreen player adopted this player and hot-swapped its video
+  /// output to the Windows native HDR surface (see [PlayerScreen]) — once that
+  /// surface tears down, the player's mpv `vo`/`wid` are no longer valid for
+  /// this controller's embedded texture, so it's discarded rather than reused.
+  /// The next [start] call builds a fresh one.
+  Future<void> discardPlayer() async {
+    final player = _player;
+    _player = null;
+    _controller = null;
+    channelId = null;
+    loading = false;
+    error = null;
+    stream = null;
+    if (!_disposed) notifyListeners();
+    if (player != null) await player.dispose();
   }
 
   @override

@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
@@ -84,6 +85,7 @@ class PlayerCallbacks(
     val onCycleAspect: () -> Unit,
     val onGoLive: () -> Unit,
     val onBack: () -> Unit,
+    val onEnterPip: () -> Unit,
 )
 
 private const val HIDE_DELAY_VOD = 3500L
@@ -469,6 +471,12 @@ private fun RowScope.RightCluster(
     }
     TextControlButton(state.aspect.label, "Aspect ratio") {
         onInteract(); callbacks.onCycleAspect()
+    }
+    if (state.supportsPip) {
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(Icons.Filled.PictureInPictureAlt, "Picture in picture") {
+            onInteract(); callbacks.onEnterPip()
+        }
     }
     if (!spread) Spacer(Modifier.width(8.dp))
     IconControlButton(Icons.Filled.Info, "Stream info") {

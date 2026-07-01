@@ -74,6 +74,12 @@ class HdrPlayerActivity : ComponentActivity() {
             epgNow = epgEntry(EXTRA_EPG_NOW_TITLE, EXTRA_EPG_NOW_START, EXTRA_EPG_NOW_STOP, EXTRA_EPG_NOW_DESC),
             epgNext = epgEntry(EXTRA_EPG_NEXT_TITLE, EXTRA_EPG_NEXT_START, EXTRA_EPG_NEXT_STOP, null),
         )
+        // Android TV's PiP framework restricts entry to communication/smartHome/health/ticker
+        // use cases via a required manifest category — general media playback isn't an
+        // approved category there, so FEATURE_PICTURE_IN_PICTURE is intentionally left
+        // unused/absent for our purposes on most TVs. That's a platform limitation, not a bug:
+        // the button below simply won't show on devices that report the feature missing.
+        uiState.supportsPip = supportsPip()
 
         startWithExoPlayer()
 
@@ -185,6 +191,7 @@ class HdrPlayerActivity : ComponentActivity() {
             }
         },
         onBack = { finish() },
+        onEnterPip = { enterPip() },
     )
 
     override fun onStart() {
@@ -211,9 +218,19 @@ class HdrPlayerActivity : ComponentActivity() {
      *  backgrounding. No-op on devices without PiP (e.g. some Android TVs). */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        enterPip()
+    }
+
+    /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
+     *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */
+    private fun enterPip() {
         if (uiState.inPip || isFinishing || !uiState.isPlaying) return
         if (!supportsPip()) return
-        runCatching { enterPictureInPictureMode(pipParams()) }
+        try {
+            enterPictureInPictureMode(pipParams())
+        } catch (e: Exception) {
+            Log.e(TAG, "enterPictureInPictureMode failed", e)
+        }
     }
 
     override fun onPictureInPictureModeChanged(

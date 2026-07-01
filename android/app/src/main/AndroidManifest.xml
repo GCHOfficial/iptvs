@@ -45,6 +45,7 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"
             android:exported="false"
             android:hardwareAccelerated="true"
+            android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
             android:supportsPictureInPicture="true"
             android:theme="@style/HdrPlayerTheme" />
