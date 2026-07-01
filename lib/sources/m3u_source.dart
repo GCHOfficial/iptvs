@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show compute;
+
 import '../data/net.dart';
 import 'source.dart';
 import 'xmltv.dart';
@@ -128,66 +130,13 @@ class M3uSource implements Source {
   Future<void> _ensureParsed() async {
     if (_channels != null) return;
     final bytes = await _download(Uri.parse(playlistUrl));
-    _parse(utf8.decode(bytes, allowMalformed: true));
-  }
-
-  void _parse(String content) {
-    final channels = <Channel>[];
-    final categoryTitles = <String>{};
-
-    String? name, group, logo, tvgId;
-
-    for (final raw in const LineSplitter().convert(content)) {
-      final line = raw.trim();
-      if (line.isEmpty) continue;
-
-      if (line.startsWith('#EXTM3U')) {
-        _headerEpgUrl = _attr(line, 'url-tvg') ?? _attr(line, 'x-tvg-url');
-        continue;
-      }
-      if (line.startsWith('#EXTINF')) {
-        tvgId = _attr(line, 'tvg-id');
-        logo = _attr(line, 'tvg-logo');
-        group = _attr(line, 'group-title');
-        name = _name(line);
-        continue;
-      }
-      if (line.startsWith('#')) continue; // other directives (#EXTVLCOPT etc.)
-
-      // A URL line completes the pending channel.
-      if (name != null) {
-        final g = (group == null || group.isEmpty) ? 'Uncategorized' : group;
-        categoryTitles.add(g);
-        channels.add(
-          Channel(
-            id: (tvgId != null && tvgId.isNotEmpty) ? tvgId : line,
-            name: name,
-            number: channels.length + 1,
-            logo: (logo != null && logo.isNotEmpty) ? logo : null,
-            categoryId: g,
-            extra: {
-              'url': line,
-              if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
-            },
-          ),
-        );
-        name = group = logo = tvgId = null;
-      }
-    }
-
-    _channels = channels;
-    _categories = (categoryTitles.toList()..sort())
-        .map((t) => Category(id: t, title: t))
-        .toList();
-  }
-
-  String? _attr(String line, String key) =>
-      RegExp('$key="([^"]*)"').firstMatch(line)?.group(1);
-
-  String _name(String extinf) {
-    final lastQuote = extinf.lastIndexOf('"');
-    final comma = extinf.indexOf(',', lastQuote == -1 ? 0 : lastQuote);
-    return comma == -1 ? '' : extinf.substring(comma + 1).trim();
+    // Decode + parse on a background isolate: a large playlist (tens of MB,
+    // tens of thousands of channels) would otherwise stall the UI thread for
+    // hundreds of ms while building Channel objects.
+    final parsed = await compute(_parseM3uBytes, bytes);
+    _channels = parsed.channels;
+    _categories = parsed.categories;
+    _headerEpgUrl = parsed.headerEpgUrl;
   }
 
   Future<Uint8List> _download(Uri uri) async {
@@ -202,4 +151,77 @@ class M3uSource implements Source {
     }
     return resp.readBytes();
   }
+}
+
+/// Result of parsing a playlist, sent back from the parse isolate.
+class _M3uParsed {
+  final List<Channel> channels;
+  final List<Category> categories;
+  final String? headerEpgUrl;
+  const _M3uParsed(this.channels, this.categories, this.headerEpgUrl);
+}
+
+/// Isolate entrypoint: decodes [bytes] and parses the playlist. Kept top-level
+/// and pure so it can run under [compute] (no access to instance state).
+_M3uParsed _parseM3uBytes(Uint8List bytes) =>
+    _parseM3u(utf8.decode(bytes, allowMalformed: true));
+
+_M3uParsed _parseM3u(String content) {
+  final channels = <Channel>[];
+  final categoryTitles = <String>{};
+  String? headerEpgUrl;
+
+  String? name, group, logo, tvgId;
+
+  for (final raw in const LineSplitter().convert(content)) {
+    final line = raw.trim();
+    if (line.isEmpty) continue;
+
+    if (line.startsWith('#EXTM3U')) {
+      headerEpgUrl = _attr(line, 'url-tvg') ?? _attr(line, 'x-tvg-url');
+      continue;
+    }
+    if (line.startsWith('#EXTINF')) {
+      tvgId = _attr(line, 'tvg-id');
+      logo = _attr(line, 'tvg-logo');
+      group = _attr(line, 'group-title');
+      name = _name(line);
+      continue;
+    }
+    if (line.startsWith('#')) continue; // other directives (#EXTVLCOPT etc.)
+
+    // A URL line completes the pending channel.
+    if (name != null) {
+      final g = (group == null || group.isEmpty) ? 'Uncategorized' : group;
+      categoryTitles.add(g);
+      channels.add(
+        Channel(
+          id: (tvgId != null && tvgId.isNotEmpty) ? tvgId : line,
+          name: name,
+          number: channels.length + 1,
+          logo: (logo != null && logo.isNotEmpty) ? logo : null,
+          categoryId: g,
+          extra: {
+            'url': line,
+            if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
+          },
+        ),
+      );
+      name = group = logo = tvgId = null;
+    }
+  }
+
+  final categories = (categoryTitles.toList()..sort())
+      .map((t) => Category(id: t, title: t))
+      .toList();
+  return _M3uParsed(channels, categories, headerEpgUrl);
+}
+
+String? _attr(String line, String key) =>
+    RegExp('$key="([^"]*)"').firstMatch(line)?.group(1);
+
+String _name(String extinf) {
+  final lastQuote = extinf.lastIndexOf('"');
+  final comma = extinf.indexOf(',', lastQuote == -1 ? 0 : lastQuote);
+  return comma == -1 ? '' : extinf.substring(comma + 1).trim();
 }
