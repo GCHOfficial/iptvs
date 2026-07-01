@@ -173,4 +173,37 @@ void main() {
 
     await unmount(tester);
   });
+
+  testWidgets('media tab content survives switching tabs and back',
+      (tester) async {
+    // Guards the "state persists across tab switches" behaviour that the split
+    // into per-kind media tabs must preserve: after visiting Series, leaving to
+    // another tab, and returning, the series content is still there.
+    await pumpWideScreen(tester);
+
+    await tester.tap(find.text('Series'));
+    await tester.pump();
+    await pumpUntil(tester, find.text('Codec Test Series'));
+    expect(find.text('Codec Test Series'), findsOneWidget);
+
+    // Leave to Movies, then back to Live, then back to Series.
+    await tester.tap(find.text('Movies'));
+    await tester.pump();
+    await pumpUntil(tester, find.text('Live'));
+    await tester.tap(find.text('Live'));
+    await tester.pump();
+    await pumpUntil(tester, find.text('Playlists'));
+    expect(find.text('Playlists'), findsOneWidget);
+
+    await tester.tap(find.text('Series'));
+    await tester.pump();
+    await pumpUntil(tester, find.text('Codec Test Series'));
+    expect(
+      find.text('Codec Test Series'),
+      findsOneWidget,
+      reason: 'series content should return after round-tripping tabs',
+    );
+
+    await unmount(tester);
+  });
 }

@@ -1466,7 +1466,22 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             Expanded(
               child: _tab == ContentKind.live
                   ? _body(visible)
-                  : _mediaBody(_tab),
+                  : MediaTabView(
+                      kind: _tab,
+                      visible: _visibleMedia(_tab),
+                      snapshot: _media[_tab],
+                      loading: _mediaLoading[_tab] == true,
+                      loadingMore: _mediaLoadingMore[_tab] == true,
+                      error: _mediaError[_tab],
+                      showingSearch: _query.trim().length >= 2,
+                      lastPlayedId: _lastPlayedMediaId[_tab],
+                      scrollController: _scrollController,
+                      firstFocusNode: _firstMediaFocusNodes[_tab],
+                      isFavorite: (id) => _isFavorite(_tab, id),
+                      onOpenMedia: _openMedia,
+                      onLoadMore: () => _loadMoreMedia(_tab),
+                      onRetry: () => _loadMedia(_tab, forceRefresh: true),
+                    ),
             ),
           ],
         ),
@@ -1649,14 +1664,64 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     );
   }
 
-  Widget _mediaBody(ContentKind kind) {
-    final loading = _mediaLoading[kind] == true;
-    final loadingMore = _mediaLoadingMore[kind] == true;
-    final error = _mediaError[kind];
-    final visible = _visibleMedia(kind);
-    final showingSearch = _query.trim().length >= 2;
+}
+
+/// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
+/// error/empty states, and D-pad focus. Extracted from `ChannelListScreen`'s
+/// State as a widget with an explicit input contract so it rebuilds
+/// independently of the rest of the (large) screen and so the media state can
+/// later move behind a controller without touching this view. Live TV keeps its
+/// own body; this handles [ContentKind.movie]/[ContentKind.series] only.
+class MediaTabView extends StatelessWidget {
+  final ContentKind kind;
+
+  /// Filtered items to show (favorites/hidden/search already applied by the
+  /// parent), and the underlying snapshot (drives "load more" / paging).
+  final List<MediaItem> visible;
+  final MediaLibrarySnapshot? snapshot;
+
+  final bool loading;
+  final bool loadingMore;
+  final String? error;
+
+  /// True when a live search query (>= 2 chars) is active — hides "load more"
+  /// since search returns a flat, non-paged result set.
+  final bool showingSearch;
+
+  /// Id of the last-played item in this kind, autofocused on return when still
+  /// visible (else the first item is).
+  final String? lastPlayedId;
+
+  final ScrollController scrollController;
+  final FocusNode? firstFocusNode;
+
+  final bool Function(String id) isFavorite;
+  final ValueChanged<MediaItem> onOpenMedia;
+  final VoidCallback onLoadMore;
+  final VoidCallback onRetry;
+
+  const MediaTabView({
+    super.key,
+    required this.kind,
+    required this.visible,
+    required this.snapshot,
+    required this.loading,
+    required this.loadingMore,
+    required this.error,
+    required this.showingSearch,
+    required this.lastPlayedId,
+    required this.scrollController,
+    required this.firstFocusNode,
+    required this.isFavorite,
+    required this.onOpenMedia,
+    required this.onLoadMore,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     final showLoadMore =
-        !showingSearch && (loadingMore || _media[kind]?.hasMore == true);
+        !showingSearch && (loadingMore || snapshot?.hasMore == true);
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
       return Center(
@@ -1672,7 +1737,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               ),
               const SizedBox(height: 16),
               FilledButton(
-                onPressed: () => _loadMedia(kind, forceRefresh: true),
+                onPressed: onRetry,
                 child: const Text('Try again'),
               ),
             ],
@@ -1691,43 +1756,41 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 860;
-        final lastPlayedId = _lastPlayedMediaId[kind];
         final hasLastVisible =
             lastPlayedId != null &&
             visible.any((media) => media.id == lastPlayedId);
+        FocusNode? focusNodeFor(int i) => hasLastVisible
+            ? (visible[i].id == lastPlayedId ? firstFocusNode : null)
+            : (i == 0 ? firstFocusNode : null);
+        bool autofocusFor(int i) =>
+            hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
         if (!wide) {
           return ListView.builder(
-            controller: _scrollController,
+            controller: scrollController,
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
             scrollCacheExtent: const ScrollCacheExtent.pixels(800),
             itemCount: visible.length + (showLoadMore ? 1 : 0),
             itemBuilder: (context, i) {
               if (i == visible.length) {
                 return _MediaLoadMoreTile(
-                  snapshot: _media[kind],
+                  snapshot: snapshot,
                   loading: loadingMore,
-                  onPressed: () => _loadMoreMedia(kind),
+                  onPressed: onLoadMore,
                 );
               }
               return _MediaListTile(
                 item: visible[i],
-                favorite: _isFavorite(kind, visible[i].id),
-                autofocus: hasLastVisible
-                    ? visible[i].id == lastPlayedId
-                    : i == 0,
-                focusNode: hasLastVisible
-                    ? (visible[i].id == lastPlayedId
-                          ? _firstMediaFocusNodes[kind]
-                          : null)
-                    : (i == 0 ? _firstMediaFocusNodes[kind] : null),
-                onTap: () => _openMedia(visible[i]),
+                favorite: isFavorite(visible[i].id),
+                autofocus: autofocusFor(i),
+                focusNode: focusNodeFor(i),
+                onTap: () => onOpenMedia(visible[i]),
               );
             },
           );
         }
         final columns = constraints.maxWidth >= 1280 ? 6 : 4;
         return GridView.builder(
-          controller: _scrollController,
+          controller: scrollController,
           padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
           scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1740,23 +1803,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           itemBuilder: (context, i) {
             if (i == visible.length) {
               return _MediaLoadMoreCard(
-                snapshot: _media[kind],
+                snapshot: snapshot,
                 loading: loadingMore,
-                onPressed: () => _loadMoreMedia(kind),
+                onPressed: onLoadMore,
               );
             }
             return _MediaGridTile(
               item: visible[i],
-              favorite: _isFavorite(kind, visible[i].id),
-              autofocus: hasLastVisible
-                  ? visible[i].id == lastPlayedId
-                  : i == 0,
-              focusNode: hasLastVisible
-                  ? (visible[i].id == lastPlayedId
-                        ? _firstMediaFocusNodes[kind]
-                        : null)
-                  : (i == 0 ? _firstMediaFocusNodes[kind] : null),
-              onTap: () => _openMedia(visible[i]),
+              favorite: isFavorite(visible[i].id),
+              autofocus: autofocusFor(i),
+              focusNode: focusNodeFor(i),
+              onTap: () => onOpenMedia(visible[i]),
             );
           },
         );
