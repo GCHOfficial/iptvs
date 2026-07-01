@@ -24,6 +24,7 @@ import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
+import 'favorites_controller.dart';
 import 'live_controller.dart';
 import 'live_preview_controller.dart';
 import 'media_tab_controller.dart';
@@ -67,8 +68,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   // both persist for the screen's lifetime so state survives tab switches.
   late final Map<ContentKind, MediaTabController> _mediaControllers;
   MediaTabController _media(ContentKind kind) => _mediaControllers[kind]!;
-  // Favorited item ids per content kind (live channels / movies / series).
-  final Map<ContentKind, Set<String>> _favorites = {};
+  // Favorited item ids per content kind (live channels / movies / series) live
+  // in a controller; the "last favorite removed → fall back to All" handling
+  // stays here (it's tied to _categoryId / the media controllers).
+  late final FavoritesController _favorites;
   String? _categoryId;
   String _query = '';
 
@@ -104,6 +107,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _live = LiveController(repo: widget.repo)..addListener(_onLiveChanged);
     _preview = LivePreviewController(repo: widget.repo, onError: _showSnack)
       ..addListener(_onLiveChanged);
+    _favorites = FavoritesController(repo: widget.repo)
+      ..addListener(_onFavoritesChanged);
     _mediaControllers = {
       for (final kind in const [ContentKind.movie, ContentKind.series])
         kind: MediaTabController(
@@ -124,6 +129,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   void _onLiveChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onFavoritesChanged() {
     if (mounted) setState(() {});
   }
 
@@ -184,6 +193,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     HardwareKeyboard.instance.removeHandler(_handleLiveGlobalKeyEvent);
     _live.dispose();
     _preview.dispose();
+    _favorites.dispose();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
     _liveSearchCellFocusNode.dispose();
@@ -615,43 +625,22 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Set<String> _hiddenCategories(ContentKind kind) =>
       widget.config.hiddenCategoryIds(kind);
 
-  Set<String> _favoriteIds(ContentKind kind) =>
-      _favorites[kind] ?? const <String>{};
+  Set<String> _favoriteIds(ContentKind kind) => _favorites.ids(kind);
 
   bool _isFavorite(ContentKind kind, String id) =>
-      _favoriteIds(kind).contains(id);
+      _favorites.isFavorite(kind, id);
 
-  Future<void> _loadFavorites(ContentKind kind) async {
-    final ids =
-        await widget.repo.db.readFavoriteIds(widget.repo.source.id, kind);
-    if (!mounted) return;
-    setState(() => _favorites[kind] = ids);
-  }
+  Future<void> _loadFavorites(ContentKind kind) => _favorites.load(kind);
 
   Future<void> _toggleFavorite(ContentKind kind, String id) async {
-    final set = {..._favoriteIds(kind)};
-    final nowFavorite = !set.contains(id);
-    if (nowFavorite) {
-      set.add(id);
-    } else {
-      set.remove(id);
-    }
-    await widget.repo.db.setFavorite(
-      widget.repo.source.id,
-      kind,
-      id,
-      nowFavorite,
-    );
-    if (!mounted) return;
+    final nowEmpty = await _favorites.toggle(kind, id);
+    if (!mounted || !nowEmpty) return;
+    // Emptying the Favorites view leaves nothing to select — fall back to All.
     setState(() {
-      _favorites[kind] = set;
-      // Emptying the Favorites view leaves nothing to select — fall back to All.
-      if (set.isEmpty) {
-        if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
-          _categoryId = null;
-        } else if (kind != ContentKind.live) {
-          _media(kind).resetFavoritesCategoryToAll();
-        }
+      if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
+        _categoryId = null;
+      } else if (kind != ContentKind.live) {
+        _media(kind).resetFavoritesCategoryToAll();
       }
     });
   }
