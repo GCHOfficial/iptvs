@@ -24,13 +24,9 @@ import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
+import 'media_tab_controller.dart';
 
 const _toolbarControlHeight = 40.0;
-const _autoMetadataEnrichmentLimit = 40;
-
-/// Sentinel category id for the synthetic "Favorites" entry shown at the top of
-/// each content kind's category list. Never a real provider category.
-const kFavoritesCategoryId = '__favorites__';
 
 enum _LiveFocusArea { category, channels, search, unknown }
 
@@ -64,17 +60,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   ContentKind _tab = ContentKind.live;
   List<Category> _categories = const [];
   List<Channel> _all = const [];
-  final Map<ContentKind, MediaLibrarySnapshot> _media = {};
-  final Map<ContentKind, String?> _mediaCategoryId = {};
-  final Map<ContentKind, bool> _mediaLoading = {};
-  final Map<ContentKind, bool> _mediaLoadingMore = {};
-  final Map<ContentKind, bool> _mediaEnriching = {};
-  final Map<ContentKind, int> _mediaEnrichmentGeneration = {};
-  final Map<ContentKind, ({int done, int total})> _mediaEnrichmentProgress = {};
-  final Map<ContentKind, bool> _mediaSearching = {};
-  final Map<ContentKind, String?> _mediaError = {};
-  final Map<ContentKind, List<MediaItem>> _mediaSearchResults = {};
-  final Map<ContentKind, String> _mediaSearchQuery = {};
+  // Movies/series browsing state + async ops live in a controller per kind;
+  // both persist for the screen's lifetime so state survives tab switches.
+  late final Map<ContentKind, MediaTabController> _mediaControllers;
+  MediaTabController _media(ContentKind kind) => _mediaControllers[kind]!;
   Map<String, Programme> _now = const {};
   Map<String, Programme> _next = const {};
   // Favorited item ids per content kind (live channels / movies / series).
@@ -115,19 +104,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   late final VideoController _previewController = VideoController(
     _previewPlayer,
   );
-  final Map<ContentKind, FocusNode> _firstMediaFocusNodes = {
-    ContentKind.movie: FocusNode(),
-    ContentKind.series: FocusNode(),
-  };
-  final Map<ContentKind, String?> _lastPlayedMediaId = {
-    ContentKind.movie: null,
-    ContentKind.series: null,
-  };
   Timer? _previewTimer;
 
   @override
   void initState() {
     super.initState();
+    _mediaControllers = {
+      for (final kind in const [ContentKind.movie, ContentKind.series])
+        kind: MediaTabController(
+          kind: kind,
+          repo: widget.repo,
+          onEnrichError: _showSnack,
+        )..addListener(_onMediaChanged),
+    };
     HardwareKeyboard.instance.addHandler(_handleLiveGlobalKeyEvent);
     _firstChannelFocusNode.addListener(() {
       final visible = _visible;
@@ -153,12 +142,36 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _categoryId = null;
       }
       for (final kind in const [ContentKind.movie, ContentKind.series]) {
-        if (_hiddenCategories(kind).contains(_mediaCategoryId[kind])) {
-          _mediaCategoryId[kind] = null;
-          _loadMedia(kind);
+        if (_hiddenCategories(kind).contains(_media(kind).categoryId)) {
+          _loadMediaTab(kind, category: null, switchCategory: true);
         }
       }
     }
+  }
+
+  /// Rebuild when a media controller's state changes (load/search/enrich), so
+  /// the toolbar/status line — which read the active controller — refresh. The
+  /// grid also rebuilds; scope is the same as the old per-kind setState.
+  void _onMediaChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _showSnack(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  /// Load a media tab and its favorites together (favorites live in the parent,
+  /// not the controller). [category] optionally switches category first.
+  void _loadMediaTab(ContentKind kind, {String? category, bool switchCategory = false, bool forceRefresh = false}) {
+    final controller = _media(kind);
+    if (switchCategory) {
+      unawaited(controller.setCategory(category));
+    } else {
+      unawaited(controller.load(forceRefresh: forceRefresh));
+    }
+    unawaited(_loadFavorites(kind));
   }
 
   @override
@@ -176,8 +189,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       node.dispose();
     }
     unawaited(_previewPlayer.dispose());
-    for (final node in _firstMediaFocusNodes.values) {
-      node.dispose();
+    for (final controller in _mediaControllers.values) {
+      controller.dispose();
     }
     _searchController.dispose();
     _scrollController.dispose();
@@ -250,7 +263,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       }
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
         if (_visibleMedia(_tab).isEmpty) return;
-        _firstMediaFocusNodes[_tab]?.requestFocus();
+        _media(_tab).firstFocusNode.requestFocus();
       }
     });
   }
@@ -616,170 +629,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     } catch (_) {}
   }
 
-  Future<void> _loadMedia(ContentKind kind, {bool forceRefresh = false}) async {
-    final categoryId = _effectiveMediaLoadCategory(kind);
-    setState(() {
-      _cancelMediaEnrichment(kind);
-      _mediaLoading[kind] = true;
-      _mediaError[kind] = null;
-    });
-    try {
-      final snap = await widget.repo.loadMedia(
-        kind,
-        categoryId: categoryId,
-        forceRefresh: forceRefresh,
-      );
-      if (!mounted) return;
-      DiagnosticsLog.instance.add(
-        'library',
-        'loaded ${kind.name} source=${widget.repo.source.name} items=${snap.items.length} category=${categoryId ?? '<all>'} force=$forceRefresh cache=${snap.fromCache} pages=${snap.loadedPages}/${snap.totalPages}',
-      );
-      setState(() {
-        _media[kind] = snap;
-        _mediaLoading[kind] = false;
-      });
-      unawaited(_loadFavorites(kind));
-      if (widget.repo.autoEnrichMetadata) {
-        unawaited(_autoEnrichMediaItems(kind, snap.items));
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _mediaError[kind] = '$e';
-        _mediaLoading[kind] = false;
-      });
-    }
-  }
-
-  Future<void> _loadMoreMedia(ContentKind kind) async {
-    if (_mediaLoadingMore[kind] == true) return;
-    final categoryId = _effectiveMediaLoadCategory(kind);
-    final existingIds = {
-      for (final item in _media[kind]?.items ?? const <MediaItem>[]) item.id,
-    };
-    setState(() {
-      _cancelMediaEnrichment(kind);
-      _mediaLoadingMore[kind] = true;
-      _mediaError[kind] = null;
-    });
-    try {
-      final snap = await widget.repo.loadMoreMedia(
-        kind,
-        categoryId: categoryId,
-      );
-      if (!mounted) return;
-      DiagnosticsLog.instance.add(
-        'library',
-        'load more ${kind.name} source=${widget.repo.source.name} items=${snap.items.length} category=${categoryId ?? '<all>'} pages=${snap.loadedPages}/${snap.totalPages}',
-      );
-      setState(() {
-        _media[kind] = snap;
-        _mediaLoadingMore[kind] = false;
-      });
-      if (widget.repo.autoEnrichMetadata) {
-        final newlyLoaded = snap.items
-            .where((item) => !existingIds.contains(item.id))
-            .toList();
-        unawaited(_autoEnrichMediaItems(kind, newlyLoaded));
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _mediaError[kind] = '$e';
-        _mediaLoadingMore[kind] = false;
-      });
-    }
-  }
-
-  Future<void> _enrichVisibleMedia(ContentKind kind) =>
-      _enrichMediaItems(kind, _visibleMedia(kind), showErrors: true);
-
-  Future<void> _autoEnrichMediaItems(ContentKind kind, List<MediaItem> items) =>
-      _enrichMediaItems(kind, items, maxItems: _autoMetadataEnrichmentLimit);
-
-  void _cancelMediaEnrichment(ContentKind kind) {
-    _mediaEnrichmentGeneration[kind] =
-        (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
-    _mediaEnriching[kind] = false;
-    _mediaEnrichmentProgress.remove(kind);
-  }
-
-  Future<void> _enrichMediaItems(
-    ContentKind kind,
-    List<MediaItem> items, {
-    bool showErrors = false,
-    int? maxItems,
-  }) async {
-    final generation = (_mediaEnrichmentGeneration[kind] ?? 0) + 1;
-    _mediaEnrichmentGeneration[kind] = generation;
-    final targets = items
-        .where(
-          (item) =>
-              item.kind == ContentKind.movie ||
-              item.kind == ContentKind.series ||
-              item.kind == ContentKind.episode,
-        )
-        .take(maxItems ?? items.length)
-        .toList();
-    if (targets.isEmpty) return;
-    setState(() {
-      _mediaEnriching[kind] = true;
-      _mediaEnrichmentProgress[kind] = (done: 0, total: targets.length);
-    });
-    var done = 0;
-    try {
-      const chunkSize = 20;
-      for (var start = 0; start < targets.length; start += chunkSize) {
-        if (_mediaEnrichmentGeneration[kind] != generation) return;
-        final chunk = targets.skip(start).take(chunkSize).toList();
-        final enriched = await widget.repo.enrichMediaMetadata(chunk);
-        if (!mounted || _mediaEnrichmentGeneration[kind] != generation) return;
-        done += chunk.length;
-        final enrichedById = {for (final item in enriched) item.id: item};
-        setState(() {
-          _replaceMediaItemsInState(kind, enrichedById);
-          _mediaEnrichmentProgress[kind] = (done: done, total: targets.length);
-        });
-        await Future<void>.delayed(Duration.zero);
-      }
-      if (!mounted || _mediaEnrichmentGeneration[kind] != generation) return;
-      setState(() {
-        _mediaEnriching[kind] = false;
-        _mediaEnrichmentProgress.remove(kind);
-      });
-    } catch (e) {
-      if (!mounted) return;
-      if (_mediaEnrichmentGeneration[kind] != generation) return;
-      setState(() => _mediaEnriching[kind] = false);
-      if (showErrors) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Metadata enrichment failed: $e')),
-        );
-      }
-    }
-  }
-
-  void _replaceMediaItemsInState(
-    ContentKind kind,
-    Map<String, MediaItem> replacements,
-  ) {
-    if (replacements.isEmpty) return;
-    final snapshot = _media[kind];
-    if (snapshot != null) {
-      _media[kind] = snapshot.copyWith(
-        items: [
-          for (final item in snapshot.items) replacements[item.id] ?? item,
-        ],
-      );
-    }
-    final searchResults = _mediaSearchResults[kind];
-    if (searchResults != null) {
-      _mediaSearchResults[kind] = [
-        for (final item in searchResults) replacements[item.id] ?? item,
-      ];
-    }
-  }
-
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
@@ -787,56 +636,16 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _scheduleLiveFocusNodePrune();
       return;
     }
-    _cancelMediaEnrichment(_tab);
+    final controller = _media(_tab);
     final query = value.trim();
     if (query.length < 2) {
-      setState(() {
-        _cancelMediaEnrichment(_tab);
-        _mediaSearching[_tab] = false;
-        _mediaSearchResults.remove(_tab);
-        _mediaSearchQuery.remove(_tab);
-      });
+      controller.clearSearch();
       return;
     }
     _searchTimer = Timer(
       const Duration(milliseconds: 450),
-      () => _searchMedia(_tab, query),
+      () => controller.search(query),
     );
-  }
-
-  Future<void> _searchMedia(ContentKind kind, String query) async {
-    final categoryId = _effectiveMediaLoadCategory(kind);
-    setState(() {
-      _cancelMediaEnrichment(kind);
-      _mediaSearching[kind] = true;
-      _mediaError[kind] = null;
-    });
-    try {
-      final results = await widget.repo.searchMedia(
-        kind,
-        query,
-        categoryId: categoryId,
-      );
-      if (!mounted || _tab != kind || _query.trim() != query) return;
-      DiagnosticsLog.instance.add(
-        'library',
-        'search ${kind.name} source=${widget.repo.source.name} query="$query" results=${results.length} category=${categoryId ?? '<all>'}',
-      );
-      setState(() {
-        _mediaSearchResults[kind] = results;
-        _mediaSearchQuery[kind] = query;
-        _mediaSearching[kind] = false;
-      });
-      if (widget.repo.autoEnrichMetadata) {
-        unawaited(_autoEnrichMediaItems(kind, results));
-      }
-    } catch (e) {
-      if (!mounted || _tab != kind || _query.trim() != query) return;
-      setState(() {
-        _mediaError[kind] = '$e';
-        _mediaSearching[kind] = false;
-      });
-    }
   }
 
   /// Category ids the user disabled for [kind] in source settings.
@@ -877,19 +686,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (set.isEmpty) {
         if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
           _categoryId = null;
-        } else if (_mediaCategoryId[kind] == kFavoritesCategoryId) {
-          _mediaCategoryId[kind] = null;
+        } else if (kind != ContentKind.live) {
+          _media(kind).resetFavoritesCategoryToAll();
         }
       }
     });
-  }
-
-  /// The real category id to load from the source for [kind] — the Favorites
-  /// pseudo-category isn't a provider category, so it loads the full "All" set
-  /// and is filtered client-side.
-  String? _effectiveMediaLoadCategory(ContentKind kind) {
-    final selected = _mediaCategoryId[kind];
-    return selected == kFavoritesCategoryId ? null : selected;
   }
 
   /// Live categories shown in the pane/dropdown: the Favorites entry (only when
@@ -921,7 +722,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   /// Media categories for [kind] with disabled ones removed.
   List<MediaCategory> _visibleMediaCategories(ContentKind kind) {
-    final all = _media[kind]?.categories ?? const <MediaCategory>[];
+    final all = _media(kind).snapshot?.categories ?? const <MediaCategory>[];
     final hidden = _hiddenCategories(kind);
     if (hidden.isEmpty) return all;
     return all.where((c) => !hidden.contains(c.id)).toList();
@@ -946,18 +747,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   List<MediaItem> _visibleMedia(ContentKind kind) {
+    final controller = _media(kind);
     final q = _query.trim().toLowerCase();
-    final favoritesView = _mediaCategoryId[kind] == kFavoritesCategoryId;
+    final favoritesView = controller.categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(kind) : null;
     final hidden = _hiddenCategories(kind);
-    if (q.length >= 2 && _mediaSearchQuery[kind] == _query.trim()) {
-      final results = _mediaSearchResults[kind] ?? const <MediaItem>[];
+    if (q.length >= 2 && controller.searchQuery == _query.trim()) {
+      final results = controller.searchResults;
       return results.where((item) {
         if (favoritesView) return favs!.contains(item.id);
         return !hidden.contains(item.categoryId);
       }).toList();
     }
-    final items = _media[kind]?.items ?? const <MediaItem>[];
+    final items = controller.snapshot?.items ?? const <MediaItem>[];
     return items.where((item) {
       if (favoritesView) {
         if (!favs!.contains(item.id)) return false;
@@ -1165,11 +967,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   void _replaceMediaItem(MediaItem replacement) {
-    setState(() {
-      _replaceMediaItemsInState(replacement.kind, {
-        replacement.id: replacement,
-      });
-    });
+    _media(replacement.kind).replaceItems({replacement.id: replacement});
   }
 
   Future<void> _playMedia(MediaItem item) async {
@@ -1185,7 +983,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       final stream = await widget.repo.resolveMedia(item);
       if (!mounted) return;
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
-        _lastPlayedMediaId[_tab] = item.id;
+        _media(_tab).setLastPlayed(item.id);
       }
       await navigator.push(
         MaterialPageRoute(
@@ -1253,7 +1051,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   String _mediaStatusLine(ContentKind kind, int count) {
-    final snap = _media[kind];
+    final snap = _media(kind).snapshot;
     final label = kind == ContentKind.movie ? 'movies' : 'series';
     final searching = _query.trim().length >= 2;
     final b = StringBuffer(
@@ -1261,7 +1059,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           ? 'Found ${_fmt(count)} $label'
           : 'Showing ${_fmt(count)} $label',
     );
-    final categoryId = _mediaCategoryId[kind];
+    final categoryId = _media(kind).categoryId;
     if (categoryId == kFavoritesCategoryId) {
       b.write(' in Favorites');
     } else if (categoryId != null) {
@@ -1291,8 +1089,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   // new content isn't shown scrolled to the previous position. Post-frame so the
   // new list has attached before we move it.
   void _scrollToTop() {
+    final controller = _tab == ContentKind.live
+        ? _scrollController
+        : _media(_tab).scrollController;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) _scrollController.jumpTo(0);
+      if (controller.hasClients) controller.jumpTo(0);
     });
   }
 
@@ -1302,22 +1103,21 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (previous == ContentKind.live && kind != ContentKind.live) {
       unawaited(_stopLivePreviewPlayback());
     }
+    if (previous != ContentKind.live) {
+      _media(previous).clearSearch();
+    }
     setState(() {
       _tab = kind;
       _query = '';
       _searchController.clear();
       _searchTimer?.cancel();
-      _mediaSearchResults.remove(previous);
-      _mediaSearchQuery.remove(previous);
-      _mediaSearching[previous] = false;
-      _cancelMediaEnrichment(previous);
     });
     DiagnosticsLog.instance.add(
       'library',
       'tab source=${widget.repo.source.name} ${previous.name}->${kind.name}',
     );
-    if (kind != ContentKind.live && !_media.containsKey(kind)) {
-      _loadMedia(kind);
+    if (kind != ContentKind.live && _media(kind).snapshot == null) {
+      _loadMediaTab(kind);
     }
     _scrollToTop();
   }
@@ -1361,11 +1161,12 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 IconButton(
                   tooltip: 'Refresh from source',
                   icon: const Icon(Icons.refresh),
-                  onPressed: _loading || _mediaLoading[_tab] == true
+                  onPressed: _loading ||
+                          (_tab != ContentKind.live && _media(_tab).loading)
                       ? null
                       : () => _tab == ContentKind.live
                             ? _load(forceRefresh: true)
-                            : _loadMedia(_tab, forceRefresh: true),
+                            : _loadMediaTab(_tab, forceRefresh: true),
                 ),
                 const SizedBox(width: 4),
               ],
@@ -1415,20 +1216,16 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         )
                       : _MediaCategoryDropdown(
                           categories: _mediaCategoriesForUi(_tab),
-                          value: _mediaCategoryId[_tab],
+                          value: _media(_tab).categoryId,
                           onChanged: (v) {
-                            setState(() {
-                              _mediaCategoryId[_tab] = v;
-                              _mediaSearchResults.remove(_tab);
-                              _mediaSearchQuery.remove(_tab);
-                            });
-                            _loadMedia(_tab);
+                            final kind = _tab;
+                            _loadMediaTab(kind, category: v, switchCategory: true);
                             _scrollToTop();
                             if (_query.trim().length >= 2) {
                               _searchTimer?.cancel();
                               _searchTimer = Timer(
                                 const Duration(milliseconds: 250),
-                                () => _searchMedia(_tab, _query.trim()),
+                                () => _media(kind).search(_query.trim()),
                               );
                             }
                           },
@@ -1437,20 +1234,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   _tab == ContentKind.live || !widget.repo.canEnrichMetadata
                   ? null
                   : _ToolbarIconButton(
-                      tooltip: _mediaEnriching[_tab] == true
+                      tooltip: _media(_tab).enriching
                           ? 'Cancel metadata refresh'
                           : 'Refresh displayed metadata',
-                      busy: _mediaEnriching[_tab] == true,
-                      icon: _mediaEnriching[_tab] == true
+                      busy: _media(_tab).enriching,
+                      icon: _media(_tab).enriching
                           ? Icons.stop_rounded
                           : Icons.auto_awesome_outlined,
                       onPressed:
-                          _mediaLoading[_tab] == true ||
-                              _mediaSearching[_tab] == true
+                          _media(_tab).loading || _media(_tab).searching
                           ? null
-                          : _mediaEnriching[_tab] == true
-                          ? () => setState(() => _cancelMediaEnrichment(_tab))
-                          : () => _enrichVisibleMedia(_tab),
+                          : _media(_tab).enriching
+                          ? _media(_tab).cancelEnrich
+                          : () => _media(_tab).enrichVisible(_visibleMedia(_tab)),
                     ),
             ),
             Padding(
@@ -1469,18 +1265,18 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                   : MediaTabView(
                       kind: _tab,
                       visible: _visibleMedia(_tab),
-                      snapshot: _media[_tab],
-                      loading: _mediaLoading[_tab] == true,
-                      loadingMore: _mediaLoadingMore[_tab] == true,
-                      error: _mediaError[_tab],
+                      snapshot: _media(_tab).snapshot,
+                      loading: _media(_tab).loading,
+                      loadingMore: _media(_tab).loadingMore,
+                      error: _media(_tab).error,
                       showingSearch: _query.trim().length >= 2,
-                      lastPlayedId: _lastPlayedMediaId[_tab],
-                      scrollController: _scrollController,
-                      firstFocusNode: _firstMediaFocusNodes[_tab],
+                      lastPlayedId: _media(_tab).lastPlayedId,
+                      scrollController: _media(_tab).scrollController,
+                      firstFocusNode: _media(_tab).firstFocusNode,
                       isFavorite: (id) => _isFavorite(_tab, id),
                       onOpenMedia: _openMedia,
-                      onLoadMore: () => _loadMoreMedia(_tab),
-                      onRetry: () => _loadMedia(_tab, forceRefresh: true),
+                      onLoadMore: () => _media(_tab).loadMore(),
+                      onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
                     ),
             ),
           ],
@@ -1493,10 +1289,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (_tab == ContentKind.live) {
       return _loading ? '' : _statusLine(visibleLiveCount);
     }
-    if (_mediaLoading[_tab] == true) return '';
-    if (_mediaSearching[_tab] == true) return 'Searching provider...';
-    if (_mediaEnriching[_tab] == true) {
-      final progress = _mediaEnrichmentProgress[_tab];
+    if (_media(_tab).loading) return '';
+    if (_media(_tab).searching) return 'Searching provider...';
+    if (_media(_tab).enriching) {
+      final progress = _media(_tab).enrichmentProgress;
       if (progress != null) {
         return 'Refreshing metadata ${_fmt(progress.done)}/${_fmt(progress.total)} · press stop to cancel';
       }
