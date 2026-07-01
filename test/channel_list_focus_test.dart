@@ -201,6 +201,38 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('ArrowDown from the last channel wraps back to the first',
+      (tester) async {
+    // Guards the wrap branch of _moveDownInLiveChannels (nextIndex == 0): from
+    // the last visible channel, ArrowDown returns to live.channel.first — the
+    // path that jumps the list to the top and re-requests focus post-frame.
+    // DemoSource has 4 channels, all visible in the wide layout.
+    await pumpWideScreen(tester);
+    final lastChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .lastWhere(
+          (c) =>
+              (c.focusNode?.debugLabel?.startsWith('live.channel.') ?? false) &&
+              c.focusNode?.debugLabel != 'live.channel.first',
+        );
+    lastChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), startsWith('live.channel.'));
+    expect(focusLabel(), isNot('live.channel.first'));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(
+      focusLabel(),
+      'live.channel.first',
+      reason: 'ArrowDown from the last channel should wrap to the first',
+    );
+
+    await unmount(tester);
+  });
+
   testWidgets('switching to the Series tab swaps out the live pane',
       (tester) async {
     await pumpWideScreen(tester);
