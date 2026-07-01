@@ -1225,7 +1225,51 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             ),
             Expanded(
               child: _tab == ContentKind.live
-                  ? _body(visible)
+                  ? LiveTabView(
+                      loading: _live.loading,
+                      error: _live.error,
+                      onRetry: () => _loadLive(forceRefresh: true),
+                      visible: visible,
+                      previewChannel: _resolvePreviewChannel(visible),
+                      now: _live.now,
+                      next: _live.next,
+                      deliberate: _deliberatePreview,
+                      resolving: _resolving,
+                      scrollController: _scrollController,
+                      firstChannelFocusNode: _firstChannelFocusNode,
+                      focusNodeForChannel: _focusNodeForLiveChannel,
+                      lastPlayedChannelId: _lastPlayedLiveChannelId,
+                      previewChannelId: _previewChannelId,
+                      isFavorite: (id) => _isFavorite(ContentKind.live, id),
+                      onToggleFavorite: (id) =>
+                          _toggleFavorite(ContentKind.live, id),
+                      onPlayChannel: _play,
+                      onLongPressChannel: _showPreviewSheet,
+                      onChannelMoveLeft: (id) {
+                        _rememberBrowsedLiveChannel(id);
+                        _focusCategoryFromChannels();
+                      },
+                      onChannelMoveDown: _moveDownInLiveChannels,
+                      categories: _liveCategoriesForUi,
+                      selectedCategoryId: _categoryId,
+                      selectedCategoryFocusNode:
+                          _focusNodeForCategory(_categoryId),
+                      onCategorySelected: (value) {
+                        setState(() => _categoryId = value);
+                        _scheduleLiveFocusNodePrune();
+                        _scrollToTop();
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted) return;
+                          _focusNodeForCategory(_categoryId).requestFocus();
+                          _lastLiveFocusArea = _LiveFocusArea.category;
+                        });
+                      },
+                      onMoveRightToChannels: _focusChannelsFromCategory,
+                      onPaneFallbackKey: _handleLivePaneFallbackKey,
+                      previewControllerBuilder: () => _previewController,
+                      previewLoading: _previewLoading,
+                      previewError: _previewError,
+                    )
                   : MediaTabView(
                       kind: _tab,
                       visible: _visibleMedia(_tab),
@@ -1265,9 +1309,147 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return _mediaStatusLine(_tab, _visibleMedia(_tab).length);
   }
 
-  Widget _body(List<Channel> visible) {
-    if (_live.loading) return const Center(child: CircularProgressIndicator());
-    if (_live.error != null) {
+  /// The channel the live preview panel should show: on a TV remote it follows
+  /// D-pad focus (last focused), on desktop the auto-preview selection; falls
+  /// back to the last-played channel and finally the first visible one.
+  Channel? _resolvePreviewChannel(List<Channel> visible) {
+    if (visible.isEmpty) return null;
+    Channel? byId(String? id) => id == null
+        ? null
+        : _live.channels.where((c) => c.id == id).firstOrNull;
+    if (_deliberatePreview) {
+      return byId(_lastFocusedLiveChannelId) ??
+          byId(_previewChannelId) ??
+          byId(_lastPlayedLiveChannelId) ??
+          visible.first;
+    }
+    return byId(_previewChannelId) ??
+        byId(_lastPlayedLiveChannelId) ??
+        visible.first;
+  }
+}
+
+/// The live-TV browsing body: the channel list (with the category side-pane and
+/// preview panel on wide layouts, plain list on phones), plus its D-pad focus
+/// wiring. Extracted from `ChannelListScreen`'s State as a widget with an
+/// explicit contract so it rebuilds independently; the preview player, focus
+/// nodes, and D-pad handlers stay owned by the screen and are injected here.
+class LiveTabView extends StatelessWidget {
+  final bool loading;
+  final String? error;
+  final VoidCallback onRetry;
+
+  final List<Channel> visible;
+
+  /// Resolved preview target (null only when [visible] is empty).
+  final Channel? previewChannel;
+  final Map<String, Programme> now;
+  final Map<String, Programme> next;
+
+  final bool deliberate;
+  final bool resolving;
+  final ScrollController scrollController;
+
+  final FocusNode firstChannelFocusNode;
+  final FocusNode Function(String channelId) focusNodeForChannel;
+  final String? lastPlayedChannelId;
+  final String? previewChannelId;
+
+  final bool Function(String id) isFavorite;
+  final ValueChanged<String> onToggleFavorite;
+  final ValueChanged<Channel> onPlayChannel;
+  final ValueChanged<Channel> onLongPressChannel;
+  final ValueChanged<String> onChannelMoveLeft;
+  final ValueChanged<String> onChannelMoveDown;
+
+  final List<Category> categories;
+  final String? selectedCategoryId;
+  final FocusNode selectedCategoryFocusNode;
+  final ValueChanged<String?> onCategorySelected;
+  final VoidCallback onMoveRightToChannels;
+  final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
+
+  /// Built lazily (only when the wide preview panel actually renders) so the
+  /// media_kit VideoController — and its native video-output — isn't created
+  /// during loading / on phones / when it's never shown.
+  final VideoController Function() previewControllerBuilder;
+  final bool previewLoading;
+  final String? previewError;
+
+  const LiveTabView({
+    super.key,
+    required this.loading,
+    required this.error,
+    required this.onRetry,
+    required this.visible,
+    required this.previewChannel,
+    required this.now,
+    required this.next,
+    required this.deliberate,
+    required this.resolving,
+    required this.scrollController,
+    required this.firstChannelFocusNode,
+    required this.focusNodeForChannel,
+    required this.lastPlayedChannelId,
+    required this.previewChannelId,
+    required this.isFavorite,
+    required this.onToggleFavorite,
+    required this.onPlayChannel,
+    required this.onLongPressChannel,
+    required this.onChannelMoveLeft,
+    required this.onChannelMoveDown,
+    required this.categories,
+    required this.selectedCategoryId,
+    required this.selectedCategoryFocusNode,
+    required this.onCategorySelected,
+    required this.onMoveRightToChannels,
+    required this.onPaneFallbackKey,
+    required this.previewControllerBuilder,
+    required this.previewLoading,
+    required this.previewError,
+  });
+
+  Widget _buildChannelList(
+    BuildContext context, {
+    EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
+  }) {
+    final allowLongPressPreview =
+        deliberate && MediaQuery.of(context).size.width < 950;
+    return ListView.builder(
+      controller: scrollController,
+      padding: padding,
+      scrollCacheExtent: const ScrollCacheExtent.pixels(
+        120,
+      ), // keep nearby rows built for D-pad without over-prefetching logos
+      itemCount: visible.length,
+      itemBuilder: (context, i) {
+        final c = visible[i];
+        return _ChannelTile(
+          channel: c,
+          now: now[c.id],
+          next: next[c.id],
+          favorite: isFavorite(c.id),
+          debugLabel: 'live.channel.${c.id}',
+          enabled: !resolving,
+          autofocus: lastPlayedChannelId == null
+              ? i == 0
+              : c.id == lastPlayedChannelId,
+          focusNode: i == 0 ? firstChannelFocusNode : focusNodeForChannel(c.id),
+          onTap: () => onPlayChannel(c),
+          onLongPress:
+              allowLongPressPreview ? () => onLongPressChannel(c) : null,
+          selected: c.id == previewChannelId,
+          onMoveLeftToCategory: () => onChannelMoveLeft(c.id),
+          onMoveDown: () => onChannelMoveDown(c.id),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) return const Center(child: CircularProgressIndicator());
+    if (error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -1275,13 +1457,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Couldn\'t load this source.\n${_live.error}',
+                'Couldn\'t load this source.\n$error',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: AppColors.textLo),
               ),
               const SizedBox(height: 16),
               FilledButton(
-                onPressed: () => _loadLive(forceRefresh: true),
+                onPressed: onRetry,
                 child: const Text('Try again'),
               ),
             ],
@@ -1297,69 +1479,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         ),
       );
     }
-    // On a TV remote the panel follows D-pad focus (it shows the focused
-    // channel's logo + EPG until OK starts a preview); on desktop it follows
-    // the auto-preview selection.
-    final preview = _deliberatePreview
-        ? (_live.channels.where((c) => c.id == _lastFocusedLiveChannelId).firstOrNull ??
-            _live.channels.where((c) => c.id == _previewChannelId).firstOrNull ??
-            _live.channels.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
-            visible.first)
-        : (_live.channels.where((c) => c.id == _previewChannelId).firstOrNull ??
-            _live.channels.where((c) => c.id == _lastPlayedLiveChannelId).firstOrNull ??
-            visible.first);
-
-    // Phones have no split-pane preview, so offer a deliberate preview via
-    // long-press; tap still goes straight to fullscreen.
-    final allowLongPressPreview =
-        _deliberatePreview && MediaQuery.of(context).size.width < 950;
-
-    Widget buildChannelList({EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16)}) {
-      return ListView.builder(
-        controller: _scrollController,
-        padding: padding,
-        scrollCacheExtent: const ScrollCacheExtent.pixels(
-          120,
-        ), // keep nearby rows built for D-pad without over-prefetching logos
-        itemCount: visible.length,
-        itemBuilder: (context, i) {
-          final c = visible[i];
-          return _ChannelTile(
-            channel: c,
-            now: _live.now[c.id],
-            next: _live.next[c.id],
-            favorite: _isFavorite(ContentKind.live, c.id),
-            debugLabel: 'live.channel.${c.id}',
-            enabled: !_resolving,
-            autofocus: _lastPlayedLiveChannelId == null
-                ? i == 0
-                : c.id == _lastPlayedLiveChannelId,
-            focusNode: i == 0
-              ? _firstChannelFocusNode
-              : _focusNodeForLiveChannel(c.id),
-            onTap: () => _play(c),
-            onLongPress:
-                allowLongPressPreview ? () => _showPreviewSheet(c) : null,
-            selected: c.id == _previewChannelId,
-            onMoveLeftToCategory: () {
-              _rememberBrowsedLiveChannel(c.id);
-              _focusCategoryFromChannels();
-            },
-            onMoveDown: () {
-              _moveDownInLiveChannels(c.id);
-            },
-          );
-        },
-      );
-    }
-
+    final preview = previewChannel!;
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < 950) return buildChannelList();
+        if (constraints.maxWidth < 950) return _buildChannelList(context);
         return Focus(
           canRequestFocus: false,
           skipTraversal: true,
-          onKeyEvent: _handleLivePaneFallbackKey,
+          onKeyEvent: onPaneFallbackKey,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
             child: Row(
@@ -1367,24 +1494,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 SizedBox(
                   width: 240,
                   child: _LiveCategoryPane(
-                    categories: _liveCategoriesForUi,
-                    selectedCategoryId: _categoryId,
-                    selectedFocusNode: _focusNodeForCategory(_categoryId),
-                    onSelected: (value) {
-                      setState(() {
-                        _categoryId = value;
-                      });
-                      _scheduleLiveFocusNodePrune();
-                      _scrollToTop();
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (!mounted) return;
-                        _focusNodeForCategory(_categoryId).requestFocus();
-                        _lastLiveFocusArea = _LiveFocusArea.category;
-                      });
-                    },
-                    onMoveRightToChannels: () {
-                      _focusChannelsFromCategory();
-                    },
+                    categories: categories,
+                    selectedCategoryId: selectedCategoryId,
+                    selectedFocusNode: selectedCategoryFocusNode,
+                    onSelected: onCategorySelected,
+                    onMoveRightToChannels: onMoveRightToChannels,
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -1393,23 +1507,23 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                     children: [
                       _LivePreviewPanel(
                         channel: preview,
-                        now: _live.now[preview.id],
-                        next: _live.next[preview.id],
-                        previewController: _previewController,
-                        previewActive: _previewChannelId == preview.id,
+                        now: now[preview.id],
+                        next: next[preview.id],
+                        previewController: previewControllerBuilder(),
+                        previewActive: previewChannelId == preview.id,
                         previewLoading:
-                            _previewLoading && _previewChannelId == preview.id,
-                        previewError: _previewChannelId == preview.id
-                            ? _previewError
+                            previewLoading && previewChannelId == preview.id,
+                        previewError: previewChannelId == preview.id
+                            ? previewError
                             : null,
-                        deliberate: _deliberatePreview,
-                        favorite: _isFavorite(ContentKind.live, preview.id),
-                        onToggleFavorite: () =>
-                            _toggleFavorite(ContentKind.live, preview.id),
+                        deliberate: deliberate,
+                        favorite: isFavorite(preview.id),
+                        onToggleFavorite: () => onToggleFavorite(preview.id),
                       ),
                       const SizedBox(height: 8),
                       Expanded(
-                        child: buildChannelList(
+                        child: _buildChannelList(
+                          context,
                           padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
                         ),
                       ),
@@ -1423,7 +1537,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       },
     );
   }
-
 }
 
 /// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
