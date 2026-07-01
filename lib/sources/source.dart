@@ -248,6 +248,14 @@ abstract class Source {
   /// never ahead of it.
   Future<StreamInfo> resolve(Channel channel);
 
+  /// Resolve a *past* [programme] on [channel] into a playable catch-up /
+  /// archive stream — [StreamInfo.isLive] is false, so it plays with a finite
+  /// seek bar. Resolve at play time, like [resolve] (archive URLs are as
+  /// short-lived as live ones). Only called for channels with
+  /// [Channel.hasArchive]; sources without catch-up throw.
+  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
+      throw UnsupportedError('$runtimeType does not support catch-up');
+
   /// Electronic program guide for roughly the next few hours, given the
   /// source's [channels] (XMLTV sources need them to map tvg-id → channel id;
   /// Stalker ignores them and keys by channel id directly). Programmes are

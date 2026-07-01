@@ -175,6 +175,23 @@ void main() {
     });
   });
 
+  group('Stalker archiveUrl', () {
+    // now = 2024-03-05 21:00:00 UTC, start = 20:30 UTC → utc/lutc in seconds.
+    final start = DateTime.utc(2024, 3, 5, 20, 30);
+    final now = DateTime.utc(2024, 3, 5, 21);
+
+    test('appends utc/lutc with ? when the URL has no query', () {
+      final url = StalkerSource.archiveUrl('http://host/stream.ts', start, now);
+      expect(url, 'http://host/stream.ts?utc=1709670600&lutc=1709672400');
+    });
+
+    test('appends with & when the URL already has a query', () {
+      final url =
+          StalkerSource.archiveUrl('http://host/stream.ts?token=x', start, now);
+      expect(url, 'http://host/stream.ts?token=x&utc=1709670600&lutc=1709672400');
+    });
+  });
+
   group('Stalker series detail fallback', () {
     final source = StalkerSource(
       portal: 'http://example.invalid/c/',
@@ -396,6 +413,42 @@ void main() {
       expect(chans[2].archiveDays, 0);
       expect(chans[2].hasArchive, isFalse);
       expect(chans[3].archiveDays, 0);
+    });
+
+    test('resolveArchive builds a timeshift URL for a past programme', () async {
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        streamExtension: 'ts',
+      );
+      // Local time so the Y-m-d:H-i stamp is deterministic regardless of the
+      // CI timezone (the resolver formats start.toLocal()).
+      final programme = Programme(
+        channelId: '42',
+        start: DateTime(2024, 3, 5, 20, 30),
+        stop: DateTime(2024, 3, 5, 21, 15),
+        title: 'Past Show',
+      );
+
+      final stream = await source.resolveArchive(
+        const Channel(id: '42', name: 'Ch', archiveDays: 3),
+        programme,
+      );
+
+      // 45-minute duration, start stamp, stream id + extension.
+      expect(
+        stream.url,
+        'http://example.invalid/timeshift/user/pass/45/2024-03-05:20-30/42.ts',
+      );
+      expect(stream.isLive, isFalse);
+    });
+
+    test('timeshiftStart zero-pads the Y-m-d:H-i stamp', () {
+      expect(
+        XtreamSource.timeshiftStart(DateTime(2024, 1, 2, 3, 4)),
+        '2024-01-02:03-04',
+      );
     });
   });
 

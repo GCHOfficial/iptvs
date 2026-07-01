@@ -138,6 +138,10 @@ class DemoSource implements Source {
   }
 
   @override
+  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
+      throw UnsupportedError('DemoSource does not support catch-up');
+
+  @override
   Future<List<Programme>> epg(List<Channel> channels) async => const [];
 
   @override
