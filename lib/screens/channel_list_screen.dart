@@ -99,6 +99,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     debugLabel: 'live.channel.first',
   );
   final Map<String, FocusNode> _liveChannelFocusNodes = {};
+  bool _liveFocusPruneScheduled = false;
   final Map<String, FocusNode> _liveCategoryFocusNodes = {};
   _LiveFocusArea _lastLiveFocusArea = _LiveFocusArea.unknown;
   String? _lastPlayedLiveChannelId;
@@ -305,6 +306,28 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         return node;
       },
     );
+  }
+
+  /// Per-channel [FocusNode]s are created lazily as rows scroll into view. Left
+  /// unbounded they'd accumulate the union of every channel browsed this
+  /// session (thousands, on a large playlist). Prune back to the current
+  /// working set — the filtered [_visible] list — whenever that set changes.
+  /// Runs post-frame so we never dispose a node still attached to a live
+  /// widget, and never disposes the focused node (belt-and-suspenders; the
+  /// focused channel is normally in [_visible] anyway).
+  void _scheduleLiveFocusNodePrune() {
+    if (_liveFocusPruneScheduled) return;
+    _liveFocusPruneScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _liveFocusPruneScheduled = false;
+      if (!mounted) return;
+      final keep = _visible.map((c) => c.id).toSet();
+      _liveChannelFocusNodes.removeWhere((id, node) {
+        if (keep.contains(id) || node.hasFocus) return false;
+        node.dispose();
+        return true;
+      });
+    });
   }
 
   void _rememberBrowsedLiveChannel(String channelId) {
@@ -570,6 +593,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _fromCache = snap.fromCache;
         _loading = false;
       });
+      _scheduleLiveFocusNodePrune();
       await _loadFavorites(ContentKind.live);
       await _refreshNowNext();
     } catch (e) {
@@ -759,7 +783,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
-    if (_tab == ContentKind.live) return;
+    if (_tab == ContentKind.live) {
+      _scheduleLiveFocusNodePrune();
+      return;
+    }
     _cancelMediaEnrichment(_tab);
     final query = value.trim();
     if (query.length < 2) {
@@ -1382,6 +1409,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                           value: _categoryId,
                           onChanged: (v) {
                             setState(() => _categoryId = v);
+                            _scheduleLiveFocusNodePrune();
                             _scrollToTop();
                           },
                         )
@@ -1571,6 +1599,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                       setState(() {
                         _categoryId = value;
                       });
+                      _scheduleLiveFocusNodePrune();
                       _scrollToTop();
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         if (!mounted) return;
