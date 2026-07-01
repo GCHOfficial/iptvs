@@ -1275,7 +1275,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Couldn\'t load this source.\n$_live.error',
+                'Couldn\'t load this source.\n${_live.error}',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: AppColors.textLo),
               ),
