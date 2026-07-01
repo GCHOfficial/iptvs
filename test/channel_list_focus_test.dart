@@ -33,6 +33,7 @@ import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
+import 'package:iptvs/widgets/tv_text_field.dart';
 
 void main() {
   late Directory tempDir;
@@ -203,6 +204,35 @@ void main() {
       findsOneWidget,
       reason: 'series content should return after round-tripping tabs',
     );
+
+    await unmount(tester);
+  });
+
+  testWidgets('search filters the media grid', (tester) async {
+    // Guards the media search path (query -> _visibleMedia filtering) that the
+    // controller move must preserve. DemoSource series is titled
+    // "Codec Test Series"; a non-matching query empties the grid, a matching
+    // one restores it.
+    await pumpWideScreen(tester);
+    await tester.tap(find.text('Series'));
+    await tester.pump();
+    await pumpUntil(tester, find.text('Codec Test Series'));
+
+    // Enter the search box (TvTextField is an "OK to edit" cell), type a
+    // non-matching query.
+    await tester.tap(find.byType(TvTextField));
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'zzzznomatch');
+    // Past the 450ms search debounce, then let it settle.
+    await tester.pump(const Duration(milliseconds: 500));
+    await pumpUntil(tester, find.text('No series match'));
+    expect(find.text('Codec Test Series'), findsNothing);
+
+    // A matching query brings it back.
+    await tester.enterText(find.byType(TextField), 'Codec');
+    await tester.pump(const Duration(milliseconds: 500));
+    await pumpUntil(tester, find.text('Codec Test Series'));
+    expect(find.text('Codec Test Series'), findsOneWidget);
 
     await unmount(tester);
   });
