@@ -716,7 +716,29 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     return all.where((c) => !hidden.contains(c.id)).toList();
   }
 
+  // Memoized filtered channel list. [_visible] is read from the build path
+  // *and* every D-pad key event (move-down, focus restore, prune), so on a
+  // large playlist an unmemoized O(N) filter would run several times per key
+  // repeat. The key fields compare by identity (List/Set/SourceConfig don't
+  // override ==): the controllers reassign fresh collections on change, and
+  // the config is a fresh object per reload.
+  List<Channel>? _visibleCache;
+  (String?, String, List<Channel>, Set<String>, SourceConfig)? _visibleKey;
+
   List<Channel> get _visible {
+    final key = (
+      _categoryId,
+      _query.trim().toLowerCase(),
+      _live.channels,
+      _favoriteIds(ContentKind.live),
+      widget.config,
+    );
+    if (_visibleKey == key) return _visibleCache!;
+    _visibleKey = key;
+    return _visibleCache = _computeVisible();
+  }
+
+  List<Channel> _computeVisible() {
     final q = _query.trim().toLowerCase();
     final favoritesView = _categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
