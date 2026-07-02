@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.TextureView
 import android.view.View
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -36,9 +37,15 @@ class ExoPlayerEngine(
     context: Context,
     private val state: PlayerUiState,
     private val headers: Map<String, String>,
-    private val onUnsupportedVideo: () -> Unit,
-    private val onRecoverableError: () -> Unit = {},
 ) : PlaybackEngine {
+
+    // Rebindable callbacks (not constructor params) because the engine can outlive
+    // its host: the shared preview engine is adopted by the fullscreen Activity,
+    // which must route these to *its* handlers (mpv fallback / live reconnect) and
+    // hand them back to the preview's on exit. See [SharedEngine].
+    var onUnsupportedVideo: (() -> Unit)? = null
+    var onRecoverableError: (() -> Unit)? = null
+    var onVideoSizeChanged: ((Int, Int) -> Unit)? = null
 
     private val playerView = PlayerView(context).apply {
         useController = false
@@ -114,6 +121,10 @@ class ExoPlayerEngine(
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (videoSize.width > 0) state.videoWidth = videoSize.width
             if (videoSize.height > 0) state.videoHeight = videoSize.height
+            if (videoSize.width > 0 && videoSize.height > 0) {
+                this@ExoPlayerEngine.onVideoSizeChanged
+                    ?.invoke(videoSize.width, videoSize.height)
+            }
             updateStreamInfo()
             playerView.post { applyAspect(state.aspect) }
         }
@@ -133,7 +144,7 @@ class ExoPlayerEngine(
             // Anything else (network/source) is transient -> let the host reconnect;
             // ExoPlayer otherwise stops in STATE_IDLE, which the stall watchdog can't
             // see (it's neither buffering nor ended).
-            if (isVideoDecodeError(error)) triggerFallback() else onRecoverableError()
+            if (isVideoDecodeError(error)) triggerFallback() else onRecoverableError?.invoke()
         }
     }
 
@@ -189,7 +200,7 @@ class ExoPlayerEngine(
     private fun triggerFallback() {
         if (fellBack) return
         fellBack = true
-        onUnsupportedVideo()
+        onUnsupportedVideo?.invoke()
     }
 
     // ---- Tracks -------------------------------------------------------------
@@ -399,6 +410,32 @@ class ExoPlayerEngine(
 
     override fun pause() {
         player.pause()
+    }
+
+    /** Resume playback (non-toggling) — a preview/adopted engine may be paused. */
+    fun play() {
+        player.play()
+    }
+
+    /**
+     * Route video into [texture] — the embedded preview platform view. Detaches
+     * the engine's own [view] first so the two never fight over the output; the
+     * audio pipeline and buffer are untouched.
+     */
+    fun attachPreviewTexture(texture: TextureView) {
+        playerView.player = null
+        player.setVideoTextureView(texture)
+    }
+
+    /**
+     * (Re)claim the engine's own [view] (SurfaceView-backed [PlayerView]) as the
+     * video output — used when the fullscreen Activity adopts a preview-owned
+     * engine. The null/reset dance forces [PlayerView] to re-take the surface
+     * even though the player instance hasn't changed.
+     */
+    fun claimViewSurface() {
+        playerView.player = null
+        playerView.player = player
     }
 
     override fun release() {

@@ -39,11 +39,13 @@ class PlayerScreen extends StatefulWidget {
   final Player? existingPlayer;
   final VideoController? existingController;
 
-  /// A frozen frame (JPEG bytes) captured from the preview this fullscreen open
-  /// came from. On Android the native HDR player shows it behind the video while
-  /// it re-buffers the stream, masking the black reload gap. Null when there was
-  /// no preview to capture (e.g. tapping a channel tile straight to fullscreen).
-  final Uint8List? placeholderFrame;
+  /// Android: the live preview is already playing this exact stream on the
+  /// *shared native engine*, and the native fullscreen Activity should adopt
+  /// it — moving only the video output to its own surface — instead of
+  /// reloading the stream. This is the seamless preview → fullscreen handoff:
+  /// audio, decoder and buffer are never interrupted. Mutually exclusive with
+  /// [existingPlayer] (that's the media_kit adoption used off Android).
+  final bool adoptNativePreview;
 
   const PlayerScreen({
     super.key,
@@ -54,7 +56,7 @@ class PlayerScreen extends StatefulWidget {
     this.epgNext,
     this.existingPlayer,
     this.existingController,
-    this.placeholderFrame,
+    this.adoptNativePreview = false,
   });
 
   @override
@@ -300,6 +302,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
 
+    // Adopted-handoff path that failed to launch natively: the preview's shared
+    // engine was deliberately left playing (seamless handoff), but this route is
+    // now about to open the stream itself — silence the engine or the audio
+    // doubles up behind the embedded fallback.
+    if (widget.adoptNativePreview) {
+      try {
+        await const MethodChannel(
+          'iptvs/native_preview',
+        ).invokeMethod<void>('pause');
+      } catch (_) {}
+    }
+
     int? nativeWindowHandle;
     if (_usesWindowsNativeSurface) {
       nativeWindowHandle = await _createWindowsNativeHdrSurface();
@@ -359,8 +373,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             if (widget.sourceName != null) 'sourceName': widget.sourceName,
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
-            if (widget.placeholderFrame != null)
-              'placeholder': widget.placeholderFrame,
+            'adoptShared': widget.adoptNativePreview,
             ..._epgPayload(),
             'subtitles': widget.stream.subtitles
                 .map(

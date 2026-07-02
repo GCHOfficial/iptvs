@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io' show Platform;
-import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
@@ -14,7 +13,6 @@ import 'package:flutter/services.dart'
         LogicalKeyboardKey,
         SystemNavigator;
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
@@ -805,42 +803,46 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   }
 
   /// Opens fullscreen playback for [channel]/[stream]. When [reusePreview] and
-  /// the preview is already showing this exact channel, hands its live [Player]
-  /// straight to [PlayerScreen] instead of resolving/opening fresh — the stream
-  /// is already buffering, so going fullscreen doesn't restart it, and the
-  /// preview is resumed on return. Only the wide-screen preview panel reuses;
-  /// the phone sheet passes [reusePreview] false (there's no panel to return to,
-  /// and Android's native HDR player reloads regardless), so it opens fresh and
-  /// the caller stops the preview afterward.
+  /// the preview is already showing this exact channel, the fullscreen player
+  /// *adopts* the running preview engine instead of resolving/opening fresh:
+  /// on Android the native Activity takes over the shared ExoPlayer engine
+  /// (only the video surface moves — audio and buffer never stop); elsewhere
+  /// the same media_kit [Player] is handed to [PlayerScreen]. Seamless either
+  /// way, so the preview is *not* paused around an adopted handoff.
+  ///
+  /// [resumePreviewOnReturn] is false for the phone sheet (no panel to return
+  /// to): the preview is stopped once fullscreen exits instead of resumed.
   Future<void> _openLivePlayer(
     Channel channel,
     StreamInfo stream, {
     bool reusePreview = true,
+    bool resumePreviewOnReturn = true,
   }) async {
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    final adoptPreview = reusePreview && _preview.channelId == channel.id;
-    final previewWasMuted = adoptPreview && _preview.player.state.volume == 0;
+    final adoptPreview =
+        reusePreview &&
+        _preview.channelId == channel.id &&
+        _preview.stream != null;
+    // Android + native preview engine: the fullscreen Activity adopts it.
+    final adoptNative =
+        adoptPreview && Platform.isAndroid && _preview.nativeActive;
+    final previewWasMuted = adoptPreview && _preview.isMuted;
     try {
       DiagnosticsLog.instance.add(
         'library',
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _lastPlayedLiveChannelId = channel.id;
-      // Grab the preview's current frame so the fullscreen player (esp. the
-      // Android native-HDR Activity, which reloads the stream from scratch) can
-      // show it as a frozen placeholder while it re-buffers — masking the black
-      // gap that reload would otherwise leave.
-      final placeholder =
-          (_preview.channelId == channel.id && _preview.stream != null)
-          ? await _capturePreviewFrame()
-          : null;
-      // Pause the preview during handoff so its audio doesn't play behind the
-      // fullscreen player (esp. the Android native-HDR path, which renders in a
-      // separate Activity). Resumed below when adopted, or stopped by the caller
-      // (phone sheet).
-      if (_preview.channelId == channel.id) await _preview.pause();
+      // An adopted engine keeps playing straight through the handoff (that's
+      // the seamless part). Only pause when the fullscreen player will open its
+      // own pipeline — i.e. Android's native player over a media_kit-fallback
+      // preview — so the preview's audio doesn't double up behind it.
+      final seamless = adoptPreview && (adoptNative || !Platform.isAndroid);
+      if (_preview.channelId == channel.id && !seamless) {
+        await _preview.pause();
+      }
       final hotSwapped =
           await navigator.push<bool>(
             MaterialPageRoute<bool>(
@@ -850,9 +852,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                 sourceName: widget.repo.source.name,
                 epgNow: _live.now[channel.id],
                 epgNext: _live.next[channel.id],
-                existingPlayer: adoptPreview ? _preview.player : null,
-                existingController: adoptPreview ? _preview.controller : null,
-                placeholderFrame: placeholder,
+                existingPlayer: (adoptPreview && !adoptNative)
+                    ? _preview.player
+                    : null,
+                existingController: (adoptPreview && !adoptNative)
+                    ? _preview.controller
+                    : null,
+                adoptNativePreview: adoptNative,
               ),
             ),
           ) ??
@@ -863,11 +869,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         // Windows native HDR surface, which just tore down — no longer safe
         // to reuse for the preview's embedded texture.
         await _preview.discardPlayer();
+      } else if (!resumePreviewOnReturn) {
+        // Phone sheet handoff: nothing shows the preview after fullscreen.
+        await _preview.stop(clearSelection: true);
       } else if (adoptPreview && _preview.stream != null) {
         await _preview.play();
         // Fullscreen always plays at full volume; restore a muted (desktop
         // auto-hover) preview instead of leaving it blaring once we return.
-        if (previewWasMuted) await _preview.player.setVolume(0);
+        if (previewWasMuted) await _preview.setMuted(true);
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
@@ -877,26 +886,16 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
-  /// Captures the preview player's current frame (JPEG bytes) to hand to the
-  /// fullscreen player as a frozen placeholder. Raced against a short timeout so
-  /// a slow/failed capture never delays the handoff — a null just means the
-  /// fullscreen player falls back to its plain launch surface.
-  Future<Uint8List?> _capturePreviewFrame() async {
-    try {
-      return await _preview.player.screenshot().timeout(
-        const Duration(milliseconds: 150),
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
   /// Phone-only: open a compact, audible preview of [channel] in a bottom
   /// sheet (tap on a tile still goes straight to fullscreen). Reuses the single
   /// preview player; the sheet's Play button hands off to fullscreen.
   Future<void> _showPreviewSheet(Channel channel) async {
     if (_resolving) return;
     unawaited(_preview.start(channel, muted: false));
+    // Set when Play hands the preview to fullscreen — the handoff owns the
+    // preview's lifecycle from there (stopped when fullscreen exits), so the
+    // post-sheet cleanup below must leave it alone.
+    var handedOff = false;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -905,8 +904,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (sheetContext) => _PhonePreviewSheet(
-        player: _preview.player,
-        controller: _preview.controller,
+        preview: _preview,
         channel: channel,
         now: _live.now[channel.id],
         next: _live.next[channel.id],
@@ -917,16 +915,26 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           final stream = _preview.stream;
           Navigator.of(sheetContext).pop();
           if (stream != null && _preview.channelId == channel.id) {
-            // Phone has no preview panel to return to and native HDR reloads
-            // anyway, so open fresh (no adoption) and stop the preview below.
-            unawaited(_openLivePlayer(channel, stream, reusePreview: false));
+            handedOff = true;
+            // A native preview hands off seamlessly (the fullscreen Activity
+            // adopts its engine); the media_kit fallback still opens fresh.
+            // Either way there's no panel to return to, so the preview is
+            // stopped when fullscreen exits rather than resumed.
+            unawaited(
+              _openLivePlayer(
+                channel,
+                stream,
+                reusePreview: _preview.nativeActive,
+                resumePreviewOnReturn: false,
+              ),
+            );
           } else {
             unawaited(_play(channel));
           }
         },
       ),
     );
-    await _preview.stop(clearSelection: true);
+    if (!handedOff) await _preview.stop(clearSelection: true);
   }
 
   /// Open the catch-up picker for an archive-capable [channel]: list its cached
@@ -1425,7 +1433,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         },
                         onMoveRightToChannels: _focusChannelsFromCategory,
                         onPaneFallbackKey: _handleLivePaneFallbackKey,
-                        previewControllerBuilder: () => _preview.controller,
+                        previewVideoBuilder: () =>
+                            PreviewVideo(preview: _preview),
                         previewLoading: _preview.loading,
                         previewError: _preview.error,
                       )
@@ -1535,10 +1544,10 @@ class LiveTabView extends StatelessWidget {
   final VoidCallback onMoveRightToChannels;
   final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
 
-  /// Built lazily (only when the wide preview panel actually renders) so the
-  /// media_kit VideoController — and its native video-output — isn't created
+  /// Built lazily (only when the wide preview panel actually renders) so no
+  /// video output — native platform view or media_kit texture — is created
   /// during loading / on phones / when it's never shown.
-  final VideoController Function() previewControllerBuilder;
+  final Widget Function() previewVideoBuilder;
   final bool previewLoading;
   final String? previewError;
 
@@ -1571,7 +1580,7 @@ class LiveTabView extends StatelessWidget {
     required this.onCategorySelected,
     required this.onMoveRightToChannels,
     required this.onPaneFallbackKey,
-    required this.previewControllerBuilder,
+    required this.previewVideoBuilder,
     required this.previewLoading,
     required this.previewError,
   });
@@ -1674,7 +1683,7 @@ class LiveTabView extends StatelessWidget {
                         channel: preview,
                         now: now[preview.id],
                         next: next[preview.id],
-                        previewController: previewControllerBuilder(),
+                        previewVideo: previewVideoBuilder(),
                         previewActive: previewChannelId == preview.id,
                         previewLoading:
                             previewLoading && previewChannelId == preview.id,
@@ -2279,7 +2288,9 @@ class _LivePreviewPanel extends StatelessWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
-  final VideoController previewController;
+  /// The preview's video widget ([PreviewVideo]) — native platform view or
+  /// media_kit texture, decided by the controller.
+  final Widget previewVideo;
   final bool previewActive;
   final bool previewLoading;
   final String? previewError;
@@ -2297,7 +2308,7 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.channel,
     required this.now,
     required this.next,
-    required this.previewController,
+    required this.previewVideo,
     required this.previewActive,
     required this.previewLoading,
     required this.previewError,
@@ -2372,12 +2383,7 @@ class _LivePreviewPanel extends StatelessWidget {
                             canRequestFocus: false,
                             skipTraversal: true,
                             descendantsAreFocusable: false,
-                            child: IgnorePointer(
-                              child: Video(
-                                controller: previewController,
-                                controls: NoVideoControls,
-                              ),
-                            ),
+                            child: IgnorePointer(child: previewVideo),
                           )
                         else if (channel.logo != null &&
                             channel.logo!.isNotEmpty)
@@ -2767,8 +2773,7 @@ class _CatchupSheet extends StatelessWidget {
 /// Phone-only bottom sheet: a compact, audible live preview with a Play button.
 /// Reuses the screen's single preview player/controller.
 class _PhonePreviewSheet extends StatefulWidget {
-  final Player player;
-  final VideoController controller;
+  final LivePreviewController preview;
   final Channel channel;
   final Programme? now;
   final Programme? next;
@@ -2780,8 +2785,7 @@ class _PhonePreviewSheet extends StatefulWidget {
   final VoidCallback? onCatchup;
 
   const _PhonePreviewSheet({
-    required this.player,
-    required this.controller,
+    required this.preview,
     required this.channel,
     required this.now,
     required this.next,
@@ -2796,20 +2800,37 @@ class _PhonePreviewSheet extends StatefulWidget {
 }
 
 class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
-  late bool _buffering = widget.player.state.buffering;
+  bool _buffering = false;
   late bool _favorite = widget.favorite;
   StreamSubscription<bool>? _bufferingSub;
 
   @override
   void initState() {
     super.initState();
-    _bufferingSub = widget.player.stream.buffering.listen((b) {
-      if (mounted) setState(() => _buffering = b);
-    });
+    widget.preview.addListener(_onPreviewChanged);
+    _onPreviewChanged();
+  }
+
+  /// The media_kit player exists only on the fallback path and is created
+  /// lazily mid-flight, so its buffering stream is subscribed to on demand —
+  /// the native path has no equivalent signal (the resolve/open `loading`
+  /// state covers the visible gap there).
+  void _onPreviewChanged() {
+    final preview = widget.preview;
+    if (!preview.nativeActive &&
+        preview.hasEmbeddedPlayer &&
+        _bufferingSub == null) {
+      _buffering = preview.player.state.buffering;
+      _bufferingSub = preview.player.stream.buffering.listen((b) {
+        if (mounted) setState(() => _buffering = b);
+      });
+    }
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    widget.preview.removeListener(_onPreviewChanged);
     _bufferingSub?.cancel();
     super.dispose();
   }
@@ -2847,11 +2868,14 @@ class _PhonePreviewSheetState extends State<_PhonePreviewSheet> {
                   fit: StackFit.expand,
                   children: [
                     Container(color: Colors.black),
-                    Video(
-                      controller: widget.controller,
-                      controls: NoVideoControls,
-                    ),
-                    if (_buffering)
+                    // Only once loaded: building PreviewVideo earlier would spin
+                    // up the media_kit texture while the native path is still
+                    // deciding whether it's needed at all.
+                    if (widget.preview.channelId == widget.channel.id &&
+                        widget.preview.stream != null &&
+                        widget.preview.error == null)
+                      PreviewVideo(preview: widget.preview),
+                    if (widget.preview.loading || _buffering)
                       const Center(
                         child: SizedBox(
                           width: 28,
