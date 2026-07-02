@@ -12,6 +12,7 @@ import 'package:flutter/services.dart'
         KeyUpEvent,
         LogicalKeyboardKey,
         SystemNavigator;
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:media_kit/media_kit.dart';
 
 import '../data/diagnostics_log.dart';
@@ -2412,14 +2413,23 @@ class _LivePreviewPanel extends StatelessWidget {
                           )
                         else if (channel.logo != null &&
                             channel.logo!.isNotEmpty)
-                          Image.network(
-                            channel.logo!,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => const Icon(
-                              Icons.live_tv_rounded,
-                              color: AppColors.textLo,
-                              size: 42,
-                            ),
+                          LayoutBuilder(
+                            builder: (context, constraints) =>
+                                CachedNetworkImage(
+                                  imageUrl: channel.logo!,
+                                  fit: BoxFit.cover,
+                                  memCacheWidth: _imageCacheSize(
+                                    context,
+                                    constraints.maxWidth.isFinite
+                                        ? constraints.maxWidth
+                                        : 480,
+                                  ),
+                                  errorWidget: (_, _, _) => const Icon(
+                                    Icons.live_tv_rounded,
+                                    color: AppColors.textLo,
+                                    size: 42,
+                                  ),
+                                ),
                           )
                         else
                           const Icon(
@@ -3181,7 +3191,7 @@ class _LogoState extends State<_Logo> {
           imageProvider: ResizeImage.resizeIfNeeded(
             cacheSize,
             cacheSize,
-            NetworkImage(logo),
+            CachedNetworkImageProvider(logo),
           ),
         ),
         width: size,
@@ -3759,14 +3769,15 @@ class _Poster extends StatelessWidget {
     if (poster == null || poster.isEmpty) return fallback;
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Image.network(
-        poster,
+      child: CachedNetworkImage(
+        imageUrl: poster,
         width: width,
         height: height,
         fit: BoxFit.cover,
-        errorBuilder: (_, _, _) => fallback,
-        loadingBuilder: (_, child, progress) =>
-            progress == null ? child : fallback,
+        memCacheWidth: _imageCacheSize(context, width),
+        memCacheHeight: _imageCacheSize(context, height),
+        errorWidget: (_, _, _) => fallback,
+        placeholder: (_, _) => fallback,
       ),
     );
   }
