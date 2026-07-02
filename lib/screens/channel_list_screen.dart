@@ -21,6 +21,7 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/profile_avatar.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
@@ -47,12 +48,13 @@ class ChannelListScreen extends StatefulWidget {
   final SourceConfig config;
   final VoidCallback? onManageSources;
 
-  /// When cloud sync is configured: the active profile's display name (used
-  /// for the avatar initial) and its index into the avatar colour palette.
+  /// The active profile's display name (used for the avatar initial) and its
+  /// index into the avatar colour palette.
   final String? profileName;
   final int profileColorIndex;
 
-  /// Avatar dropdown callbacks — only wired when cloud sync is configured.
+  /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is only wired
+  /// when the build has cloud config; "Change profile" is always available.
   final VoidCallback? onChangeProfile;
   final VoidCallback? onProfileSettings;
 
@@ -1258,7 +1260,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           title: Text(widget.repo.source.name),
           leading: (widget.onChangeProfile != null ||
                   widget.onProfileSettings != null)
-              ? _ProfileAvatar(
+              ? ProfileAvatarButton(
                   profileName: widget.profileName,
                   colorIndex: widget.profileColorIndex,
                   onChangeProfile: widget.onChangeProfile,
@@ -4242,89 +4244,3 @@ class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
     );
   }
 }
-
-// ── Profile avatar ─────────────────────────────────────────────────────────────
-
-const _kAvatarColors = [
-  Color(0xFF2D6BE4),
-  Color(0xFFE34040),
-  Color(0xFF2DBE8C),
-  Color(0xFFE87C26),
-  Color(0xFF8B5CF6),
-  Color(0xFFE84393),
-];
-
-class _ProfileAvatar extends StatelessWidget {
-  final String? profileName;
-  final int colorIndex;
-  final VoidCallback? onChangeProfile;
-  final VoidCallback? onProfileSettings;
-
-  const _ProfileAvatar({
-    required this.profileName,
-    required this.colorIndex,
-    required this.onChangeProfile,
-    required this.onProfileSettings,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final name = (profileName?.isNotEmpty == true) ? profileName! : null;
-    final initial = name != null ? name[0].toUpperCase() : null;
-    final color = _kAvatarColors[colorIndex % _kAvatarColors.length];
-
-    return PopupMenuButton<_ProfileMenuAction>(
-      tooltip: name ?? 'Profile',
-      offset: const Offset(0, 48),
-      onSelected: (action) {
-        switch (action) {
-          case _ProfileMenuAction.changeProfile:
-            onChangeProfile?.call();
-          case _ProfileMenuAction.profileSettings:
-            onProfileSettings?.call();
-        }
-      },
-      itemBuilder: (_) => [
-        PopupMenuItem(
-          value: _ProfileMenuAction.changeProfile,
-          child: const Row(
-            children: [
-              Icon(Icons.switch_account_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Change profile'),
-            ],
-          ),
-        ),
-        PopupMenuItem(
-          value: _ProfileMenuAction.profileSettings,
-          child: const Row(
-            children: [
-              Icon(Icons.cloud_sync_outlined, size: 18),
-              SizedBox(width: 10),
-              Text('Profile settings'),
-            ],
-          ),
-        ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: CircleAvatar(
-          radius: 16,
-          backgroundColor: color,
-          child: initial != null
-              ? Text(
-                  initial,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
-                )
-              : const Icon(Icons.person_outline, color: Colors.white, size: 18),
-        ),
-      ),
-    );
-  }
-}
-
-enum _ProfileMenuAction { changeProfile, profileSettings }

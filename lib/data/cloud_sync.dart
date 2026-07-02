@@ -363,6 +363,14 @@ class CloudSync {
     }
   }
 
+  /// The cloud-managed source ids from the last pull/push, exposed so profile
+  /// switching can snapshot/restore them alongside the source list (restoring
+  /// a local profile clears the set, so a later pull can't merge cloud sources
+  /// into it). Pure bookkeeping — no network.
+  Future<Set<String>> managedSourceIds() => _readCloudIds();
+
+  Future<void> setManagedSourceIds(Set<String> ids) => _writeCloudIds(ids);
+
   Future<Set<String>> _readCloudIds() async {
     final raw = await _storage.read(key: _kCloudIds);
     if (raw == null || raw.isEmpty) return <String>{};

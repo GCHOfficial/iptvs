@@ -14,6 +14,7 @@ import '../data/tmdb_client.dart';
 import '../data/tvdb_client.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import '../widgets/profile_avatar.dart';
 import 'channel_list_screen.dart';
 import 'cloud_sync_screen.dart';
 import 'profile_pick_screen.dart';
@@ -38,7 +39,8 @@ class _HomeShellState extends State<HomeShell> {
   bool _loading = true;
   bool Function(KeyEvent event)? _keyboardLogger;
 
-  // Cloud profile info for the avatar — loaded after the main source load.
+  // Active profile info for the avatar — loaded after the main source load.
+  // Local profile first (most-recently-selected), cloud profile as fallback.
   String? _profileName;
   int _profileColorIndex = 0;
 
@@ -117,9 +119,7 @@ class _HomeShellState extends State<HomeShell> {
             );
       _loading = false;
     });
-    if (CloudConfig.isConfigured) {
-      _loadProfileInfo();
-    }
+    _loadProfileInfo();
   }
 
   Future<void> _loadProfileInfo() async {
@@ -150,7 +150,7 @@ class _HomeShellState extends State<HomeShell> {
         if (profile != null) {
           setState(() {
             _profileName = profile.name;
-            _profileColorIndex = idx >= 0 ? idx : 0;
+            _profileColorIndex = profileColorIndexFor(profile.id);
           });
         }
       }
@@ -263,9 +263,11 @@ class _HomeShellState extends State<HomeShell> {
       repo: repo,
       config: _config!,
       onManageSources: _manageSources,
-      profileName: CloudConfig.isConfigured ? _profileName : null,
+      profileName: _profileName,
       profileColorIndex: _profileColorIndex,
-      onChangeProfile: CloudConfig.isConfigured ? _changeProfile : null,
+      onChangeProfile: _changeProfile,
+      // Profile settings = the cloud-sync screen; only meaningful when the
+      // build has cloud config.
       onProfileSettings: CloudConfig.isConfigured ? _profileSettings : null,
     );
   }

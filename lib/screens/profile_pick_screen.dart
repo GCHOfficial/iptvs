@@ -1,30 +1,22 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
 import '../data/local_profile_store.dart';
+import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
+import '../widgets/profile_avatar.dart';
 import 'cloud_sync_screen.dart';
 import 'home_shell.dart';
 
-// Cycling palette â€” shared with channel_list_screen.dart's avatar widget.
-const _kAvatarColors = [
-  Color(0xFF2D6BE4),
-  Color(0xFFE34040),
-  Color(0xFF2DBE8C),
-  Color(0xFFE87C26),
-  Color(0xFF8B5CF6),
-  Color(0xFFE84393),
-];
-
 enum _ProfileSource { cloud, local }
 
-/// A unified entry shown in the profile grid â€” can be a cloud profile or a
-/// locally-stored profile.
+/// A unified entry shown in the profile grid — a cloud profile (when the
+/// device is paired) or a locally-stored profile.
 class _ProfileEntry {
   final String id;
   final String name;
@@ -41,9 +33,15 @@ class _ProfileEntry {
   bool get isCloud => source == _ProfileSource.cloud;
 }
 
-/// Boot-time "Who's watching?" screen. Shows cloud profiles (when paired) and
-/// local profiles side-by-side, plus a "+" circle to create a new local
-/// profile. Always shown when [CloudConfig.isConfigured].
+/// "Who's watching?" screen. Local profiles work with no cloud account; cloud
+/// profiles appear alongside them when the build has Supabase config and the
+/// device is paired. A "+" circle creates a new local profile.
+///
+/// At boot ([bootMode]) the screen decides for itself whether to appear: the
+/// startup-mode setting ([LocalProfileStore.pickerStartup]) and the profile
+/// count feed [shouldShowPickerAtStartup]; when the answer is no it navigates
+/// straight to [HomeShell] without painting the grid, so the app boots exactly
+/// as before for single-profile users.
 ///
 /// Navigates to [HomeShell] (or calls [onDone]) when a profile is chosen or
 /// the user taps Skip.
@@ -51,7 +49,13 @@ class ProfilePickScreen extends StatefulWidget {
   final AppDatabase db;
   final SourceStore store;
 
-  /// Injectable for tests; defaults to the live Supabase-backed [CloudSync].
+  /// True when this screen is the app's `home` at startup — enables the
+  /// show-or-skip decision. False when pushed from the avatar menu, where the
+  /// user explicitly asked for it.
+  final bool bootMode;
+
+  /// Injectable for tests; defaults to the live Supabase-backed [CloudSync]
+  /// (only constructed when [CloudConfig.isConfigured]).
   final CloudSync? sync;
 
   /// Called instead of navigating to [HomeShell] when provided. Use this when
@@ -63,6 +67,7 @@ class ProfilePickScreen extends StatefulWidget {
     super.key,
     required this.db,
     required this.store,
+    this.bootMode = false,
     this.sync,
     this.onDone,
   });
@@ -72,8 +77,16 @@ class ProfilePickScreen extends StatefulWidget {
 }
 
 class _ProfilePickScreenState extends State<ProfilePickScreen> {
-  late final CloudSync _sync = widget.sync ?? CloudSync(db: widget.db);
-  final _localStore = LocalProfileStore();
+  CloudSync? _syncCached;
+
+  /// Null when the build has no cloud config — every cloud call is skipped.
+  CloudSync? get _sync {
+    if (widget.sync != null) return widget.sync;
+    if (!CloudConfig.isConfigured) return null;
+    return _syncCached ??= CloudSync(db: widget.db);
+  }
+
+  final _localStore = const LocalProfileStore();
 
   bool _checking = true;
   bool _busy = false;
@@ -96,48 +109,51 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   }
 
   Future<void> _check() async {
-    // â”€â”€ Cloud profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Cloud profiles — only when configured; a network error still shows the
+    // local profiles.
     List<CloudProfile> cloudProfiles = [];
     bool isPaired = false;
     String? cloudActiveId;
-    if (CloudConfig.isConfigured) {
+    final sync = _sync;
+    if (sync != null) {
       try {
-        await _sync.ensureAnonSession();
-        isPaired = await _sync.isPaired();
+        await sync.ensureAnonSession();
+        isPaired = await sync.isPaired();
         if (isPaired) {
-          cloudProfiles = await _sync.listProfiles();
-          cloudActiveId = await _sync.activeProfileId();
+          cloudProfiles = await sync.listProfiles();
+          cloudActiveId = await sync.activeProfileId();
         }
       } catch (_) {
-        // Network error â€” still show local profiles.
+        // Offline / backend unreachable — behave as unpaired for this visit.
       }
     }
 
-    // â”€â”€ Local profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     final localProfiles = await _localStore.loadAll();
     final localActiveId = await _localStore.activeId();
 
     if (!mounted) return;
 
-    // Build combined entry list: cloud first, then local.
+    // Combined entry list: cloud first, then local. Cloud colours are derived
+    // from the profile id so they don't shift when the panel reorders.
     final entries = <_ProfileEntry>[
-      for (var i = 0; i < cloudProfiles.length; i++)
+      for (final p in cloudProfiles)
         _ProfileEntry(
-          id: cloudProfiles[i].id,
-          name: cloudProfiles[i].name,
-          colorIndex: i,
+          id: p.id,
+          name: p.name,
+          colorIndex: profileColorIndexFor(p.id),
           source: _ProfileSource.cloud,
         ),
-      for (var i = 0; i < localProfiles.length; i++)
+      for (final p in localProfiles)
         _ProfileEntry(
-          id: localProfiles[i].id,
-          name: localProfiles[i].name,
-          colorIndex: cloudProfiles.length + i,
+          id: p.id,
+          name: p.name,
+          colorIndex: p.colorIndex,
           source: _ProfileSource.local,
         ),
     ];
 
-    // Determine the active profile (local takes precedence if set).
+    // Determine the active profile (an active local profile takes precedence:
+    // it's the most recent explicit selection).
     String? activeId;
     _ProfileSource? activeSource;
     if (localActiveId != null &&
@@ -151,6 +167,15 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     } else if (entries.isNotEmpty) {
       activeId = entries.first.id;
       activeSource = entries.first.source;
+    }
+
+    if (widget.bootMode) {
+      final mode = await _localStore.pickerStartup();
+      if (!mounted) return;
+      if (!shouldShowPickerAtStartup(mode, entries.length)) {
+        _goHome();
+        return;
+      }
     }
 
     setState(() {
@@ -175,69 +200,96 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     );
   }
 
+  /// Save the device state (sources, active source, metadata config, and the
+  /// cloud-managed ids) into the profile that owned it, so switching back
+  /// restores it exactly.
+  Future<void> _snapshotCurrent() async {
+    final id = _activeProfileId;
+    final source = _activeSource;
+    if (id == null || source == null) return;
+    final sources = await widget.store.list();
+    final snapshot = ProfileSnapshot(
+      sourcesJson: [for (final c in sources) c.toJson()],
+      activeSourceId: await widget.store.activeId(),
+      metadataJson: (await widget.store.metadataConfig()).toJson(),
+      // Only a cloud profile can own cloud-managed sources.
+      managedIds: source == _ProfileSource.cloud
+          ? (await _sync?.managedSourceIds())?.toList() ?? const []
+          : const [],
+    );
+    if (source == _ProfileSource.local) {
+      final all = await _localStore.loadAll();
+      final idx = all.indexWhere((p) => p.id == id);
+      if (idx >= 0) await _localStore.save(all[idx].withSnapshot(snapshot));
+    } else {
+      await _localStore.saveCloudSnapshot(id, snapshot);
+    }
+  }
+
+  /// Replace the device state with [snapshot] — the whole list (even when
+  /// empty: an emptied profile must come back empty, not inherit the previous
+  /// profile's sources), the metadata config, and the managed-ids set.
+  Future<void> _restoreSnapshot(ProfileSnapshot snapshot) async {
+    final sources = [
+      for (final j in snapshot.sourcesJson) SourceConfig.fromJson(j),
+    ];
+    await widget.store.setAll(sources);
+    final active = snapshot.activeSourceId;
+    if (active != null && sources.any((c) => c.id == active)) {
+      await widget.store.setActive(active);
+    }
+    final metadata = snapshot.metadataJson;
+    if (metadata != null) {
+      await widget.store.saveMetadataConfig(MetadataConfig.fromJson(metadata));
+    }
+    await _sync?.setManagedSourceIds(snapshot.managedIds.toSet());
+  }
+
   Future<void> _selectProfile(_ProfileEntry entry) async {
     if (_busy) return;
-    // Capture BEFORE setState so the changed-check below isn't comparing
-    // entry.id against itself (setState runs synchronously).
-    final previousId = _activeProfileId;
-    final previousSource = _activeSource;
+    // Re-selecting the active profile: the store already holds its state.
+    if (entry.id == _activeProfileId && entry.source == _activeSource) {
+      _goHome();
+      return;
+    }
     setState(() {
-      _activeProfileId = entry.id;
-      _activeSource = entry.source;
       _busy = true;
       _error = null;
     });
     try {
-      // When leaving a local profile, snapshot its current source list so we
-      // can restore it when the user switches back.
-      if (previousSource == _ProfileSource.local && previousId != null) {
-        final currentSources = await widget.store.list();
-        final currentActiveId = await widget.store.activeId();
-        final allLocal = await _localStore.loadAll();
-        final prevIdx = allLocal.indexWhere((p) => p.id == previousId);
-        if (prevIdx >= 0) {
-          final prev = allLocal[prevIdx];
-          await _localStore.save(LocalProfile(
-            id: prev.id,
-            name: prev.name,
-            colorIndex: prev.colorIndex,
-            sourcesJson: currentSources.map((c) => c.toJson()).toList(),
-            activeSourceId: currentActiveId,
-          ));
-        }
-      }
-
+      await _snapshotCurrent();
       if (entry.isCloud) {
-        // Always pull when the selection changed or when switching away from a
-        // local profile, so each cloud profile's sources are always fresh.
-        final changed =
-            entry.id != previousId || previousSource != _ProfileSource.cloud;
-        if (changed) {
-          await _sync.setProfile(entry.id);
-          await _sync.pullSources(widget.store, entry.id);
-          await _sync.pullMetadata(widget.store, entry.id);
-          await _sync.pullFavorites(widget.store, entry.id);
+        final sync = _sync!;
+        final snapshot = await _localStore.cloudSnapshot(entry.id);
+        if (snapshot != null) {
+          // Bring back this profile's device-local extras + managed ids so the
+          // pull below prunes/refreshes the right set.
+          await _restoreSnapshot(snapshot);
+        } else {
+          // First visit: start from a clean slate so the previous profile's
+          // sources can't survive the pull as "device-local" leftovers.
+          await widget.store.setAll(const []);
+          await sync.setManagedSourceIds(const {});
         }
+        await sync.setProfile(entry.id);
+        await sync.pullSources(widget.store, entry.id);
+        await sync.pullMetadata(widget.store, entry.id);
+        await sync.pullFavorites(widget.store, entry.id);
         await _localStore.setActive(null);
       } else {
-        // Restore this local profile's saved source list.
-        final allLocal = await _localStore.loadAll();
-        final target = allLocal.firstWhere(
+        final all = await _localStore.loadAll();
+        final target = all.firstWhere(
           (p) => p.id == entry.id,
           orElse: () => throw StateError('profile not found'),
         );
-        if (target.sourcesJson.isNotEmpty) {
-          final sources = target.sourcesJson
-              .map((j) => SourceConfig.fromJson(j))
-              .toList();
-          await widget.store.setAll(sources);
-          if (target.activeSourceId != null) {
-            await widget.store.setActive(target.activeSourceId);
-          }
-        }
+        await _restoreSnapshot(target.snapshot);
         await _localStore.setActive(entry.id);
       }
-      if (mounted) _goHome();
+      setState(() {
+        _activeProfileId = entry.id;
+        _activeSource = entry.source;
+      });
+      _goHome();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -254,26 +306,36 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       builder: (_) => const _CreateProfileDialog(),
     );
     if (name == null || name.trim().isEmpty || !mounted) return;
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
-      final colorIndex = _profiles.length; // next slot in palette
+      // Park the current state with its owner before the new profile takes
+      // over the store.
+      await _snapshotCurrent();
       const demoConfig = SourceConfig(
         id: 'demo',
         kind: SourceKind.demo,
         label: 'Demo',
         fields: {},
       );
-      // Create the profile with only the demo source so it starts isolated.
+      // Seed with only the demo source so the profile starts clean, with no
+      // inherited IPTV providers.
+      final seed = ProfileSnapshot(
+        sourcesJson: [demoConfig.toJson()],
+        activeSourceId: 'demo',
+        metadataJson: (await widget.store.metadataConfig()).toJson(),
+      );
       final profile = await _localStore.createProfile(
         name.trim(),
-        colorIndex,
-        initialSourcesJson: [demoConfig.toJson()],
-        initialActiveSourceId: 'demo',
+        _profiles.length, // next palette slot
+        snapshot: seed,
       );
+      await _restoreSnapshot(seed);
       await _localStore.setActive(profile.id);
-      // Apply the profile's source list to the global store.
-      await widget.store.setAll([demoConfig]);
-      await widget.store.setActive('demo');
+      _activeProfileId = profile.id;
+      _activeSource = _ProfileSource.local;
       if (mounted) _goHome();
     } catch (e) {
       if (mounted) {
@@ -286,7 +348,8 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   }
 
   Future<void> _deleteProfile(_ProfileEntry entry) async {
-    // Only local profiles can be deleted from the app.
+    // Only local profiles can be deleted from the app; cloud profiles are
+    // managed in the web panel.
     if (entry.isCloud) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -314,6 +377,10 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     );
     if (confirmed != true || !mounted) return;
     await _localStore.delete(entry.id);
+    if (_activeProfileId == entry.id) {
+      _activeProfileId = null;
+      _activeSource = null;
+    }
     await _reload();
   }
 
@@ -378,7 +445,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                   ),
                 ),
                 const SizedBox(height: 52),
-                // â”€â”€ Profile grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // Profile grid
                 Expanded(
                   child: Center(
                     child: SingleChildScrollView(
@@ -446,7 +513,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                     ),
                   ),
                 const SizedBox(height: 12),
-                // â”€â”€ Link-to-cloud banner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // Link-to-cloud banner (configured builds that aren't paired)
                 if (!_isPaired && CloudConfig.isConfigured && !_manageMode)
                   TextButton.icon(
                     onPressed: _busy ? null : _goToCloudSync,
@@ -497,7 +564,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   }
 }
 
-// â”€â”€ Logo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Logo ─────────────────────────────────────────────────────────────────────
 
 class _AppLogo extends StatelessWidget {
   @override
@@ -537,7 +604,7 @@ class _AppLogo extends StatelessWidget {
   }
 }
 
-// â”€â”€ Profile circle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Profile circle ───────────────────────────────────────────────────────────
 
 class _ProfileCircle extends StatefulWidget {
   final _ProfileEntry entry;
@@ -576,8 +643,9 @@ class _ProfileCircleState extends State<_ProfileCircle> {
   Widget build(BuildContext context) {
     final name = widget.entry.name.isEmpty ? 'Profile' : widget.entry.name;
     final initial = name[0].toUpperCase();
-    final color =
-        _kAvatarColors[widget.entry.colorIndex % _kAvatarColors.length];
+    final color = profileAvatarColor(widget.entry.colorIndex);
+    // White focus ring (always visible over any avatar colour); accent ring
+    // marks the active profile when unfocused.
     final ringColor = _focused
         ? Colors.white
         : widget.isActive
@@ -673,7 +741,8 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           ),
                         ),
                       ),
-                    // Cloud lock badge (manage mode, cloud profiles — not deletable here)
+                    // Cloud lock badge (manage mode, cloud profiles — deleted
+                    // from the web panel, not here)
                     if (widget.manageMode && widget.entry.isCloud)
                       Positioned(
                         right: 0,
@@ -696,7 +765,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           ),
                         ),
                       ),
-                    // Green checkmark badge for active profile (hidden in manage mode)
+                    // Green checkmark badge for the active profile
                     if (widget.isActive && !widget.manageMode)
                       Positioned(
                         right: 0,
@@ -764,7 +833,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
   }
 }
 
-// â”€â”€ Add-profile "+" circle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Add-profile "+" circle ───────────────────────────────────────────────────
 
 class _AddProfileCircle extends StatefulWidget {
   final bool autofocus;
@@ -860,7 +929,7 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
   }
 }
 
-// â”€â”€ Create-profile dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Create-profile dialog ────────────────────────────────────────────────────
 
 class _CreateProfileDialog extends StatefulWidget {
   const _CreateProfileDialog();
@@ -906,4 +975,3 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
     );
   }
 }
-
