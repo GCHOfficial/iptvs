@@ -16,7 +16,7 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
-  static const schemaVersion = 9;
+  static const schemaVersion = 10;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -66,6 +66,7 @@ class AppDatabase {
             logo        TEXT,
             category_id TEXT,
             extra       TEXT,
+            archive_days INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (source_id, id)
           )
         ''');
@@ -115,6 +116,12 @@ class AppDatabase {
           // so this repair branch covers every upgrade path (incl. pre-v3, which
           // skips the v3+ media ALTER branches). Idempotent.
           await _createFavorites(db);
+        }
+        if (oldV < 10) {
+          // Catch-up window per channel. The `channels` table is built in
+          // `onCreate` (not `_createMediaTables`), so every upgrade path lands
+          // here; the ALTER is guarded against a pre-existing column.
+          await _addChannelArchiveColumn(db);
         }
       },
     );
@@ -296,6 +303,16 @@ class AppDatabase {
     await db.execute(
       'ALTER TABLE media_page_state_v7 RENAME TO media_page_state',
     );
+  }
+
+  static Future<void> _addChannelArchiveColumn(Database db) async {
+    try {
+      await db.execute(
+        'ALTER TABLE channels ADD COLUMN archive_days INTEGER NOT NULL DEFAULT 0',
+      );
+    } on DatabaseException catch (e) {
+      if (!_isDuplicateColumn(e)) rethrow;
+    }
   }
 
   static bool _isDuplicateColumn(DatabaseException e) {
@@ -956,6 +973,7 @@ class AppDatabase {
     number: r['number'] as int?,
     logo: r['logo'] as String?,
     categoryId: r['category_id'] as String?,
+    archiveDays: (r['archive_days'] as int?) ?? 0,
     extra: r['extra'] != null
         ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
         : const {},
@@ -997,6 +1015,7 @@ class AppDatabase {
           'logo': ch.logo,
           'category_id': ch.categoryId,
           'extra': ch.extra.isEmpty ? null : jsonEncode(ch.extra),
+          'archive_days': ch.archiveDays,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       batch.insert('sources', {
@@ -1066,6 +1085,30 @@ class AppDatabase {
       next[r['channel_id'] as String] = _rowToProgramme(r);
     }
     return (now: now, next: next);
+  }
+
+  /// Cached programmes for one channel overlapping the `[from, to)` window,
+  /// ordered by start — the catch-up guide's data source. A programme overlaps
+  /// the window when it starts before `to` and ends after `from`. Served by
+  /// `idx_prog_lookup(source_id, channel_id, start)`.
+  Future<List<Programme>> programmesForChannel(
+    String sourceId,
+    String channelId, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final rows = await _db.rawQuery(
+      'SELECT channel_id, title, start, stop, description FROM programmes '
+      'WHERE source_id = ? AND channel_id = ? AND start < ? AND stop > ? '
+      'ORDER BY start',
+      [
+        sourceId,
+        channelId,
+        to.millisecondsSinceEpoch,
+        from.millisecondsSinceEpoch,
+      ],
+    );
+    return rows.map(_rowToProgramme).toList();
   }
 
   Programme _rowToProgramme(Map<String, Object?> r) => Programme(

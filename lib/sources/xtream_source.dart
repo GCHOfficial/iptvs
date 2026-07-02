@@ -102,6 +102,7 @@ class XtreamSource implements Source {
             ? m['stream_icon'] as String
             : null,
         categoryId: m['category_id']?.toString(),
+        archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
         extra: {
           'streamId': streamId,
           if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
@@ -116,6 +117,35 @@ class XtreamSource implements Source {
     return StreamInfo(
       url: '$_base/live/$username/$password/$streamId.$streamExtension',
     );
+  }
+
+  @override
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async {
+    final streamId = channel.extra['streamId']?.toString() ?? channel.id;
+    final duration = programme.stop.difference(programme.start).inMinutes;
+    return StreamInfo(
+      url:
+          '$_base/timeshift/$username/$password/$duration/'
+          '${_timeshiftStart(programme.start)}/$streamId.$streamExtension',
+      isLive: false,
+    );
+  }
+
+  /// Xtream timeshift start stamp `Y-m-d:H-i`. XMLTV times are absolute, but the
+  /// endpoint expects the panel's local time; we use the device's local zone
+  /// (device ≈ panel region in practice). A per-source offset is the future
+  /// refinement if a panel sits in a different zone.
+  @visibleForTesting
+  static String timeshiftStart(DateTime start) => _timeshiftStart(start);
+
+  static String _timeshiftStart(DateTime start) {
+    final t = start.toLocal();
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${t.year.toString().padLeft(4, '0')}-${p2(t.month)}-${p2(t.day)}:'
+        '${p2(t.hour)}-${p2(t.minute)}';
   }
 
   @override
@@ -537,6 +567,16 @@ class XtreamSource implements Source {
     if (value is int) return value;
     if (value == null) return null;
     return int.tryParse(value.toString());
+  }
+
+  /// Catch-up window in days from a live-stream's `tv_archive` (0/1) and
+  /// `tv_archive_duration` (days). Archive off → 0; on but duration
+  /// missing/zero → [kDefaultArchiveDays].
+  int _archiveDays(dynamic archive, dynamic duration) {
+    final on = archive == 1 || archive == '1' || archive == true;
+    if (!on) return 0;
+    final days = _parseInt(duration) ?? 0;
+    return days > 0 ? days : kDefaultArchiveDays;
   }
 
   double? _parseDouble(String? value) {

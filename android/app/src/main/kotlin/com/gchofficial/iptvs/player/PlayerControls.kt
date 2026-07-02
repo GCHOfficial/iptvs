@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeOff
@@ -84,6 +87,7 @@ class PlayerCallbacks(
     val onCycleAspect: () -> Unit,
     val onGoLive: () -> Unit,
     val onBack: () -> Unit,
+    val onEnterPip: () -> Unit,
 )
 
 private const val HIDE_DELAY_VOD = 3500L
@@ -192,21 +196,24 @@ fun PlayerScreen(
         }
 
         // Tap layer (below the controls) toggles visibility on touch devices.
-        Box(
-            Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = {
-                            if (state.controlsVisible) {
-                                state.controlsVisible = false
-                            } else {
-                                poke()
-                            }
-                        },
-                    )
-                },
-        )
+        // Skipped in PiP: the tiny window shows video only, no control chrome.
+        if (!state.inPip) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                if (state.controlsVisible) {
+                                    state.controlsVisible = false
+                                } else {
+                                    poke()
+                                }
+                            },
+                        )
+                    },
+            )
+        }
 
         if (state.videoUnsupported) {
             UnsupportedVideoNotice(
@@ -220,7 +227,7 @@ fun PlayerScreen(
         }
 
         AnimatedVisibility(
-            visible = state.controlsVisible,
+            visible = state.controlsVisible && !state.inPip,
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
@@ -228,7 +235,7 @@ fun PlayerScreen(
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.
-        if (state.controlsVisible) {
+        if (state.controlsVisible && !state.inPip) {
             PlayerMenusLayer(state, callbacks) { poke() }
             if (state.infoOpen) {
                 InfoPanel(
@@ -268,6 +275,7 @@ private fun ControlsOverlay(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TopBar(
     state: PlayerUiState,
@@ -275,43 +283,91 @@ private fun TopBar(
     nowMillis: Long,
     onInteract: () -> Unit,
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconControlButton(
-            icon = Icons.AutoMirrored.Filled.ArrowBack,
-            contentDescription = "Back",
-            onClick = { onInteract(); callbacks.onBack() },
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = state.title,
-                color = PlayerColors.TextHi,
-                fontFamily = InterFontFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                maxLines = 1,
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV only) a
-        // date+time clock. The title above takes the remaining width and ellipsizes.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            state.sourceBadge()?.let { Badge(it) }
-            if (state.isLive) LiveBadge(synced = state.liveSynced)
-            state.resolutionBadge()?.let { Badge(it) }
-            state.hdrBadge()?.let { Badge(it, accent = true) }
-            state.fpsBadge()?.let { Badge(it) }
-            if (state.isTv) Badge(formatClock(nowMillis))
+    // Same breakpoint as the bottom bar: below ~560dp (phone portrait) the badge
+    // cluster would squeeze the title to nothing, so it wraps onto its own row.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxWidth < 560.dp
+        if (compact) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 12.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconControlButton(
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        onClick = { onInteract(); callbacks.onBack() },
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        text = state.title,
+                        color = PlayerColors.TextHi,
+                        fontFamily = InterFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                // FlowRow so the badges wrap again on very narrow screens instead
+                // of overflowing off-screen.
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TopBadges(state, nowMillis)
+                }
+            }
+        } else {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconControlButton(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    onClick = { onInteract(); callbacks.onBack() },
+                )
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    text = state.title,
+                    color = PlayerColors.TextHi,
+                    fontFamily = InterFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV
+                // only) a date+time clock. The title takes the remaining width and
+                // ellipsizes.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TopBadges(state, nowMillis)
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun TopBadges(state: PlayerUiState, nowMillis: Long) {
+    state.sourceBadge()?.let { Badge(it) }
+    if (state.isLive) LiveBadge(synced = state.liveSynced)
+    state.resolutionBadge()?.let { Badge(it) }
+    state.hdrBadge()?.let { Badge(it, accent = true) }
+    state.fpsBadge()?.let { Badge(it) }
+    if (state.isTv) Badge(formatClock(nowMillis))
 }
 
 @Composable
@@ -466,6 +522,12 @@ private fun RowScope.RightCluster(
     }
     TextControlButton(state.aspect.label, "Aspect ratio") {
         onInteract(); callbacks.onCycleAspect()
+    }
+    if (state.supportsPip) {
+        if (!spread) Spacer(Modifier.width(8.dp))
+        IconControlButton(Icons.Filled.PictureInPictureAlt, "Picture in picture") {
+            onInteract(); callbacks.onEnterPip()
+        }
     }
     if (!spread) Spacer(Modifier.width(8.dp))
     IconControlButton(Icons.Filled.Info, "Stream info") {

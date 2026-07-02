@@ -3,6 +3,9 @@
 // (Replaces the default counter widget test from `flutter create`, which
 // referenced the old app and no longer applies.)
 
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/metadata_config.dart';
@@ -53,6 +56,55 @@ void main() {
     test('returns null for malformed input', () {
       expect(parseXmltvTime(null), isNull);
       expect(parseXmltvTime('nope'), isNull);
+    });
+  });
+
+  group('parseXmltv', () {
+    Uint8List xmltv(String programmes) => Uint8List.fromList(
+          utf8.encode('<?xml version="1.0"?><tv>$programmes</tv>'),
+        );
+
+    String programme(String channel, {String title = 'Show'}) =>
+        '<programme channel="$channel" start="20240101120000 +0000" '
+        'stop="20240101130000 +0000"><title>$title</title>'
+        '<desc>Desc</desc></programme>';
+
+    test('maps tvg-ids to channel ids and drops unmapped programmes', () async {
+      final bytes = xmltv(
+        programme('tvg.one', title: 'One') +
+            programme('tvg.unknown', title: 'Nope') +
+            programme('tvg.two', title: 'Two'),
+      );
+      final progs = await parseXmltv(bytes, {
+        'tvg.one': 'ch1',
+        'tvg.two': 'ch2',
+      });
+
+      expect(progs.map((p) => p.channelId), ['ch1', 'ch2']);
+      expect(progs.first.title, 'One');
+      expect(progs.first.description, 'Desc');
+      expect(
+        progs.first.start.isAtSameMomentAs(DateTime.utc(2024, 1, 1, 12)),
+        isTrue,
+      );
+    });
+
+    test('parses a large guide through the background isolate', () async {
+      // Exceed the inline threshold so the compute() path runs; assert the
+      // record + List<Programme> round-trip across the isolate boundary and the
+      // mapping/filtering matches the inline path.
+      final many = StringBuffer();
+      for (var i = 0; i < 1500; i++) {
+        many.write(programme(i.isEven ? 'tvg.one' : 'tvg.skip', title: 'P$i'));
+      }
+      final bytes = xmltv(many.toString());
+      expect(bytes.length, greaterThan(64 * 1024));
+
+      final progs = await parseXmltv(bytes, {'tvg.one': 'ch1'});
+
+      expect(progs, hasLength(750)); // even indices only
+      expect(progs.every((p) => p.channelId == 'ch1'), isTrue);
+      expect(progs.first.title, 'P0');
     });
   });
 
@@ -120,6 +172,23 @@ void main() {
       expect(redacted, isNot(contains('secret-token')));
       expect(redacted, contains('mac=<redacted>'));
       expect(redacted, contains('Bearer <redacted>'));
+    });
+  });
+
+  group('Stalker archiveUrl', () {
+    // now = 2024-03-05 21:00:00 UTC, start = 20:30 UTC → utc/lutc in seconds.
+    final start = DateTime.utc(2024, 3, 5, 20, 30);
+    final now = DateTime.utc(2024, 3, 5, 21);
+
+    test('appends utc/lutc with ? when the URL has no query', () {
+      final url = StalkerSource.archiveUrl('http://host/stream.ts', start, now);
+      expect(url, 'http://host/stream.ts?utc=1709670600&lutc=1709672400');
+    });
+
+    test('appends with & when the URL already has a query', () {
+      final url =
+          StalkerSource.archiveUrl('http://host/stream.ts?token=x', start, now);
+      expect(url, 'http://host/stream.ts?token=x&utc=1709670600&lutc=1709672400');
     });
   });
 
@@ -309,6 +378,76 @@ void main() {
       expect(
         source.debugVodCommand(episode),
         '/play/movie.php?stream=.&type=series',
+      );
+    });
+  });
+
+  group('Xtream live channels', () {
+    test('maps the catch-up window from tv_archive fields', () async {
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        debugApi: (params) async {
+          expect(params['action'], 'get_live_streams');
+          return [
+            {
+              'stream_id': '1',
+              'name': 'Archive 5d',
+              'tv_archive': 1,
+              'tv_archive_duration': '5',
+            },
+            // Archive on but no duration reported → conservative default.
+            {'stream_id': '2', 'name': 'Archive no-dur', 'tv_archive': 1},
+            {'stream_id': '3', 'name': 'Archive off', 'tv_archive': 0},
+            {'stream_id': '4', 'name': 'Plain'},
+          ];
+        },
+      );
+
+      final chans = await source.channels();
+
+      expect(chans[0].archiveDays, 5);
+      expect(chans[0].hasArchive, isTrue);
+      expect(chans[1].archiveDays, kDefaultArchiveDays);
+      expect(chans[2].archiveDays, 0);
+      expect(chans[2].hasArchive, isFalse);
+      expect(chans[3].archiveDays, 0);
+    });
+
+    test('resolveArchive builds a timeshift URL for a past programme', () async {
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        streamExtension: 'ts',
+      );
+      // Local time so the Y-m-d:H-i stamp is deterministic regardless of the
+      // CI timezone (the resolver formats start.toLocal()).
+      final programme = Programme(
+        channelId: '42',
+        start: DateTime(2024, 3, 5, 20, 30),
+        stop: DateTime(2024, 3, 5, 21, 15),
+        title: 'Past Show',
+      );
+
+      final stream = await source.resolveArchive(
+        const Channel(id: '42', name: 'Ch', archiveDays: 3),
+        programme,
+      );
+
+      // 45-minute duration, start stamp, stream id + extension.
+      expect(
+        stream.url,
+        'http://example.invalid/timeshift/user/pass/45/2024-03-05:20-30/42.ts',
+      );
+      expect(stream.isLive, isFalse);
+    });
+
+    test('timeshiftStart zero-pads the Y-m-d:H-i stamp', () {
+      expect(
+        XtreamSource.timeshiftStart(DateTime(2024, 1, 2, 3, 4)),
+        '2024-01-02:03-04',
       );
     });
   });

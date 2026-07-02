@@ -48,16 +48,30 @@ val SPEED_OPTIONS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
  */
 @Stable
 class PlayerUiState(
-    val title: String,
-    val isLive: Boolean,
-    /** Active source's display name, shown as a top-bar badge. */
-    val sourceName: String? = null,
-    /** True on Android TV (drives the clock badge, hidden on phones). */
-    val isTv: Boolean = false,
-    /** Live EPG now/next snapshot; null for VOD. */
-    val epgNow: EpgEntry? = null,
-    val epgNext: EpgEntry? = null,
+    title: String,
+    isLive: Boolean,
+    sourceName: String? = null,
+    isTv: Boolean = false,
+    epgNow: EpgEntry? = null,
+    epgNext: EpgEntry? = null,
 ) {
+    // Presentation fields are mutable (not constructor vals) because a state can
+    // outlive its first host: the shared preview engine's state is created
+    // "faceless" (no title/EPG) and adopted by the fullscreen Activity, which
+    // fills these in from its Intent extras. All observable for Compose.
+    var title by mutableStateOf(title)
+    var isLive by mutableStateOf(isLive)
+
+    /** Active source's display name, shown as a top-bar badge. */
+    var sourceName by mutableStateOf(sourceName)
+
+    /** True on Android TV (drives the clock badge, hidden on phones). */
+    var isTv by mutableStateOf(isTv)
+
+    /** Live EPG now/next snapshot; null for VOD. */
+    var epgNow by mutableStateOf(epgNow)
+    var epgNext by mutableStateOf(epgNext)
+
     var isPlaying by mutableStateOf(false)
     var isBuffering by mutableStateOf(true)
     var ended by mutableStateOf(false)
@@ -96,6 +110,12 @@ class PlayerUiState(
     var openMenu by mutableStateOf(PlayerMenu.None)
     var infoOpen by mutableStateOf(false)
     var controlsVisible by mutableStateOf(true)
+
+    /** In Android picture-in-picture: the overlay hides all chrome (video only). */
+    var inPip by mutableStateOf(false)
+
+    /** Whether the device supports PiP at all — gates the manual "Enter PiP" button. */
+    var supportsPip by mutableStateOf(false)
 
     // Set when the stream carries a video track the device can't decode (e.g.
     // Dolby Vision Profile 5 on non-DV hardware): audio plays but there's no

@@ -1,7 +1,11 @@
 package com.gchofficial.iptvs
 
+import android.app.PictureInPictureParams
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
+import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -15,8 +19,10 @@ import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
 import com.gchofficial.iptvs.player.PlayerCallbacks
+import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
+import com.gchofficial.iptvs.player.SharedEngine
 import com.gchofficial.iptvs.player.SubtitleSpec
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -42,6 +48,11 @@ class HdrPlayerActivity : ComponentActivity() {
     private var engine: PlaybackEngine? = null
     private var progressTicker: Job? = null
 
+    // True while this Activity plays through the *adopted* shared preview engine
+    // (see [SharedEngine]): it never releases that engine — on exit it hands the
+    // video output back to the preview instead.
+    private var adoptedShared = false
+
     // Live reconnect watchdog: when a live stream stalls (buffering) or drops
     // (ended / error), reload it with capped backoff until playback resumes.
     private var stalledSinceMs = 0L
@@ -61,16 +72,59 @@ class HdrPlayerActivity : ComponentActivity() {
         url = streamUrl
         headers = requestHeaders()
         subtitles = subtitleSpecs()
-        uiState = PlayerUiState(
-            title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
-            isLive = intent.getBooleanExtra(EXTRA_IS_LIVE, false),
-            sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME),
-            isTv = isTelevision(),
-            epgNow = epgEntry(EXTRA_EPG_NOW_TITLE, EXTRA_EPG_NOW_START, EXTRA_EPG_NOW_STOP, EXTRA_EPG_NOW_DESC),
-            epgNext = epgEntry(EXTRA_EPG_NEXT_TITLE, EXTRA_EPG_NEXT_START, EXTRA_EPG_NEXT_STOP, null),
-        )
 
-        startWithExoPlayer()
+        // Seamless handoff: when the live preview is already playing this exact
+        // stream, adopt its running engine — only the video output moves to this
+        // Activity's surface; audio, decoder and buffer carry over untouched.
+        val shared = if (intent.getBooleanExtra(EXTRA_ADOPT_SHARED, false)) {
+            SharedEngine.adoptForFullscreen(streamUrl)
+        } else {
+            null
+        }
+        adoptedShared = shared != null
+
+        uiState = shared?.second
+            ?: PlayerUiState(
+                title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                isLive = intent.getBooleanExtra(EXTRA_IS_LIVE, false),
+                sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME),
+                isTv = isTelevision(),
+                epgNow = epgEntry(EXTRA_EPG_NOW_TITLE, EXTRA_EPG_NOW_START, EXTRA_EPG_NOW_STOP, EXTRA_EPG_NOW_DESC),
+                epgNext = epgEntry(EXTRA_EPG_NEXT_TITLE, EXTRA_EPG_NEXT_START, EXTRA_EPG_NEXT_STOP, null),
+            )
+        if (shared != null) {
+            // The adopted state was born for the faceless preview — fill in this
+            // stream's presentation fields and reset any stale overlay state.
+            uiState.title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
+            uiState.isLive = intent.getBooleanExtra(EXTRA_IS_LIVE, false)
+            uiState.sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME)
+            uiState.isTv = isTelevision()
+            uiState.epgNow = epgEntry(EXTRA_EPG_NOW_TITLE, EXTRA_EPG_NOW_START, EXTRA_EPG_NOW_STOP, EXTRA_EPG_NOW_DESC)
+            uiState.epgNext = epgEntry(EXTRA_EPG_NEXT_TITLE, EXTRA_EPG_NEXT_START, EXTRA_EPG_NEXT_STOP, null)
+            uiState.controlsVisible = true
+            uiState.openMenu = PlayerMenu.None
+            uiState.infoOpen = false
+            uiState.inPip = false
+        }
+        // Android TV's PiP framework restricts entry to communication/smartHome/health/ticker
+        // use cases via a required manifest category — general media playback isn't an
+        // approved category there, so FEATURE_PICTURE_IN_PICTURE is intentionally left
+        // unused/absent for our purposes on most TVs. That's a platform limitation, not a bug:
+        // the button below simply won't show on devices that report the feature missing.
+        uiState.supportsPip = supportsPip()
+
+        if (shared != null) {
+            val sharedEngine = shared.first
+            sharedEngine.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
+            sharedEngine.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
+            sharedEngine.onVideoSizeChanged = null
+            setEngine(sharedEngine)
+            // Fullscreen always plays unmuted, and resumes a paused preview.
+            sharedEngine.setVolume(1f)
+            sharedEngine.play()
+        } else {
+            startWithExoPlayer()
+        }
 
         setContent {
             engineState.value?.let { active ->
@@ -88,9 +142,9 @@ class HdrPlayerActivity : ComponentActivity() {
             context = this,
             state = uiState,
             headers = headers,
-            onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } },
-            onRecoverableError = { runOnUiThread { reconnectLive(force = true) } },
         )
+        exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
+        exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
         setEngine(exo)
         exo.load(url, subtitles)
     }
@@ -99,7 +153,15 @@ class HdrPlayerActivity : ComponentActivity() {
     private fun fallbackToMpv() {
         if (engine is MpvEngine || isFinishing) return
         Log.i(TAG, "falling back to libmpv (video unsupported by ExoPlayer)")
-        engine?.release()
+        if (adoptedShared) {
+            // The adopted engine can't decode this stream, so the shared preview
+            // engine is dead too: release it through the holder, which tells the
+            // Dart side to reset its preview state (it falls back to media_kit).
+            adoptedShared = false
+            SharedEngine.invalidateFromFullscreen()
+        } else {
+            engine?.release()
+        }
         // Reset stale stream info before the new engine repopulates it.
         uiState.videoUnsupported = false
         val mpv = MpvEngine(
@@ -180,6 +242,7 @@ class HdrPlayerActivity : ComponentActivity() {
             }
         },
         onBack = { finish() },
+        onEnterPip = { enterPip() },
     )
 
     override fun onStart() {
@@ -197,7 +260,76 @@ class HdrPlayerActivity : ComponentActivity() {
         super.onStop()
         progressTicker?.cancel()
         progressTicker = null
-        engine?.pause()
+        // Keep playing while in PiP (onStop can fire around the PiP window on
+        // some devices); only pause when actually backgrounded. An adopted engine
+        // on its way back to the preview keeps playing too — pausing here would
+        // put an audio gap in an otherwise seamless return.
+        if (!uiState.inPip && !(isFinishing && adoptedShared)) engine?.pause()
+    }
+
+    /** Home / recents while playing → enter picture-in-picture instead of
+     *  backgrounding. No-op on devices without PiP (e.g. some Android TVs). */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        enterPip()
+    }
+
+    /** Enters PiP if currently eligible; also invoked from a manual overlay button so entry
+     *  doesn't depend solely on the OS calling [onUserLeaveHint] (inconsistent across OEMs). */
+    private fun enterPip() {
+        if (uiState.inPip || isFinishing || !uiState.isPlaying) return
+        if (!supportsPip()) return
+        try {
+            enterPictureInPictureMode(pipParams())
+        } catch (e: Exception) {
+            Log.e(TAG, "enterPictureInPictureMode failed", e)
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        uiState.inPip = isInPictureInPictureMode
+        if (isInPictureInPictureMode) {
+            // Collapse all chrome so the PiP window is video-only.
+            uiState.controlsVisible = false
+            uiState.openMenu = PlayerMenu.None
+            uiState.infoOpen = false
+            // Behind the PiP window sits MainActivity's task showing the black
+            // Flutter handoff route — recede *that* task so the launcher shows
+            // instead. It must be moved via MainActivity: entering PiP reparents
+            // this Activity into its own pinned task, so moveTaskToBack(false)
+            // from here would send the PiP window itself to the back (black
+            // screen all around — the original 0.1.13 bug).
+            MainActivity.instance?.get()?.moveTaskToBack(true)
+        }
+    }
+
+    private fun supportsPip(): Boolean =
+        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun pipParams(): PictureInPictureParams {
+        val w = uiState.videoWidth
+        val h = uiState.videoHeight
+        // Android rejects extreme ratios; clamp to its allowed band, default 16:9.
+        val ratio = if (w > 0 && h > 0) {
+            Rational(w, h).coerceRatio()
+        } else {
+            Rational(16, 9)
+        }
+        return PictureInPictureParams.Builder().setAspectRatio(ratio).build()
+    }
+
+    /** Clamp to Android's accepted aspect band (~0.418..2.39) to avoid a crash. */
+    private fun Rational.coerceRatio(): Rational {
+        val value = numerator.toDouble() / denominator.toDouble()
+        return when {
+            value < 0.42 -> Rational(42, 100)
+            value > 2.39 -> Rational(239, 100)
+            else -> this
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -221,7 +353,14 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        engine?.release()
+        if (adoptedShared) {
+            // Not ours to release: hand the video output back to the preview
+            // surface; the engine keeps playing across the return.
+            adoptedShared = false
+            SharedEngine.fullscreenDetached()
+        } else {
+            engine?.release()
+        }
         engine = null
         super.onDestroy()
     }
@@ -304,6 +443,9 @@ class HdrPlayerActivity : ComponentActivity() {
         const val EXTRA_SUBTITLE_URLS = "subtitle_urls"
         const val EXTRA_SUBTITLE_LABELS = "subtitle_labels"
         const val EXTRA_SUBTITLE_LANGUAGES = "subtitle_languages"
+
+        /** Adopt the shared preview engine instead of loading fresh (see [SharedEngine]). */
+        const val EXTRA_ADOPT_SHARED = "adopt_shared"
         private const val TAG = "iptvs.hdr"
 
         // Live reconnect watchdog thresholds.
