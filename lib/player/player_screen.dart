@@ -542,6 +542,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _setNativeFullscreen(!_isNativeFullscreen);
   }
 
+  // Windows always-on-top mini-player: a compact frameless topmost window,
+  // draggable by its video area. Toggled with the M key; the native side owns
+  // the geometry and restores the previous placement on exit.
+  bool _isNativeMiniPlayer = false;
+
+  Future<void> _toggleNativeMiniPlayer() async {
+    if (!_usesWindowsNativeSurface) return;
+    try {
+      final mini = await _nativeHdrPlayer.invokeMethod<bool>('setMiniPlayer', {
+        'mini': !_isNativeMiniPlayer,
+      });
+      _isNativeMiniPlayer = mini ?? !_isNativeMiniPlayer;
+      _logPlayback('native mini-player=$_isNativeMiniPlayer');
+      await _syncWindowsNativeControlState();
+    } catch (error) {
+      _logPlayback('native mini-player failed: $error');
+    }
+  }
+
   Future<dynamic> _handleNativeHdrMethodCall(MethodCall call) async {
     if (call.method == 'nativeInput') {
       final ignoreUntil = _ignoreNativeInputUntil;
@@ -1474,6 +1493,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
           const SingleActivator(LogicalKeyboardKey.keyF): () {
             _handlePlaybackInput();
             _toggleNativeFullscreen();
+          },
+          const SingleActivator(LogicalKeyboardKey.keyM): () {
+            _handlePlaybackInput();
+            _toggleNativeMiniPlayer();
           },
         },
         child: Listener(
