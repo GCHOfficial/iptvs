@@ -694,7 +694,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _media(replacement.kind).replaceItems({replacement.id: replacement});
   }
 
-  Future<void> _playMedia(MediaItem item) async {
+  /// Play a movie/episode fullscreen, auto-resuming from any saved position
+  /// unless [fromStart]. The player persists the new position (periodically,
+  /// on exit, and via the Android native player's close payload).
+  Future<void> _playMedia(MediaItem item, {bool fromStart = false}) async {
     if (_resolving) return;
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
@@ -704,6 +707,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         'library',
         'resolve ${item.kind.name} source=${widget.repo.source.name} title=${item.title} id=${item.id}',
       );
+      final resume = fromStart
+          ? null
+          : await widget.repo.db.readPlaybackPosition(
+              widget.repo.source.id,
+              item.kind,
+              item.id,
+            );
       final stream = await widget.repo.resolveMedia(item);
       if (!mounted) return;
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
@@ -715,9 +725,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             title: item.title,
             stream: stream,
             sourceName: widget.repo.source.name,
+            playback: PlaybackContext(
+              db: widget.repo.db,
+              sourceId: widget.repo.source.id,
+              kind: item.kind,
+              itemId: item.id,
+              resumeFrom: resume?.position,
+            ),
           ),
         ),
       );
+      // The rail reflects the position just saved by the player.
+      unawaited(_media(ContentKind.movie).loadContinueWatching());
+      unawaited(_media(ContentKind.series).loadContinueWatching());
       _restoreListFocusAfterPlayback();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
@@ -726,8 +746,18 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
-  void _showMediaDetails(MediaItem item) {
-    showModalBottomSheet<void>(
+  Future<void> _showMediaDetails(MediaItem item) async {
+    // Saved resume point (if any) drives the sheet's Resume / From-start pair.
+    final resume =
+        item.kind == ContentKind.movie || item.kind == ContentKind.episode
+        ? await widget.repo.db.readPlaybackPosition(
+            widget.repo.source.id,
+            item.kind,
+            item.id,
+          )
+        : null;
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       backgroundColor: AppColors.panel,
@@ -738,11 +768,18 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         favorite: _isFavorite(item.kind, item.id),
         onToggleFavorite: () => _toggleFavorite(item.kind, item.id),
         onChanged: _replaceMediaItem,
+        resume: resume,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
             ? () {
                 Navigator.of(context).pop();
                 _playMedia(item);
+              }
+            : null,
+        onPlayFromStart: resume != null
+            ? () {
+                Navigator.of(context).pop();
+                _playMedia(item, fromStart: true);
               }
             : null,
       ),
@@ -1153,6 +1190,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             onOpenMedia: _openMedia,
             onLoadMore: () => _media(_tab).loadMore(),
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
+            continueWatching: _media(_tab).continueWatching,
+            onResume: _playMedia,
           );
   }
 

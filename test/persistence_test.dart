@@ -275,6 +275,105 @@ void main() {
     });
   });
 
+  group('AppDatabase playback positions', () {
+    test('round-trips a resume position and lists recents newest-first', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+        position: const Duration(minutes: 12),
+        duration: const Duration(minutes: 90),
+      );
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.episode,
+        'e1',
+        position: const Duration(minutes: 3),
+        duration: const Duration(minutes: 42),
+      );
+
+      final read = await db.readPlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+      );
+      expect(read, isNotNull);
+      expect(read!.position, const Duration(minutes: 12));
+      expect(read.duration, const Duration(minutes: 90));
+      expect(read.progress, closeTo(12 / 90, 0.001));
+
+      final recents = await db.readRecentPositions('src');
+      expect(recents.map((p) => p.itemId).toList(), ['e1', 'm1']);
+      // Other sources see nothing.
+      expect(await db.readRecentPositions('other'), isEmpty);
+      await db.close();
+    });
+
+    test('finishing a title clears its row; early positions are ignored', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+        position: const Duration(minutes: 30),
+        duration: const Duration(minutes: 90),
+      );
+      // Past the finished threshold -> row removed.
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+        position: const Duration(minutes: 88),
+        duration: const Duration(minutes: 90),
+      );
+      expect(
+        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+        isNull,
+      );
+      // Under 10s in -> not worth a row.
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm2',
+        position: const Duration(seconds: 5),
+        duration: const Duration(minutes: 90),
+      );
+      expect(
+        await db.readPlaybackPosition('src', ContentKind.movie, 'm2'),
+        isNull,
+      );
+      await db.close();
+    });
+
+    test('v10 database gains the playback_positions table on upgrade', () async {
+      // Simulate a pre-v11 install: open at v10 (no positions table), then
+      // reopen through AppDatabase so the oldV < 11 repair branch runs.
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+      final raw = await openDatabase(dbPath(), version: 10,
+          onCreate: (db, _) async {
+        await db.execute('CREATE TABLE sources (id TEXT PRIMARY KEY, '
+            'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)');
+      });
+      await raw.close();
+
+      final db = await AppDatabase.openAt(dbPath());
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+        position: const Duration(minutes: 12),
+        duration: const Duration(minutes: 90),
+      );
+      expect(
+        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+        isNotNull,
+      );
+      await db.close();
+    });
+  });
+
   group('AppDatabase programmes', () {
     test('returns a channel\'s programmes overlapping a window, ordered',
         () async {

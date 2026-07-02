@@ -1,6 +1,7 @@
 package com.gchofficial.iptvs
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
@@ -124,6 +125,10 @@ class HdrPlayerActivity : ComponentActivity() {
             sharedEngine.play()
         } else {
             startWithExoPlayer()
+            // VOD resume: jump to the saved position once the engine loads.
+            // ExoPlayer remembers a seek issued right after load/prepare.
+            val resumeMs = intent.getLongExtra(EXTRA_RESUME_MS, 0L)
+            if (resumeMs > 0L && !uiState.isLive) engine?.seekTo(resumeMs)
         }
 
         setContent {
@@ -352,6 +357,24 @@ class HdrPlayerActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    /**
+     * Every exit path funnels through finish() (including system Back via the
+     * dispatcher), so report the final playback position here — the Dart side
+     * persists it as the VOD resume point when [MainActivity] relays it on
+     * `nativeClosed`.
+     */
+    override fun finish() {
+        if (::uiState.isInitialized && !uiState.isLive) {
+            setResult(
+                RESULT_OK,
+                Intent()
+                    .putExtra(RESULT_POSITION_MS, uiState.positionMs)
+                    .putExtra(RESULT_DURATION_MS, uiState.durationMs),
+            )
+        }
+        super.finish()
+    }
+
     override fun onDestroy() {
         if (adoptedShared) {
             // Not ours to release: hand the video output back to the preview
@@ -446,6 +469,13 @@ class HdrPlayerActivity : ComponentActivity() {
 
         /** Adopt the shared preview engine instead of loading fresh (see [SharedEngine]). */
         const val EXTRA_ADOPT_SHARED = "adopt_shared"
+
+        /** VOD resume: start playback at this position (ms), 0 = from the top. */
+        const val EXTRA_RESUME_MS = "resume_ms"
+
+        /** Result extras: final position/duration, for the Dart resume store. */
+        const val RESULT_POSITION_MS = "position_ms"
+        const val RESULT_DURATION_MS = "duration_ms"
         private const val TAG = "iptvs.hdr"
 
         // Live reconnect watchdog thresholds.

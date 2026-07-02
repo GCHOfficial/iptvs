@@ -12,6 +12,19 @@ import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 import '../player/player_screen.dart';
+import '../data/app_database.dart' show PlaybackPosition;
+import 'media_tab_controller.dart' show ContinueWatchingEntry;
+
+/// `1:23:45` / `12:34` style label for a resume position.
+String _positionLabel(Duration position) {
+  final hours = position.inHours;
+  final minutes = position.inMinutes % 60;
+  final seconds = position.inSeconds % 60;
+  String two(int n) => n.toString().padLeft(2, '0');
+  return hours > 0
+      ? '$hours:${two(minutes)}:${two(seconds)}'
+      : '$minutes:${two(seconds)}';
+}
 
 /// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
 /// error/empty states, and D-pad focus. Extracted from `ChannelListScreen`'s
@@ -47,6 +60,11 @@ class MediaTabView extends StatelessWidget {
   final VoidCallback onLoadMore;
   final VoidCallback onRetry;
 
+  /// In-progress items (saved playback positions) shown as a horizontal
+  /// "Continue watching" rail above the grid; [onResume] plays one, resuming.
+  final List<ContinueWatchingEntry> continueWatching;
+  final ValueChanged<MediaItem> onResume;
+
   const MediaTabView({
     super.key,
     required this.kind,
@@ -63,10 +81,23 @@ class MediaTabView extends StatelessWidget {
     required this.onOpenMedia,
     required this.onLoadMore,
     required this.onRetry,
+    this.continueWatching = const [],
+    required this.onResume,
   });
 
   @override
   Widget build(BuildContext context) {
+    final body = _buildBody(context);
+    if (showingSearch || continueWatching.isEmpty) return body;
+    return Column(
+      children: [
+        _ContinueWatchingRail(entries: continueWatching, onResume: onResume),
+        Expanded(child: body),
+      ],
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
     final showLoadMore =
         !showingSearch && (loadingMore || snapshot?.hasMore == true);
     if (loading) return const Center(child: CircularProgressIndicator());
@@ -162,6 +193,92 @@ class MediaTabView extends StatelessWidget {
           },
         );
       },
+    );
+  }
+}
+
+/// Horizontal "Continue watching" strip: poster tiles with a progress bar,
+/// newest first. One `FocusTraversalGroup` so the D-pad walks the rail as a
+/// row between the toolbar and the grid.
+class _ContinueWatchingRail extends StatelessWidget {
+  final List<ContinueWatchingEntry> entries;
+  final ValueChanged<MediaItem> onResume;
+
+  const _ContinueWatchingRail({required this.entries, required this.onResume});
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusTraversalGroup(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(18, 4, 18, 6),
+            child: Text(
+              'Continue watching',
+              style: TextStyle(
+                color: AppColors.textHi,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          SizedBox(
+            height: 172,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: entries.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, i) => _ContinueWatchingTile(
+                entry: entries[i],
+                onTap: () => onResume(entries[i].item),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ContinueWatchingTile extends StatelessWidget {
+  final ContinueWatchingEntry entry;
+  final VoidCallback onTap;
+
+  const _ContinueWatchingTile({required this.entry, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final item = entry.item;
+    return FocusableCard(
+      onTap: onTap,
+      child: SizedBox(
+        width: 96,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _Poster(item: item, width: 96, height: 128),
+            const SizedBox(height: 4),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(
+                value: entry.position.progress,
+                minHeight: 3,
+                backgroundColor: AppColors.line,
+                color: AppColors.accent,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              item.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -588,7 +705,14 @@ class MediaDetailsSheet extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onPlay,
     this.onChanged,
+    this.resume,
+    this.onPlayFromStart,
   });
+
+  /// Saved resume point for this item, if any — turns the Play button into
+  /// "Resume from h:mm:ss" and surfaces [onPlayFromStart] beside it.
+  final PlaybackPosition? resume;
+  final VoidCallback? onPlayFromStart;
 
   @override
   State<MediaDetailsSheet> createState() => _MediaDetailsSheetState();
@@ -743,11 +867,29 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                 ],
                 const SizedBox(height: 16),
                 if (widget.onPlay != null)
-                  FilledButton.icon(
-                    autofocus: true,
-                    onPressed: widget.onPlay,
-                    icon: const Icon(Icons.play_arrow_rounded),
-                    label: const Text('Play'),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      FilledButton.icon(
+                        autofocus: true,
+                        onPressed: widget.onPlay,
+                        icon: const Icon(Icons.play_arrow_rounded),
+                        label: Text(
+                          widget.resume != null
+                              ? 'Resume from ${_positionLabel(widget.resume!.position)}'
+                              : 'Play',
+                        ),
+                      ),
+                      if (widget.resume != null &&
+                          widget.onPlayFromStart != null)
+                        OutlinedButton.icon(
+                          onPressed: widget.onPlayFromStart,
+                          icon: const Icon(Icons.replay_rounded),
+                          label: const Text('From start'),
+                        ),
+                    ],
                   ),
                 const SizedBox(height: 12),
                 _MetadataStatus(
@@ -997,18 +1139,35 @@ class _DeferredMediaPlayer extends StatefulWidget {
 }
 
 class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
-  late final Future<StreamInfo> _stream = widget.repo.resolveMedia(widget.item);
+  late final Future<(StreamInfo, PlaybackPosition?)> _stream = () async {
+    // Saved resume point rides along with the resolve so playback starts at
+    // the right position (episodes played from the series browser).
+    final resume = await widget.repo.db.readPlaybackPosition(
+      widget.repo.source.id,
+      widget.item.kind,
+      widget.item.id,
+    );
+    return (await widget.repo.resolveMedia(widget.item), resume);
+  }();
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<StreamInfo>(
+    return FutureBuilder<(StreamInfo, PlaybackPosition?)>(
       future: _stream,
       builder: (context, snapshot) {
         if (snapshot.hasData) {
+          final (stream, resume) = snapshot.data!;
           return PlayerScreen(
             title: widget.item.title,
-            stream: snapshot.data!,
+            stream: stream,
             sourceName: widget.repo.source.name,
+            playback: PlaybackContext(
+              db: widget.repo.db,
+              sourceId: widget.repo.source.id,
+              kind: widget.item.kind,
+              itemId: widget.item.id,
+              resumeFrom: resume?.position,
+            ),
           );
         }
         if (snapshot.hasError) {

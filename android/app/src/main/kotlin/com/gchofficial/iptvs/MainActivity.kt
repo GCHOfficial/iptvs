@@ -152,6 +152,11 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_ADOPT_SHARED,
                             args["adoptShared"] as? Boolean ?: false,
                         )
+                        // VOD resume point (ms), 0 = play from the top.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_RESUME_MS,
+                            (args["resumeMs"] as? Number)?.toLong() ?: 0L,
+                        )
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }
@@ -203,7 +208,16 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_NATIVE_PLAYER && ::nativeHdrChannel.isInitialized) {
-            nativeHdrChannel.invokeMethod("nativeClosed", null)
+            // Relay the final VOD position (see HdrPlayerActivity.finish) so the
+            // Dart side can persist the resume point. Null args = live / legacy.
+            val positionMs = data?.getLongExtra(HdrPlayerActivity.RESULT_POSITION_MS, -1L) ?: -1L
+            val durationMs = data?.getLongExtra(HdrPlayerActivity.RESULT_DURATION_MS, -1L) ?: -1L
+            val args = if (positionMs >= 0L && durationMs > 0L) {
+                mapOf("positionMs" to positionMs, "durationMs" to durationMs)
+            } else {
+                null
+            }
+            nativeHdrChannel.invokeMethod("nativeClosed", args)
         }
     }
 

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../sources/source.dart';
@@ -13,6 +14,13 @@ const kFavoritesCategoryId = '__favorites__';
 /// Cap on how many items an automatic (post-load) metadata enrichment pass
 /// touches, so a large catalog doesn't fan out into a huge burst of API calls.
 const _autoEnrichLimit = 40;
+
+/// One "Continue watching" rail entry: the cached item + its saved position.
+class ContinueWatchingEntry {
+  final MediaItem item;
+  final PlaybackPosition position;
+  const ContinueWatchingEntry({required this.item, required this.position});
+}
 
 /// Owns one media tab's (movies *or* series) browsing state and the async
 /// operations that mutate it — load, paging, search, and metadata enrichment —
@@ -78,6 +86,42 @@ class MediaTabController extends ChangeNotifier {
   String? get _loadCategory =>
       categoryId == kFavoritesCategoryId ? null : categoryId;
 
+  /// "Continue watching" entries for this tab, newest first: in-progress
+  /// movies on the movie tab, in-progress episodes on the series tab.
+  List<ContinueWatchingEntry> continueWatching = const [];
+
+  /// Which position kind this tab resumes (episodes drive the series tab).
+  ContentKind get _resumeKind =>
+      kind == ContentKind.movie ? ContentKind.movie : ContentKind.episode;
+
+  /// Rebuild [continueWatching] from the saved positions, resolving ids
+  /// against the cached media items (unknown ids — e.g. items whose category
+  /// was never cached — are skipped rather than shown title-less).
+  Future<void> loadContinueWatching() async {
+    final positions = await repo.db.readRecentPositions(repo.source.id);
+    final wanted = positions.where((p) => p.kind == _resumeKind).toList();
+    if (wanted.isEmpty) {
+      if (continueWatching.isNotEmpty) {
+        _set(() => continueWatching = const []);
+      }
+      return;
+    }
+    final items = await repo.db.readMediaItemsByIds(
+      repo.source.id,
+      _resumeKind,
+      [for (final p in wanted) p.itemId],
+    );
+    if (_disposed) return;
+    final byId = {for (final item in items) item.id: item};
+    _set(() {
+      continueWatching = [
+        for (final position in wanted)
+          if (byId[position.itemId] case final item?)
+            ContinueWatchingEntry(item: item, position: position),
+      ];
+    });
+  }
+
   Future<void> load({bool forceRefresh = false}) async {
     final categoryToLoad = _loadCategory;
     _set(() {
@@ -85,6 +129,7 @@ class MediaTabController extends ChangeNotifier {
       loading = true;
       error = null;
     });
+    unawaited(loadContinueWatching());
     try {
       final snap = await repo.loadMedia(
         kind,
