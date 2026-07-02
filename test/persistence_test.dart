@@ -375,6 +375,33 @@ void main() {
   });
 
   group('AppDatabase programmes', () {
+    test('programmesForChannels batches the window query per channel', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      DateTime t(int h) => DateTime.utc(2024, 1, 1, h);
+      await db.replaceEpg('src1', [
+        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+        Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+        Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'C'),
+        Programme(channelId: 'ch3', start: t(1), stop: t(2), title: 'OutOfWindow'),
+      ]);
+
+      final byChannel = await db.programmesForChannels(
+        'src1',
+        ['ch1', 'ch2', 'ch3'],
+        from: t(10),
+        to: t(12),
+      );
+
+      expect(byChannel['ch1']!.map((p) => p.title), ['A', 'B']);
+      expect(byChannel['ch2']!.map((p) => p.title), ['C']);
+      expect(byChannel.containsKey('ch3'), isFalse);
+      expect(
+        await db.programmesForChannels('src1', const [], from: t(0), to: t(23)),
+        isEmpty,
+      );
+      await db.close();
+    });
+
     test('returns a channel\'s programmes overlapping a window, ordered',
         () async {
       final db = await AppDatabase.openAt(dbPath());

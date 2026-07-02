@@ -1278,6 +1278,37 @@ class AppDatabase {
     return rows.map(_rowToProgramme).toList();
   }
 
+  /// Programmes overlapping [from]..[to] for a batch of channels in one query
+  /// (the EPG grid's visible window), grouped by channel id, each ordered by
+  /// start. Channels without cached EPG simply have no entry.
+  Future<Map<String, List<Programme>>> programmesForChannels(
+    String sourceId,
+    List<String> channelIds, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    if (channelIds.isEmpty) return const {};
+    final placeholders = List.filled(channelIds.length, '?').join(', ');
+    final rows = await _db.rawQuery(
+      'SELECT channel_id, title, start, stop, description FROM programmes '
+      'WHERE source_id = ? AND channel_id IN ($placeholders) '
+      'AND start < ? AND stop > ? '
+      'ORDER BY channel_id, start',
+      [
+        sourceId,
+        ...channelIds,
+        to.millisecondsSinceEpoch,
+        from.millisecondsSinceEpoch,
+      ],
+    );
+    final out = <String, List<Programme>>{};
+    for (final row in rows) {
+      final programme = _rowToProgramme(row);
+      (out[programme.channelId] ??= []).add(programme);
+    }
+    return out;
+  }
+
   Programme _rowToProgramme(Map<String, Object?> r) => Programme(
     channelId: r['channel_id'] as String,
     start: DateTime.fromMillisecondsSinceEpoch(r['start'] as int),

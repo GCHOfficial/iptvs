@@ -17,6 +17,7 @@ import '../widgets/profile_avatar.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
+import 'epg_grid_screen.dart';
 import 'favorites_controller.dart';
 import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
@@ -567,13 +568,10 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
   }
 
-  /// Zap straight back to the previously played live channel (fullscreen,
-  /// bypassing the preview) — classic "last channel" recall.
-  Future<void> _zapToPreviousChannel() async {
+  /// Resolve [channel] and play it fullscreen directly, bypassing the preview
+  /// flow (used by zap and the EPG grid).
+  Future<void> _playChannelFullscreen(Channel channel) async {
     if (_resolving) return;
-    final id = _previousPlayedLiveChannelId;
-    final channel = id == null ? null : _findChannelById(id);
-    if (channel == null) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
       final stream = await widget.repo.resolve(channel);
@@ -584,6 +582,30 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         SnackBar(content: Text('Could not play: ${redactText('$e')}')),
       );
     }
+  }
+
+  /// Zap straight back to the previously played live channel — classic
+  /// "last channel" recall.
+  Future<void> _zapToPreviousChannel() async {
+    final id = _previousPlayedLiveChannelId;
+    final channel = id == null ? null : _findChannelById(id);
+    if (channel != null) await _playChannelFullscreen(channel);
+  }
+
+  /// Open the TV-guide grid for the currently visible channels.
+  void _openEpgGrid() {
+    unawaited(_preview.stop());
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => EpgGridScreen(
+          repo: widget.repo,
+          channels: _visible,
+          onPlayChannel: (channel) => unawaited(_playChannelFullscreen(channel)),
+          onPlayArchive: (channel, programme) =>
+              unawaited(_playCatchup(channel, programme)),
+        ),
+      ),
+    );
   }
 
   /// Phone-only: open a compact, audible preview of [channel] in a bottom
@@ -1140,8 +1162,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                           }
                         },
                       )),
-          actionControl:
-              _tab == ContentKind.live || !widget.repo.canEnrichMetadata
+          actionControl: _tab == ContentKind.live
+              ? _ToolbarIconButton(
+                  tooltip: 'TV guide',
+                  busy: false,
+                  icon: Icons.calendar_view_day_rounded,
+                  onPressed: _openEpgGrid,
+                )
+              : !widget.repo.canEnrichMetadata
               ? null
               : _ToolbarIconButton(
                   tooltip: _media(_tab).enriching
