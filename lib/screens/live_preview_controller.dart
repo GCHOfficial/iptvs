@@ -151,7 +151,9 @@ class LivePreviewController extends ChangeNotifier {
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
   Future<void> start(Channel channel, {bool muted = true}) async {
-    if (loading) return;
+    // No guard on `loading`: a newer call must supersede an in-flight resolve
+    // (a slow Stalker create_link would otherwise swallow the user's channel
+    // change). The request id makes the stale attempt's completions no-ops.
     final requestId = ++_requestId;
     this.muted = muted;
     _set(() {
