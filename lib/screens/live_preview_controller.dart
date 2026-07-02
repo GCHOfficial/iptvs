@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -10,28 +11,64 @@ import '../data/library_repository.dart';
 import '../player/mpv_options.dart';
 import '../sources/source.dart';
 
-/// Owns the live split-pane/phone **preview** player and its state — the
-/// media_kit [Player] + [VideoController], which channel is previewing, its
-/// resolved [StreamInfo], and loading/error — as a [ChangeNotifier] so the
-/// screen rebuilds via a listener.
+/// Owns the live split-pane/phone **preview** player and its state — which
+/// channel is previewing, its resolved [StreamInfo], and loading/error — as a
+/// [ChangeNotifier] so the screen rebuilds via a listener.
 ///
-/// Fullscreen playback, the phone preview sheet, and focus handling stay in the
-/// screen (they need navigation/context/focus); they drive the preview through
-/// [start]/[stop]/[pause]/[play] and read these fields.
+/// Two playback paths, chosen per channel:
 ///
-/// The [Player] and [VideoController] are created lazily (only when a preview
-/// actually starts / the preview panel first renders) so the media_kit video
-/// output isn't spun up during loading or on layouts that never show it.
+/// - **Android (default)**: the *shared native ExoPlayer engine* (Kotlin
+///   `SharedEngine`), rendering into a platform view. This is what makes the
+///   preview → fullscreen handoff seamless: the fullscreen Activity *adopts*
+///   the running engine (only the video surface moves — audio, decoder and
+///   buffer carry over) instead of reloading the stream, and it's also the
+///   cheapest decode path for weak TV boxes (MediaCodec straight into a
+///   TextureView, no mpv → GL texture copy).
+/// - **Fallback / other platforms**: the embedded media_kit [Player] +
+///   [VideoController] texture. On Android this covers streams the native
+///   engine can't decode (chiefly Dolby Vision P5 on non-DV hardware — mpv
+///   software-reshapes those), remembered per channel in
+///   [_nativeUnsupportedIds].
+///
+/// Fullscreen playback, the phone preview sheet, and focus handling stay in
+/// the screen (they need navigation/context/focus); they drive the preview
+/// through [start]/[stop]/[pause]/[play] and read these fields.
 class LivePreviewController extends ChangeNotifier {
   final LibraryRepository repo;
 
   /// Surfaces a preview-resolution failure (the screen shows a snackbar).
   final void Function(String message)? onError;
 
-  LivePreviewController({required this.repo, this.onError});
+  LivePreviewController({required this.repo, this.onError}) {
+    if (Platform.isAndroid) {
+      // Last-created controller wins the channel — there's one live preview at
+      // a time, and a new source's screen replaces the old controller.
+      _nativeChannel.setMethodCallHandler(_handleNativeCall);
+    }
+  }
+
+  static const MethodChannel _nativeChannel = MethodChannel(
+    'iptvs/native_preview',
+  );
+
+  /// Channels whose video the native engine can't decode (e.g. Dolby Vision
+  /// P5 on non-DV hardware) — they preview via media_kit for this session.
+  final Set<String> _nativeUnsupportedIds = <String>{};
+
+  /// True while the native shared engine (not media_kit) owns the preview.
+  bool nativeActive = false;
+
+  /// Current mute state (native volume isn't readable back, so track it here).
+  bool muted = true;
+
+  bool get isMuted => muted;
 
   Player? _player;
   Player get player => _player ??= _createPlayer();
+
+  /// True once the embedded media_kit player exists (it's created lazily, and
+  /// never at all while the native path serves every preview).
+  bool get hasEmbeddedPlayer => _player != null;
 
   VideoController? _controller;
   // Force hardware decode for the preview via the controller config — the only
@@ -107,12 +144,16 @@ class LivePreviewController extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool _useNative(Channel channel) =>
+      Platform.isAndroid && !_nativeUnsupportedIds.contains(channel.id);
+
   /// Resolve [channel] and open it in the preview player. [muted] is true for
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
   Future<void> start(Channel channel, {bool muted = true}) async {
     if (loading) return;
     final requestId = ++_requestId;
+    this.muted = muted;
     _set(() {
       channelId = channel.id;
       loading = true;
@@ -126,6 +167,27 @@ class LivePreviewController extends ChangeNotifier {
       );
       final resolved = await repo.resolve(channel);
       if (_disposed || requestId != _requestId) return;
+      if (_useNative(channel)) {
+        final opened = await _openNative(resolved, muted: muted);
+        if (_disposed || requestId != _requestId) return;
+        if (opened) {
+          // A previous fallback (media_kit) preview may still be running.
+          if (_player != null) unawaited(_player!.stop());
+          _set(() {
+            nativeActive = true;
+            stream = resolved;
+            loading = false;
+            error = null;
+          });
+          return;
+        }
+        // Native engine unavailable for this channel — embedded path instead.
+        _nativeUnsupportedIds.add(channel.id);
+      }
+      if (nativeActive) {
+        nativeActive = false;
+        unawaited(_stopNative());
+      }
       await player.open(Media(resolved.url, httpHeaders: resolved.headers));
       await player.setVolume(muted ? 0 : 100);
       if (_disposed || requestId != _requestId) return;
@@ -144,9 +206,87 @@ class LivePreviewController extends ChangeNotifier {
     }
   }
 
+  Future<bool> _openNative(StreamInfo resolved, {required bool muted}) async {
+    try {
+      final opened = await _nativeChannel.invokeMethod<bool>('open', {
+        'url': resolved.url,
+        'headers': resolved.headers,
+        'muted': muted,
+      });
+      if (opened == true) {
+        DiagnosticsLog.instance.add('library', 'preview native engine open');
+        return true;
+      }
+      return false;
+    } catch (e) {
+      // No URL in the log — provider URLs carry credentials.
+      DiagnosticsLog.instance.add(
+        'library',
+        'preview native engine unavailable: ${e.runtimeType}',
+      );
+      return false;
+    }
+  }
+
+  Future<void> _stopNative() async {
+    try {
+      await _nativeChannel.invokeMethod('stop');
+    } catch (_) {}
+  }
+
+  /// Events pushed by the Kotlin side (`SharedEngine` via MainActivity).
+  Future<dynamic> _handleNativeCall(MethodCall call) async {
+    if (_disposed || call.method != 'previewEvent') return null;
+    final args = call.arguments as Map?;
+    if (!nativeActive) return null;
+    switch (args?['event']) {
+      case 'unsupported':
+        // The native engine can't decode this channel's video — remember that
+        // and fall back to the embedded media_kit preview mid-flight.
+        final id = channelId;
+        final s = stream;
+        if (id != null) _nativeUnsupportedIds.add(id);
+        nativeActive = false;
+        if (s == null) return null;
+        DiagnosticsLog.instance.add(
+          'library',
+          'preview video unsupported by native engine — media_kit fallback',
+        );
+        try {
+          await player.open(Media(s.url, httpHeaders: s.headers));
+          await player.setVolume(muted ? 0 : 100);
+          _set(() {});
+        } catch (e) {
+          _set(() => error = '$e');
+        }
+      case 'lost':
+        // Fullscreen swapped the adopted shared engine for mpv (unsupported
+        // video), so the native preview is gone. Clear the preview; the next
+        // (re)focus starts a fresh one on the fallback path.
+        final id = channelId;
+        if (id != null) _nativeUnsupportedIds.add(id);
+        _set(() {
+          nativeActive = false;
+          stream = null;
+          loading = false;
+        });
+      case 'error':
+        final message = (args?['message'] as String?) ?? 'stream error';
+        _set(() {
+          loading = false;
+          error = message;
+        });
+    }
+    return null;
+  }
+
   /// Stop the preview player. [clearSelection] also drops the previewing
   /// channel (used when leaving the live view / closing the phone sheet).
   Future<void> stop({bool clearSelection = false}) async {
+    if (nativeActive) {
+      nativeActive = false;
+      await _stopNative();
+    }
     try {
       if (_player != null) await _player!.stop();
     } catch (_) {}
@@ -162,11 +302,37 @@ class LivePreviewController extends ChangeNotifier {
   /// Pause/resume the preview player around fullscreen playback (no-ops if the
   /// player was never created).
   Future<void> pause() async {
+    if (nativeActive) {
+      try {
+        await _nativeChannel.invokeMethod('pause');
+      } catch (_) {}
+      return;
+    }
     if (_player != null) await _player!.pause();
   }
 
   Future<void> play() async {
+    if (nativeActive) {
+      try {
+        await _nativeChannel.invokeMethod('play');
+      } catch (_) {}
+      return;
+    }
     if (_player != null) await _player!.play();
+  }
+
+  /// Mute/unmute whichever engine is previewing (and remember the state).
+  Future<void> setMuted(bool value) async {
+    muted = value;
+    if (nativeActive) {
+      try {
+        await _nativeChannel.invokeMethod('setVolume', {
+          'volume': value ? 0.0 : 1.0,
+        });
+      } catch (_) {}
+      return;
+    }
+    if (_player != null) await _player!.setVolume(value ? 0 : 100);
   }
 
   /// Disposes the current player entirely and clears preview state. Used when
@@ -177,6 +343,10 @@ class LivePreviewController extends ChangeNotifier {
   /// The next [start] call builds a fresh one.
   Future<void> discardPlayer() async {
     final player = _player;
+    if (nativeActive) {
+      nativeActive = false;
+      unawaited(_stopNative());
+    }
     unawaited(_hwdecProbe?.cancel());
     _hwdecProbe = null;
     _loggedHwdec = false;
@@ -193,8 +363,30 @@ class LivePreviewController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    if (nativeActive) {
+      nativeActive = false;
+      unawaited(_stopNative());
+    }
     unawaited(_hwdecProbe?.cancel());
     unawaited(_player?.dispose());
     super.dispose();
+  }
+}
+
+/// Renders the live preview's video: the native shared-engine platform view
+/// when that path is active, else the embedded media_kit texture. Build this
+/// only once the preview has loaded ([LivePreviewController.stream] != null) so
+/// the media_kit player isn't spun up while the native path is still deciding.
+class PreviewVideo extends StatelessWidget {
+  final LivePreviewController preview;
+
+  const PreviewVideo({super.key, required this.preview});
+
+  @override
+  Widget build(BuildContext context) {
+    if (preview.nativeActive) {
+      return const AndroidView(viewType: 'iptvs/preview_view');
+    }
+    return Video(controller: preview.controller, controls: NoVideoControls);
   }
 }
