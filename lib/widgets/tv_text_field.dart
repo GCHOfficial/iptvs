@@ -153,10 +153,7 @@ class _TvTextFieldState extends State<TvTextField> {
           onTap: _enterEdit,
           child: Container(
             height: widget.height,
-            // Center the inner field within a fixed-height cell. Without this the
-            // Container hands the TextField a tight height; under isDense Android's
-            // InputDecorator then pins the hint to the top (Windows happens to
-            // center it) — the long-standing Android-only hint misalignment.
+            // Vertically centers the Row within a fixed-height cell.
             alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
               color: highlighted ? AppColors.panelHi : AppColors.panel,
@@ -174,38 +171,61 @@ class _TvTextFieldState extends State<TvTextField> {
               ignoring: !_editing,
               child: ExcludeFocus(
                 excluding: !_editing,
-                child: TextField(
-                  controller: widget.controller,
-                  focusNode: _fieldFocus,
-                  obscureText: widget.obscureText,
-                  // Center text + hint within the decorator. When a prefix/suffix
-                  // icon (min 48dp) makes the decorator taller than the text line,
-                  // Android's InputDecorator top-aligns dense text by default —
-                  // Windows happens to center it, so the skew is Android-only.
-                  textAlignVertical: TextAlignVertical.center,
-                  onChanged: widget.onChanged,
-                  textInputAction: widget.textInputAction,
-                  onSubmitted: (value) {
-                    _exitEdit();
-                    widget.onSubmitted?.call(value);
-                  },
-                  // The cell already supplies the background + focus ring, so strip
-                  // the global InputDecorationTheme's fill and all borders.
-                  decoration: InputDecoration(
-                    isDense: true,
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
+                // Icons live OUTSIDE the InputDecoration, in a manually centered
+                // Row. Inside the decorator their 48dp minimum makes it taller
+                // than the text line, and the InputDecorator's dense-layout
+                // vertical centering differs between Android and Windows — the
+                // recurring "hint sits high on Android" bug. With no icons the
+                // decorator collapses to the text line and the Row centers
+                // everything identically on every platform.
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    if (widget.prefixIcon != null)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 12),
+                        child: IconTheme.merge(
+                          data: const IconThemeData(color: AppColors.textLo),
+                          child: widget.prefixIcon!,
+                        ),
+                      ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: TextField(
+                          controller: widget.controller,
+                          focusNode: _fieldFocus,
+                          obscureText: widget.obscureText,
+                          onChanged: widget.onChanged,
+                          textInputAction: widget.textInputAction,
+                          onSubmitted: (value) {
+                            _exitEdit();
+                            widget.onSubmitted?.call(value);
+                          },
+                          // A *collapsed* decoration removes the InputDecorator's
+                          // layout entirely (no fill, borders, or padding — the
+                          // cell supplies all of that), so the field is exactly
+                          // the text line and the Row's centering is
+                          // platform-independent. Any non-collapsed decoration
+                          // re-engages the decorator's own vertical placement,
+                          // which differs between Android and Windows — the
+                          // recurring hint-misalignment bug.
+                          decoration: InputDecoration.collapsed(
+                            hintText: widget.hintText,
+                            hintStyle: const TextStyle(color: AppColors.textLo),
+                          ),
+                        ),
+                      ),
                     ),
-                    hintText: widget.hintText,
-                    prefixIcon: widget.prefixIcon,
-                    suffixIcon: widget.suffixIcon,
-                  ),
+                    if (widget.suffixIcon != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 4),
+                        child: IconTheme.merge(
+                          data: const IconThemeData(color: AppColors.textLo),
+                          child: widget.suffixIcon!,
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),
