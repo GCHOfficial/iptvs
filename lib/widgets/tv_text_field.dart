@@ -178,6 +178,11 @@ class _TvTextFieldState extends State<TvTextField> {
                   controller: widget.controller,
                   focusNode: _fieldFocus,
                   obscureText: widget.obscureText,
+                  // Center text + hint within the decorator. When a prefix/suffix
+                  // icon (min 48dp) makes the decorator taller than the text line,
+                  // Android's InputDecorator top-aligns dense text by default —
+                  // Windows happens to center it, so the skew is Android-only.
+                  textAlignVertical: TextAlignVertical.center,
                   onChanged: widget.onChanged,
                   textInputAction: widget.textInputAction,
                   onSubmitted: (value) {
