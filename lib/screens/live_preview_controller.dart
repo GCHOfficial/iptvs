@@ -8,6 +8,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/net.dart';
 import '../player/mpv_options.dart';
 import '../sources/source.dart';
 
@@ -151,7 +152,9 @@ class LivePreviewController extends ChangeNotifier {
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
   Future<void> start(Channel channel, {bool muted = true}) async {
-    if (loading) return;
+    // No guard on `loading`: a newer call must supersede an in-flight resolve
+    // (a slow Stalker create_link would otherwise swallow the user's channel
+    // change). The request id makes the stale attempt's completions no-ops.
     final requestId = ++_requestId;
     this.muted = muted;
     _set(() {
@@ -198,11 +201,14 @@ class LivePreviewController extends ChangeNotifier {
       });
     } catch (e) {
       if (_disposed || requestId != _requestId) return;
+      // Exception text can embed the stream URL (credentials in the path) —
+      // scrub before anything user-visible.
+      final message = redactText('$e');
       _set(() {
         loading = false;
-        error = '$e';
+        error = message;
       });
-      onError?.call('Could not preview: $e');
+      onError?.call('Could not preview: $message');
     }
   }
 
@@ -257,7 +263,7 @@ class LivePreviewController extends ChangeNotifier {
           await player.setVolume(muted ? 0 : 100);
           _set(() {});
         } catch (e) {
-          _set(() => error = '$e');
+          _set(() => error = redactText('$e'));
         }
       case 'lost':
         // Fullscreen swapped the adopted shared engine for mpv (unsupported
@@ -271,7 +277,8 @@ class LivePreviewController extends ChangeNotifier {
           loading = false;
         });
       case 'error':
-        final message = (args?['message'] as String?) ?? 'stream error';
+        // Native engine error text can carry the stream URL — scrub it.
+        final message = redactText((args?['message'] as String?) ?? 'stream error');
         _set(() {
           loading = false;
           error = message;

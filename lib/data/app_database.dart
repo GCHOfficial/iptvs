@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
@@ -7,6 +8,28 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
+
+/// A saved VOD resume point (see `playback_positions`).
+class PlaybackPosition {
+  final ContentKind kind;
+  final String itemId;
+  final Duration position;
+  final Duration duration;
+  final DateTime updatedAt;
+
+  const PlaybackPosition({
+    required this.kind,
+    required this.itemId,
+    required this.position,
+    required this.duration,
+    required this.updatedAt,
+  });
+
+  /// 0..1 watched fraction (0 when the duration is unknown).
+  double get progress => duration > Duration.zero
+      ? (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0)
+      : 0.0;
+}
 
 /// Local SQLite cache of a source's categories, channels, and EPG, keyed by
 /// [Source.id], so launches are instant and search/guide work offline.
@@ -16,7 +39,7 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
-  static const schemaVersion = 10;
+  static const schemaVersion = 11;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -73,6 +96,7 @@ class AppDatabase {
         await _createProgrammes(db);
         await _createMediaTables(db);
         await _createFavorites(db);
+        await _createPlaybackPositions(db);
         await db.execute(
           'CREATE INDEX idx_channels_source ON channels(source_id)',
         );
@@ -122,6 +146,12 @@ class AppDatabase {
           // `onCreate` (not `_createMediaTables`), so every upgrade path lands
           // here; the ALTER is guarded against a pre-existing column.
           await _addChannelArchiveColumn(db);
+        }
+        if (oldV < 11) {
+          // VOD resume positions. Standalone table (like `favorites`, outside
+          // `_createMediaTables`), so this one repair branch covers every
+          // upgrade path. Idempotent.
+          await _createPlaybackPositions(db);
         }
       },
     );
@@ -363,6 +393,110 @@ class AppDatabase {
     );
   }
 
+  static Future<void> _createPlaybackPositions(Database db) async {
+    // VOD resume positions (movies/episodes), keyed like `favorites` by the
+    // source-stable ids and deliberately separate from `media_items` so a
+    // library refresh never drops them. Rows are removed when playback
+    // finishes (>~95%) or the media is deleted upstream.
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS playback_positions (
+        source_id   TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        item_id     TEXT NOT NULL,
+        position_ms INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, item_id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_positions_source_updated '
+      'ON playback_positions(source_id, updated_at)',
+    );
+  }
+
+  // ── playback positions (VOD resume) ───────────────────────────────────────
+
+  /// Upsert the resume position for an item; clears the row instead when the
+  /// user is effectively done (past [kFinishedFraction] of the duration), so
+  /// finished titles drop out of "Continue watching".
+  static const kFinishedFraction = 0.95;
+
+  Future<void> savePlaybackPosition(
+    String sourceId,
+    ContentKind kind,
+    String itemId, {
+    required Duration position,
+    required Duration duration,
+  }) async {
+    if (duration > Duration.zero &&
+        position.inMilliseconds >=
+            duration.inMilliseconds * kFinishedFraction) {
+      await clearPlaybackPosition(sourceId, kind, itemId);
+      return;
+    }
+    // Ignore the first instants — a resume row for second 0 is just noise.
+    if (position < const Duration(seconds: 10)) return;
+    await _db.insert('playback_positions', {
+      'source_id': sourceId,
+      'kind': kind.name,
+      'item_id': itemId,
+      'position_ms': position.inMilliseconds,
+      'duration_ms': duration.inMilliseconds,
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<PlaybackPosition?> readPlaybackPosition(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+  ) async {
+    final rows = await _db.query(
+      'playback_positions',
+      where: 'source_id = ? AND kind = ? AND item_id = ?',
+      whereArgs: [sourceId, kind.name, itemId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return _rowToPlaybackPosition(rows.first);
+  }
+
+  Future<void> clearPlaybackPosition(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+  ) => _db.delete(
+    'playback_positions',
+    where: 'source_id = ? AND kind = ? AND item_id = ?',
+    whereArgs: [sourceId, kind.name, itemId],
+  );
+
+  /// Most recently watched in-progress items for [sourceId], newest first —
+  /// the data behind the "Continue watching" rail.
+  Future<List<PlaybackPosition>> readRecentPositions(
+    String sourceId, {
+    int limit = 20,
+  }) async {
+    final rows = await _db.query(
+      'playback_positions',
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+      orderBy: 'updated_at DESC',
+      limit: limit,
+    );
+    return rows.map(_rowToPlaybackPosition).toList();
+  }
+
+  static PlaybackPosition _rowToPlaybackPosition(Map<String, Object?> r) =>
+      PlaybackPosition(
+        kind: ContentKind.values.byName(r['kind'] as String),
+        itemId: r['item_id'] as String,
+        position: Duration(milliseconds: r['position_ms'] as int),
+        duration: Duration(milliseconds: r['duration_ms'] as int),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(r['updated_at'] as int),
+      );
+
   // ── favorites ─────────────────────────────────────────────────────────────
 
   /// The set of favorited item ids for [sourceId] / [kind].
@@ -452,6 +586,12 @@ class AppDatabase {
         .toList();
   }
 
+  /// Above this many rows, row→model mapping (a jsonDecode of `extra` per
+  /// row) moves to a background isolate — it's the cache-hit startup path, so
+  /// on a 50k-channel playlist it would otherwise jank every launch. Below it
+  /// the isolate spawn costs more than the mapping.
+  static const _isolateMapThreshold = 500;
+
   Future<List<Channel>> readChannels(String sourceId) async {
     final rows = await _db.query(
       'channels',
@@ -459,7 +599,10 @@ class AppDatabase {
       whereArgs: [sourceId],
       orderBy: 'number, name',
     );
-    return rows.map(_rowToChannel).toList();
+    if (rows.length < _isolateMapThreshold) {
+      return rows.map(_rowToChannel).toList();
+    }
+    return Isolate.run(() => rows.map(_rowToChannel).toList());
   }
 
   // ── movies / series / generic media ──────────────────────────────────────
@@ -555,10 +698,34 @@ class AppDatabase {
       whereArgs: args,
       orderBy: 'display_order, title',
     );
+    if (rows.length < _isolateMapThreshold) {
+      return rows.map((r) => _rowToMediaItem(r, kind)).toList();
+    }
+    return Isolate.run(
+      () => rows.map((r) => _rowToMediaItem(r, kind)).toList(),
+    );
+  }
+
+  /// The cached media items among [ids] (any order). Used to materialize the
+  /// "Continue watching" rail from saved playback positions.
+  Future<List<MediaItem>> readMediaItemsByIds(
+    String sourceId,
+    ContentKind kind,
+    List<String> ids,
+  ) async {
+    if (ids.isEmpty) return const [];
+    final placeholders = List.filled(ids.length, '?').join(', ');
+    final rows = await _db.query(
+      'media_items',
+      where: 'source_id = ? AND kind = ? AND id IN ($placeholders)',
+      whereArgs: [sourceId, kind.name, ...ids],
+    );
     return rows.map((r) => _rowToMediaItem(r, kind)).toList();
   }
 
-  MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
+  // Static (not instance) so the Isolate.run closures above capture only the
+  // rows — capturing `this` would drag the non-sendable Database across.
+  static MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
       MediaItem(
         id: r['id'] as String,
         title: r['title'] as String,
@@ -579,13 +746,13 @@ class AppDatabase {
             : const {},
       );
 
-  int? _readInt(Object? value) {
+  static int? _readInt(Object? value) {
     if (value is int) return value;
     if (value == null) return null;
     return int.tryParse(value.toString());
   }
 
-  double? _readDouble(Object? value) {
+  static double? _readDouble(Object? value) {
     if (value is double) return value;
     if (value is int) return value.toDouble();
     if (value == null) return null;
@@ -967,7 +1134,7 @@ class AppDatabase {
         ),
       );
 
-  Channel _rowToChannel(Map<String, Object?> r) => Channel(
+  static Channel _rowToChannel(Map<String, Object?> r) => Channel(
     id: r['id'] as String,
     name: r['name'] as String,
     number: r['number'] as int?,
@@ -1109,6 +1276,37 @@ class AppDatabase {
       ],
     );
     return rows.map(_rowToProgramme).toList();
+  }
+
+  /// Programmes overlapping [from]..[to] for a batch of channels in one query
+  /// (the EPG grid's visible window), grouped by channel id, each ordered by
+  /// start. Channels without cached EPG simply have no entry.
+  Future<Map<String, List<Programme>>> programmesForChannels(
+    String sourceId,
+    List<String> channelIds, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    if (channelIds.isEmpty) return const {};
+    final placeholders = List.filled(channelIds.length, '?').join(', ');
+    final rows = await _db.rawQuery(
+      'SELECT channel_id, title, start, stop, description FROM programmes '
+      'WHERE source_id = ? AND channel_id IN ($placeholders) '
+      'AND start < ? AND stop > ? '
+      'ORDER BY channel_id, start',
+      [
+        sourceId,
+        ...channelIds,
+        to.millisecondsSinceEpoch,
+        from.millisecondsSinceEpoch,
+      ],
+    );
+    final out = <String, List<Programme>>{};
+    for (final row in rows) {
+      final programme = _rowToProgramme(row);
+      (out[programme.channelId] ??= []).add(programme);
+    }
+    return out;
   }
 
   Programme _rowToProgramme(Map<String, Object?> r) => Programme(

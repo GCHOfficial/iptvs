@@ -52,6 +52,9 @@ constexpr int kNativeMenuMaxRows = 5;
 constexpr int kNativeMenuPadding = 10;
 constexpr int kNativeControlsKindOverlay = 0;
 bool g_native_video_cursor_visible = true;
+// Mini-player mode (see SetNativeWindowMiniPlayer): dragging the video moves
+// the whole window.
+bool g_native_window_mini = false;
 POINT g_last_video_mouse{-1, -1};
 POINT g_last_controls_mouse{-1, -1};
 int g_native_menu_scroll_offset = 0;
@@ -1642,6 +1645,21 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
     }
     break;
   case WM_LBUTTONDOWN:
+    if (HWND parent = GetParent(hwnd)) {
+      PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+    }
+    // Mini-player: dragging anywhere on the video moves the window (the
+    // classic manual-caption-drag trick; the frameless window has no title
+    // bar to grab). Controls live on a separate layered window and keep
+    // their own clicks.
+    if (g_native_window_mini) {
+      if (HWND root = GetAncestor(hwnd, GA_ROOT)) {
+        ReleaseCapture();
+        SendMessage(root, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        return 0;
+      }
+    }
+    break;
   case WM_RBUTTONDOWN:
   case WM_MBUTTONDOWN:
   case WM_MOUSEWHEEL:
@@ -2322,6 +2340,11 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
   if (!hwnd || native_window_fullscreen_ == fullscreen) {
     return;
   }
+  // Fullscreen and mini-player are mutually exclusive; leave mini first so
+  // the saved windowed placement isn't overwritten with the mini geometry.
+  if (fullscreen && native_window_mini_) {
+    SetNativeWindowMiniPlayer(false);
+  }
 
   if (fullscreen) {
     native_windowed_style_ = GetWindowLongPtr(hwnd, GWL_STYLE);
@@ -2351,6 +2374,67 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                      SWP_FRAMECHANGED);
     native_window_fullscreen_ = false;
+  }
+  ResizeNativeVideoSurface();
+  RecreateNativeControls();
+  ShowNativeControls(true);
+  if (native_controls_pinned_ || !g_native_control_state.playing) {
+    KillTimer(hwnd, kNativeControlsHideTimer);
+  } else {
+    ScheduleNativeControlsHide();
+  }
+}
+
+// Always-on-top mini-player: shrink the top level window to a compact,
+// frameless (but resizable), topmost video window docked at the bottom-right
+// of the work area. WM_NCHITTEST (see MessageHandler) makes the client area
+// drag the window. Restoring puts the saved windowed style/placement back.
+void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
+  HWND hwnd = GetHandle();
+  if (!hwnd || native_window_mini_ == mini) {
+    return;
+  }
+  if (mini && native_window_fullscreen_) {
+    SetNativeWindowFullscreen(false);
+  }
+
+  if (mini) {
+    native_windowed_style_ = GetWindowLongPtr(hwnd, GWL_STYLE);
+    native_windowed_ex_style_ = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    native_windowed_placement_.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(hwnd, &native_windowed_placement_);
+
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor_info{};
+    monitor_info.cbSize = sizeof(MONITORINFO);
+    GetMonitorInfo(monitor, &monitor_info);
+    const RECT &work = monitor_info.rcWork;
+
+    // 16:9 video sized to a quarter of the work-area width, clamped sane.
+    int width = (work.right - work.left) / 4;
+    if (width < 384) width = 384;
+    if (width > 640) width = 640;
+    const int height = width * 9 / 16;
+    const int margin = 16;
+
+    // Frameless but resizable (WS_THICKFRAME keeps the sizing borders).
+    SetWindowLongPtr(hwnd, GWL_STYLE,
+                     (native_windowed_style_ & ~WS_OVERLAPPEDWINDOW) |
+                         WS_POPUP | WS_THICKFRAME);
+    SetWindowPos(hwnd, HWND_TOPMOST, work.right - width - margin,
+                 work.bottom - height - margin, width, height,
+                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    native_window_mini_ = true;
+    g_native_window_mini = true;
+  } else {
+    SetWindowLongPtr(hwnd, GWL_STYLE, native_windowed_style_);
+    SetWindowLongPtr(hwnd, GWL_EXSTYLE, native_windowed_ex_style_);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER |
+                     SWP_FRAMECHANGED);
+    SetWindowPlacement(hwnd, &native_windowed_placement_);
+    native_window_mini_ = false;
+    g_native_window_mini = false;
   }
   ResizeNativeVideoSurface();
   RecreateNativeControls();
@@ -2408,6 +2492,7 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "prepareExit") {
           SetNativeWindowFullscreen(false);
+          SetNativeWindowMiniPlayer(false);
           DestroyNativeControls();
           if (native_video_surface_) {
             ShowWindow(native_video_surface_, SW_HIDE);
@@ -2492,6 +2577,20 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "isFullscreen") {
           result->Success(flutter::EncodableValue(native_window_fullscreen_));
+          return;
+        }
+
+        if (call.method_name() == "setMiniPlayer") {
+          bool mini = false;
+          const auto *args = call.arguments();
+          if (args && std::holds_alternative<bool>(*args)) {
+            mini = std::get<bool>(*args);
+          } else if (args &&
+                     std::holds_alternative<flutter::EncodableMap>(*args)) {
+            mini = EncodableBoolArg(args, "mini", mini);
+          }
+          SetNativeWindowMiniPlayer(mini);
+          result->Success(flutter::EncodableValue(native_window_mini_));
           return;
         }
 

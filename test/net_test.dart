@@ -40,4 +40,27 @@ void main() {
       expect(redactUrl('not a url?username=u'), 'not a url');
     });
   });
+
+  group('redactText', () {
+    test('redacts credential path segments of a URL inside a message', () {
+      const message =
+          'PlayerError: failed to open '
+          'http://panel.example.com:8080/live/someuser12345/s3cretp4ssw0rd/9001.ts '
+          '(timed out)';
+      final redacted = redactText(message);
+      expect(redacted, isNot(contains('someuser12345')));
+      expect(redacted, isNot(contains('s3cretp4ssw0rd')));
+      expect(redacted, contains('panel.example.com:8080'));
+      expect(redacted, contains('(timed out)'));
+    });
+
+    test('keeps short, non-token path segments readable', () {
+      const message = 'HTTP 404 fetching http://host/movie/list.m3u8';
+      expect(redactText(message), contains('/movie/list.m3u8'));
+    });
+
+    test('passes through plain text without URLs or slashes', () {
+      expect(redactText('connection refused'), 'connection refused');
+    });
+  });
 }

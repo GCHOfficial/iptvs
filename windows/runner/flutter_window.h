@@ -44,6 +44,7 @@ private:
   void NotifyNativeControlCommand(const std::string &command);
   void UpdateNativeControlState(const flutter::EncodableValue *args);
   void SetNativeWindowFullscreen(bool fullscreen);
+  void SetNativeWindowMiniPlayer(bool mini);
   void RegisterNativeHdrPlayerChannel();
 
   // The project to run.
@@ -64,6 +65,9 @@ private:
   bool native_controls_pinned_ = false;
   ULONGLONG native_ignore_input_until_ = 0;
   bool native_window_fullscreen_ = false;
+  // Always-on-top mini-player mode. Mutually exclusive with fullscreen; both
+  // save/restore through the shared *_windowed_* placement fields below.
+  bool native_window_mini_ = false;
   WINDOWPLACEMENT native_windowed_placement_ = {};
   LONG_PTR native_windowed_style_ = 0;
   LONG_PTR native_windowed_ex_style_ = 0;

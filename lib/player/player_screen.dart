@@ -7,10 +7,34 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
+import '../data/net.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import 'mpv_options.dart';
+
+/// Identifies what's playing for the VOD resume store: where to save
+/// positions and where to resume from. Absent for live streams and anything
+/// the caller doesn't want remembered.
+class PlaybackContext {
+  final AppDatabase db;
+  final String sourceId;
+  final ContentKind kind;
+  final String itemId;
+
+  /// Saved position to resume at (read by the caller before pushing the
+  /// player); null/zero plays from the top.
+  final Duration? resumeFrom;
+
+  const PlaybackContext({
+    required this.db,
+    required this.sourceId,
+    required this.kind,
+    required this.itemId,
+    this.resumeFrom,
+  });
+}
 
 /// Plays a resolved [StreamInfo] using media_kit (libmpv under the hood, so it
 /// handles HEVC / AC-3 / MPEG-TS that an HTML video element can't). Controls
@@ -47,6 +71,10 @@ class PlayerScreen extends StatefulWidget {
   /// [existingPlayer] (that's the media_kit adoption used off Android).
   final bool adoptNativePreview;
 
+  /// VOD resume context — where to persist playback positions and where to
+  /// start. Null for live streams (never persisted) and untracked playback.
+  final PlaybackContext? playback;
+
   const PlayerScreen({
     super.key,
     required this.title,
@@ -57,6 +85,7 @@ class PlayerScreen extends StatefulWidget {
     this.existingPlayer,
     this.existingController,
     this.adoptNativePreview = false,
+    this.playback,
   });
 
   @override
@@ -136,6 +165,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _probingHdr10Plus = false;
   DateTime? _ignoreNativeInputUntil;
   int? _windowsNativeSurface;
+  // VOD resume plumbing (null when untracked / live).
+  Timer? _positionPersistTimer;
+  Duration? _pendingEmbeddedResume;
   // Index into [_aspectModes]. Starts at "Fill" to match the panscan=1.0 the
   // native surface is configured with in [_configureNativePlayer].
   int _aspectModeIndex = 1;
@@ -191,6 +223,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
         (_) => _pollLiveReconnect(),
       );
     }
+    // VOD resume: persist the position periodically (plus on dispose and via
+    // the native player's nativeClosed payload), so a crash mid-film loses at
+    // most half a minute.
+    if (widget.playback != null && !_isLive) {
+      _positionPersistTimer = Timer.periodic(
+        const Duration(seconds: 30),
+        (_) => _persistPlaybackPosition(),
+      );
+      final resume = widget.playback!.resumeFrom;
+      if (resume != null && resume > Duration.zero) {
+        _pendingEmbeddedResume = resume;
+      }
+    }
+    // Embedded resume: seek once the duration is known (a cold seek right
+    // after open can land before the demuxer is ready).
+    _subs.add(
+      _player.stream.duration.listen((duration) {
+        final resume = _pendingEmbeddedResume;
+        if (resume == null || _nativePlaybackLaunched) return;
+        if (duration <= Duration.zero) return;
+        _pendingEmbeddedResume = null;
+        if (resume < duration) {
+          _logPlayback('resume seek to ${resume.inSeconds}s');
+          unawaited(_player.seek(resume));
+        }
+      }),
+    );
     _subs.add(
       _player.stream.log.listen((entry) {
         if (entry.level != 'warn' && entry.level != 'error') return;
@@ -270,15 +329,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _syncWindowsNativeControlState();
       }),
     );
-    _subs.add(
-      _player.stream.position.listen((_) => _syncWindowsNativeControlState()),
-    );
-    _subs.add(
-      _player.stream.duration.listen((_) => _syncWindowsNativeControlState()),
-    );
-    _subs.add(
-      _player.stream.volume.listen((_) => _syncWindowsNativeControlState()),
-    );
+    // Continuous streams (position ticks several times a second, duration/
+    // volume piggyback on them) go through the throttle — shipping the full
+    // control-state map over the MethodChannel per tick is pure churn while
+    // the overlay is hidden, and 2 Hz is plenty for a visible scrubber.
+    // Discrete events (track change, play/pause, user commands) keep calling
+    // _syncWindowsNativeControlState directly so the overlay never lags input.
+    _subs.add(_player.stream.position.listen((_) => _requestControlSync()));
+    _subs.add(_player.stream.duration.listen((_) => _requestControlSync()));
+    _subs.add(_player.stream.volume.listen((_) => _requestControlSync()));
 
     _open();
   }
@@ -374,6 +433,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
             'adoptShared': widget.adoptNativePreview,
+            'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
             ..._epgPayload(),
             'subtitles': widget.stream.subtitles
                 .map(
@@ -482,6 +542,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _setNativeFullscreen(!_isNativeFullscreen);
   }
 
+  // Windows always-on-top mini-player: a compact frameless topmost window,
+  // draggable by its video area. Toggled with the M key; the native side owns
+  // the geometry and restores the previous placement on exit.
+  bool _isNativeMiniPlayer = false;
+
+  Future<void> _toggleNativeMiniPlayer() async {
+    if (!_usesWindowsNativeSurface) return;
+    try {
+      final mini = await _nativeHdrPlayer.invokeMethod<bool>('setMiniPlayer', {
+        'mini': !_isNativeMiniPlayer,
+      });
+      _isNativeMiniPlayer = mini ?? !_isNativeMiniPlayer;
+      _logPlayback('native mini-player=$_isNativeMiniPlayer');
+      await _syncWindowsNativeControlState();
+    } catch (error) {
+      _logPlayback('native mini-player failed: $error');
+    }
+  }
+
   Future<dynamic> _handleNativeHdrMethodCall(MethodCall call) async {
     if (call.method == 'nativeInput') {
       final ignoreUntil = _ignoreNativeInputUntil;
@@ -493,6 +572,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final command = call.arguments?.toString();
       if (command != null) await _handleNativeControlCommand(command);
     } else if (call.method == 'nativeClosed') {
+      // The native Activity reports its final VOD position on exit; persist it
+      // as the resume point (live playback sends no args).
+      final args = call.arguments;
+      final playback = widget.playback;
+      if (playback != null && args is Map) {
+        final positionMs = (args['positionMs'] as num?)?.toInt();
+        final durationMs = (args['durationMs'] as num?)?.toInt();
+        if (positionMs != null && durationMs != null && durationMs > 0) {
+          unawaited(
+            playback.db.savePlaybackPosition(
+              playback.sourceId,
+              playback.kind,
+              playback.itemId,
+              position: Duration(milliseconds: positionMs),
+              duration: Duration(milliseconds: durationMs),
+            ),
+          );
+        }
+      }
       await _finishAndroidNativePlayback();
     }
   }
@@ -687,6 +785,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } else if (mounted) {
       setState(() {});
     }
+  }
+
+  // Coalesces continuous-stream control-state syncs (see initState) to 2 Hz.
+  // Note the native overlay auto-hides on its own timer without telling Dart,
+  // so visibility can't gate this — the throttle alone does the work. Any
+  // user action syncs directly, so the overlay never reappears stale.
+  Timer? _controlSyncThrottle;
+
+  void _requestControlSync() {
+    if (!Platform.isWindows || _windowsNativeSurface == null) return;
+    if (_controlSyncThrottle?.isActive ?? false) return;
+    _controlSyncThrottle = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      unawaited(_syncWindowsNativeControlState());
+    });
   }
 
   Future<void> _syncWindowsNativeControlState() async {
@@ -1199,12 +1312,35 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  /// Persist the embedded player's current VOD position. Not used while the
+  /// Android native Activity plays (its position arrives via `nativeClosed`).
+  void _persistPlaybackPosition() {
+    final playback = widget.playback;
+    if (playback == null || _isLive) return;
+    if (Platform.isAndroid && _nativePlaybackLaunched) return;
+    final position = _player.state.position;
+    final duration = _player.state.duration;
+    if (duration <= Duration.zero) return;
+    unawaited(
+      playback.db.savePlaybackPosition(
+        playback.sourceId,
+        playback.kind,
+        playback.itemId,
+        position: position,
+        duration: duration,
+      ),
+    );
+  }
+
   @override
   void dispose() {
     if (Platform.isWindows) {
       _nativeHdrPlayer.setMethodCallHandler(null);
     }
+    _positionPersistTimer?.cancel();
+    _persistPlaybackPosition();
     _reconnectTimer?.cancel();
+    _controlSyncThrottle?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
@@ -1358,6 +1494,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             _handlePlaybackInput();
             _toggleNativeFullscreen();
           },
+          const SingleActivator(LogicalKeyboardKey.keyM): () {
+            _handlePlaybackInput();
+            _toggleNativeMiniPlayer();
+          },
         },
         child: Listener(
           onPointerHover: (_) => _handlePlaybackInput(),
@@ -1473,37 +1613,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // labels or buttons that would read as a stray extra screen.
   Widget _nativePlaybackOverlay() => const ColoredBox(color: Colors.black);
 
-  String _redactPlayback(String value) {
-    final urlMatch = RegExp(
-      r'https?://\S+',
-      caseSensitive: false,
-    ).firstMatch(value);
-    if (urlMatch != null) {
-      final redactedUrl = _redactPlaybackUrl(urlMatch.group(0)!);
-      return value.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
-    }
-    return _redactPlaybackUrl(value);
-  }
-
-  String _redactPlaybackUrl(String value) {
-    final uri = Uri.tryParse(value);
-    if (uri == null) return value;
-    if (!uri.hasAuthority && !value.contains('/')) return value;
-    final cleanSegments = uri.pathSegments.map((segment) {
-      final looksSecret =
-          segment.length > 18 ||
-          RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
-      return looksSecret ? '<redacted>' : segment;
-    }).toList();
-    final path = cleanSegments.join('/');
-    final authority = uri.hasAuthority
-        ? '${uri.scheme}://${uri.authority}'
-        : '';
-    final prefix = authority.isNotEmpty
-        ? authority
-        : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');
-    return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
-  }
+  // Redaction lives in net.dart (redactText) so the preview controller and
+  // any other user-visible error path share the same scrubbing.
+  String _redactPlayback(String value) => redactText(value);
 
   void _logPlayback(String message) {
     DiagnosticsLog.instance.add('player', message);

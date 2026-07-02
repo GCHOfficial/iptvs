@@ -1,0 +1,1206 @@
+import 'dart:async';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+
+import '../data/library_repository.dart';
+import '../data/source_hint_parser.dart';
+import '../sources/source.dart';
+import '../theme.dart';
+import '../widgets/favorite_controls.dart';
+import '../widgets/focusable_card.dart';
+import '../widgets/image_utils.dart';
+import '../player/player_screen.dart';
+import '../data/app_database.dart' show PlaybackPosition;
+import 'media_tab_controller.dart' show ContinueWatchingEntry;
+
+/// `1:23:45` / `12:34` style label for a resume position.
+String _positionLabel(Duration position) {
+  final hours = position.inHours;
+  final minutes = position.inMinutes % 60;
+  final seconds = position.inSeconds % 60;
+  String two(int n) => n.toString().padLeft(2, '0');
+  return hours > 0
+      ? '$hours:${two(minutes)}:${two(seconds)}'
+      : '$minutes:${two(seconds)}';
+}
+
+/// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
+/// error/empty states, and D-pad focus. Extracted from `ChannelListScreen`'s
+/// State as a widget with an explicit input contract so it rebuilds
+/// independently of the rest of the (large) screen and so the media state can
+/// later move behind a controller without touching this view. Live TV keeps its
+/// own body; this handles [ContentKind.movie]/[ContentKind.series] only.
+class MediaTabView extends StatelessWidget {
+  final ContentKind kind;
+
+  /// Filtered items to show (favorites/hidden/search already applied by the
+  /// parent), and the underlying snapshot (drives "load more" / paging).
+  final List<MediaItem> visible;
+  final MediaLibrarySnapshot? snapshot;
+
+  final bool loading;
+  final bool loadingMore;
+  final String? error;
+
+  /// True when a live search query (>= 2 chars) is active — hides "load more"
+  /// since search returns a flat, non-paged result set.
+  final bool showingSearch;
+
+  /// Id of the last-played item in this kind, autofocused on return when still
+  /// visible (else the first item is).
+  final String? lastPlayedId;
+
+  final ScrollController scrollController;
+  final FocusNode? firstFocusNode;
+
+  final bool Function(String id) isFavorite;
+  final ValueChanged<MediaItem> onOpenMedia;
+  final VoidCallback onLoadMore;
+  final VoidCallback onRetry;
+
+  /// In-progress items (saved playback positions) shown as a horizontal
+  /// "Continue watching" rail above the grid; [onResume] plays one, resuming.
+  final List<ContinueWatchingEntry> continueWatching;
+  final ValueChanged<MediaItem> onResume;
+
+  const MediaTabView({
+    super.key,
+    required this.kind,
+    required this.visible,
+    required this.snapshot,
+    required this.loading,
+    required this.loadingMore,
+    required this.error,
+    required this.showingSearch,
+    required this.lastPlayedId,
+    required this.scrollController,
+    required this.firstFocusNode,
+    required this.isFavorite,
+    required this.onOpenMedia,
+    required this.onLoadMore,
+    required this.onRetry,
+    this.continueWatching = const [],
+    required this.onResume,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final body = _buildBody(context);
+    if (showingSearch || continueWatching.isEmpty) return body;
+    return Column(
+      children: [
+        _ContinueWatchingRail(entries: continueWatching, onResume: onResume),
+        Expanded(child: body),
+      ],
+    );
+  }
+
+  Widget _buildBody(BuildContext context) {
+    final showLoadMore =
+        !showingSearch && (loadingMore || snapshot?.hasMore == true);
+    if (loading) return const Center(child: CircularProgressIndicator());
+    if (error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Couldn\'t load ${kind == ContentKind.movie ? 'movies' : 'series'}.\n$error',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textLo),
+              ),
+              const SizedBox(height: 16),
+              FilledButton(onPressed: onRetry, child: const Text('Try again')),
+            ],
+          ),
+        ),
+      );
+    }
+    if (visible.isEmpty) {
+      return Center(
+        child: Text(
+          'No ${kind == ContentKind.movie ? 'movies' : 'series'} match',
+          style: const TextStyle(color: AppColors.textLo),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 860;
+        final hasLastVisible =
+            lastPlayedId != null &&
+            visible.any((media) => media.id == lastPlayedId);
+        FocusNode? focusNodeFor(int i) => hasLastVisible
+            ? (visible[i].id == lastPlayedId ? firstFocusNode : null)
+            : (i == 0 ? firstFocusNode : null);
+        bool autofocusFor(int i) =>
+            hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
+        if (!wide) {
+          return ListView.builder(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+            scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+            itemCount: visible.length + (showLoadMore ? 1 : 0),
+            itemBuilder: (context, i) {
+              if (i == visible.length) {
+                return _MediaLoadMoreTile(
+                  snapshot: snapshot,
+                  loading: loadingMore,
+                  onPressed: onLoadMore,
+                );
+              }
+              return _MediaListTile(
+                item: visible[i],
+                favorite: isFavorite(visible[i].id),
+                autofocus: autofocusFor(i),
+                focusNode: focusNodeFor(i),
+                onTap: () => onOpenMedia(visible[i]),
+              );
+            },
+          );
+        }
+        final columns = constraints.maxWidth >= 1280 ? 6 : 4;
+        return GridView.builder(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+          scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            childAspectRatio: 0.64,
+          ),
+          itemCount: visible.length + (showLoadMore ? 1 : 0),
+          itemBuilder: (context, i) {
+            if (i == visible.length) {
+              return _MediaLoadMoreCard(
+                snapshot: snapshot,
+                loading: loadingMore,
+                onPressed: onLoadMore,
+              );
+            }
+            return _MediaGridTile(
+              item: visible[i],
+              favorite: isFavorite(visible[i].id),
+              autofocus: autofocusFor(i),
+              focusNode: focusNodeFor(i),
+              onTap: () => onOpenMedia(visible[i]),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+/// Horizontal "Continue watching" strip: poster tiles with a progress bar,
+/// newest first. One `FocusTraversalGroup` so the D-pad walks the rail as a
+/// row between the toolbar and the grid.
+class _ContinueWatchingRail extends StatelessWidget {
+  final List<ContinueWatchingEntry> entries;
+  final ValueChanged<MediaItem> onResume;
+
+  const _ContinueWatchingRail({required this.entries, required this.onResume});
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusTraversalGroup(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(18, 4, 18, 6),
+            child: Text(
+              'Continue watching',
+              style: TextStyle(
+                color: AppColors.textHi,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          SizedBox(
+            height: 172,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: entries.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, i) => _ContinueWatchingTile(
+                entry: entries[i],
+                onTap: () => onResume(entries[i].item),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ContinueWatchingTile extends StatelessWidget {
+  final ContinueWatchingEntry entry;
+  final VoidCallback onTap;
+
+  const _ContinueWatchingTile({required this.entry, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final item = entry.item;
+    return FocusableCard(
+      onTap: onTap,
+      child: SizedBox(
+        width: 96,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _Poster(item: item, width: 96, height: 128),
+            const SizedBox(height: 4),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(
+                value: entry.position.progress,
+                minHeight: 3,
+                backgroundColor: AppColors.line,
+                color: AppColors.accent,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              item.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaListTile extends StatelessWidget {
+  final MediaItem item;
+  final bool favorite;
+  final bool autofocus;
+  final FocusNode? focusNode;
+  final VoidCallback onTap;
+
+  const _MediaListTile({
+    required this.item,
+    required this.favorite,
+    required this.autofocus,
+    this.focusNode,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      autofocus: autofocus,
+      focusNode: focusNode,
+      debugLabel: 'media.item.${item.id}',
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            _Poster(item: item, width: 58, height: 84),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  if (item.year != null || _hasRating(item)) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        if (item.year != null)
+                          Flexible(
+                            child: Text(
+                              item.year!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textLo,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        if (item.year != null && _hasRating(item))
+                          const SizedBox(width: 10),
+                        _RatingBadge(rating: item.rating),
+                      ],
+                    ),
+                  ],
+                  if (sourceHintLabels(item).isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    _SourceHints(item: item),
+                  ],
+                  if (item.description != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      item.description!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (favorite) ...[const SizedBox(width: 8), const FavoriteBadge()],
+            const SizedBox(width: 8),
+            Icon(
+              item.kind == ContentKind.movie
+                  ? Icons.play_arrow_rounded
+                  : Icons.chevron_right_rounded,
+              color: AppColors.accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaGridTile extends StatelessWidget {
+  final MediaItem item;
+  final bool favorite;
+  final bool autofocus;
+  final FocusNode? focusNode;
+  final VoidCallback onTap;
+
+  const _MediaGridTile({
+    required this.item,
+    required this.favorite,
+    required this.autofocus,
+    this.focusNode,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      autofocus: autofocus,
+      focusNode: focusNode,
+      debugLabel: 'media.item.${item.id}',
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: SizedBox.expand(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _Poster(
+                      item: item,
+                      width: double.infinity,
+                      height: double.infinity,
+                    ),
+                    if (_hasRating(item))
+                      Positioned(
+                        top: 6,
+                        left: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppColors.ink.withValues(alpha: 0.75),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: _RatingBadge(
+                            rating: item.rating,
+                            compact: true,
+                          ),
+                        ),
+                      ),
+                    if (favorite)
+                      Positioned(
+                        top: 6,
+                        right: 6,
+                        child: Container(
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            color: AppColors.ink.withValues(alpha: 0.75),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const FavoriteBadge(size: 16),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              item.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            if (item.year != null)
+              Text(
+                item.year!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+              ),
+            if (sourceHintLabels(item).isNotEmpty) ...[
+              const SizedBox(height: 5),
+              _SourceHints(item: item, compact: true),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SourceHints extends StatelessWidget {
+  final MediaItem item;
+  final bool compact;
+
+  const _SourceHints({required this.item, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final hints = sourceHintLabels(item);
+    if (hints.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 5,
+      runSpacing: 5,
+      children: [
+        for (final hint in hints.take(compact ? 2 : 4))
+          Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 5 : 6,
+              vertical: compact ? 2 : 3,
+            ),
+            decoration: BoxDecoration(
+              color: AppColors.panelHi,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: AppColors.line),
+            ),
+            child: Text(
+              hint,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: AppColors.textLo,
+                fontSize: compact ? 10 : 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Whether an item has a real (non-zero) score worth showing. Many items come
+/// back with `rating == 0.0`, which means "unrated", not a literal zero.
+bool _hasRating(MediaItem item) => (item.rating ?? 0) > 0;
+
+/// A small `★ 8.5` rating chip, shown when an item carries a non-zero 0–10
+/// score (TMDB or MDBList). Renders nothing otherwise.
+class _RatingBadge extends StatelessWidget {
+  final double? rating;
+  final bool compact;
+
+  const _RatingBadge({required this.rating, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final value = rating;
+    if (value == null || value <= 0) return const SizedBox.shrink();
+    final fontSize = compact ? 11.0 : 12.0;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.star_rounded, size: fontSize + 3, color: AppColors.accent),
+        const SizedBox(width: 3),
+        Text(
+          value.toStringAsFixed(1),
+          style: TextStyle(
+            color: AppColors.textHi,
+            fontSize: fontSize,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MediaLoadMoreTile extends StatelessWidget {
+  final MediaLibrarySnapshot? snapshot;
+  final bool loading;
+  final VoidCallback onPressed;
+
+  const _MediaLoadMoreTile({
+    required this.snapshot,
+    required this.loading,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final canLoad = snapshot?.hasMore == true;
+    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Center(
+        child: FilledButton.icon(
+          onPressed: canLoad && !loading ? onPressed : null,
+          icon: loading
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.expand_more_rounded),
+          label: Text(
+            loading
+                ? 'Loading'
+                : canLoad
+                ? nextPage == null
+                      ? 'Load more'
+                      : 'Load page $nextPage'
+                : 'All loaded',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaLoadMoreCard extends StatelessWidget {
+  final MediaLibrarySnapshot? snapshot;
+  final bool loading;
+  final VoidCallback onPressed;
+
+  const _MediaLoadMoreCard({
+    required this.snapshot,
+    required this.loading,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final canLoad = snapshot?.hasMore == true;
+    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
+    return FocusableCard(
+      autofocus: false,
+      onTap: canLoad && !loading ? onPressed : () {},
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loading)
+              const SizedBox.square(
+                dimension: 28,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(
+                canLoad ? Icons.expand_more_rounded : Icons.check_rounded,
+                color: canLoad ? AppColors.accent : AppColors.textLo,
+                size: 32,
+              ),
+            const SizedBox(height: 8),
+            Text(
+              loading
+                  ? 'Loading'
+                  : canLoad
+                  ? nextPage == null
+                        ? 'Load more'
+                        : 'Load page $nextPage'
+                  : 'All loaded',
+              style: const TextStyle(color: AppColors.textLo),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Poster extends StatelessWidget {
+  final MediaItem item;
+  final double width;
+  final double height;
+
+  const _Poster({
+    required this.item,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = Container(
+      width: width,
+      height: height,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.panelHi,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(
+        item.kind == ContentKind.movie
+            ? Icons.movie_outlined
+            : Icons.tv_outlined,
+        color: AppColors.textLo,
+      ),
+    );
+    final poster = item.poster;
+    if (poster == null || poster.isEmpty) return fallback;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: CachedNetworkImage(
+        imageUrl: poster,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        memCacheWidth: imageCacheSize(context, width),
+        memCacheHeight: imageCacheSize(context, height),
+        errorWidget: (_, _, _) => fallback,
+        placeholder: (_, _) => fallback,
+      ),
+    );
+  }
+}
+
+class MediaDetailsSheet extends StatefulWidget {
+  final LibraryRepository repo;
+  final MediaItem item;
+  final bool favorite;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback? onPlay;
+  final ValueChanged<MediaItem>? onChanged;
+
+  const MediaDetailsSheet({
+    super.key,
+    required this.repo,
+    required this.item,
+    required this.favorite,
+    required this.onToggleFavorite,
+    required this.onPlay,
+    this.onChanged,
+    this.resume,
+    this.onPlayFromStart,
+  });
+
+  /// Saved resume point for this item, if any — turns the Play button into
+  /// "Resume from h:mm:ss" and surfaces [onPlayFromStart] beside it.
+  final PlaybackPosition? resume;
+  final VoidCallback? onPlayFromStart;
+
+  @override
+  State<MediaDetailsSheet> createState() => _MediaDetailsSheetState();
+}
+
+class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
+  late MediaItem _item = widget.item;
+  late bool _favorite = widget.favorite;
+  late Future<ExternalMetadata?> _metadataFuture = _loadMetadata();
+  late final Future<List<MediaItem>>? _seasonsFuture = _loadSeasonsIfNeeded();
+  final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
+  bool _refreshingMetadata = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Movies/episodes autofocus their Play button directly. A series has no
+    // top-level Play button, so once the seasons load, nudge focus onto the
+    // first season tile (ExpansionTile exposes no autofocus of its own).
+    if (widget.onPlay == null) {
+      _seasonsFuture?.whenComplete(() {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) FocusScope.of(context).nextFocus();
+        });
+      });
+    }
+  }
+
+  Future<List<MediaItem>>? _loadSeasonsIfNeeded() {
+    if (_item.kind != ContentKind.series) return null;
+    return widget.repo
+        .loadMedia(ContentKind.season, parent: _item)
+        .then((snapshot) => snapshot.items);
+  }
+
+  Future<List<MediaItem>> _episodes(MediaItem season) =>
+      _episodeFutures.putIfAbsent(
+        season.id,
+        () => widget.repo
+            .loadMedia(ContentKind.episode, parent: season)
+            .then((snapshot) => snapshot.items),
+      );
+
+  Future<ExternalMetadata?> _loadMetadata() =>
+      widget.repo.cachedExternalMetadata(_item, 'tmdb');
+
+  Future<void> _refreshMetadata() async {
+    if (_refreshingMetadata) return;
+    setState(() => _refreshingMetadata = true);
+    try {
+      final metadata = await widget.repo.refreshExternalMetadata(_item);
+      if (!mounted) return;
+      setState(() {
+        if (metadata != null) {
+          _item = widget.repo.mergeExternalMetadata(_item, metadata);
+          widget.onChanged?.call(_item);
+        }
+        _metadataFuture = _loadMetadata();
+        _refreshingMetadata = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _refreshingMetadata = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Metadata refresh failed: $error')),
+      );
+    }
+  }
+
+  void _play(MediaItem item) {
+    Navigator.of(context).pop();
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _DeferredMediaPlayer(repo: widget.repo, item: item),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final narrow = constraints.maxWidth < 520;
+            final poster = _Poster(item: _item, width: 124, height: 180);
+            final seasonsFuture = _seasonsFuture;
+            final details = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ),
+                    FavoriteButton(
+                      favorite: _favorite,
+                      onPressed: () {
+                        setState(() => _favorite = !_favorite);
+                        widget.onToggleFavorite();
+                      },
+                    ),
+                  ],
+                ),
+                if (_item.year != null || _hasRating(_item)) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      if (_item.year != null)
+                        Text(
+                          _item.year!,
+                          style: const TextStyle(color: AppColors.textLo),
+                        ),
+                      if (_item.year != null && _hasRating(_item))
+                        const SizedBox(width: 12),
+                      _RatingBadge(rating: _item.rating),
+                    ],
+                  ),
+                ],
+                if (sourceHintLabels(_item).isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  _SourceHints(item: _item),
+                ],
+                if (providerSourceTitle(_item) case final sourceTitle?) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    'Source title: $sourceTitle',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+                if (_item.description != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _item.description!,
+                    maxLines: 8,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: AppColors.textLo),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                if (widget.onPlay != null)
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      FilledButton.icon(
+                        autofocus: true,
+                        onPressed: widget.onPlay,
+                        icon: const Icon(Icons.play_arrow_rounded),
+                        label: Text(
+                          widget.resume != null
+                              ? 'Resume from ${_positionLabel(widget.resume!.position)}'
+                              : 'Play',
+                        ),
+                      ),
+                      if (widget.resume != null &&
+                          widget.onPlayFromStart != null)
+                        OutlinedButton.icon(
+                          onPressed: widget.onPlayFromStart,
+                          icon: const Icon(Icons.replay_rounded),
+                          label: const Text('From start'),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: 12),
+                _MetadataStatus(
+                  metadata: _metadataFuture,
+                  refreshing: _refreshingMetadata,
+                  onRefresh: _refreshMetadata,
+                ),
+                if (seasonsFuture != null) ...[
+                  const SizedBox(height: 18),
+                  _SeriesBrowser(
+                    seasons: seasonsFuture,
+                    episodesFor: _episodes,
+                    onPlayEpisode: _play,
+                  ),
+                ],
+              ],
+            );
+            if (narrow) {
+              return SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(child: poster),
+                    const SizedBox(height: 14),
+                    details,
+                  ],
+                ),
+              );
+            }
+            return SingleChildScrollView(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  poster,
+                  const SizedBox(width: 18),
+                  Expanded(child: details),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _MetadataStatus extends StatelessWidget {
+  final Future<ExternalMetadata?> metadata;
+  final bool refreshing;
+  final VoidCallback onRefresh;
+
+  const _MetadataStatus({
+    required this.metadata,
+    required this.refreshing,
+    required this.onRefresh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<ExternalMetadata?>(
+      future: metadata,
+      builder: (context, snapshot) {
+        final value = snapshot.data;
+        final label = value == null
+            ? 'Provider metadata'
+            : '${value.provider.toUpperCase()} · ${_ago(value.refreshedAt)}';
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: AppColors.panelHi,
+            borderRadius: BorderRadius.circular(AppRadius.control),
+            border: Border.all(color: AppColors.line),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                value == null
+                    ? Icons.auto_awesome_outlined
+                    : Icons.check_circle_outline,
+                color: value == null ? AppColors.textLo : AppColors.accent,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Refresh metadata',
+                visualDensity: VisualDensity.compact,
+                onPressed: refreshing ? null : onRefresh,
+                icon: refreshing
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh, size: 18),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _ago(DateTime time) {
+    final diff = DateTime.now().difference(time);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+}
+
+class _SeriesBrowser extends StatelessWidget {
+  final Future<List<MediaItem>> seasons;
+  final Future<List<MediaItem>> Function(MediaItem season) episodesFor;
+  final ValueChanged<MediaItem> onPlayEpisode;
+
+  const _SeriesBrowser({
+    required this.seasons,
+    required this.episodesFor,
+    required this.onPlayEpisode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<MediaItem>>(
+      future: seasons,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+        if (snapshot.hasError) {
+          return Text(
+            'Could not load seasons: ${snapshot.error}',
+            style: const TextStyle(color: AppColors.textLo),
+          );
+        }
+        final seasons = snapshot.data ?? const <MediaItem>[];
+        if (seasons.isEmpty) {
+          return const Text(
+            'No seasons found',
+            style: TextStyle(color: AppColors.textLo),
+          );
+        }
+        return Column(
+          children: [
+            for (final season in seasons)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                title: Text(season.title),
+                subtitle:
+                    season.seasonNumber == null ||
+                        season.title.trim().toLowerCase() ==
+                            'season ${season.seasonNumber}'.toLowerCase()
+                    ? null
+                    : Text(
+                        'Season ${season.seasonNumber}',
+                        style: const TextStyle(color: AppColors.textLo),
+                      ),
+                children: [
+                  FutureBuilder<List<MediaItem>>(
+                    future: episodesFor(season),
+                    builder: (context, episodeSnapshot) {
+                      if (episodeSnapshot.connectionState !=
+                          ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: LinearProgressIndicator(minHeight: 2),
+                        );
+                      }
+                      if (episodeSnapshot.hasError) {
+                        return Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Could not load episodes: ${episodeSnapshot.error}',
+                            style: const TextStyle(color: AppColors.textLo),
+                          ),
+                        );
+                      }
+                      final episodes =
+                          episodeSnapshot.data ?? const <MediaItem>[];
+                      if (episodes.isEmpty) {
+                        return const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'No episodes found',
+                            style: TextStyle(color: AppColors.textLo),
+                          ),
+                        );
+                      }
+                      return Column(
+                        children: [
+                          for (final episode in episodes)
+                            ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(Icons.play_arrow_rounded),
+                              title: Text(
+                                episode.episodeNumber == null
+                                    ? episode.title
+                                    : '${episode.episodeNumber}. ${episode.title}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: episode.description == null
+                                  ? null
+                                  : Text(
+                                      episode.description!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                              onTap: () => onPlayEpisode(episode),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _DeferredMediaPlayer extends StatefulWidget {
+  final LibraryRepository repo;
+  final MediaItem item;
+
+  const _DeferredMediaPlayer({required this.repo, required this.item});
+
+  @override
+  State<_DeferredMediaPlayer> createState() => _DeferredMediaPlayerState();
+}
+
+class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
+  late final Future<(StreamInfo, PlaybackPosition?)> _stream = () async {
+    // Saved resume point rides along with the resolve so playback starts at
+    // the right position (episodes played from the series browser).
+    final resume = await widget.repo.db.readPlaybackPosition(
+      widget.repo.source.id,
+      widget.item.kind,
+      widget.item.id,
+    );
+    return (await widget.repo.resolveMedia(widget.item), resume);
+  }();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<(StreamInfo, PlaybackPosition?)>(
+      future: _stream,
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          final (stream, resume) = snapshot.data!;
+          return PlayerScreen(
+            title: widget.item.title,
+            stream: stream,
+            sourceName: widget.repo.source.name,
+            playback: PlaybackContext(
+              db: widget.repo.db,
+              sourceId: widget.repo.source.id,
+              kind: widget.item.kind,
+              itemId: widget.item.id,
+              resumeFrom: resume?.position,
+            ),
+          );
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            appBar: AppBar(title: Text(widget.item.title)),
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Could not play: ${snapshot.error}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: AppColors.textLo),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.arrow_back),
+                      label: const Text('Back'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return Scaffold(
+          appBar: AppBar(title: Text(widget.item.title)),
+          body: const Center(child: CircularProgressIndicator()),
+        );
+      },
+    );
+  }
+}
