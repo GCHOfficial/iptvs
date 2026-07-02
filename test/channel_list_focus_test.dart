@@ -254,8 +254,7 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets('switching to the Series tab swaps out the live pane',
->>>>>>> main
+  focusTestWidgets('switching to the Series tab swaps out the live pane',
       (tester) async {
     await pumpWideScreen(tester);
 
