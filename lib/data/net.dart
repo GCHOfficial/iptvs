@@ -20,6 +20,41 @@ extension HttpResponseRead on HttpClientResponse {
   }
 }
 
+/// Redacts secret-looking material from free-form [text] (an exception
+/// message, an mpv log line) so it is safe to log or show on screen. Finds an
+/// embedded http(s) URL and redacts its path segments that look like
+/// credentials (long or token-shaped) — IPTV providers put username/password
+/// in the *path* (`/live/user/pass/123.ts`), which [redactUrl]'s query-focused
+/// redaction wouldn't touch.
+String redactText(String text) {
+  final urlMatch = RegExp(
+    r'https?://\S+',
+    caseSensitive: false,
+  ).firstMatch(text);
+  if (urlMatch != null) {
+    final redactedUrl = _redactUrlPath(urlMatch.group(0)!);
+    return text.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
+  }
+  return _redactUrlPath(text);
+}
+
+String _redactUrlPath(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri == null) return value;
+  if (!uri.hasAuthority && !value.contains('/')) return value;
+  final cleanSegments = uri.pathSegments.map((segment) {
+    final looksSecret =
+        segment.length > 18 || RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
+    return looksSecret ? '<redacted>' : segment;
+  }).toList();
+  final path = cleanSegments.join('/');
+  final authority = uri.hasAuthority ? '${uri.scheme}://${uri.authority}' : '';
+  final prefix = authority.isNotEmpty
+      ? authority
+      : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');
+  return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
+}
+
 /// Removes credentials from [url] so it is safe to surface in error messages,
 /// logs, and exported diagnostics. Drops any userinfo (`user:pass@`) and
 /// replaces the query string — IPTV panels carry username/password as query

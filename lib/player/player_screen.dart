@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/diagnostics_log.dart';
+import '../data/net.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import 'mpv_options.dart';
@@ -1473,37 +1474,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // labels or buttons that would read as a stray extra screen.
   Widget _nativePlaybackOverlay() => const ColoredBox(color: Colors.black);
 
-  String _redactPlayback(String value) {
-    final urlMatch = RegExp(
-      r'https?://\S+',
-      caseSensitive: false,
-    ).firstMatch(value);
-    if (urlMatch != null) {
-      final redactedUrl = _redactPlaybackUrl(urlMatch.group(0)!);
-      return value.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
-    }
-    return _redactPlaybackUrl(value);
-  }
-
-  String _redactPlaybackUrl(String value) {
-    final uri = Uri.tryParse(value);
-    if (uri == null) return value;
-    if (!uri.hasAuthority && !value.contains('/')) return value;
-    final cleanSegments = uri.pathSegments.map((segment) {
-      final looksSecret =
-          segment.length > 18 ||
-          RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
-      return looksSecret ? '<redacted>' : segment;
-    }).toList();
-    final path = cleanSegments.join('/');
-    final authority = uri.hasAuthority
-        ? '${uri.scheme}://${uri.authority}'
-        : '';
-    final prefix = authority.isNotEmpty
-        ? authority
-        : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');
-    return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
-  }
+  // Redaction lives in net.dart (redactText) so the preview controller and
+  // any other user-visible error path share the same scrubbing.
+  String _redactPlayback(String value) => redactText(value);
 
   void _logPlayback(String message) {
     DiagnosticsLog.instance.add('player', message);
