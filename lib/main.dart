@@ -6,7 +6,7 @@ import 'data/app_database.dart';
 import 'data/cloud_config.dart';
 import 'data/secure_local_storage.dart';
 import 'data/source_store.dart';
-import 'screens/home_shell.dart';
+import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -39,7 +39,9 @@ class IptvApp extends StatelessWidget {
       title: 'IPTV Player',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark,
-      home: HomeShell(db: db, store: store),
+      // The picker itself decides whether to appear (startup-mode setting +
+      // profile count) and silently short-circuits to HomeShell otherwise.
+      home: ProfilePickScreen(db: db, store: store, bootMode: true),
     );
   }
 }

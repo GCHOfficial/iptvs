@@ -39,8 +39,9 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/data/app_database.dart`** — local SQLite cache (channels, categories, EPG, movies/series, paging state, external metadata), keyed by `Source.id`. Schema is versioned (`schemaVersion`) with a hand-rolled `onUpgrade`. See "Database migrations" below.
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider` implementations enriching `MediaItem`s with posters/overviews/ratings. `ratingsOnly` providers (MDBList) only contribute ratings and run after a visual provider has matched.
 - **`lib/data/source_store.dart`** — persists `SourceConfig`s (credentials included) in the OS keychain via `flutter_secure_storage`, plus the active source and metadata config.
-- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs (add/edit/delete/activate, plus ↑/↓ reorder persisted via `SourceStore.setAll`, and a per-source settings entry); `source_settings_screen.dart` toggles a source's categories on/off (persisted on `SourceConfig.settings`, filtered in the channel list); favorites are tagged from the per-item surfaces (live preview panel / phone preview sheet / media details sheet) and surface as a "Favorites" entry atop each category list; `diagnostics_screen.dart` views/export the in-memory log. Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
-- **`lib/widgets/`** — shared UI widgets: `focusable_card.dart` (`FocusableCard`, the D-pad-navigable list/grid tile) and `tv_text_field.dart` (`TvTextField`, the edit-mode text input). Both are central to TV navigation.
+- **`lib/data/local_profile_store.dart`** — device profiles (see "Profiles" below): keychain-persisted `LocalProfile`s, per-cloud-profile `ProfileSnapshot`s, and the picker's startup mode (`ProfilePickerStartup` + the pure `shouldShowPickerAtStartup`).
+- **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its repository; `channel_list_screen.dart` is the main browsing UI (live/movies/series, search, paging); `sources_screen.dart` manages provider configs (add/edit/delete/activate, plus ↑/↓ reorder persisted via `SourceStore.setAll`, and a per-source settings entry); `source_settings_screen.dart` toggles a source's categories on/off (persisted on `SourceConfig.settings`, filtered in the channel list); favorites are tagged from the per-item surfaces (live preview panel / phone preview sheet / media details sheet) and surface as a "Favorites" entry atop each category list; `diagnostics_screen.dart` views/export the in-memory log; `profile_pick_screen.dart` is the boot-time "Who's watching?" profile picker (see "Profiles" below). Built to be usable by a TV remote's D-pad as well as touch/mouse — see "TV / remote navigation" below.
+- **`lib/widgets/`** — shared UI widgets: `focusable_card.dart` (`FocusableCard`, the D-pad-navigable list/grid tile), `tv_text_field.dart` (`TvTextField`, the edit-mode text input) — both central to TV navigation — and `profile_avatar.dart` (the avatar palette + the AppBar profile dropdown).
 - **`lib/player/player_screen.dart`** — playback. See "Player" below.
 
 ## Key conventions
@@ -121,6 +122,30 @@ itself and the app is unchanged.
   [`.github/workflows/pages.yml`](.github/workflows/pages.yml) (`upload-pages-artifact@v5` +
   `deploy-pages@v5`; Supabase values from repo Variables).
   Note: the Flutter web target lives in `web/`; the panel deliberately lives in `panel/`.
+
+## Profiles (device-side)
+
+The app boots into `ProfilePickScreen` (`main.dart` `home:`, `bootMode: true`) — a "Who's watching?"
+grid that combines **cloud profiles** (only when built with Supabase config *and* paired) and
+**local profiles**, which need no cloud at all. At boot the screen decides for itself whether to
+appear: `shouldShowPickerAtStartup(mode, profileCount)` with the persisted `ProfilePickerStartup`
+mode (`auto` = only when >1 profile, `always`, `off`; cycled from a `FocusableCard` row atop
+`sources_screen.dart`) — otherwise it silently short-circuits to `HomeShell`, so a single-profile
+install boots exactly as before. Profiles are also reachable from the channel-list AppBar avatar
+(`ProfileAvatarButton` → "Change profile") and a Profiles action on the sources screen.
+
+Isolation model (`lib/data/local_profile_store.dart`): every profile — local *and* cloud — owns a
+`ProfileSnapshot` of the device state (source list + active source + metadata config + the
+cloud-managed ids set from `CloudSync.managedSourceIds`). Switching away snapshots the current
+state into its owner; switching to a local profile restores its snapshot verbatim (including an
+empty list — and clears the managed-ids set so a later cloud "Pull now" can't merge cloud sources
+into a local profile); switching to a cloud profile restores its snapshot first (its device-local
+extra sources + managed ids), then does the normal `setProfile` + pull. This keeps `pullSources`'s
+"preserve non-managed sources" semantic working on the right baseline and prevents cross-profile
+source leaks. New local profiles are seeded with only the Demo source. Local profiles can be
+deleted in the picker's manage mode; cloud profiles are managed in the web panel. JSON round-trips,
+the startup decision, and the stable cloud-avatar colour hash are unit-tested in
+`test/profile_store_test.dart`.
 
 ## Database migrations
 

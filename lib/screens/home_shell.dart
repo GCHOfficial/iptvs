@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/app_database.dart';
+import '../data/cloud_config.dart';
+import '../data/cloud_sync.dart';
 import '../data/library_repository.dart';
+import '../data/local_profile_store.dart';
 import '../data/mdblist_client.dart';
 import '../data/metadata_config.dart';
 import '../data/metadata_provider.dart';
@@ -11,7 +14,10 @@ import '../data/tmdb_client.dart';
 import '../data/tvdb_client.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import '../widgets/profile_avatar.dart';
 import 'channel_list_screen.dart';
+import 'cloud_sync_screen.dart';
+import 'profile_pick_screen.dart';
 import 'sources_screen.dart';
 
 /// Top-level shell: resolves the active source, builds its repository, and
@@ -32,6 +38,11 @@ class _HomeShellState extends State<HomeShell> {
   LibraryRepository? _repo;
   bool _loading = true;
   bool Function(KeyEvent event)? _keyboardLogger;
+
+  // Active profile info for the avatar — loaded after the main source load.
+  // Local profile first (most-recently-selected), cloud profile as fallback.
+  String? _profileName;
+  int _profileColorIndex = 0;
 
   @override
   void initState() {
@@ -108,6 +119,44 @@ class _HomeShellState extends State<HomeShell> {
             );
       _loading = false;
     });
+    _loadProfileInfo();
+  }
+
+  Future<void> _loadProfileInfo() async {
+    try {
+      // Local profile takes precedence (it's the most-recently-selected).
+      final localStore = LocalProfileStore();
+      final localActiveId = await localStore.activeId();
+      if (localActiveId != null) {
+        final locals = await localStore.loadAll();
+        final local = locals.where((p) => p.id == localActiveId).firstOrNull;
+        if (local != null && mounted) {
+          setState(() {
+            _profileName = local.name;
+            _profileColorIndex = local.colorIndex;
+          });
+          return;
+        }
+      }
+      // Fall back to cloud profile.
+      if (CloudConfig.isConfigured) {
+        final sync = CloudSync(db: widget.db);
+        final profiles = await sync.listProfiles();
+        final activeId = await sync.activeProfileId();
+        if (!mounted) return;
+        final idx = profiles.indexWhere((p) => p.id == activeId);
+        final profile =
+            idx >= 0 ? profiles[idx] : (profiles.isNotEmpty ? profiles.first : null);
+        if (profile != null) {
+          setState(() {
+            _profileName = profile.name;
+            _profileColorIndex = profileColorIndexFor(profile.id);
+          });
+        }
+      }
+    } catch (_) {
+      // Best-effort — avatar falls back to the person icon.
+    }
   }
 
   List<MetadataProvider> _buildMetadataProviders(MetadataConfig metadata) {
@@ -139,7 +188,29 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => SourcesScreen(store: widget.store, db: widget.db),
       ),
     );
-    await _loadActive(); // active selection may have changed
+    await _loadActive();
+  }
+
+  Future<void> _changeProfile() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ProfilePickScreen(
+          db: widget.db,
+          store: widget.store,
+          onDone: () => Navigator.of(context).pop(),
+        ),
+      ),
+    );
+    await _loadActive();
+  }
+
+  Future<void> _profileSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CloudSyncScreen(store: widget.store, db: widget.db),
+      ),
+    );
+    await _loadActive();
   }
 
   Future<void> _useDemo() async {
@@ -192,6 +263,12 @@ class _HomeShellState extends State<HomeShell> {
       repo: repo,
       config: _config!,
       onManageSources: _manageSources,
+      profileName: _profileName,
+      profileColorIndex: _profileColorIndex,
+      onChangeProfile: _changeProfile,
+      // Profile settings = the cloud-sync screen; only meaningful when the
+      // build has cloud config.
+      onProfileSettings: CloudConfig.isConfigured ? _profileSettings : null,
     );
   }
 }

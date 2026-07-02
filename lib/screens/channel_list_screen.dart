@@ -21,6 +21,7 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/profile_avatar.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
@@ -46,11 +47,26 @@ class ChannelListScreen extends StatefulWidget {
   /// categories). Read for presentation only — browsing filters key off it.
   final SourceConfig config;
   final VoidCallback? onManageSources;
+
+  /// The active profile's display name (used for the avatar initial) and its
+  /// index into the avatar colour palette.
+  final String? profileName;
+  final int profileColorIndex;
+
+  /// Avatar dropdown callbacks. "Profile settings" (cloud sync) is only wired
+  /// when the build has cloud config; "Change profile" is always available.
+  final VoidCallback? onChangeProfile;
+  final VoidCallback? onProfileSettings;
+
   const ChannelListScreen({
     super.key,
     required this.repo,
     required this.config,
     this.onManageSources,
+    this.profileName,
+    this.profileColorIndex = 0,
+    this.onChangeProfile,
+    this.onProfileSettings,
   });
 
   @override
@@ -1242,6 +1258,15 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(widget.repo.source.name),
+          leading: (widget.onChangeProfile != null ||
+                  widget.onProfileSettings != null)
+              ? ProfileAvatarButton(
+                  profileName: widget.profileName,
+                  colorIndex: widget.profileColorIndex,
+                  onChangeProfile: widget.onChangeProfile,
+                  onProfileSettings: widget.onProfileSettings,
+                )
+              : null,
           // Group the actions so D-pad traversal treats them as one cluster (reached
           // by going up to the bar), rather than the toolbar's "right" jumping
           // straight to the rightmost icon.
