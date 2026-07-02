@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/net.dart';
 import 'source.dart';
@@ -158,19 +158,22 @@ class M3uSource implements Source {
 }
 
 /// Result of parsing a playlist, sent back from the parse isolate.
-class _M3uParsed {
+class M3uParsed {
   final List<Channel> channels;
   final List<Category> categories;
   final String? headerEpgUrl;
-  const _M3uParsed(this.channels, this.categories, this.headerEpgUrl);
+  const M3uParsed(this.channels, this.categories, this.headerEpgUrl);
 }
 
 /// Isolate entrypoint: decodes [bytes] and parses the playlist. Kept top-level
 /// and pure so it can run under [compute] (no access to instance state).
-_M3uParsed _parseM3uBytes(Uint8List bytes) =>
-    _parseM3u(utf8.decode(bytes, allowMalformed: true));
+M3uParsed _parseM3uBytes(Uint8List bytes) =>
+    parseM3uPlaylist(utf8.decode(bytes, allowMalformed: true));
 
-_M3uParsed _parseM3u(String content) {
+/// Parses an extended M3U playlist. Public only for tests — production code
+/// goes through [M3uSource], which runs this on a background isolate.
+@visibleForTesting
+M3uParsed parseM3uPlaylist(String content) {
   final channels = <Channel>[];
   final categoryTitles = <String>{};
   String? headerEpgUrl;
@@ -200,7 +203,12 @@ _M3uParsed _parseM3u(String content) {
       categoryTitles.add(g);
       channels.add(
         Channel(
-          id: (tvgId != null && tvgId.isNotEmpty) ? tvgId : line,
+          // The stream URL is the only per-entry unique key. tvg-id must NOT
+          // be the id: playlists commonly reuse one tvg-id across quality
+          // variants (HD/FHD/4K of the same channel), and the SQLite cache's
+          // (source_id, id) primary key would silently drop all but one.
+          // tvg-id stays in extra for the XMLTV EPG mapping.
+          id: line,
           name: name,
           number: channels.length + 1,
           logo: (logo != null && logo.isNotEmpty) ? logo : null,
@@ -218,7 +226,7 @@ _M3uParsed _parseM3u(String content) {
   final categories = (categoryTitles.toList()..sort())
       .map((t) => Category(id: t, title: t))
       .toList();
-  return _M3uParsed(channels, categories, headerEpgUrl);
+  return M3uParsed(channels, categories, headerEpgUrl);
 }
 
 String? _attr(String line, String key) =>
