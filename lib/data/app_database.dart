@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
@@ -452,6 +453,12 @@ class AppDatabase {
         .toList();
   }
 
+  /// Above this many rows, row→model mapping (a jsonDecode of `extra` per
+  /// row) moves to a background isolate — it's the cache-hit startup path, so
+  /// on a 50k-channel playlist it would otherwise jank every launch. Below it
+  /// the isolate spawn costs more than the mapping.
+  static const _isolateMapThreshold = 500;
+
   Future<List<Channel>> readChannels(String sourceId) async {
     final rows = await _db.query(
       'channels',
@@ -459,7 +466,10 @@ class AppDatabase {
       whereArgs: [sourceId],
       orderBy: 'number, name',
     );
-    return rows.map(_rowToChannel).toList();
+    if (rows.length < _isolateMapThreshold) {
+      return rows.map(_rowToChannel).toList();
+    }
+    return Isolate.run(() => rows.map(_rowToChannel).toList());
   }
 
   // ── movies / series / generic media ──────────────────────────────────────
@@ -555,10 +565,17 @@ class AppDatabase {
       whereArgs: args,
       orderBy: 'display_order, title',
     );
-    return rows.map((r) => _rowToMediaItem(r, kind)).toList();
+    if (rows.length < _isolateMapThreshold) {
+      return rows.map((r) => _rowToMediaItem(r, kind)).toList();
+    }
+    return Isolate.run(
+      () => rows.map((r) => _rowToMediaItem(r, kind)).toList(),
+    );
   }
 
-  MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
+  // Static (not instance) so the Isolate.run closures above capture only the
+  // rows — capturing `this` would drag the non-sendable Database across.
+  static MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
       MediaItem(
         id: r['id'] as String,
         title: r['title'] as String,
@@ -579,13 +596,13 @@ class AppDatabase {
             : const {},
       );
 
-  int? _readInt(Object? value) {
+  static int? _readInt(Object? value) {
     if (value is int) return value;
     if (value == null) return null;
     return int.tryParse(value.toString());
   }
 
-  double? _readDouble(Object? value) {
+  static double? _readDouble(Object? value) {
     if (value is double) return value;
     if (value is int) return value.toDouble();
     if (value == null) return null;
@@ -967,7 +984,7 @@ class AppDatabase {
         ),
       );
 
-  Channel _rowToChannel(Map<String, Object?> r) => Channel(
+  static Channel _rowToChannel(Map<String, Object?> r) => Channel(
     id: r['id'] as String,
     name: r['name'] as String,
     number: r['number'] as int?,

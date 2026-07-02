@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
@@ -738,9 +739,17 @@ class StalkerSource implements Source {
       final list = (js is Map && js['data'] is List)
           ? js['data'] as List
           : (js is List ? js : const []);
-      final channels = list
-          .map((e) => _mapChannel(Map<String, dynamic>.from(e)))
-          .toList();
+      // get_all_channels returns the whole portal in one payload (tens of
+      // thousands of rows on big portals) — build the Channel objects off the
+      // UI isolate. _mapChannel and its helpers are static/pure, so the
+      // closure captures only the decoded JSON list.
+      final channels = list.length < 500
+          ? list.map((e) => _mapChannel(Map<String, dynamic>.from(e))).toList()
+          : await Isolate.run(
+              () => list
+                  .map((e) => _mapChannel(Map<String, dynamic>.from(e)))
+                  .toList(),
+            );
       if (channels.isNotEmpty) return channels;
     } on StalkerException catch (e) {
       // Some portals only expose ITV through paginated get_ordered_list.
@@ -895,7 +904,7 @@ class StalkerSource implements Source {
     return int.tryParse(value.toString());
   }
 
-  Channel _mapChannel(Map<String, dynamic> ch) {
+  static Channel _mapChannel(Map<String, dynamic> ch) {
     final id =
         _firstString(ch, ['id', 'ch_id', 'channel_id', 'stream_id']) ??
         '${ch['name']}';
@@ -915,7 +924,7 @@ class StalkerSource implements Source {
 
   /// Catch-up window in days from a raw ITV channel row: `tv_archive_duration`
   /// (days) when present, else a flag (`archive`/`allow_archive`) → default.
-  int _archiveDays(Map<String, dynamic> ch) {
+  static int _archiveDays(Map<String, dynamic> ch) {
     final raw = ch['tv_archive_duration'] ?? ch['archive_duration'];
     final days = raw is int ? raw : (int.tryParse('${raw ?? ''}') ?? 0);
     if (days > 0) return days;
@@ -1741,7 +1750,7 @@ class StalkerSource implements Source {
     ).hasMatch(value);
   }
 
-  String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
+  static String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
     for (final key in keys) {
       final value = map[key];
       if (value == null) continue;
