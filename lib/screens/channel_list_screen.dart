@@ -3,14 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show
-        HardwareKeyboard,
-        KeyDownEvent,
-        KeyEvent,
-        KeyRepeatEvent,
-        KeyUpEvent,
-        LogicalKeyboardKey,
-        SystemNavigator;
+    show HardwareKeyboard, KeyEvent, KeyRepeatEvent, SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
 import '../data/diagnostics_log.dart';
@@ -25,14 +18,13 @@ import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
 import 'favorites_controller.dart';
 import 'live_controller.dart';
+import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 import 'live_tab_view.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
 
 const _toolbarControlHeight = 40.0;
-
-enum _LiveFocusArea { category, channels, search, unknown }
 
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
@@ -92,15 +84,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
   final ScrollController _scrollController = ScrollController();
-  final FocusNode _liveSearchCellFocusNode = FocusNode(
-    debugLabel: 'live.search.cell',
-  );
-  final FocusNode _firstChannelFocusNode = FocusNode(
-    debugLabel: 'live.channel.first',
-  );
-  final Map<String, FocusNode> _liveChannelFocusNodes = {};
-  bool _liveFocusPruneScheduled = false;
-  final Map<String, FocusNode> _liveCategoryFocusNodes = {};
+  // Live D-pad focus machinery (nodes, pane routing, down-hold lock, resume
+  // bookkeeping) lives in the coordinator; see live_focus_coordinator.dart.
+  late final LiveFocusCoordinator _focus;
   // One stable focus node per content-kind tab chip, so a Back-key peel can jump
   // focus straight to the current tab (and detect when focus is already there)
   // instead of arrowing up item by item through a long list — see
@@ -112,11 +98,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     ContentKind.movie: FocusNode(debugLabel: 'content.tab.movie'),
     ContentKind.series: FocusNode(debugLabel: 'content.tab.series'),
   };
-  _LiveFocusArea _lastLiveFocusArea = _LiveFocusArea.unknown;
   String? _lastPlayedLiveChannelId;
-  String? _lastFocusedLiveChannelId;
-  bool _downHoldFromChannels = false;
-  final Map<String, String> _lastBrowsedLiveChannelByCategory = {};
   // Live preview player + its state live in a controller; the screen keeps the
   // focus-driven preview trigger (below), fullscreen playback, and the phone
   // preview sheet, which drive it.
@@ -145,19 +127,22 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           onEnrichError: _showSnack,
         ),
     };
+    _focus = LiveFocusCoordinator(
+      scrollController: _scrollController,
+      visibleChannels: () => _visible,
+      categoryId: () => _categoryId,
+      channelById: _findChannelById,
+      isLiveTab: () => _tab == ContentKind.live,
+      isMounted: () => mounted,
+      onChannelFocusChanged: _onChannelFocusChanged,
+    );
     _dataListenable = Listenable.merge([
       _live,
       _favorites,
       ..._mediaControllers.values,
     ]);
-    _bodyListenable = Listenable.merge([_dataListenable, _preview]);
-    HardwareKeyboard.instance.addHandler(_handleLiveGlobalKeyEvent);
-    _firstChannelFocusNode.addListener(() {
-      final visible = _visible;
-      if (visible.isNotEmpty) {
-        _onChannelFocusChanged(visible.first, _firstChannelFocusNode.hasFocus);
-      }
-    });
+    _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
+    HardwareKeyboard.instance.addHandler(_focus.handleGlobalKeyEvent);
     _loadLive();
     _live.startEpgRefresh();
   }
@@ -167,7 +152,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Future<void> _loadLive({bool forceRefresh = false}) async {
     await _live.load(forceRefresh: forceRefresh);
     if (!mounted) return;
-    _scheduleLiveFocusNodePrune();
+    _focus.scheduleFocusNodePrune();
     await _loadFavorites(ContentKind.live);
   }
 
@@ -216,21 +201,14 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleLiveGlobalKeyEvent);
+    HardwareKeyboard.instance.removeHandler(_focus.handleGlobalKeyEvent);
     _live.dispose();
     _preview.dispose();
     _favorites.dispose();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
-    _liveSearchCellFocusNode.dispose();
-    _firstChannelFocusNode.dispose();
+    _focus.dispose();
     for (final node in _tabFocusNodes.values) {
-      node.dispose();
-    }
-    for (final node in _liveChannelFocusNodes.values) {
-      node.dispose();
-    }
-    for (final node in _liveCategoryFocusNodes.values) {
       node.dispose();
     }
     for (final controller in _mediaControllers.values) {
@@ -256,11 +234,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
 
     if (_deliberatePreview) {
-      // No auto-preview on a TV remote: just let the info panel follow focus,
-      // and drop any preview still playing for a different channel.
-      if (_lastFocusedLiveChannelId != channel.id) {
-        setState(() => _lastFocusedLiveChannelId = channel.id);
-      }
+      // No auto-preview on a TV remote: the info panel follows focus via the
+      // coordinator's lastFocusedChannelId notification; just drop any preview
+      // still playing for a different channel.
       if (_preview.channelId != null && _preview.channelId != channel.id) {
         unawaited(_preview.stop(clearSelection: true));
       }
@@ -290,20 +266,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (_tab == ContentKind.live) {
-        if (_visible.isEmpty) return;
-        final targetId = _lastPlayedLiveChannelId;
-        final hasTarget =
-            targetId != null &&
-            _visible.any((channel) => channel.id == targetId);
-        if (hasTarget) {
-          if (_visible.isNotEmpty && _visible.first.id == targetId) {
-            _firstChannelFocusNode.requestFocus();
-          } else {
-            _focusNodeForLiveChannel(targetId).requestFocus();
-          }
-        } else {
-          _firstChannelFocusNode.requestFocus();
-        }
+        _focus.restoreFocusToChannel(_lastPlayedLiveChannelId);
         return;
       }
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
@@ -313,331 +276,11 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     });
   }
 
-  void _focusChannelsFromCategory() {
-    final visible = _visible;
-    if (visible.isEmpty) return;
-    final categoryKey = _liveCategoryKey(_categoryId);
-    final resumeId = _lastBrowsedLiveChannelByCategory[categoryKey];
-    final hasResume =
-        resumeId != null && visible.any((channel) => channel.id == resumeId);
-    final resumeIndex = hasResume
-        ? visible.indexWhere((channel) => channel.id == resumeId)
-        : -1;
-    if (hasResume && resumeIndex > 0 && _scrollController.hasClients) {
-      const estimatedChannelRowExtent = 104.0;
-      final targetOffset = resumeIndex * estimatedChannelRowExtent;
-      final maxOffset = _scrollController.position.maxScrollExtent;
-      _scrollController.jumpTo(targetOffset.clamp(0, maxOffset));
-    }
-    final FocusNode targetNode = hasResume && visible.first.id != resumeId
-        ? _focusNodeForLiveChannel(resumeId)
-        : _firstChannelFocusNode;
-    targetNode.requestFocus();
-    _reassertLiveFocus(
-      targetNode,
-      shouldRetry: (label) =>
-          label.startsWith('live.category.') || label == 'Focus',
-      attempts: 4,
-    );
-    _reassertLiveFocus(
-      _firstChannelFocusNode,
-      shouldRetry: (label) =>
-          label.startsWith('live.category.') || label == 'Focus',
-      attempts: 6,
-    );
-    _lastLiveFocusArea = _LiveFocusArea.channels;
-  }
-
-  String _liveCategoryKey(String? categoryId) =>
-      categoryId ?? '__live.channels__';
-
-  FocusNode _focusNodeForLiveChannel(String channelId) {
-    return _liveChannelFocusNodes.putIfAbsent(channelId, () {
-      final node = FocusNode(debugLabel: 'live.channel.$channelId');
-      node.addListener(() {
-        final channel = _findChannelById(channelId);
-        if (channel != null) {
-          _onChannelFocusChanged(channel, node.hasFocus);
-        }
-      });
-      return node;
-    });
-  }
-
-  /// Per-channel [FocusNode]s are created lazily as rows scroll into view. Left
-  /// unbounded they'd accumulate the union of every channel browsed this
-  /// session (thousands, on a large playlist). Prune back to the current
-  /// working set — the filtered [_visible] list — whenever that set changes.
-  /// Runs post-frame so we never dispose a node still attached to a live
-  /// widget, and never disposes the focused node (belt-and-suspenders; the
-  /// focused channel is normally in [_visible] anyway).
-  void _scheduleLiveFocusNodePrune() {
-    if (_liveFocusPruneScheduled) return;
-    _liveFocusPruneScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _liveFocusPruneScheduled = false;
-      if (!mounted) return;
-      final keep = _visible.map((c) => c.id).toSet();
-      _liveChannelFocusNodes.removeWhere((id, node) {
-        if (keep.contains(id) || node.hasFocus) return false;
-        node.dispose();
-        return true;
-      });
-    });
-  }
-
-  void _rememberBrowsedLiveChannel(String channelId) {
-    _lastBrowsedLiveChannelByCategory[_liveCategoryKey(_categoryId)] =
-        channelId;
-  }
-
-  void _focusCategoryFromChannels() {
-    _downHoldFromChannels = false;
-    final categoryNode = _focusNodeForCategory(_categoryId);
-    categoryNode.requestFocus();
-    _reassertLiveFocus(
-      categoryNode,
-      shouldRetry: (label) =>
-          label.startsWith('live.channel.') || label == 'Focus',
-      attempts: 4,
-    );
-    _lastLiveFocusArea = _LiveFocusArea.category;
-  }
-
-  void _focusLiveChannelByIndex(List<Channel> visible, int index) {
-    if (visible.isEmpty) return;
-    final clamped = index.clamp(0, visible.length - 1);
-    if (clamped == 0) {
-      _firstChannelFocusNode.requestFocus();
-      return;
-    }
-    final node = _focusNodeForLiveChannel(visible[clamped].id);
-    if (node.context == null && _scrollController.hasClients) {
-      const estimatedChannelRowExtent = 104.0;
-      final maxOffset = _scrollController.position.maxScrollExtent;
-      final targetOffset = (clamped * estimatedChannelRowExtent)
-          .clamp(0, maxOffset)
-          .toDouble();
-      _scrollController.jumpTo(targetOffset);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (node.context != null) {
-          node.requestFocus();
-          return;
-        }
-        if (_scrollController.hasClients) {
-          final nudged =
-              (_scrollController.position.pixels + estimatedChannelRowExtent)
-                  .clamp(0, _scrollController.position.maxScrollExtent)
-                  .toDouble();
-          _scrollController.jumpTo(nudged);
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          node.requestFocus();
-        });
-      });
-      return;
-    }
-    node.requestFocus();
-  }
-
-  void _moveDownInLiveChannels(String channelId) {
-    final visible = _visible;
-    if (visible.isEmpty) return;
-    final currentIndex = visible.indexWhere(
-      (channel) => channel.id == channelId,
-    );
-    if (currentIndex < 0) return;
-    final nextIndex = (currentIndex + 1) % visible.length;
-    if (nextIndex == 0) {
-      _lastFocusedLiveChannelId = visible.first.id;
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(0);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (_firstChannelFocusNode.context != null) {
-          _firstChannelFocusNode.requestFocus();
-          return;
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          _firstChannelFocusNode.requestFocus();
-        });
-      });
-      return;
-    }
-    _lastFocusedLiveChannelId = visible[nextIndex].id;
-    _focusLiveChannelByIndex(visible, nextIndex);
-  }
-
-  String? _channelIdFromFocusLabel(String label) {
-    if (label == 'live.channel.first') {
-      final visible = _visible;
-      return visible.isEmpty ? null : visible.first.id;
-    }
-    const prefix = 'live.channel.';
-    if (!label.startsWith(prefix)) return null;
-    final id = label.substring(prefix.length);
-    if (id.isEmpty || id == 'first') return null;
-    return id;
-  }
-
-  void _reassertLiveFocus(
-    FocusNode targetNode, {
-    required bool Function(String label) shouldRetry,
-    int attempts = 3,
-  }) {
-    if (attempts <= 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
-      if (!shouldRetry(label)) return;
-      targetNode.requestFocus();
-      _reassertLiveFocus(
-        targetNode,
-        shouldRetry: shouldRetry,
-        attempts: attempts - 1,
-      );
-    });
-  }
-
-  bool _handleLiveGlobalKeyEvent(KeyEvent event) {
-    if (_tab != ContentKind.live) return false;
-    final key = event.logicalKey;
-    if (key == LogicalKeyboardKey.arrowDown && event is KeyUpEvent) {
-      _downHoldFromChannels = false;
-      return false;
-    }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
-
-    if (key != LogicalKeyboardKey.arrowDown) {
-      _downHoldFromChannels = false;
-    }
-
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
-    if (key == LogicalKeyboardKey.arrowRight &&
-        label.startsWith('live.category.')) {
-      _focusChannelsFromCategory();
-      return true;
-    }
-    if (key == LogicalKeyboardKey.arrowDown) {
-      final channelId = _channelIdFromFocusLabel(label);
-      if (channelId != null) {
-        _downHoldFromChannels = true;
-        _lastFocusedLiveChannelId = channelId;
-        _moveDownInLiveChannels(channelId);
-        return true;
-      }
-      // Once a Down hold started in channels, keep all subsequent Down events
-      // locked to channel navigation until key-up to avoid pane leakage.
-      if (_downHoldFromChannels) {
-        final visible = _visible;
-        if (visible.isEmpty) return true;
-        final fallbackId = _lastFocusedLiveChannelId ?? visible.first.id;
-        _moveDownInLiveChannels(fallbackId);
-        return true;
-      }
-      return false;
-    }
-    return false;
-  }
-
-  KeyEventResult _handleLiveSearchCellKey(FocusNode node, KeyEvent event) {
-    if (_tab != ContentKind.live) return KeyEventResult.ignored;
-    if (!_liveSearchCellFocusNode.hasFocus) return KeyEventResult.ignored;
-    if (event.logicalKey != LogicalKeyboardKey.arrowDown) {
-      return KeyEventResult.ignored;
-    }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.handled;
-    }
-    _focusChannelsFromCategory();
-    return KeyEventResult.handled;
-  }
-
-  _LiveFocusArea _focusAreaFromLabel(String label) {
-    if (label.startsWith('live.category.')) return _LiveFocusArea.category;
-    if (label.startsWith('live.channel.')) return _LiveFocusArea.channels;
-    if (label == 'live.search.cell') return _LiveFocusArea.search;
-    return _LiveFocusArea.unknown;
-  }
-
-  KeyEventResult _handleLivePaneFallbackKey(FocusNode node, KeyEvent event) {
-    if (_tab != ContentKind.live) return KeyEventResult.ignored;
-    if (event is! KeyDownEvent &&
-        event is! KeyRepeatEvent &&
-        event is! KeyUpEvent) {
-      return KeyEventResult.ignored;
-    }
-
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
-    final area = _focusAreaFromLabel(label);
-    if (area != _LiveFocusArea.unknown) {
-      _lastLiveFocusArea = area;
-      if (area == _LiveFocusArea.channels) {
-        final focusedChannelId = _channelIdFromFocusLabel(label);
-        if (focusedChannelId != null) {
-          _lastFocusedLiveChannelId = focusedChannelId;
-        } else if (label == 'live.channel.first' && _visible.isNotEmpty) {
-          _lastFocusedLiveChannelId = _visible.first.id;
-        }
-      }
-    }
-
-    final key = event.logicalKey;
-
-    if (label.startsWith('live.category.') &&
-        key == LogicalKeyboardKey.arrowRight) {
-      _focusChannelsFromCategory();
-      return KeyEventResult.handled;
-    }
-    if (label.startsWith('live.channel.') &&
-        key == LogicalKeyboardKey.arrowLeft) {
-      _focusCategoryFromChannels();
-      return KeyEventResult.handled;
-    }
-
-    if (label.startsWith('live.category.') &&
-        key == LogicalKeyboardKey.arrowDown &&
-        (event is KeyDownEvent || event is KeyRepeatEvent) &&
-        _downHoldFromChannels) {
-      final visible = _visible;
-      if (visible.isNotEmpty) {
-        _moveDownInLiveChannels(_lastFocusedLiveChannelId ?? visible.first.id);
-      }
-      return KeyEventResult.handled;
-    }
-
-    // If focus transiently lands on an unlabeled node, route based on the last
-    // known pane so navigation stays deterministic.
-    if (label == 'Focus') {
-      if (key == LogicalKeyboardKey.arrowRight &&
-          _lastLiveFocusArea == _LiveFocusArea.category) {
-        _focusChannelsFromCategory();
-        return KeyEventResult.handled;
-      }
-      if (key == LogicalKeyboardKey.arrowLeft &&
-          _lastLiveFocusArea == _LiveFocusArea.channels) {
-        _focusCategoryFromChannels();
-        return KeyEventResult.handled;
-      }
-      if (key == LogicalKeyboardKey.arrowDown &&
-          _lastLiveFocusArea == _LiveFocusArea.search) {
-        _focusChannelsFromCategory();
-        return KeyEventResult.handled;
-      }
-    }
-
-    return KeyEventResult.ignored;
-  }
-
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
     if (_tab == ContentKind.live) {
-      _scheduleLiveFocusNodePrune();
+      _focus.scheduleFocusNodePrune();
       return;
     }
     final controller = _media(_tab);
@@ -774,14 +417,6 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
-  }
-
-  FocusNode _focusNodeForCategory(String? categoryId) {
-    final key = categoryId ?? 'all';
-    return _liveCategoryFocusNodes.putIfAbsent(
-      key,
-      () => FocusNode(debugLabel: 'live.category.$key'),
-    );
   }
 
   Future<void> _play(Channel channel) async {
@@ -1227,25 +862,25 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
     // Live channel list → the category sidebar (wide) or straight to search
     // (narrow, which has no sidebar).
-    if (label.startsWith('live.channel.')) {
+    if (label.startsWith(LiveFocusCoordinator.channelLabelPrefix)) {
       if (wideLive) {
-        _focusCategoryFromChannels();
+        _focus.focusCategoryFromChannels();
       } else {
-        _liveSearchCellFocusNode.requestFocus();
+        _focus.searchCellFocusNode.requestFocus();
       }
       return;
     }
     // On "All channels" → the search box.
-    if (label == 'live.category.all') {
-      _liveSearchCellFocusNode.requestFocus();
-      _lastLiveFocusArea = _LiveFocusArea.search;
+    if (label == '${LiveFocusCoordinator.categoryLabelPrefix}all') {
+      _focus.searchCellFocusNode.requestFocus();
+      _focus.noteFocusArea(LiveFocusArea.search);
       return;
     }
     // On a specific category → move the highlight to "All channels" without
     // changing the current filter (the user presses OK to actually switch).
-    if (label.startsWith('live.category.')) {
-      _focusNodeForCategory(null).requestFocus();
-      _lastLiveFocusArea = _LiveFocusArea.category;
+    if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix)) {
+      _focus.focusNodeForCategory(null).requestFocus();
+      _focus.noteFocusArea(LiveFocusArea.category);
       return;
     }
     // Movies/series grid → the content-kind tabs.
@@ -1385,9 +1020,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             _setQuery('');
           },
           searchCellFocusNode: _tab == ContentKind.live
-              ? _liveSearchCellFocusNode
+              ? _focus.searchCellFocusNode
               : null,
-          onSearchCellKeyEvent: _handleLiveSearchCellKey,
+          onSearchCellKeyEvent: _focus.handleSearchCellKey,
           categoryControl:
               (_tab == ContentKind.live &&
                   MediaQuery.of(context).size.width >= 950)
@@ -1398,7 +1033,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
                         value: _categoryId,
                         onChanged: (v) {
                           setState(() => _categoryId = v);
-                          _scheduleLiveFocusNodePrune();
+                          _focus.scheduleFocusNodePrune();
                           _scrollToTop();
                         },
                       )
@@ -1468,8 +1103,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             deliberate: _deliberatePreview,
             resolving: _resolving,
             scrollController: _scrollController,
-            firstChannelFocusNode: _firstChannelFocusNode,
-            focusNodeForChannel: _focusNodeForLiveChannel,
+            firstChannelFocusNode: _focus.firstChannelFocusNode,
+            focusNodeForChannel: _focus.focusNodeForChannel,
             lastPlayedChannelId: _lastPlayedLiveChannelId,
             previewChannelId: _preview.channelId,
             isFavorite: (id) => _isFavorite(ContentKind.live, id),
@@ -1477,26 +1112,26 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             onPlayChannel: _play,
             onLongPressChannel: _showPreviewSheet,
             onChannelMoveLeft: (id) {
-              _rememberBrowsedLiveChannel(id);
-              _focusCategoryFromChannels();
+              _focus.rememberBrowsedChannel(id);
+              _focus.focusCategoryFromChannels();
             },
-            onChannelMoveDown: _moveDownInLiveChannels,
+            onChannelMoveDown: _focus.moveDownInChannels,
             onCatchup: _showCatchupSheet,
             categories: _liveCategoriesForUi,
             selectedCategoryId: _categoryId,
-            focusNodeForCategory: _focusNodeForCategory,
+            focusNodeForCategory: _focus.focusNodeForCategory,
             onCategorySelected: (value) {
               setState(() => _categoryId = value);
-              _scheduleLiveFocusNodePrune();
+              _focus.scheduleFocusNodePrune();
               _scrollToTop();
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 if (!mounted) return;
-                _focusNodeForCategory(_categoryId).requestFocus();
-                _lastLiveFocusArea = _LiveFocusArea.category;
+                _focus.focusNodeForCategory(_categoryId).requestFocus();
+                _focus.noteFocusArea(LiveFocusArea.category);
               });
             },
-            onMoveRightToChannels: _focusChannelsFromCategory,
-            onPaneFallbackKey: _handleLivePaneFallbackKey,
+            onMoveRightToChannels: _focus.focusChannelsFromCategory,
+            onPaneFallbackKey: _focus.handlePaneFallbackKey,
             previewVideoBuilder: () => PreviewVideo(preview: _preview),
             previewLoading: _preview.loading,
             previewError: _preview.error,
@@ -1543,7 +1178,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     Channel? byId(String? id) =>
         id == null ? null : _live.channels.where((c) => c.id == id).firstOrNull;
     if (_deliberatePreview) {
-      return byId(_lastFocusedLiveChannelId) ??
+      return byId(_focus.lastFocusedChannelId) ??
           byId(_preview.channelId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;
