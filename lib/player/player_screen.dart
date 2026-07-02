@@ -271,15 +271,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _syncWindowsNativeControlState();
       }),
     );
-    _subs.add(
-      _player.stream.position.listen((_) => _syncWindowsNativeControlState()),
-    );
-    _subs.add(
-      _player.stream.duration.listen((_) => _syncWindowsNativeControlState()),
-    );
-    _subs.add(
-      _player.stream.volume.listen((_) => _syncWindowsNativeControlState()),
-    );
+    // Continuous streams (position ticks several times a second, duration/
+    // volume piggyback on them) go through the throttle — shipping the full
+    // control-state map over the MethodChannel per tick is pure churn while
+    // the overlay is hidden, and 2 Hz is plenty for a visible scrubber.
+    // Discrete events (track change, play/pause, user commands) keep calling
+    // _syncWindowsNativeControlState directly so the overlay never lags input.
+    _subs.add(_player.stream.position.listen((_) => _requestControlSync()));
+    _subs.add(_player.stream.duration.listen((_) => _requestControlSync()));
+    _subs.add(_player.stream.volume.listen((_) => _requestControlSync()));
 
     _open();
   }
@@ -688,6 +688,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } else if (mounted) {
       setState(() {});
     }
+  }
+
+  // Coalesces continuous-stream control-state syncs (see initState) to 2 Hz.
+  // Note the native overlay auto-hides on its own timer without telling Dart,
+  // so visibility can't gate this — the throttle alone does the work. Any
+  // user action syncs directly, so the overlay never reappears stale.
+  Timer? _controlSyncThrottle;
+
+  void _requestControlSync() {
+    if (!Platform.isWindows || _windowsNativeSurface == null) return;
+    if (_controlSyncThrottle?.isActive ?? false) return;
+    _controlSyncThrottle = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      unawaited(_syncWindowsNativeControlState());
+    });
   }
 
   Future<void> _syncWindowsNativeControlState() async {
@@ -1206,6 +1221,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _nativeHdrPlayer.setMethodCallHandler(null);
     }
     _reconnectTimer?.cancel();
+    _controlSyncThrottle?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
