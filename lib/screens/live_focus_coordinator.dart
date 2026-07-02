@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyEvent, KeyRepeatEvent, KeyUpEvent, LogicalKeyboardKey;
@@ -113,6 +115,103 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// Per-category memory of the channel the user was on, so re-entering the
   /// channel pane resumes there instead of at the top.
   final Map<String, String> _lastBrowsedByCategory = {};
+
+  /// Digits typed on the remote while browsing live — committed to a
+  /// channel-number jump after [_digitCommitDelay] (or OK). Non-empty means
+  /// the screen shows the entry chip. Notifies on every change.
+  String get digitBuffer => _digitBuffer;
+  String _digitBuffer = '';
+  Timer? _digitTimer;
+  static const _digitCommitDelay = Duration(milliseconds: 1500);
+  static const _maxDigits = 4;
+
+  // LogicalKeyboardKey overrides == and can't key a const map.
+  static final Map<LogicalKeyboardKey, int> _digitKeys = {
+    LogicalKeyboardKey.digit0: 0,
+    LogicalKeyboardKey.digit1: 1,
+    LogicalKeyboardKey.digit2: 2,
+    LogicalKeyboardKey.digit3: 3,
+    LogicalKeyboardKey.digit4: 4,
+    LogicalKeyboardKey.digit5: 5,
+    LogicalKeyboardKey.digit6: 6,
+    LogicalKeyboardKey.digit7: 7,
+    LogicalKeyboardKey.digit8: 8,
+    LogicalKeyboardKey.digit9: 9,
+    LogicalKeyboardKey.numpad0: 0,
+    LogicalKeyboardKey.numpad1: 1,
+    LogicalKeyboardKey.numpad2: 2,
+    LogicalKeyboardKey.numpad3: 3,
+    LogicalKeyboardKey.numpad4: 4,
+    LogicalKeyboardKey.numpad5: 5,
+    LogicalKeyboardKey.numpad6: 6,
+    LogicalKeyboardKey.numpad7: 7,
+    LogicalKeyboardKey.numpad8: 8,
+    LogicalKeyboardKey.numpad9: 9,
+  };
+
+  static int? _digitFor(LogicalKeyboardKey key) => _digitKeys[key];
+
+  /// Digit-entry channel jump. Returns true when the event was consumed.
+  /// Only active while focus sits in one of the live panes ([area] known) —
+  /// never while a text field is editing (that focus is `TvTextField.field`,
+  /// which classifies as unknown, so typed digits reach the editor).
+  bool _handleDigitKey(KeyEvent event, LiveFocusArea area) {
+    if (event is! KeyDownEvent) {
+      // Swallow digit-key repeats so a held digit doesn't leak into nav.
+      return event is KeyRepeatEvent &&
+          area != LiveFocusArea.unknown &&
+          _digitFor(event.logicalKey) != null;
+    }
+    final key = event.logicalKey;
+    final digit = _digitFor(key);
+    if (digit != null) {
+      if (area == LiveFocusArea.unknown) return false;
+      appendDigit(digit);
+      return true;
+    }
+    if (_digitBuffer.isEmpty) return false;
+    if (key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      commitDigitBuffer();
+      return true;
+    }
+    if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.goBack) {
+      clearDigitBuffer();
+      return true;
+    }
+    return false;
+  }
+
+  /// Append a typed digit and (re)arm the auto-commit timer.
+  void appendDigit(int digit) {
+    if (_digitBuffer.length >= _maxDigits) return;
+    _digitBuffer += '$digit';
+    _digitTimer?.cancel();
+    _digitTimer = Timer(_digitCommitDelay, commitDigitBuffer);
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Jump to the visible channel whose [Channel.number] matches the buffer.
+  void commitDigitBuffer() {
+    final number = int.tryParse(_digitBuffer);
+    clearDigitBuffer();
+    if (number == null) return;
+    final visible = visibleChannels();
+    final index = visible.indexWhere((channel) => channel.number == number);
+    if (index < 0) return;
+    noteFocusedChannel(visible[index].id);
+    _focusChannelByIndex(visible, index);
+    lastFocusArea = LiveFocusArea.channels;
+  }
+
+  void clearDigitBuffer() {
+    _digitTimer?.cancel();
+    _digitTimer = null;
+    if (_digitBuffer.isEmpty) return;
+    _digitBuffer = '';
+    if (!_disposed) notifyListeners();
+  }
 
   void noteFocusedChannel(String id) {
     if (_lastFocusedChannelId == id) return;
@@ -364,6 +463,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
 
     final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    if (_handleDigitKey(event, focusAreaFromLabel(label))) return true;
     if (key == LogicalKeyboardKey.arrowRight &&
         label.startsWith(categoryLabelPrefix)) {
       focusChannelsFromCategory();
@@ -478,6 +578,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _digitTimer?.cancel();
     searchCellFocusNode.dispose();
     firstChannelFocusNode.dispose();
     for (final node in _channelNodes.values) {

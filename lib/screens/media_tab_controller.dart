@@ -43,8 +43,8 @@ class MediaTabController extends ChangeNotifier {
     required this.kind,
     required this.repo,
     this.onEnrichError,
-  })  : firstFocusNode = FocusNode(debugLabel: 'media.${kind.name}.first'),
-        scrollController = ScrollController();
+  }) : firstFocusNode = FocusNode(debugLabel: 'media.${kind.name}.first'),
+       scrollController = ScrollController();
 
   /// Loaded page(s) for the current category (drives paging / "load more").
   MediaLibrarySnapshot? snapshot;
@@ -179,8 +179,9 @@ class MediaTabController extends ChangeNotifier {
         loadingMore = false;
       });
       if (repo.autoEnrichMetadata) {
-        final newlyLoaded =
-            snap.items.where((item) => !existingIds.contains(item.id)).toList();
+        final newlyLoaded = snap.items
+            .where((item) => !existingIds.contains(item.id))
+            .toList();
         unawaited(_enrich(newlyLoaded, maxItems: _autoEnrichLimit));
       }
     } catch (e) {
@@ -200,8 +201,11 @@ class MediaTabController extends ChangeNotifier {
       error = null;
     });
     try {
-      final results =
-          await repo.searchMedia(kind, query, categoryId: categoryToLoad);
+      final results = await repo.searchMedia(
+        kind,
+        query,
+        categoryId: categoryToLoad,
+      );
       // A newer keystroke superseded this search — drop the stale result.
       if (_disposed || _pendingSearch != query) return;
       DiagnosticsLog.instance.add(

@@ -128,6 +128,48 @@ void main() {
     });
   });
 
+  group('digit-entry channel jump', () {
+    test('committing typed digits focuses the matching channel number', () {
+      // channels() assigns numbers 1..n in order.
+      final coordinator = makeCoordinator(visible: channels(['a', 'b', 'c']));
+      addTearDown(coordinator.dispose);
+
+      coordinator.appendDigit(2);
+      expect(coordinator.digitBuffer, '2');
+      coordinator.commitDigitBuffer();
+
+      expect(coordinator.digitBuffer, isEmpty);
+      expect(coordinator.lastFocusedChannelId, 'b');
+      expect(coordinator.lastFocusArea, LiveFocusArea.channels);
+    });
+
+    test('a number with no matching channel just clears the buffer', () {
+      final coordinator = makeCoordinator(visible: channels(['a']));
+      addTearDown(coordinator.dispose);
+
+      coordinator.appendDigit(9);
+      coordinator.commitDigitBuffer();
+
+      expect(coordinator.digitBuffer, isEmpty);
+      expect(coordinator.lastFocusedChannelId, isNull);
+    });
+
+    test('clearDigitBuffer cancels pending entry and notifies', () {
+      final coordinator = makeCoordinator(visible: channels(['a']));
+      addTearDown(coordinator.dispose);
+      var notifications = 0;
+      coordinator.addListener(() => notifications++);
+
+      coordinator.appendDigit(1);
+      coordinator.appendDigit(0);
+      coordinator.clearDigitBuffer();
+
+      expect(coordinator.digitBuffer, isEmpty);
+      expect(coordinator.lastFocusedChannelId, isNull);
+      expect(notifications, 3); // two appends + one clear
+    });
+  });
+
   testWidgets('focus node prune keeps visible + focused nodes only', (
     tester,
   ) async {

@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/net.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
@@ -99,6 +100,17 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     ContentKind.series: FocusNode(debugLabel: 'content.tab.series'),
   };
   String? _lastPlayedLiveChannelId;
+  // The channel played before the current one — the zap ("last channel")
+  // target. Only meaningful within this screen's lifetime.
+  String? _previousPlayedLiveChannelId;
+
+  void _notePlayedChannel(String id) {
+    if (_lastPlayedLiveChannelId != null && _lastPlayedLiveChannelId != id) {
+      _previousPlayedLiveChannelId = _lastPlayedLiveChannelId;
+    }
+    _lastPlayedLiveChannelId = id;
+  }
+
   // Live preview player + its state live in a controller; the screen keeps the
   // focus-driven preview trigger (below), fullscreen playback, and the phone
   // preview sheet, which drive it.
@@ -434,7 +446,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         );
         final stream = await widget.repo.resolve(channel);
         if (!mounted) return;
-        _lastPlayedLiveChannelId = channel.id;
+        _notePlayedChannel(channel.id);
         await Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => PlayerScreen(
@@ -449,9 +461,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         _restoreListFocusAfterPlayback();
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Could not play: $e')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not play: ${redactText('$e')}')),
+          );
         }
       } finally {
         if (mounted) setState(() => _resolving = false);
@@ -501,7 +513,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         'library',
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
-      _lastPlayedLiveChannelId = channel.id;
+      _notePlayedChannel(channel.id);
       // An adopted engine keeps playing straight through the handoff (that's
       // the seamless part). Only pause when the fullscreen player will open its
       // own pipeline — i.e. Android's native player over a media_kit-fallback
@@ -547,9 +559,30 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not play: ${redactText('$e')}')),
+      );
     } finally {
       if (mounted) setState(() => _resolving = false);
+    }
+  }
+
+  /// Zap straight back to the previously played live channel (fullscreen,
+  /// bypassing the preview) — classic "last channel" recall.
+  Future<void> _zapToPreviousChannel() async {
+    if (_resolving) return;
+    final id = _previousPlayedLiveChannelId;
+    final channel = id == null ? null : _findChannelById(id);
+    if (channel == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final stream = await widget.repo.resolve(channel);
+      if (!mounted) return;
+      await _openLivePlayer(channel, stream, reusePreview: false);
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not play: ${redactText('$e')}')),
+      );
     }
   }
 
@@ -650,7 +683,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
         'library',
         'open catch-up source=${widget.repo.source.name} channel=${channel.name} programme=${programme.title} start=${programme.start.toIso8601String()}',
       );
-      _lastPlayedLiveChannelId = channel.id;
+      _notePlayedChannel(channel.id);
       final stream = await widget.repo.resolveArchive(channel, programme);
       if (!mounted) return;
       await navigator.push(
@@ -667,7 +700,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _restoreListFocusAfterPlayback();
     } catch (e) {
       messenger.showSnackBar(
-        SnackBar(content: Text('Could not play catch-up: $e')),
+        SnackBar(content: Text('Could not play catch-up: ${redactText('$e')}')),
       );
     } finally {
       if (mounted) setState(() => _resolving = false);
@@ -686,7 +719,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       _replaceMediaItem(detailed);
       _showMediaDetails(detailed);
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Could not open: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not open: ${redactText('$e')}')),
+      );
     }
   }
 
@@ -740,7 +775,9 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       unawaited(_media(ContentKind.series).loadContinueWatching());
       _restoreListFocusAfterPlayback();
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Could not play: $e')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not play: ${redactText('$e')}')),
+      );
     } finally {
       if (mounted) setState(() => _resolving = false);
     }
@@ -963,6 +1000,13 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (_tab == ContentKind.live &&
+                      _previousPlayedLiveChannelId != null)
+                    IconButton(
+                      tooltip: 'Last channel',
+                      icon: const Icon(Icons.swap_horiz_rounded),
+                      onPressed: _zapToPreviousChannel,
+                    ),
                   if (widget.onManageSources != null)
                     IconButton(
                       tooltip: 'Sources',
@@ -1131,50 +1175,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
   Widget _buildBody(BuildContext context) {
     final visible = _tab == ContentKind.live ? _visible : const <Channel>[];
     return _tab == ContentKind.live
-        ? LiveTabView(
-            loading: _live.loading,
-            error: _live.error,
-            onRetry: () => _loadLive(forceRefresh: true),
-            visible: visible,
-            previewChannel: _resolvePreviewChannel(visible),
-            now: _live.now,
-            next: _live.next,
-            deliberate: _deliberatePreview,
-            resolving: _resolving,
-            scrollController: _scrollController,
-            firstChannelFocusNode: _focus.firstChannelFocusNode,
-            focusNodeForChannel: _focus.focusNodeForChannel,
-            lastPlayedChannelId: _lastPlayedLiveChannelId,
-            previewChannelId: _preview.channelId,
-            isFavorite: (id) => _isFavorite(ContentKind.live, id),
-            onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
-            onPlayChannel: _play,
-            onLongPressChannel: _showPreviewSheet,
-            onChannelMoveLeft: (id) {
-              _focus.rememberBrowsedChannel(id);
-              _focus.focusCategoryFromChannels();
-            },
-            onChannelMoveDown: _focus.moveDownInChannels,
-            onCatchup: _showCatchupSheet,
-            categories: _liveCategoriesForUi,
-            selectedCategoryId: _categoryId,
-            focusNodeForCategory: _focus.focusNodeForCategory,
-            onCategorySelected: (value) {
-              setState(() => _categoryId = value);
-              _focus.scheduleFocusNodePrune();
-              _scrollToTop();
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
-                _focus.focusNodeForCategory(_categoryId).requestFocus();
-                _focus.noteFocusArea(LiveFocusArea.category);
-              });
-            },
-            onMoveRightToChannels: _focus.focusChannelsFromCategory,
-            onPaneFallbackKey: _focus.handlePaneFallbackKey,
-            previewVideoBuilder: () => PreviewVideo(preview: _preview),
-            previewLoading: _preview.loading,
-            previewError: _preview.error,
-          )
+        ? _withDigitEntryChip(_buildLiveBody(visible))
         : MediaTabView(
             kind: _tab,
             visible: _visibleMedia(_tab),
@@ -1193,6 +1194,87 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
             continueWatching: _media(_tab).continueWatching,
             onResume: _playMedia,
           );
+  }
+
+  /// Overlays the digit-entry "Ch 123" chip while the user is typing a
+  /// channel number on the remote (see [LiveFocusCoordinator.digitBuffer]).
+  Widget _withDigitEntryChip(Widget body) {
+    if (_focus.digitBuffer.isEmpty) return body;
+    return Stack(
+      children: [
+        body,
+        Positioned(
+          top: 8,
+          right: 16,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.panel.withValues(alpha: 0.95),
+              borderRadius: BorderRadius.circular(AppRadius.tile),
+              border: Border.all(color: AppColors.accent, width: 2),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Text(
+                'Ch ${_focus.digitBuffer}',
+                style: const TextStyle(
+                  color: AppColors.textHi,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLiveBody(List<Channel> visible) {
+    return LiveTabView(
+      loading: _live.loading,
+      error: _live.error,
+      onRetry: () => _loadLive(forceRefresh: true),
+      visible: visible,
+      previewChannel: _resolvePreviewChannel(visible),
+      now: _live.now,
+      next: _live.next,
+      deliberate: _deliberatePreview,
+      resolving: _resolving,
+      scrollController: _scrollController,
+      firstChannelFocusNode: _focus.firstChannelFocusNode,
+      focusNodeForChannel: _focus.focusNodeForChannel,
+      lastPlayedChannelId: _lastPlayedLiveChannelId,
+      previewChannelId: _preview.channelId,
+      isFavorite: (id) => _isFavorite(ContentKind.live, id),
+      onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
+      onPlayChannel: _play,
+      onLongPressChannel: _showPreviewSheet,
+      onChannelMoveLeft: (id) {
+        _focus.rememberBrowsedChannel(id);
+        _focus.focusCategoryFromChannels();
+      },
+      onChannelMoveDown: _focus.moveDownInChannels,
+      onCatchup: _showCatchupSheet,
+      categories: _liveCategoriesForUi,
+      selectedCategoryId: _categoryId,
+      focusNodeForCategory: _focus.focusNodeForCategory,
+      onCategorySelected: (value) {
+        setState(() => _categoryId = value);
+        _focus.scheduleFocusNodePrune();
+        _scrollToTop();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _focus.focusNodeForCategory(_categoryId).requestFocus();
+          _focus.noteFocusArea(LiveFocusArea.category);
+        });
+      },
+      onMoveRightToChannels: _focus.focusChannelsFromCategory,
+      onPaneFallbackKey: _focus.handlePaneFallbackKey,
+      previewVideoBuilder: () => PreviewVideo(preview: _preview),
+      previewLoading: _preview.loading,
+      previewError: _preview.error,
+    );
   }
 
   String _statusText(int visibleLiveCount) {
