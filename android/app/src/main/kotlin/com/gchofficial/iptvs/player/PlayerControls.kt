@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -273,6 +275,7 @@ private fun ControlsOverlay(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TopBar(
     state: PlayerUiState,
@@ -280,43 +283,91 @@ private fun TopBar(
     nowMillis: Long,
     onInteract: () -> Unit,
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconControlButton(
-            icon = Icons.AutoMirrored.Filled.ArrowBack,
-            contentDescription = "Back",
-            onClick = { onInteract(); callbacks.onBack() },
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = state.title,
-                color = PlayerColors.TextHi,
-                fontFamily = InterFontFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                maxLines = 1,
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV only) a
-        // date+time clock. The title above takes the remaining width and ellipsizes.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            state.sourceBadge()?.let { Badge(it) }
-            if (state.isLive) LiveBadge(synced = state.liveSynced)
-            state.resolutionBadge()?.let { Badge(it) }
-            state.hdrBadge()?.let { Badge(it, accent = true) }
-            state.fpsBadge()?.let { Badge(it) }
-            if (state.isTv) Badge(formatClock(nowMillis))
+    // Same breakpoint as the bottom bar: below ~560dp (phone portrait) the badge
+    // cluster would squeeze the title to nothing, so it wraps onto its own row.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxWidth < 560.dp
+        if (compact) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 12.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconControlButton(
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        onClick = { onInteract(); callbacks.onBack() },
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        text = state.title,
+                        color = PlayerColors.TextHi,
+                        fontFamily = InterFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                // FlowRow so the badges wrap again on very narrow screens instead
+                // of overflowing off-screen.
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TopBadges(state, nowMillis)
+                }
+            }
+        } else {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconControlButton(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    onClick = { onInteract(); callbacks.onBack() },
+                )
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    text = state.title,
+                    color = PlayerColors.TextHi,
+                    fontFamily = InterFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                // Right-cluster badges: source, LIVE/resolution/HDR, fps, and (TV
+                // only) a date+time clock. The title takes the remaining width and
+                // ellipsizes.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TopBadges(state, nowMillis)
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun TopBadges(state: PlayerUiState, nowMillis: Long) {
+    state.sourceBadge()?.let { Badge(it) }
+    if (state.isLive) LiveBadge(synced = state.liveSynced)
+    state.resolutionBadge()?.let { Badge(it) }
+    state.hdrBadge()?.let { Badge(it, accent = true) }
+    state.fpsBadge()?.let { Badge(it) }
+    if (state.isTv) Badge(formatClock(nowMillis))
 }
 
 @Composable
