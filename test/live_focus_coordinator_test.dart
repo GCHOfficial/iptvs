@@ -22,6 +22,7 @@ void main() {
       channelById: (id) =>
           visible.where((channel) => channel.id == id).firstOrNull,
       isLiveTab: () => true,
+      isRouteCurrent: () => true,
       isMounted: () => true,
       onChannelFocusChanged: (_, _) {},
     );
@@ -138,6 +139,7 @@ void main() {
       channelById: (id) =>
           visible.where((channel) => channel.id == id).firstOrNull,
       isLiveTab: () => true,
+      isRouteCurrent: () => true,
       isMounted: () => true,
       onChannelFocusChanged: (_, _) {},
     );

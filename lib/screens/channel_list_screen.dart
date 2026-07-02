@@ -133,6 +133,8 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       categoryId: () => _categoryId,
       channelById: _findChannelById,
       isLiveTab: () => _tab == ContentKind.live,
+      isRouteCurrent: () =>
+          !mounted || (ModalRoute.of(context)?.isCurrent ?? true),
       isMounted: () => mounted,
       onChannelFocusChanged: _onChannelFocusChanged,
     );

@@ -48,6 +48,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.categoryId,
     required this.channelById,
     required this.isLiveTab,
+    required this.isRouteCurrent,
     required this.isMounted,
     required this.onChannelFocusChanged,
   }) {
@@ -73,6 +74,13 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   /// Whether the live tab is the active content tab.
   final bool Function() isLiveTab;
+
+  /// Whether the screen's route is on top. [handleGlobalKeyEvent] is
+  /// registered on [HardwareKeyboard] for the screen's whole lifetime, so
+  /// without this guard it would keep intercepting arrow keys behind any
+  /// pushed route (player, sources, diagnostics) whose focus nodes happen to
+  /// be unlabeled.
+  final bool Function() isRouteCurrent;
 
   /// Whether the owning State is still mounted (guards post-frame work).
   final bool Function() isMounted;
@@ -343,7 +351,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// down-hold lock that keeps a held Down key walking the channel list.
   /// Registered by the screen for its lifetime.
   bool handleGlobalKeyEvent(KeyEvent event) {
-    if (!isLiveTab()) return false;
+    if (!isLiveTab() || !isRouteCurrent()) return false;
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowDown && event is KeyUpEvent) {
       _downHoldFromChannels = false;
