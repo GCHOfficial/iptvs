@@ -61,8 +61,10 @@ class TvTextField extends StatefulWidget {
 class _TvTextFieldState extends State<TvTextField> {
   final FocusNode _cellFocus = FocusNode(debugLabel: 'TvTextField.cell');
   final FocusNode _fieldFocus = FocusNode(debugLabel: 'TvTextField.field');
+  final FocusNode _toggleFocus = FocusNode(debugLabel: 'TvTextField.toggle');
   bool _editing = false;
   bool _cellFocused = false;
+  bool _toggleFocused = false;
   late bool _obscured = widget.obscureText;
 
   FocusNode get _effectiveCellFocus => widget.cellFocusNode ?? _cellFocus;
@@ -80,6 +82,7 @@ class _TvTextFieldState extends State<TvTextField> {
       _cellFocus.dispose();
     }
     _fieldFocus.dispose();
+    _toggleFocus.dispose();
     super.dispose();
   }
 
@@ -140,128 +143,190 @@ class _TvTextFieldState extends State<TvTextField> {
       onPopInvokedWithResult: (didPop, result) {
         if (!didPop && _editing) _exitEdit();
       },
+      child: Container(
+        height: widget.height ?? kTvTextFieldHeight,
+        // Vertically centers the Row within a fixed-height cell.
+        alignment: Alignment.centerLeft,
+        decoration: BoxDecoration(
+          color: highlighted ? AppColors.panelHi : AppColors.panel,
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          border: Border.all(
+            color: highlighted ? AppColors.accent : AppColors.line,
+            width: highlighted ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(child: _buildEntryCell()),
+            // The show/hide toggle lives *outside* the entry cell's
+            // edit-mode barrier below, as its own always-focusable stop —
+            // not nested inside it. Nested there it would be unreachable by
+            // D-pad: entering edit mode hands focus straight to the
+            // TextField, and arrow keys are then consumed by the editor for
+            // caret movement (that's the whole reason this widget exists),
+            // so a sibling icon inside the same barrier could never be
+            // navigated to on a TV remote.
+            if (widget.obscureText) _buildVisibilityToggle(),
+            if (widget.suffixIcon != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: IgnorePointer(
+                  ignoring: !_editing,
+                  child: ExcludeFocus(
+                    excluding: !_editing,
+                    child: IconTheme.merge(
+                      data: const IconThemeData(color: AppColors.textLo),
+                      child: widget.suffixIcon!,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The "OK to edit" prefix-icon + text field portion — a single focusable
+  /// stop until [_enterEdit] hands focus to the inner [TextField].
+  Widget _buildEntryCell() {
+    return FocusableActionDetector(
+      focusNode: _effectiveCellFocus,
+      autofocus: widget.autofocus,
+      mouseCursor: SystemMouseCursors.text,
+      onShowFocusHighlight: (v) {
+        if (mounted) setState(() => _cellFocused = v);
+      },
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            _enterEdit();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _enterEdit,
+        // Until editing, the inner field neither takes focus (ExcludeFocus) nor
+        // pointer events (IgnorePointer) — so a tap falls through to the cell's
+        // onTap → _enterEdit instead of being swallowed by the (unfocusable)
+        // field. Once editing, both barriers lift so caret/selection work.
+        child: IgnorePointer(
+          ignoring: !_editing,
+          child: ExcludeFocus(
+            excluding: !_editing,
+            // Icons live OUTSIDE the InputDecoration, in a manually centered
+            // Row. Inside the decorator their 48dp minimum makes it taller
+            // than the text line, and the InputDecorator's dense-layout
+            // vertical centering differs between Android and Windows — the
+            // recurring "hint sits high on Android" bug. With no icons the
+            // decorator collapses to the text line and the Row centers
+            // everything identically on every platform.
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (widget.prefixIcon != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12),
+                    child: IconTheme.merge(
+                      data: const IconThemeData(color: AppColors.textLo),
+                      child: widget.prefixIcon!,
+                    ),
+                  ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: TextField(
+                      controller: widget.controller,
+                      focusNode: _fieldFocus,
+                      obscureText: _obscured,
+                      onChanged: widget.onChanged,
+                      textInputAction: widget.textInputAction,
+                      onSubmitted: (value) {
+                        _exitEdit();
+                        widget.onSubmitted?.call(value);
+                      },
+                      // A *collapsed* decoration removes the InputDecorator's
+                      // layout entirely (no fill, borders, or padding — the
+                      // cell supplies all of that), so the field is exactly
+                      // the text line and the Row's centering is
+                      // platform-independent. Any non-collapsed decoration
+                      // re-engages the decorator's own vertical placement,
+                      // which differs between Android and Windows — the
+                      // recurring hint-misalignment bug.
+                      //
+                      // Every border slot must be InputBorder.none
+                      // explicitly: applyDefaults fills any null slot from
+                      // the app theme's OutlineInputBorders, and the
+                      // decorator prefers enabled/focusedBorder over
+                      // `border` — which painted a second rounded box
+                      // inside the cell.
+                      decoration: InputDecoration(
+                        isCollapsed: true,
+                        contentPadding: EdgeInsets.zero,
+                        filled: false,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        hintText: widget.hintText,
+                        hintStyle: const TextStyle(color: AppColors.textLo),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Password/credential fields get a built-in show/hide toggle — without it
+  /// there's no way to spot a typo on a device with no physical keyboard to
+  /// arrow back over masked characters. Always focusable/tappable (not
+  /// gated by edit mode) with its own accent focus ring, matching how every
+  /// other D-pad-navigable control in the app signals focus.
+  Widget _buildVisibilityToggle() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
       child: FocusableActionDetector(
-        focusNode: _effectiveCellFocus,
-        autofocus: widget.autofocus,
-        mouseCursor: SystemMouseCursors.text,
+        focusNode: _toggleFocus,
+        mouseCursor: SystemMouseCursors.click,
         onShowFocusHighlight: (v) {
-          if (mounted) setState(() => _cellFocused = v);
+          if (mounted) setState(() => _toggleFocused = v);
         },
         actions: {
           ActivateIntent: CallbackAction<ActivateIntent>(
             onInvoke: (_) {
-              _enterEdit();
+              setState(() => _obscured = !_obscured);
               return null;
             },
           ),
         },
         child: GestureDetector(
-          onTap: _enterEdit,
-          child: Container(
-            height: widget.height ?? kTvTextFieldHeight,
-            // Vertically centers the Row within a fixed-height cell.
-            alignment: Alignment.centerLeft,
-            decoration: BoxDecoration(
-              color: highlighted ? AppColors.panelHi : AppColors.panel,
-              borderRadius: BorderRadius.circular(AppRadius.tile),
-              border: Border.all(
-                color: highlighted ? AppColors.accent : AppColors.line,
-                width: highlighted ? 2 : 1,
+          onTap: () => setState(() => _obscured = !_obscured),
+          child: Tooltip(
+            message: _obscured ? 'Show' : 'Hide',
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _toggleFocused ? AppColors.panelHi : null,
+                border: _toggleFocused
+                    ? Border.all(color: AppColors.accent, width: 2)
+                    : null,
               ),
-            ),
-            // Until editing, the inner field neither takes focus (ExcludeFocus) nor
-            // pointer events (IgnorePointer) — so a tap falls through to the cell's
-            // onTap → _enterEdit instead of being swallowed by the (unfocusable)
-            // field. Once editing, both barriers lift so caret/selection work.
-            child: IgnorePointer(
-              ignoring: !_editing,
-              child: ExcludeFocus(
-                excluding: !_editing,
-                // Icons live OUTSIDE the InputDecoration, in a manually centered
-                // Row. Inside the decorator their 48dp minimum makes it taller
-                // than the text line, and the InputDecorator's dense-layout
-                // vertical centering differs between Android and Windows — the
-                // recurring "hint sits high on Android" bug. With no icons the
-                // decorator collapses to the text line and the Row centers
-                // everything identically on every platform.
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    if (widget.prefixIcon != null)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 12),
-                        child: IconTheme.merge(
-                          data: const IconThemeData(color: AppColors.textLo),
-                          child: widget.prefixIcon!,
-                        ),
-                      ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: TextField(
-                          controller: widget.controller,
-                          focusNode: _fieldFocus,
-                          obscureText: _obscured,
-                          onChanged: widget.onChanged,
-                          textInputAction: widget.textInputAction,
-                          onSubmitted: (value) {
-                            _exitEdit();
-                            widget.onSubmitted?.call(value);
-                          },
-                          // A *collapsed* decoration removes the InputDecorator's
-                          // layout entirely (no fill, borders, or padding — the
-                          // cell supplies all of that), so the field is exactly
-                          // the text line and the Row's centering is
-                          // platform-independent. Any non-collapsed decoration
-                          // re-engages the decorator's own vertical placement,
-                          // which differs between Android and Windows — the
-                          // recurring hint-misalignment bug.
-                          //
-                          // Every border slot must be InputBorder.none
-                          // explicitly: applyDefaults fills any null slot from
-                          // the app theme's OutlineInputBorders, and the
-                          // decorator prefers enabled/focusedBorder over
-                          // `border` — which painted a second rounded box
-                          // inside the cell.
-                          decoration: InputDecoration(
-                            isCollapsed: true,
-                            contentPadding: EdgeInsets.zero,
-                            filled: false,
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            errorBorder: InputBorder.none,
-                            focusedErrorBorder: InputBorder.none,
-                            disabledBorder: InputBorder.none,
-                            hintText: widget.hintText,
-                            hintStyle: const TextStyle(color: AppColors.textLo),
-                          ),
-                        ),
-                      ),
-                    ),
-                    // Password/credential fields get a built-in show/hide toggle —
-                    // without it there's no way to spot a typo on a device with no
-                    // physical keyboard to arrow back over masked characters.
-                    if (widget.obscureText)
-                      IconButton(
-                        icon: Icon(
-                          _obscured ? Icons.visibility_off : Icons.visibility,
-                          size: 20,
-                        ),
-                        color: AppColors.textLo,
-                        tooltip: _obscured ? 'Show' : 'Hide',
-                        onPressed: () => setState(() => _obscured = !_obscured),
-                      ),
-                    if (widget.suffixIcon != null)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 4),
-                        child: IconTheme.merge(
-                          data: const IconThemeData(color: AppColors.textLo),
-                          child: widget.suffixIcon!,
-                        ),
-                      ),
-                  ],
-                ),
+              child: Icon(
+                _obscured ? Icons.visibility_off : Icons.visibility,
+                size: 20,
+                color: _toggleFocused ? AppColors.accent : AppColors.textLo,
               ),
             ),
           ),
