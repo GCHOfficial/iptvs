@@ -19,6 +19,18 @@ class MainActivity : FlutterActivity() {
         instance = WeakReference(this)
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Back-exit safety net: leaving the app must never strand the shared
+        // preview engine playing audio behind the launcher. Dart also stops it
+        // on lifecycle-pause, but the engine is process-global and outlives the
+        // Flutter UI, so the finishing Activity enforces it too. Not adopted =
+        // not owned by a fullscreen HdrPlayerActivity.
+        if (isFinishing && !SharedEngine.adoptedByFullscreen) {
+            SharedEngine.invalidate()
+        }
+    }
+
     override fun onDestroy() {
         if (instance?.get() === this) instance = null
         super.onDestroy()

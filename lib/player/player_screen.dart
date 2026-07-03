@@ -150,6 +150,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const int _kStallReconnectMs = 8000;
   static const int _kMaxBackoffMs = 30000;
   late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
+  // Android adopted-handoff: set once the native launch failed and the
+  // embedded fallback is taking over (ends the transparent handoff window).
+  bool _nativeLaunchFailed = false;
   bool _isNativeFullscreen = false;
   bool _nativeControlsVisible = true;
   bool _nativeTeardownScheduled = false;
@@ -189,6 +192,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   ];
 
   bool get _usesWindowsNativeSurface => Platform.isWindows;
+
+  /// Android adopted-handoff window: this route (pushed non-opaque by the
+  /// caller) stays fully transparent so the channel list — including the
+  /// preview's frozen last frame — remains visible until the native Activity's
+  /// first frame covers it. No black flash in between. Ends if the native
+  /// launch fails and the embedded fallback needs a real surface.
+  bool get _transparentHandoff =>
+      Platform.isAndroid && widget.adoptNativePreview && !_nativeLaunchFailed;
 
   @override
   void initState() {
@@ -380,7 +391,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         setState(() => _nativePlaybackLaunched = false);
       }
     } else if (mounted) {
-      setState(() => _nativePlaybackLaunched = false);
+      setState(() {
+        _nativePlaybackLaunched = false;
+        _nativeLaunchFailed = true;
+      });
     }
 
     // Keep a backward cache so scrubbing back through a VOD doesn't refetch
@@ -1183,6 +1197,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _playbackSurface() {
+    // Transparent while the adopted-handoff Activity launches/plays — the
+    // route below (channel list + frozen preview frame) shows through instead
+    // of a black flash.
+    if (_transparentHandoff) return const SizedBox.expand();
     if (_controller == null) return _nativePlaybackOverlay();
     return _nativePlaybackLaunched ? _nativePlaybackOverlay() : _video(context);
   }
@@ -1243,10 +1261,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'keepaspect-window': 'yes',
           };
 
+    // Order matters: options apply sequentially, and `wid` must land before
+    // `vo`/`force-window`. Setting `vo=gpu-next` on an already-playing player
+    // (the preview hot-swap) with no `wid` yet makes mpv create the VO in its
+    // *own* top-level window, then recreate it into the child surface when
+    // `wid` arrives — visible as a stray window popping up during the
+    // preview → fullscreen handoff.
     await applyMpvOptions(platform, {
       ...options,
-      ...videoOptions,
       ...nativeWindowOptions,
+      ...videoOptions,
     }, onWarn: (message) => _logPlayback('warn $message'));
   }
 
@@ -1451,7 +1475,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: _transparentHandoff ? Colors.transparent : Colors.black,
       body: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () {

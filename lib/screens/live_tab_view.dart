@@ -110,7 +110,7 @@ class LiveTabView extends StatelessWidget {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
     final allowLongPressPreview =
-        deliberate && MediaQuery.of(context).size.width < 950;
+        deliberate && MediaQuery.of(context).size.width < kWideLayoutMinWidth;
     return ListView.builder(
       controller: scrollController,
       padding: padding,
@@ -176,7 +176,7 @@ class LiveTabView extends StatelessWidget {
     final preview = previewChannel!;
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < 950) return _buildChannelList(context);
+        if (constraints.maxWidth < kWideLayoutMinWidth) return _buildChannelList(context);
         return Focus(
           canRequestFocus: false,
           skipTraversal: true,

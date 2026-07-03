@@ -421,141 +421,159 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
             ),
           ),
           SafeArea(
-            child: Column(
-              children: [
-                const SizedBox(height: 40),
-                _AppLogo(),
-                const SizedBox(height: 40),
-                Text(
-                  "Who's watching?",
-                  style: GoogleFonts.spaceGrotesk(
-                    fontSize: 38,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textHi,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Select a profile to continue',
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: AppColors.textLo,
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-                const SizedBox(height: 52),
-                // Profile grid
-                Expanded(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 32),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          for (var i = 0; i < _profiles.length; i++) ...[
-                            if (i > 0) const SizedBox(width: 32),
-                            _ProfileCircle(
-                              entry: _profiles[i],
-                              isActive: _profiles[i].id == _activeProfileId,
-                              autofocus: _profiles[i].id == _activeProfileId,
-                              busy: _busy,
-                              manageMode: _manageMode,
-                              onTap: _manageMode
-                                  ? null
-                                  : () => _selectProfile(_profiles[i]),
-                              onDelete: _profiles[i].isCloud
-                                  ? null
-                                  : () => _deleteProfile(_profiles[i]),
-                            ),
-                          ],
-                          // "+" button — always last
-                          if (!_manageMode) ...[
-                            if (_profiles.isNotEmpty) const SizedBox(width: 32),
-                            _AddProfileCircle(
-                              autofocus: _profiles.isEmpty,
-                              busy: _busy,
-                              onTap: _createLocalProfile,
-                            ),
-                          ],
-                        ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // TV logical heights run ~540–720dp — the roomy phone/desktop
+                // spacing overflows the grid area there and paints over the
+                // footer. Scale the fixed chrome down with available height.
+                final compact = constraints.maxHeight < 640;
+                final tight = constraints.maxHeight < 520;
+                final avatarSize = tight ? 64.0 : compact ? 80.0 : 100.0;
+                return Column(
+                  children: [
+                    SizedBox(height: compact ? 16 : 40),
+                    _AppLogo(),
+                    SizedBox(height: compact ? 14 : 40),
+                    Text(
+                      "Who's watching?",
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: compact ? 28 : 38,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textHi,
+                        letterSpacing: -0.5,
                       ),
                     ),
-                  ),
-                ),
-                if (_error != null) ...[
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Color(0xFFE5484D),
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-                if (_busy)
-                  const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                else
-                  Text(
-                    'Use D-pad to choose a profile',
-                    style: TextStyle(
-                      color: AppColors.textLo.withValues(alpha: 0.6),
-                      fontSize: 13,
-                    ),
-                  ),
-                const SizedBox(height: 12),
-                // Link-to-cloud banner (configured builds that aren't paired)
-                if (!_isPaired && CloudConfig.isConfigured && !_manageMode)
-                  TextButton.icon(
-                    onPressed: _busy ? null : _goToCloudSync,
-                    icon: const Icon(Icons.cloud_outlined, size: 16),
-                    label: const Text('Link to cloud account'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.textLo,
-                      textStyle: const TextStyle(fontSize: 13),
-                    ),
-                  ),
-                // Manage / Done toggle
-                if (_profiles.isNotEmpty)
-                  TextButton(
-                    onPressed: _busy
-                        ? null
-                        : () => setState(() => _manageMode = !_manageMode),
-                    child: Text(
-                      _manageMode ? 'Done' : 'Manage profiles',
+                    SizedBox(height: compact ? 6 : 10),
+                    Text(
+                      'Select a profile to continue',
                       style: TextStyle(
-                        color: _manageMode
-                            ? AppColors.accent
-                            : AppColors.textLo.withValues(alpha: 0.6),
-                        fontSize: 13,
-                        fontWeight: _manageMode
-                            ? FontWeight.w600
-                            : FontWeight.w400,
+                        fontSize: compact ? 13 : 15,
+                        color: AppColors.textLo,
+                        fontWeight: FontWeight.w400,
                       ),
                     ),
-                  ),
-                if (!_manageMode)
-                  TextButton(
-                    onPressed: _busy ? null : _goHome,
-                    child: Text(
-                      'Skip',
-                      style: TextStyle(
-                        color: AppColors.textLo.withValues(alpha: 0.5),
-                        fontSize: 13,
+                    SizedBox(height: compact ? 18 : 52),
+                    // Profile grid
+                    Expanded(
+                      child: Center(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 32),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              for (var i = 0; i < _profiles.length; i++) ...[
+                                if (i > 0) const SizedBox(width: 32),
+                                _ProfileCircle(
+                                  entry: _profiles[i],
+                                  isActive:
+                                      _profiles[i].id == _activeProfileId,
+                                  autofocus:
+                                      _profiles[i].id == _activeProfileId,
+                                  busy: _busy,
+                                  manageMode: _manageMode,
+                                  avatarSize: avatarSize,
+                                  compact: compact,
+                                  onTap: _manageMode
+                                      ? null
+                                      : () => _selectProfile(_profiles[i]),
+                                  onDelete: _profiles[i].isCloud
+                                      ? null
+                                      : () => _deleteProfile(_profiles[i]),
+                                ),
+                              ],
+                              // "+" button — always last
+                              if (!_manageMode) ...[
+                                if (_profiles.isNotEmpty)
+                                  const SizedBox(width: 32),
+                                _AddProfileCircle(
+                                  autofocus: _profiles.isEmpty,
+                                  busy: _busy,
+                                  avatarSize: avatarSize,
+                                  compact: compact,
+                                  onTap: _createLocalProfile,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                const SizedBox(height: 24),
-              ],
+                    if (_error != null) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFFE5484D),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    if (_busy)
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      Text(
+                        'Use D-pad to choose a profile',
+                        style: TextStyle(
+                          color: AppColors.textLo.withValues(alpha: 0.6),
+                          fontSize: 13,
+                        ),
+                      ),
+                    SizedBox(height: compact ? 4 : 12),
+                    // Link-to-cloud banner (configured builds that aren't
+                    // paired)
+                    if (!_isPaired && CloudConfig.isConfigured && !_manageMode)
+                      TextButton.icon(
+                        onPressed: _busy ? null : _goToCloudSync,
+                        icon: const Icon(Icons.cloud_outlined, size: 16),
+                        label: const Text('Link to cloud account'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: AppColors.textLo,
+                          textStyle: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                    // Manage / Done toggle
+                    if (_profiles.isNotEmpty)
+                      TextButton(
+                        onPressed: _busy
+                            ? null
+                            : () => setState(() => _manageMode = !_manageMode),
+                        child: Text(
+                          _manageMode ? 'Done' : 'Manage profiles',
+                          style: TextStyle(
+                            color: _manageMode
+                                ? AppColors.accent
+                                : AppColors.textLo.withValues(alpha: 0.6),
+                            fontSize: 13,
+                            fontWeight: _manageMode
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ),
+                    if (!_manageMode)
+                      TextButton(
+                        onPressed: _busy ? null : _goHome,
+                        child: Text(
+                          'Skip',
+                          style: TextStyle(
+                            color: AppColors.textLo.withValues(alpha: 0.5),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    SizedBox(height: compact ? 10 : 24),
+                  ],
+                );
+              },
             ),
           ),
         ],
@@ -612,6 +630,13 @@ class _ProfileCircle extends StatefulWidget {
   final bool autofocus;
   final bool busy;
   final bool manageMode;
+
+  /// Outer circle diameter — scaled down by the screen on short viewports.
+  final double avatarSize;
+
+  /// The screen's short-viewport decision (drives label gap/font, so the
+  /// threshold lives in one place — the screen's LayoutBuilder).
+  final bool compact;
   final VoidCallback? onTap;
   final VoidCallback? onDelete;
 
@@ -621,6 +646,8 @@ class _ProfileCircle extends StatefulWidget {
     required this.autofocus,
     required this.busy,
     required this.manageMode,
+    required this.avatarSize,
+    required this.compact,
     required this.onTap,
     required this.onDelete,
   });
@@ -679,14 +706,14 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                 ? widget.onDelete
                 : widget.onTap,
         child: SizedBox(
-          width: 120,
+          width: widget.avatarSize + 20,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
-                width: 100,
-                height: 100,
+                width: widget.avatarSize,
+                height: widget.avatarSize,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(color: ringColor, width: ringWidth),
@@ -704,8 +731,8 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                   alignment: Alignment.center,
                   children: [
                     Container(
-                      width: 94,
-                      height: 94,
+                      width: widget.avatarSize - 6,
+                      height: widget.avatarSize - 6,
                       decoration: BoxDecoration(
                         color: widget.manageMode && widget.entry.isCloud
                             ? color.withValues(alpha: 0.4)
@@ -716,7 +743,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                       child: Text(
                         initial,
                         style: GoogleFonts.spaceGrotesk(
-                          fontSize: 38,
+                          fontSize: widget.avatarSize * 0.38,
                           fontWeight: FontWeight.w700,
                           color: Colors.white,
                         ),
@@ -811,7 +838,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: widget.compact ? 8 : 14),
               Text(
                 name,
                 maxLines: 1,
@@ -820,7 +847,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                 style: TextStyle(
                   color:
                       widget.isActive ? AppColors.textHi : AppColors.textLo,
-                  fontSize: 15,
+                  fontSize: widget.compact ? 13 : 15,
                   fontWeight:
                       widget.isActive ? FontWeight.w600 : FontWeight.w400,
                 ),
@@ -838,11 +865,15 @@ class _ProfileCircleState extends State<_ProfileCircle> {
 class _AddProfileCircle extends StatefulWidget {
   final bool autofocus;
   final bool busy;
+  final double avatarSize;
+  final bool compact;
   final VoidCallback onTap;
 
   const _AddProfileCircle({
     required this.autofocus,
     required this.busy,
+    required this.avatarSize,
+    required this.compact,
     required this.onTap,
   });
 
@@ -878,14 +909,14 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
       child: GestureDetector(
         onTap: widget.busy ? null : widget.onTap,
         child: SizedBox(
-          width: 120,
+          width: widget.avatarSize + 20,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
-                width: 100,
-                height: 100,
+                width: widget.avatarSize,
+                height: widget.avatarSize,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
@@ -906,18 +937,18 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
                 alignment: Alignment.center,
                 child: Icon(
                   Icons.add_rounded,
-                  size: 40,
+                  size: widget.avatarSize * 0.4,
                   color: _focused ? AppColors.accent : AppColors.textLo,
                 ),
               ),
-              const SizedBox(height: 14),
+              SizedBox(height: widget.compact ? 8 : 14),
               Text(
                 'Add profile',
                 maxLines: 1,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: AppColors.textLo,
-                  fontSize: 15,
+                  fontSize: widget.compact ? 13 : 15,
                   fontWeight: FontWeight.w400,
                 ),
               ),

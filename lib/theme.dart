@@ -18,6 +18,11 @@ class AppRadius {
   static const control = 8.0;
 }
 
+/// Width (logical px) at or above which the browsing UI uses the wide layout
+/// (category side-pane + live preview panel). Shared by the channel list
+/// screen and the live tab view so the breakpoint can't drift between them.
+const double kWideLayoutMinWidth = 950;
+
 class AppTheme {
   static ThemeData get dark {
     final base = ThemeData.dark(useMaterial3: true);
