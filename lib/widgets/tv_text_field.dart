@@ -16,6 +16,11 @@ import '../theme.dart';
 /// or Back exits edit mode and returns focus to the cell so navigation resumes.
 /// The inner field is removed from traversal ([ExcludeFocus]) unless editing, so
 /// it can never become a trap.
+///
+/// Matches the channel list's search box height by default (`height: 40` there
+/// is redundant with this but kept explicit at that call site).
+const double kTvTextFieldHeight = 40.0;
+
 class TvTextField extends StatefulWidget {
   final TextEditingController controller;
   final String hintText;
@@ -58,6 +63,7 @@ class _TvTextFieldState extends State<TvTextField> {
   final FocusNode _fieldFocus = FocusNode(debugLabel: 'TvTextField.field');
   bool _editing = false;
   bool _cellFocused = false;
+  late bool _obscured = widget.obscureText;
 
   FocusNode get _effectiveCellFocus => widget.cellFocusNode ?? _cellFocus;
 
@@ -152,7 +158,7 @@ class _TvTextFieldState extends State<TvTextField> {
         child: GestureDetector(
           onTap: _enterEdit,
           child: Container(
-            height: widget.height,
+            height: widget.height ?? kTvTextFieldHeight,
             // Vertically centers the Row within a fixed-height cell.
             alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
@@ -195,7 +201,7 @@ class _TvTextFieldState extends State<TvTextField> {
                         child: TextField(
                           controller: widget.controller,
                           focusNode: _fieldFocus,
-                          obscureText: widget.obscureText,
+                          obscureText: _obscured,
                           onChanged: widget.onChanged,
                           textInputAction: widget.textInputAction,
                           onSubmitted: (value) {
@@ -233,6 +239,19 @@ class _TvTextFieldState extends State<TvTextField> {
                         ),
                       ),
                     ),
+                    // Password/credential fields get a built-in show/hide toggle —
+                    // without it there's no way to spot a typo on a device with no
+                    // physical keyboard to arrow back over masked characters.
+                    if (widget.obscureText)
+                      IconButton(
+                        icon: Icon(
+                          _obscured ? Icons.visibility_off : Icons.visibility,
+                          size: 20,
+                        ),
+                        color: AppColors.textLo,
+                        tooltip: _obscured ? 'Show' : 'Hide',
+                        onPressed: () => setState(() => _obscured = !_obscured),
+                      ),
                     if (widget.suffixIcon != null)
                       Padding(
                         padding: const EdgeInsets.only(right: 4),
