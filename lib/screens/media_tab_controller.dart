@@ -122,6 +122,22 @@ class MediaTabController extends ChangeNotifier {
     });
   }
 
+  /// Drops one entry from "Continue watching" — clears its saved resume
+  /// position so it won't reappear, and updates the in-memory list
+  /// immediately rather than waiting on a full [loadContinueWatching] reload.
+  Future<void> removeFromContinueWatching(ContinueWatchingEntry entry) async {
+    _set(
+      () => continueWatching = continueWatching
+          .where((e) => e.item.id != entry.item.id)
+          .toList(),
+    );
+    await repo.db.clearPlaybackPosition(
+      repo.source.id,
+      entry.position.kind,
+      entry.item.id,
+    );
+  }
+
   Future<void> load({bool forceRefresh = false}) async {
     final categoryToLoad = _loadCategory;
     _set(() {

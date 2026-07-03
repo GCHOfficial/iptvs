@@ -21,6 +21,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.util.Locale
@@ -66,8 +67,22 @@ class ExoPlayerEngine(
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
     // Reset per load so a new stream re-derives instead of inheriting the last one.
     private var decoderDynamicRange: String? = null
-    // Measured-FPS sampling: many IPTV streams don't carry frameRate in their
-    // Format (stays NO_VALUE), so we derive it from the rendered-frame counter.
+    // Measured-FPS: many IPTV streams don't carry frameRate in their Format
+    // (stays NO_VALUE). Primary method: a short burst of actual frame
+    // *presentation* timestamps (via setVideoFrameMetadataListener), median'd
+    // into a single value and then frozen (fpsLocked) — not a live,
+    // continuously-redisplayed number, and not vulnerable to playback-thread
+    // scheduling/GC jitter or rebuffer stalls the way wall-clock sampling is.
+    // Falls back to the older rendered-frame-count/wall-clock heuristic
+    // (measureFps) only while this hasn't converged, e.g. a device/decoder
+    // that never invokes the frame-metadata listener.
+    private val frameIntervalsUs = mutableListOf<Long>()
+    private var lastFramePresentationUs = Long.MIN_VALUE
+    private var fpsLocked = false
+    // clearVideoFrameMetadataListener needs the exact registered instance back
+    // (there's no bare "unset"), so we hold onto it to stop the measurement.
+    private var frameMetadataListener: VideoFrameMetadataListener? = null
+    // Fallback wall-clock sampling state (see measureFps).
     private var lastRenderedFrames = 0
     private var lastFpsSampleNs = 0L
 
@@ -95,6 +110,16 @@ class ExoPlayerEngine(
         player.playWhenReady = true
         lastFpsSampleNs = 0L
         lastRenderedFrames = 0
+        frameIntervalsUs.clear()
+        lastFramePresentationUs = Long.MIN_VALUE
+        fpsLocked = false
+        // Re-armed per load — locking unregisters it (see stopFrameMetadataMeasurement).
+        stopFrameMetadataMeasurement()
+        val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->
+            mainHandler.post { onVideoFrameMetadata(presentationTimeUs) }
+        }
+        frameMetadataListener = listener
+        player.setVideoFrameMetadataListener(listener)
         decoderDynamicRange = null
     }
 
@@ -285,7 +310,16 @@ class ExoPlayerEngine(
         player.videoFormat?.let { v ->
             if (v.width != Format.NO_VALUE) state.videoWidth = v.width
             if (v.height != Format.NO_VALUE) state.videoHeight = v.height
-            if (v.frameRate != Format.NO_VALUE.toFloat() && v.frameRate > 0f) state.fps = v.frameRate
+            // The container-declared rate, when present, is authoritative —
+            // prefer it outright and skip/cancel the measurement below so it
+            // can't later overwrite a good value with a merely-measured one.
+            if (v.frameRate != Format.NO_VALUE.toFloat() && v.frameRate > 0f) {
+                state.fps = v.frameRate
+                if (!fpsLocked) {
+                    fpsLocked = true
+                    stopFrameMetadataMeasurement()
+                }
+            }
             state.videoCodec = codecLabel(v.sampleMimeType)
             state.dynamicRange = dynamicRangeLabel(v)
         }
@@ -390,8 +424,13 @@ class ExoPlayerEngine(
         measureFps()
     }
 
-    /** Derive FPS from the rendered-frame delta when the Format doesn't report it. */
+    /**
+     * Fallback: derive FPS from the rendered-frame delta over wall-clock time.
+     * Only runs until [onVideoFrameMetadata] locks in a timestamp-derived
+     * value — see the field doc comment for why that's preferred.
+     */
     private fun measureFps() {
+        if (fpsLocked) return
         val rendered = player.videoDecoderCounters?.renderedOutputBufferCount ?: return
         val now = System.nanoTime()
         if (lastFpsSampleNs == 0L) {
@@ -406,6 +445,36 @@ class ExoPlayerEngine(
             lastRenderedFrames = rendered
             state.fps = snapFps((dFrames / dtSec).toFloat())
         }
+    }
+
+    /**
+     * Accumulates real frame-presentation-timestamp intervals (called on the
+     * main thread — see the listener registration in [load]) and, once a
+     * clean burst of [FRAME_SAMPLE_TARGET] is collected, locks in their
+     * median as the final FPS reading and stops listening for more.
+     */
+    private fun onVideoFrameMetadata(presentationTimeUs: Long) {
+        if (fpsLocked) return
+        val last = lastFramePresentationUs
+        lastFramePresentationUs = presentationTimeUs
+        if (last == Long.MIN_VALUE) return
+        val deltaUs = presentationTimeUs - last
+        // Discard non-positive/huge gaps — seeks, the live edge jumping
+        // forward, and stream discontinuities produce garbage intervals that
+        // would corrupt the median. A real frame interval at any broadcast
+        // rate is well under this (worst case ~24fps film -> ~42ms).
+        if (deltaUs <= 0 || deltaUs > MAX_FRAME_INTERVAL_US) return
+        frameIntervalsUs.add(deltaUs)
+        if (frameIntervalsUs.size < FRAME_SAMPLE_TARGET) return
+        val medianUs = frameIntervalsUs.sorted()[frameIntervalsUs.size / 2]
+        fpsLocked = true
+        state.fps = snapFps(1_000_000f / medianUs)
+        stopFrameMetadataMeasurement()
+    }
+
+    private fun stopFrameMetadataMeasurement() {
+        frameMetadataListener?.let { player.clearVideoFrameMetadataListener(it) }
+        frameMetadataListener = null
     }
 
     override fun pause() {
@@ -465,5 +534,14 @@ class ExoPlayerEngine(
 
     companion object {
         private const val TAG = "iptvs.exo"
+
+        // ~30 consecutive frame intervals is enough for a stable median even
+        // with a stray dropped/duplicated frame or two mixed in, while still
+        // converging in roughly a second at typical broadcast rates.
+        private const val FRAME_SAMPLE_TARGET = 30
+
+        // 200ms (5fps) — no real broadcast video runs this slow; a gap wider
+        // than this between two frames is a seek/live-edge jump/stall.
+        private const val MAX_FRAME_INTERVAL_US = 200_000L
     }
 }
