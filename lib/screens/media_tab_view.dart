@@ -11,7 +11,6 @@ import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
-import '../player/player_screen.dart';
 import '../data/app_database.dart' show PlaybackPosition;
 import 'media_tab_controller.dart' show ContinueWatchingEntry;
 
@@ -447,6 +446,9 @@ class _ContinueWatchingTile extends StatelessWidget {
                       ),
                     ),
                   ],
+                  // Breathing room between the text and the card's bottom
+                  // border — the card itself adds no internal padding.
+                  const SizedBox(height: 10),
                 ],
               ),
             ),
@@ -1000,6 +1002,11 @@ class MediaDetailsSheet extends StatefulWidget {
   final VoidCallback? onPlay;
   final ValueChanged<MediaItem>? onChanged;
 
+  /// Plays one episode picked from the series browser. Routed back through the
+  /// screen's own play path (rather than pushing a player here) so the
+  /// "Continue watching" rail reloads on return, exactly like a movie does.
+  final ValueChanged<MediaItem>? onPlayEpisode;
+
   const MediaDetailsSheet({
     super.key,
     required this.repo,
@@ -1008,6 +1015,7 @@ class MediaDetailsSheet extends StatefulWidget {
     required this.onToggleFavorite,
     required this.onPlay,
     this.onChanged,
+    this.onPlayEpisode,
     this.resume,
     this.onPlayFromStart,
   });
@@ -1086,12 +1094,12 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   }
 
   void _play(MediaItem item) {
+    // Close the sheet, then hand the episode to the screen's play path (which
+    // resolves, plays, and — critically — reloads "Continue watching" on
+    // return). Pushing a player straight from here bypassed that reload, so the
+    // series rail went stale until a manual refresh.
     Navigator.of(context).pop();
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => _DeferredMediaPlayer(repo: widget.repo, item: item),
-      ),
-    );
+    widget.onPlayEpisode?.call(item);
   }
 
   @override
@@ -1425,83 +1433,6 @@ class _SeriesBrowser extends StatelessWidget {
                 ],
               ),
           ],
-        );
-      },
-    );
-  }
-}
-
-class _DeferredMediaPlayer extends StatefulWidget {
-  final LibraryRepository repo;
-  final MediaItem item;
-
-  const _DeferredMediaPlayer({required this.repo, required this.item});
-
-  @override
-  State<_DeferredMediaPlayer> createState() => _DeferredMediaPlayerState();
-}
-
-class _DeferredMediaPlayerState extends State<_DeferredMediaPlayer> {
-  late final Future<(StreamInfo, PlaybackPosition?)> _stream = () async {
-    // Saved resume point rides along with the resolve so playback starts at
-    // the right position (episodes played from the series browser).
-    final resume = await widget.repo.db.readPlaybackPosition(
-      widget.repo.source.id,
-      widget.item.kind,
-      widget.item.id,
-    );
-    return (await widget.repo.resolveMedia(widget.item), resume);
-  }();
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<(StreamInfo, PlaybackPosition?)>(
-      future: _stream,
-      builder: (context, snapshot) {
-        if (snapshot.hasData) {
-          final (stream, resume) = snapshot.data!;
-          return PlayerScreen(
-            title: widget.item.title,
-            stream: stream,
-            sourceName: widget.repo.source.name,
-            playback: PlaybackContext(
-              db: widget.repo.db,
-              sourceId: widget.repo.source.id,
-              kind: widget.item.kind,
-              itemId: widget.item.id,
-              resumeFrom: resume?.position,
-            ),
-          );
-        }
-        if (snapshot.hasError) {
-          return Scaffold(
-            appBar: AppBar(title: Text(widget.item.title)),
-            body: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Could not play: ${snapshot.error}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: AppColors.textLo),
-                    ),
-                    const SizedBox(height: 16),
-                    FilledButton.icon(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.arrow_back),
-                      label: const Text('Back'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }
-        return Scaffold(
-          appBar: AppBar(title: Text(widget.item.title)),
-          body: const Center(child: CircularProgressIndicator()),
         );
       },
     );

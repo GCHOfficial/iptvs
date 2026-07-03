@@ -871,6 +871,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         onToggleFavorite: () => _toggleFavorite(item.kind, item.id),
         onChanged: _replaceMediaItem,
         resume: resume,
+        // Episodes picked in the series browser play through the same path as
+        // movies, so "Continue watching" reloads on return (the sheet used to
+        // push its own player, which skipped that reload — the series rail then
+        // went stale until a manual refresh).
+        onPlayEpisode: _playMedia,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
             ? () {
