@@ -565,9 +565,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: (adoptPreview && !adoptNative)
-            ? _preview.player
-            : null,
+        existingPlayer: (adoptPreview && !adoptNative) ? _preview.player : null,
         existingController: (adoptPreview && !adoptNative)
             ? _preview.controller
             : null,
@@ -644,7 +642,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
           channels: _visible,
-          onPlayChannel: (channel) => unawaited(_playChannelFullscreen(channel)),
+          onPlayChannel: (channel) =>
+              unawaited(_playChannelFullscreen(channel)),
           onPlayArchive: (channel, programme) =>
               unawaited(_playCatchup(channel, programme)),
         ),
@@ -1330,6 +1329,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             continueWatching: _media(_tab).continueWatching,
             onResume: _playMedia,
+            onRemoveContinueWatching: (entry) =>
+                _media(_tab).removeFromContinueWatching(entry),
           );
   }
 

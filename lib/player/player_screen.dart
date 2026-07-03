@@ -594,14 +594,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         final positionMs = (args['positionMs'] as num?)?.toInt();
         final durationMs = (args['durationMs'] as num?)?.toInt();
         if (positionMs != null && durationMs != null && durationMs > 0) {
-          unawaited(
-            playback.db.savePlaybackPosition(
-              playback.sourceId,
-              playback.kind,
-              playback.itemId,
-              position: Duration(milliseconds: positionMs),
-              duration: Duration(milliseconds: durationMs),
-            ),
+          // Awaited — the caller (_playMedia) reloads "Continue watching"
+          // right after this route pops, so the write must land first.
+          await playback.db.savePlaybackPosition(
+            playback.sourceId,
+            playback.kind,
+            playback.itemId,
+            position: Duration(milliseconds: positionMs),
+            duration: Duration(milliseconds: durationMs),
           );
         }
       }
@@ -1338,21 +1338,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   /// Persist the embedded player's current VOD position. Not used while the
   /// Android native Activity plays (its position arrives via `nativeClosed`).
-  void _persistPlaybackPosition() {
+  ///
+  /// Returns the write's Future so exit paths can await it — the "Continue
+  /// watching" rail is reloaded right after this route pops, and `pop()`'s
+  /// Future resolves as soon as `pop()` is *called*, well before this route's
+  /// `dispose()` (previously the only place a generic Back saved the final
+  /// position) actually runs on the next frame. A fire-and-forget save there
+  /// raced the reload and reliably lost, which is why the rail looked stale
+  /// until a manual refresh re-read the by-then-completed write.
+  Future<void> _persistPlaybackPosition() async {
     final playback = widget.playback;
     if (playback == null || _isLive) return;
     if (Platform.isAndroid && _nativePlaybackLaunched) return;
     final position = _player.state.position;
     final duration = _player.state.duration;
     if (duration <= Duration.zero) return;
-    unawaited(
-      playback.db.savePlaybackPosition(
-        playback.sourceId,
-        playback.kind,
-        playback.itemId,
-        position: position,
-        duration: duration,
-      ),
+    await playback.db.savePlaybackPosition(
+      playback.sourceId,
+      playback.kind,
+      playback.itemId,
+      position: position,
+      duration: duration,
     );
   }
 
@@ -1362,7 +1368,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _nativeHdrPlayer.setMethodCallHandler(null);
     }
     _positionPersistTimer?.cancel();
-    _persistPlaybackPosition();
+    // Last-resort safety net (e.g. dispose without an explicit exit path) —
+    // the real save-before-pop is in _exitAndPop/nativeClosed, both of which
+    // run and complete well before this.
+    unawaited(_persistPlaybackPosition());
     _reconnectTimer?.cancel();
     _controlSyncThrottle?.cancel();
     for (final s in _subs) {
@@ -1391,6 +1400,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _exitAndPop() async {
+    // Await the final position write before popping — see the doc comment on
+    // _persistPlaybackPosition for why this can't be fire-and-forget here.
+    await _persistPlaybackPosition();
     if (Platform.isWindows && _nativePlaybackLaunched) {
       await _prepareWindowsNativeExit();
       _scheduleWindowsNativeTeardown(prepared: true);
