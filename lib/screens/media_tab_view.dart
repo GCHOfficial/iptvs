@@ -87,19 +87,118 @@ class MediaTabView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final body = _buildBody(context);
-    if (showingSearch || continueWatching.isEmpty) return body;
-    return Column(
-      children: [
-        _ContinueWatchingRail(entries: continueWatching, onResume: onResume),
-        Expanded(child: body),
-      ],
+    // The rail rides in the *same* scroll view as the grid/list below (as a
+    // leading sliver) rather than sitting above it in a fixed-height Column.
+    // A fixed height there could exceed the whole available viewport on a
+    // short screen (phone landscape, mainly) — Column+Expanded overflows in
+    // that case, which broke the rail's own horizontal drag along with it.
+    // As a sliver it just contributes to the (already scrollable) content
+    // and never forces an overflow.
+    final showRail = !showingSearch && continueWatching.isNotEmpty;
+    final railSliver = showRail
+        ? SliverToBoxAdapter(
+            child: _ContinueWatchingRail(
+              entries: continueWatching,
+              onResume: onResume,
+            ),
+          )
+        : null;
+
+    if (loading || error != null || visible.isEmpty) {
+      final status = _statusBody(context);
+      if (railSliver == null) return status;
+      return CustomScrollView(
+        slivers: [
+          railSliver,
+          SliverFillRemaining(hasScrollBody: false, child: status),
+        ],
+      );
+    }
+
+    final showLoadMore =
+        !showingSearch && (loadingMore || snapshot?.hasMore == true);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 860;
+        final hasLastVisible =
+            lastPlayedId != null &&
+            visible.any((media) => media.id == lastPlayedId);
+        FocusNode? focusNodeFor(int i) => hasLastVisible
+            ? (visible[i].id == lastPlayedId ? firstFocusNode : null)
+            : (i == 0 ? firstFocusNode : null);
+        bool autofocusFor(int i) =>
+            hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
+        if (!wide) {
+          return CustomScrollView(
+            controller: scrollController,
+            scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+            slivers: [
+              ?railSliver,
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                sliver: SliverList.builder(
+                  itemCount: visible.length + (showLoadMore ? 1 : 0),
+                  itemBuilder: (context, i) {
+                    if (i == visible.length) {
+                      return _MediaLoadMoreTile(
+                        snapshot: snapshot,
+                        loading: loadingMore,
+                        onPressed: onLoadMore,
+                      );
+                    }
+                    return _MediaListTile(
+                      item: visible[i],
+                      favorite: isFavorite(visible[i].id),
+                      autofocus: autofocusFor(i),
+                      focusNode: focusNodeFor(i),
+                      onTap: () => onOpenMedia(visible[i]),
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        }
+        final columns = constraints.maxWidth >= 1280 ? 6 : 4;
+        return CustomScrollView(
+          controller: scrollController,
+          scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
+          slivers: [
+            ?railSliver,
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+              sliver: SliverGrid(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 0.64,
+                ),
+                delegate: SliverChildBuilderDelegate((context, i) {
+                  if (i == visible.length) {
+                    return _MediaLoadMoreCard(
+                      snapshot: snapshot,
+                      loading: loadingMore,
+                      onPressed: onLoadMore,
+                    );
+                  }
+                  return _MediaGridTile(
+                    item: visible[i],
+                    favorite: isFavorite(visible[i].id),
+                    autofocus: autofocusFor(i),
+                    focusNode: focusNodeFor(i),
+                    onTap: () => onOpenMedia(visible[i]),
+                  );
+                }, childCount: visible.length + (showLoadMore ? 1 : 0)),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  Widget _buildBody(BuildContext context) {
-    final showLoadMore =
-        !showingSearch && (loadingMore || snapshot?.hasMore == true);
+  Widget _statusBody(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
       return Center(
@@ -120,79 +219,11 @@ class MediaTabView extends StatelessWidget {
         ),
       );
     }
-    if (visible.isEmpty) {
-      return Center(
-        child: Text(
-          'No ${kind == ContentKind.movie ? 'movies' : 'series'} match',
-          style: const TextStyle(color: AppColors.textLo),
-        ),
-      );
-    }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 860;
-        final hasLastVisible =
-            lastPlayedId != null &&
-            visible.any((media) => media.id == lastPlayedId);
-        FocusNode? focusNodeFor(int i) => hasLastVisible
-            ? (visible[i].id == lastPlayedId ? firstFocusNode : null)
-            : (i == 0 ? firstFocusNode : null);
-        bool autofocusFor(int i) =>
-            hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
-        if (!wide) {
-          return ListView.builder(
-            controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
-            scrollCacheExtent: const ScrollCacheExtent.pixels(800),
-            itemCount: visible.length + (showLoadMore ? 1 : 0),
-            itemBuilder: (context, i) {
-              if (i == visible.length) {
-                return _MediaLoadMoreTile(
-                  snapshot: snapshot,
-                  loading: loadingMore,
-                  onPressed: onLoadMore,
-                );
-              }
-              return _MediaListTile(
-                item: visible[i],
-                favorite: isFavorite(visible[i].id),
-                autofocus: autofocusFor(i),
-                focusNode: focusNodeFor(i),
-                onTap: () => onOpenMedia(visible[i]),
-              );
-            },
-          );
-        }
-        final columns = constraints.maxWidth >= 1280 ? 6 : 4;
-        return GridView.builder(
-          controller: scrollController,
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
-          scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 0.64,
-          ),
-          itemCount: visible.length + (showLoadMore ? 1 : 0),
-          itemBuilder: (context, i) {
-            if (i == visible.length) {
-              return _MediaLoadMoreCard(
-                snapshot: snapshot,
-                loading: loadingMore,
-                onPressed: onLoadMore,
-              );
-            }
-            return _MediaGridTile(
-              item: visible[i],
-              favorite: isFavorite(visible[i].id),
-              autofocus: autofocusFor(i),
-              focusNode: focusNodeFor(i),
-              onTap: () => onOpenMedia(visible[i]),
-            );
-          },
-        );
-      },
+    return Center(
+      child: Text(
+        'No ${kind == ContentKind.movie ? 'movies' : 'series'} match',
+        style: const TextStyle(color: AppColors.textLo),
+      ),
     );
   }
 }
@@ -251,7 +282,11 @@ class _ContinueWatchingRail extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: 280,
+            // Only tall enough for the tile's own content (16:9 thumbnail +
+            // two-line title + subtitle) — not sized against the screen, so
+            // it can never itself overflow a short viewport (phone
+            // landscape). It scrolls away with the rest of the tab content.
+            height: 196,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -270,8 +305,11 @@ class _ContinueWatchingRail extends StatelessWidget {
 }
 
 class _ContinueWatchingTile extends StatelessWidget {
-  static const double _width = 138.0;
-  static const double _posterHeight = 200.0;
+  // 16:9 — these thumbnails are usually a video-frame screenshot or a
+  // backdrop still, both landscape; cropping them into a portrait poster
+  // box (the old design) zoomed in hard and made compression noise obvious.
+  static const double _width = 224.0;
+  static const double _thumbHeight = 126.0;
 
   final ContinueWatchingEntry entry;
   final VoidCallback onTap;
@@ -294,17 +332,17 @@ class _ContinueWatchingTile extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
               child: SizedBox(
                 width: _width,
-                height: _posterHeight,
+                height: _thumbHeight,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    _Poster(item: item, width: _width, height: _posterHeight),
+                    _Thumb(item: item, width: _width, height: _thumbHeight),
                     // Resume affordance — makes it obvious at a glance that
                     // these tiles play mid-way through, not from the start.
                     Center(
                       child: Container(
-                        width: 40,
-                        height: 40,
+                        width: 36,
+                        height: 36,
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.45),
                           shape: BoxShape.circle,
@@ -312,26 +350,27 @@ class _ContinueWatchingTile extends StatelessWidget {
                         child: const Icon(
                           Icons.play_arrow_rounded,
                           color: Colors.white,
-                          size: 26,
+                          size: 22,
                         ),
                       ),
                     ),
-                    // Progress bar overlaid on the poster (with a scrim behind
-                    // it for contrast on bright artwork) rather than a
-                    // separate row, so the freed-up space goes to the title.
+                    // Progress bar overlaid on the thumbnail (with a scrim
+                    // behind it for contrast on bright artwork) rather than
+                    // a separate row, so the freed-up space goes to the
+                    // title.
                     Positioned(
                       left: 0,
                       right: 0,
                       bottom: 0,
                       child: Container(
-                        padding: const EdgeInsets.fromLTRB(6, 12, 6, 6),
+                        padding: const EdgeInsets.fromLTRB(6, 14, 6, 6),
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
                             begin: Alignment.topCenter,
                             end: Alignment.bottomCenter,
                             colors: [
                               Colors.black.withValues(alpha: 0.0),
-                              Colors.black.withValues(alpha: 0.65),
+                              Colors.black.withValues(alpha: 0.7),
                             ],
                           ),
                         ),
@@ -353,28 +392,86 @@ class _ContinueWatchingTile extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
-            Text(
-              item.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppColors.textHi,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              child: Text(
+                item.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.textHi,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  height: 1.2,
+                ),
               ),
             ),
             if (subtitle != null) ...[
               const SizedBox(height: 2),
-              Text(
-                subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+                ),
               ),
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A landscape (16:9) artwork tile for the continue-watching rail — prefers
+/// [MediaItem.backdrop] (a proper cinematic still) and falls back to
+/// [MediaItem.poster] (often a video-frame screenshot for episodes), since
+/// either is landscape-shaped content, unlike [_Poster]'s portrait crop.
+class _Thumb extends StatelessWidget {
+  final MediaItem item;
+  final double width;
+  final double height;
+
+  const _Thumb({required this.item, required this.width, required this.height});
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = Container(
+      width: width,
+      height: height,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.panelHi,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Icon(
+        item.kind == ContentKind.movie
+            ? Icons.movie_outlined
+            : Icons.tv_outlined,
+        color: AppColors.textLo,
+      ),
+    );
+    final backdrop = item.backdrop;
+    final poster = item.poster;
+    final image = (backdrop != null && backdrop.isNotEmpty)
+        ? backdrop
+        : (poster != null && poster.isNotEmpty)
+        ? poster
+        : null;
+    if (image == null) return fallback;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: CachedNetworkImage(
+        imageUrl: image,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        memCacheWidth: imageCacheSize(context, width),
+        memCacheHeight: imageCacheSize(context, height),
+        errorWidget: (_, _, _) => fallback,
+        placeholder: (_, _) => fallback,
       ),
     );
   }
