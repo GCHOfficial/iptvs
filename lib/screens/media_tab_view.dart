@@ -197,9 +197,36 @@ class MediaTabView extends StatelessWidget {
   }
 }
 
+/// Remaining watch time as `23 min left` / `1 hr 12 min left`, or null when
+/// the duration is unknown or the item is effectively finished.
+String? _remainingLabel(PlaybackPosition position) {
+  if (position.duration <= Duration.zero) return null;
+  final remaining = position.duration - position.position;
+  if (remaining.inSeconds < 30) return null;
+  final minutes = remaining.inMinutes;
+  if (minutes < 1) return 'Less than a min left';
+  if (minutes < 60) return '$minutes min left';
+  final hours = minutes ~/ 60;
+  final mins = minutes % 60;
+  return mins == 0 ? '$hours hr left' : '$hours hr $mins min left';
+}
+
+/// `S2 · E5 · 23 min left` style second line — season/episode (episodes
+/// only) and remaining time, whichever of the two apply.
+String? _continueWatchingSubtitle(ContinueWatchingEntry entry) {
+  final item = entry.item;
+  final parts = <String>[
+    if (item.seasonNumber != null && item.episodeNumber != null)
+      'S${item.seasonNumber} · E${item.episodeNumber}',
+    ?_remainingLabel(entry.position),
+  ];
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
 /// Horizontal "Continue watching" strip: poster tiles with a progress bar,
 /// newest first. One `FocusTraversalGroup` so the D-pad walks the rail as a
-/// row between the toolbar and the grid.
+/// row between the toolbar and the grid. Sized noticeably larger than the
+/// other rails so the title and remaining-time text stay legible on phones.
 class _ContinueWatchingRail extends StatelessWidget {
   final List<ContinueWatchingEntry> entries;
   final ValueChanged<MediaItem> onResume;
@@ -213,23 +240,23 @@ class _ContinueWatchingRail extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Padding(
-            padding: EdgeInsets.fromLTRB(18, 4, 18, 6),
+            padding: EdgeInsets.fromLTRB(18, 8, 18, 8),
             child: Text(
               'Continue watching',
               style: TextStyle(
                 color: AppColors.textHi,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
           SizedBox(
-            height: 172,
+            height: 280,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
               itemCount: entries.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              separatorBuilder: (_, _) => const SizedBox(width: 12),
               itemBuilder: (context, i) => _ContinueWatchingTile(
                 entry: entries[i],
                 onTap: () => onResume(entries[i].item),
@@ -243,6 +270,9 @@ class _ContinueWatchingRail extends StatelessWidget {
 }
 
 class _ContinueWatchingTile extends StatelessWidget {
+  static const double _width = 138.0;
+  static const double _posterHeight = 200.0;
+
   final ContinueWatchingEntry entry;
   final VoidCallback onTap;
 
@@ -251,31 +281,98 @@ class _ContinueWatchingTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final item = entry.item;
+    final subtitle = _continueWatchingSubtitle(entry);
     return FocusableCard(
       onTap: onTap,
+      debugLabel: 'media.continue.${item.id}',
       child: SizedBox(
-        width: 96,
+        width: _width,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _Poster(item: item, width: 96, height: 128),
-            const SizedBox(height: 4),
             ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: LinearProgressIndicator(
-                value: entry.position.progress,
-                minHeight: 3,
-                backgroundColor: AppColors.line,
-                color: AppColors.accent,
+              borderRadius: BorderRadius.circular(8),
+              child: SizedBox(
+                width: _width,
+                height: _posterHeight,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _Poster(item: item, width: _width, height: _posterHeight),
+                    // Resume affordance — makes it obvious at a glance that
+                    // these tiles play mid-way through, not from the start.
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.play_arrow_rounded,
+                          color: Colors.white,
+                          size: 26,
+                        ),
+                      ),
+                    ),
+                    // Progress bar overlaid on the poster (with a scrim behind
+                    // it for contrast on bright artwork) rather than a
+                    // separate row, so the freed-up space goes to the title.
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(6, 12, 6, 6),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.black.withValues(alpha: 0.0),
+                              Colors.black.withValues(alpha: 0.65),
+                            ],
+                          ),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            value: entry.position.progress,
+                            minHeight: 4,
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.3,
+                            ),
+                            color: AppColors.accent,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 3),
+            const SizedBox(height: 6),
             Text(
               item.title,
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+              style: const TextStyle(
+                color: AppColors.textHi,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                height: 1.2,
+              ),
             ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 11),
+              ),
+            ],
           ],
         ),
       ),
