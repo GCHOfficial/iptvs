@@ -63,6 +63,10 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   final ValueNotifier<double> _hOffset = ValueNotifier(0);
   final ScrollController _vController = ScrollController();
 
+  /// The programme whose cell currently holds D-pad focus — shown in full in
+  /// the detail bar below the grid, since narrow cells truncate their title.
+  final ValueNotifier<(Channel, Programme)?> _focused = ValueNotifier(null);
+
   /// Per-channel programme futures, request-coalesced: rows built in the same
   /// frame share one `programmesForChannels` query instead of N single-channel
   /// lookups.
@@ -72,6 +76,10 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
 
   static DateTime _floorToHalfHour(DateTime t) =>
       DateTime(t.year, t.month, t.day, t.hour, t.minute < 30 ? 0 : 30);
+
+  /// HH:mm — the one formatter for the ruler, detail bar and details dialog.
+  static String _hm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   @override
   void initState() {
@@ -84,6 +92,7 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   void dispose() {
     _hOffset.dispose();
     _vController.dispose();
+    _focused.dispose();
     super.dispose();
   }
 
@@ -204,12 +213,60 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
                         onRevealSpan: _revealSpan,
                         onActivate: (programme) =>
                             _activate(widget.channels[i], programme),
+                        onFocusProgramme: (programme) =>
+                            _focused.value = (widget.channels[i], programme),
                       ),
                     ),
             ),
+            _focusedDetailBar(),
           ],
         ),
       ),
+    );
+  }
+
+  /// Detail strip for the focused cell: cells too narrow for their title (a
+  /// 15-minute programme is ~60px wide) get their full name/time read here.
+  Widget _focusedDetailBar() {
+    return ValueListenableBuilder<(Channel, Programme)?>(
+      valueListenable: _focused,
+      builder: (context, value, _) {
+        if (value == null) return const SizedBox.shrink();
+        final (channel, programme) = value;
+        final description = programme.description;
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+          decoration: const BoxDecoration(
+            color: AppColors.panel,
+            border: Border(top: BorderSide(color: AppColors.line)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                programme.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.textHi,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}'
+                '${description != null && description.isNotEmpty ? ' · $description' : ''}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -230,8 +287,6 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   }
 
   void _showProgrammeDetails(Channel channel, Programme programme) {
-    String hm(DateTime t) =>
-        '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -245,7 +300,7 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '${channel.name} · ${hm(programme.start)} – ${hm(programme.stop)}',
+              '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}',
               style: const TextStyle(color: AppColors.textLo, fontSize: 13),
             ),
             if (programme.description case final description?) ...[
@@ -282,7 +337,7 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(
-              '${tick.hour.toString().padLeft(2, '0')}:${tick.minute.toString().padLeft(2, '0')}',
+              _hm(tick),
               style: const TextStyle(color: AppColors.textLo, fontSize: 12),
             ),
           ),
@@ -333,6 +388,7 @@ class _ChannelRow extends StatelessWidget {
   final ValueNotifier<double> hOffset;
   final void Function(double left, double width) onRevealSpan;
   final ValueChanged<Programme> onActivate;
+  final ValueChanged<Programme> onFocusProgramme;
 
   const _ChannelRow({
     required this.channel,
@@ -346,6 +402,7 @@ class _ChannelRow extends StatelessWidget {
     required this.hOffset,
     required this.onRevealSpan,
     required this.onActivate,
+    required this.onFocusProgramme,
   });
 
   double _left(DateTime time) =>
@@ -431,14 +488,17 @@ class _ChannelRow extends StatelessWidget {
                                 programme: programme,
                                 autofocus: autofocus && i == _nowIndex(items),
                                 onTap: () => onActivate(programme),
-                                onFocused: () => onRevealSpan(
-                                  _left(
-                                    programme.start.isBefore(windowStart)
-                                        ? windowStart
-                                        : programme.start,
-                                  ),
-                                  _cellWidth(programme),
-                                ),
+                                onFocused: () {
+                                  onFocusProgramme(programme);
+                                  onRevealSpan(
+                                    _left(
+                                      programme.start.isBefore(windowStart)
+                                          ? windowStart
+                                          : programme.start,
+                                    ),
+                                    _cellWidth(programme),
+                                  );
+                                },
                               ),
                             ),
                         ],

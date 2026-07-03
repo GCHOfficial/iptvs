@@ -340,4 +340,61 @@ void main() {
 
     await unmount(tester);
   });
+
+  focusTestWidgets(
+      'Back peels channel -> category -> tabs, then exits only on double-Back',
+      (tester) async {
+    // Guards the TV Back ladder end-to-end: from the channel list Back climbs
+    // to the sidebar, then to the tabs, and from the top the app exits only on
+    // a second Back inside the confirmation window (a first Back shows the
+    // "Press Back again to exit" snackbar and must NOT call
+    // SystemNavigator.pop).
+    final popMethods = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        popMethods.add(call.method);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
+    await pumpWideScreen(tester);
+    // Focus the first channel explicitly (the load-time autofocus is
+    // contested; see the other tests).
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    Future<void> back() async {
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+    }
+
+    // Channel list (not scrolled deep) -> the selected category ("All
+    // channels" — the default selection).
+    await back();
+    expect(focusLabel(), 'live.category.all');
+
+    // "All channels" -> the content-kind tabs.
+    await back();
+    expect(focusLabel(), 'content.tab.live');
+
+    // Top of the ladder: first Back arms the confirmation, no exit yet.
+    await back();
+    expect(find.text('Press Back again to exit'), findsOneWidget);
+    expect(popMethods, isNot(contains('SystemNavigator.pop')));
+
+    // Second Back inside the window exits.
+    await back();
+    expect(popMethods, contains('SystemNavigator.pop'));
+
+    await unmount(tester);
+  });
 }

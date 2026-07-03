@@ -5,6 +5,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:iptvs/theme.dart';
 import 'package:iptvs/widgets/tv_text_field.dart';
 
 void main() {
@@ -112,6 +113,40 @@ void main() {
       );
     });
   }
+
+  // Regression guard for the double-border bug: under the app theme (whose
+  // InputDecorationTheme sets OutlineInputBorders), a decoration that leaves
+  // any border slot null gets it filled by applyDefaults — the InputDecorator
+  // then paints a second rounded box *inside* the cell's own border. The
+  // InputDecoration.collapsed constructor only sets `border`, so reverting to
+  // it reintroduces the bug; this pins every slot to InputBorder.none.
+  testWidgets('inner field paints no border under the app theme', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: TvTextField(controller: controller, hintText: 'hint'),
+        ),
+      ),
+    );
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    final decoration = field.decoration!.applyDefaults(
+      Theme.of(tester.element(find.byType(TextField))).inputDecorationTheme,
+    );
+    expect(decoration.border, InputBorder.none);
+    expect(decoration.enabledBorder, InputBorder.none);
+    expect(decoration.focusedBorder, InputBorder.none);
+    expect(decoration.errorBorder, InputBorder.none);
+    expect(decoration.focusedErrorBorder, InputBorder.none);
+    expect(decoration.disabledBorder, InputBorder.none);
+    expect(decoration.filled, isFalse);
+  });
 
   testWidgets('renders an external label when provided', (tester) async {
     final controller = TextEditingController();

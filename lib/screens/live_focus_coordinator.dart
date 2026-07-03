@@ -359,6 +359,37 @@ class LiveFocusCoordinator extends ChangeNotifier {
     node.requestFocus();
   }
 
+  /// True when the channel list is scrolled more than one viewport deep —
+  /// the threshold for the "first Back returns to the top of the list" rung.
+  bool get channelListIsDeep =>
+      scrollController.hasClients &&
+      scrollController.position.pixels >
+          scrollController.position.viewportDimension;
+
+  /// Jump the list to the top and focus the first visible channel (used by
+  /// the down-wrap and the Back-to-top rung). The first row may not be built
+  /// yet right after the jump, hence the post-frame focus with one retry.
+  void focusFirstChannel() {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    noteFocusedChannel(visible.first.id);
+    if (scrollController.hasClients) {
+      scrollController.jumpTo(0);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_disposed || !isMounted()) return;
+      if (firstChannelFocusNode.context != null) {
+        firstChannelFocusNode.requestFocus();
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_disposed || !isMounted()) return;
+        firstChannelFocusNode.requestFocus();
+      });
+    });
+    lastFocusArea = LiveFocusArea.channels;
+  }
+
   /// Move focus one row down from [channelId], wrapping to the top.
   void moveDownInChannels(String channelId) {
     final visible = visibleChannels();
@@ -369,21 +400,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (currentIndex < 0) return;
     final nextIndex = (currentIndex + 1) % visible.length;
     if (nextIndex == 0) {
-      noteFocusedChannel(visible.first.id);
-      if (scrollController.hasClients) {
-        scrollController.jumpTo(0);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_disposed || !isMounted()) return;
-        if (firstChannelFocusNode.context != null) {
-          firstChannelFocusNode.requestFocus();
-          return;
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_disposed || !isMounted()) return;
-          firstChannelFocusNode.requestFocus();
-        });
-      });
+      focusFirstChannel();
       return;
     }
     noteFocusedChannel(visible[nextIndex].id);

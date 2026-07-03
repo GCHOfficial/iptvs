@@ -19,5 +19,11 @@
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
+        <!-- Seamless preview->fullscreen handoff: no system starting window
+             (which paints windowBackground black before our first frame) and
+             no open/close animation, so the adopted engine's video appears
+             without a black flash in between. -->
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
     </style>
 </resources>

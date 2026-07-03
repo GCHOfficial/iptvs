@@ -63,7 +63,8 @@ class ChannelListScreen extends StatefulWidget {
   State<ChannelListScreen> createState() => _ChannelListScreenState();
 }
 
-class _ChannelListScreenState extends State<ChannelListScreen> {
+class _ChannelListScreenState extends State<ChannelListScreen>
+    with WidgetsBindingObserver {
   final _searchController = TextEditingController();
 
   ContentKind _tab = ContentKind.live;
@@ -158,8 +159,25 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     ]);
     _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
     HardwareKeyboard.instance.addHandler(_focus.handleGlobalKeyEvent);
+    WidgetsBinding.instance.addObserver(this);
     _loadLive();
     _live.startEpgRefresh();
+  }
+
+  /// The app going to the background (home button, back-exit, launcher) must
+  /// not leave the preview engine running — its audio would keep playing
+  /// behind the launcher (the shared native engine outlives the Flutter UI).
+  /// Skipped while a fullscreen playback handoff is in flight ([_resolving]
+  /// spans the whole player push): launching the native player also
+  /// backgrounds this screen's lifecycle, and an adopted preview engine must
+  /// keep playing through it.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.paused) return;
+    if (_resolving) return;
+    if (_preview.channelId != null) {
+      unawaited(_preview.stop(clearSelection: true));
+    }
   }
 
   /// Load live channels (via the controller) plus the focus-node prune and
@@ -216,6 +234,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     HardwareKeyboard.instance.removeHandler(_focus.handleGlobalKeyEvent);
     _live.dispose();
     _preview.dispose();
@@ -249,11 +268,26 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     }
 
     if (_deliberatePreview) {
-      // No auto-preview on a TV remote: the info panel follows focus via the
-      // coordinator's lastFocusedChannelId notification; just drop any preview
-      // still playing for a different channel.
-      if (_preview.channelId != null && _preview.channelId != channel.id) {
-        unawaited(_preview.stop(clearSelection: true));
+      // No auto-preview on a TV remote until the user starts one with OK. But
+      // once a preview is *actively running* it follows focus: retarget it to
+      // the newly focused channel after a short debounce (so surfing with held
+      // Down doesn't fire a resolve per row) instead of stopping and demanding
+      // a fresh OK on every move. The old preview keeps playing until the new
+      // one resolves — LivePreviewController.start supersedes it in-flight.
+      // "Actively running" is stream/loading, not channelId: stop() without
+      // clearSelection (EPG grid, sources, diagnostics) keeps channelId, and a
+      // deliberately stopped preview must not resurrect on the next focus move.
+      final previewActive = _preview.stream != null || _preview.loading;
+      if (previewActive && _preview.channelId != channel.id) {
+        _previewTimer?.cancel();
+        _previewTimer = Timer(const Duration(milliseconds: 450), () {
+          if (!mounted || _tab != ContentKind.live) return;
+          if (MediaQuery.of(context).size.width < kWideLayoutMinWidth) return;
+          // Focus may have moved again since this timer was armed.
+          if (_focus.lastFocusedChannelId != channel.id) return;
+          if (_preview.channelId == channel.id) return;
+          unawaited(_preview.start(channel, muted: _preview.isMuted));
+        });
       }
       return;
     }
@@ -263,7 +297,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     // Debounce for 500ms (desktop mouse/keyboard).
     _previewTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
-      final isWide = MediaQuery.of(context).size.width >= 950;
+      final isWide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
       if (isWide && _tab == ContentKind.live) {
         _preview.start(channel);
       }
@@ -436,7 +470,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
 
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
-    final isWide = MediaQuery.of(context).size.width >= 950;
+    final isWide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
     if (!isWide) {
       // On small screens, bypass preview and go fullscreen immediately
       setState(() => _resolving = true);
@@ -523,26 +557,36 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
       if (_preview.channelId == channel.id && !seamless) {
         await _preview.pause();
       }
-      final hotSwapped =
-          await navigator.push<bool>(
-            MaterialPageRoute<bool>(
-              builder: (_) => PlayerScreen(
-                title: channel.name,
-                stream: stream,
-                sourceName: widget.repo.source.name,
-                epgNow: _live.now[channel.id],
-                epgNext: _live.next[channel.id],
-                existingPlayer: (adoptPreview && !adoptNative)
-                    ? _preview.player
-                    : null,
-                existingController: (adoptPreview && !adoptNative)
-                    ? _preview.controller
-                    : null,
-                adoptNativePreview: adoptNative,
-              ),
-            ),
-          ) ??
-          false;
+      // Context-independent on purpose — nothing in the player derives from
+      // the route builder's element.
+      Widget buildPlayer() => PlayerScreen(
+        title: channel.name,
+        stream: stream,
+        sourceName: widget.repo.source.name,
+        epgNow: _live.now[channel.id],
+        epgNext: _live.next[channel.id],
+        existingPlayer: (adoptPreview && !adoptNative)
+            ? _preview.player
+            : null,
+        existingController: (adoptPreview && !adoptNative)
+            ? _preview.controller
+            : null,
+        adoptNativePreview: adoptNative,
+      );
+      // The adopted native handoff pushes a *transparent, non-animated* route:
+      // PlayerScreen stays see-through while the native Activity launches, so
+      // this screen (with the preview's frozen last frame) remains visible
+      // until the Activity's first frame — no black flash (see
+      // PlayerScreen._transparentHandoff).
+      final route = adoptNative
+          ? PageRouteBuilder<bool>(
+              opaque: false,
+              transitionDuration: Duration.zero,
+              reverseTransitionDuration: Duration.zero,
+              pageBuilder: (_, _, _) => buildPlayer(),
+            )
+          : MaterialPageRoute<bool>(builder: (_) => buildPlayer());
+      final hotSwapped = await navigator.push<bool>(route) ?? false;
       if (!mounted) return;
       if (hotSwapped) {
         // The fullscreen player re-pointed this player's video output at the
@@ -942,11 +986,19 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     _scrollToTop();
   }
 
-  /// Peels one D-pad rung per Back press, keyed off what's focused, and
-  /// **defaults to exiting the app** for anything above the content (search box,
-  /// tabs, app-bar buttons) — so Back leaves from the toolbar too, not only the
-  /// section tabs. Live (wide/TV) ladder: channel list → category sidebar (last
-  /// selected) → "All channels" highlight → search box → exit.
+  /// Double-Back exit confirmation: the first Back at the top of the ladder
+  /// arms this and shows "Press Back again to exit"; a second Back inside the
+  /// window actually exits.
+  DateTime? _exitArmedAt;
+  static const _exitConfirmWindow = Duration(seconds: 2);
+
+  /// Peels one D-pad rung per Back press, keyed off what's focused. Live
+  /// (wide/TV) ladder: deep channel list → top of the list → category sidebar
+  /// (last selected) → "All channels" highlight → content-kind tabs
+  /// (Live/Movies/Series) → exit (double-Back). Media: deep grid → top of the
+  /// grid → tabs → exit. The app only exits from the top of the ladder — the
+  /// section tabs, the toolbar/app-bar, or anything else above the content —
+  /// and only on a second Back within [_exitConfirmWindow].
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
     final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
@@ -956,44 +1008,101 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
     if (label == 'TvTextField.field') return;
 
     final wideLive =
-        _tab == ContentKind.live && MediaQuery.of(context).size.width >= 950;
+        _tab == ContentKind.live &&
+        MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+    // The single "one rung below exit" target — every content-level focus
+    // peels here before the app can exit.
+    void focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
 
-    // Live channel list → the category sidebar (wide) or straight to search
-    // (narrow, which has no sidebar).
+    // Live channel list. More than a screen deep, the first Back returns to
+    // the top of the list (you're navigating *within* the list; climbing out
+    // starts from its top). From the top: the category sidebar (wide) or
+    // straight to the tabs (narrow, which has no sidebar).
     if (label.startsWith(LiveFocusCoordinator.channelLabelPrefix)) {
-      if (wideLive) {
+      if (_focus.channelListIsDeep) {
+        _focus.focusFirstChannel();
+      } else if (wideLive) {
         _focus.focusCategoryFromChannels();
       } else {
-        _focus.searchCellFocusNode.requestFocus();
+        focusTabs();
       }
-      return;
-    }
-    // On "All channels" → the search box.
-    if (label == '${LiveFocusCoordinator.categoryLabelPrefix}all') {
-      _focus.searchCellFocusNode.requestFocus();
-      _focus.noteFocusArea(LiveFocusArea.search);
       return;
     }
     // On a specific category → move the highlight to "All channels" without
     // changing the current filter (the user presses OK to actually switch).
-    if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix)) {
+    if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix) &&
+        label != '${LiveFocusCoordinator.categoryLabelPrefix}all') {
       _focus.focusNodeForCategory(null).requestFocus();
       _focus.noteFocusArea(LiveFocusArea.category);
       return;
     }
-    // Movies/series grid → the content-kind tabs.
+    // Movies/series grid — same top-of-list rung as the channel list, then
+    // the tabs.
     if (label.startsWith('media.')) {
-      _tabFocusNodes[_tab]?.requestFocus();
+      final controller = _media(_tab);
+      final scroll = controller.scrollController;
+      if (scroll.hasClients &&
+          scroll.position.pixels > scroll.position.viewportDimension) {
+        scroll.jumpTo(0);
+        // The first tile may not be built until the frame after the jump —
+        // focus post-frame with one retry (same pattern as the coordinator's
+        // focusFirstChannel).
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          if (controller.firstFocusNode.context != null) {
+            controller.firstFocusNode.requestFocus();
+            return;
+          }
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) controller.firstFocusNode.requestFocus();
+          });
+        });
+      } else {
+        focusTabs();
+      }
       return;
     }
-    // Search box, tabs, app-bar buttons, or anything unlabeled: nothing left to
-    // peel. This screen is HomeShell's root content (not a pushed route), so
-    // there may be nothing to pop to — fall back to the platform default (exit).
+    // Everything else at content level — "All channels" (the sidebar's top),
+    // the search box (live's coordinator node or the media tabs' internal
+    // TvTextField cell) — peels to the tabs.
+    if (label == '${LiveFocusCoordinator.categoryLabelPrefix}all' ||
+        label == LiveFocusCoordinator.searchCellLabel ||
+        label == 'TvTextField.cell') {
+      focusTabs();
+      return;
+    }
+    // Tabs, app-bar buttons, or anything unlabeled: nothing left to peel —
+    // exit, behind a double-Back confirmation so mashing Back up the ladder
+    // can't overshoot into the launcher.
+    // This screen is HomeShell's root content (not a pushed route), so there
+    // may be nothing to pop to — fall back to the platform default (exit).
     if (Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
-    } else {
-      SystemNavigator.pop();
+      return;
     }
+    final now = DateTime.now();
+    final armed =
+        _exitArmedAt != null &&
+        now.difference(_exitArmedAt!) <= _exitConfirmWindow;
+    if (!armed) {
+      _exitArmedAt = now;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Press Back again to exit'),
+            duration: _exitConfirmWindow,
+          ),
+        );
+      return;
+    }
+    // Exiting must not leave the preview engine playing behind the launcher
+    // (Android's back-exit only moves the task back — the engine would keep
+    // its audio running).
+    if (_preview.channelId != null || _preview.nativeActive) {
+      unawaited(_preview.stop(clearSelection: true));
+    }
+    SystemNavigator.pop();
   }
 
   @override
@@ -1130,7 +1239,7 @@ class _ChannelListScreenState extends State<ChannelListScreen> {
           onSearchCellKeyEvent: _focus.handleSearchCellKey,
           categoryControl:
               (_tab == ContentKind.live &&
-                  MediaQuery.of(context).size.width >= 950)
+                  MediaQuery.of(context).size.width >= kWideLayoutMinWidth)
               ? null
               : (_tab == ContentKind.live
                     ? _CategoryDropdown(

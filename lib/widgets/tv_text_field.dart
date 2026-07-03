@@ -210,7 +210,23 @@ class _TvTextFieldState extends State<TvTextField> {
                           // re-engages the decorator's own vertical placement,
                           // which differs between Android and Windows — the
                           // recurring hint-misalignment bug.
-                          decoration: InputDecoration.collapsed(
+                          //
+                          // Every border slot must be InputBorder.none
+                          // explicitly: applyDefaults fills any null slot from
+                          // the app theme's OutlineInputBorders, and the
+                          // decorator prefers enabled/focusedBorder over
+                          // `border` — which painted a second rounded box
+                          // inside the cell.
+                          decoration: InputDecoration(
+                            isCollapsed: true,
+                            contentPadding: EdgeInsets.zero,
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            errorBorder: InputBorder.none,
+                            focusedErrorBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
                             hintText: widget.hintText,
                             hintStyle: const TextStyle(color: AppColors.textLo),
                           ),
