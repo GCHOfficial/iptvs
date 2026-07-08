@@ -7,9 +7,11 @@
 // They are written against the *current* (pre-split) widget so the same
 // assertions can pin behaviour through the LiveTab/MoviesTab/SeriesTab split.
 //
-// Focus is asserted via FocusNode.debugLabel, which the screen itself already
-// treats as a first-class signal (it routes D-pad logic off `primaryFocus`
-// labels like `live.channel.*` / `live.category.*`).
+// Focus is asserted via RoutedFocusNode.routeKey (read through focusRouteKey),
+// the release-safe signal the screen routes D-pad logic off (`live.channel.*` /
+// `live.category.*`). Reading routeKey — not debugLabel — means these tests
+// exercise the exact path release builds use, so a regression to a debug-only
+// key fails here instead of passing in debug and breaking on real hardware.
 //
 // Notes on the test harness:
 //  * repo.load / loadMedia run through sqflite_common_ffi (a background
@@ -33,6 +35,7 @@ import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
+import 'package:iptvs/widgets/routed_focus_node.dart';
 import 'package:iptvs/widgets/tv_text_field.dart';
 
 // Set to true in setUpAll when libmpv is available; tests skip otherwise.
@@ -111,7 +114,7 @@ void main() {
       .widgetList<FocusableCard>(find.byType(FocusableCard))
       .firstWhere((c) => c.debugLabel == label);
 
-  String? focusLabel() => FocusManager.instance.primaryFocus?.debugLabel;
+  String focusLabel() => focusRouteKey(FocusManager.instance.primaryFocus);
 
   // Wrapper that skips when libmpv is not present in the test environment.
   void focusTestWidgets(String description, WidgetTesterCallback callback) {
@@ -163,7 +166,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(
-      focusLabel() ?? '',
+      focusLabel(),
       startsWith('live.channel.'),
       reason: 'ArrowRight from the category pane should focus a channel',
     );
@@ -188,7 +191,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(
-      focusLabel() ?? '',
+      focusLabel(),
       startsWith('live.category.'),
       reason: 'ArrowLeft from a channel should focus the category pane',
     );
@@ -211,7 +214,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
-    final label = focusLabel() ?? '';
+    final label = focusLabel();
     expect(label, startsWith('live.channel.'));
     expect(
       label,

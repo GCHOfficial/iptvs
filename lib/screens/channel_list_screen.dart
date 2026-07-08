@@ -14,6 +14,7 @@ import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/profile_avatar.dart';
+import '../widgets/routed_focus_node.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
@@ -97,9 +98,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // screen relies on a single flat scope with FocusTraversalGroups so arrow-down
   // flows tabs → toolbar → list, and a nested scope would trap that traversal.
   final Map<ContentKind, FocusNode> _tabFocusNodes = {
-    ContentKind.live: FocusNode(debugLabel: 'content.tab.live'),
-    ContentKind.movie: FocusNode(debugLabel: 'content.tab.movie'),
-    ContentKind.series: FocusNode(debugLabel: 'content.tab.series'),
+    ContentKind.live: RoutedFocusNode('content.tab.live'),
+    ContentKind.movie: RoutedFocusNode('content.tab.movie'),
+    ContentKind.series: RoutedFocusNode('content.tab.series'),
   };
   String? _lastPlayedLiveChannelId;
   // The channel played before the current one — the zap ("last channel")
@@ -253,10 +254,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     super.dispose();
   }
 
-  /// On Android (phone + TV) previews are deliberate: started by an explicit
-  /// OK press (TV split-pane) or long-press (phone), and they carry audio
-  /// because the user asked for them. On desktop they auto-start muted after a
-  /// short focus debounce, mouse-hover style.
+  /// Whether previews are *deliberate* on this platform. On Android (phone + TV)
+  /// they are: a preview starts only on an explicit OK press (TV split-pane) or
+  /// long-press (phone), carries audio, and — once running — stays **locked** to
+  /// that channel. D-pad focus moving around never starts, stops, or retargets a
+  /// preview; only pressing OK on a different channel switches it. On desktop
+  /// previews are *not* deliberate: they auto-start muted, mouse-hover style,
+  /// after a short focus debounce (the branch at the end of
+  /// [_onChannelFocusChanged]).
   bool get _deliberatePreview => Platform.isAndroid;
 
   void _onChannelFocusChanged(Channel channel, bool hasFocus) {
@@ -268,27 +273,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
 
     if (_deliberatePreview) {
-      // No auto-preview on a TV remote until the user starts one with OK. But
-      // once a preview is *actively running* it follows focus: retarget it to
-      // the newly focused channel after a short debounce (so surfing with held
-      // Down doesn't fire a resolve per row) instead of stopping and demanding
-      // a fresh OK on every move. The old preview keeps playing until the new
-      // one resolves — LivePreviewController.start supersedes it in-flight.
-      // "Actively running" is stream/loading, not channelId: stop() without
-      // clearSelection (EPG grid, sources, diagnostics) keeps channelId, and a
-      // deliberately stopped preview must not resurrect on the next focus move.
-      final previewActive = _preview.stream != null || _preview.loading;
-      if (previewActive && _preview.channelId != channel.id) {
-        _previewTimer?.cancel();
-        _previewTimer = Timer(const Duration(milliseconds: 450), () {
-          if (!mounted || _tab != ContentKind.live) return;
-          if (MediaQuery.of(context).size.width < kWideLayoutMinWidth) return;
-          // Focus may have moved again since this timer was armed.
-          if (_focus.lastFocusedChannelId != channel.id) return;
-          if (_preview.channelId == channel.id) return;
-          unawaited(_preview.start(channel, muted: _preview.isMuted));
-        });
-      }
+      // Android (TV/phone): the preview requires an explicit OK/Enter press to
+      // start and to switch channels. Focus alone never starts, stops, or
+      // retargets a preview — it stays locked to the channel it was started on
+      // until the user presses OK on a different one.
       return;
     }
 
@@ -565,7 +553,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: (adoptPreview && !adoptNative) ? _preview.player : null,
+        existingPlayer: (adoptPreview && !adoptNative)
+            ? _preview.player
+            : null,
         existingController: (adoptPreview && !adoptNative)
             ? _preview.controller
             : null,
@@ -642,8 +632,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
           channels: _visible,
-          onPlayChannel: (channel) =>
-              unawaited(_playChannelFullscreen(channel)),
+          onPlayChannel: (channel) => unawaited(_playChannelFullscreen(channel)),
           onPlayArchive: (channel, programme) =>
               unawaited(_playCatchup(channel, programme)),
         ),
@@ -1005,7 +994,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// and only on a second Back within [_exitConfirmWindow].
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    final label = focusRouteKey(FocusManager.instance.primaryFocus);
     // Flutter invokes every registered PopScope when a pop is blocked, so defer
     // entirely to TvTextField's own PopScope while its inner field is actually
     // being edited — it already exits edit mode on Back.
@@ -1444,7 +1433,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     Channel? byId(String? id) =>
         id == null ? null : _live.channels.where((c) => c.id == id).firstOrNull;
     if (_deliberatePreview) {
-      return byId(_focus.lastFocusedChannelId) ??
+      // When a preview is actively running (or loading), lock the panel to
+      // that channel.  D-pad focus moves away without disrupting it.
+      final previewActive =
+          _preview.stream != null || _preview.loading;
+      return byId(previewActive ? _preview.channelId : null) ??
+          byId(_focus.lastFocusedChannelId) ??
           byId(_preview.channelId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;

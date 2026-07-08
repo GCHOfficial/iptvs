@@ -20,7 +20,10 @@ enum ProfilePickerStartup {
 bool shouldShowPickerAtStartup(ProfilePickerStartup mode, int profileCount) {
   switch (mode) {
     case ProfilePickerStartup.auto:
-      return profileCount > 1;
+      // Show on first launch (0 profiles) so the user can create one, and
+      // whenever there is a real choice to make (>1 profile).  Skip when
+      // exactly one profile exists — nothing to choose.
+      return profileCount != 1;
     case ProfilePickerStartup.always:
       return true;
     case ProfilePickerStartup.off:

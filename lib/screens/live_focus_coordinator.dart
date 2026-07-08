@@ -5,6 +5,7 @@ import 'package:flutter/services.dart'
     show KeyDownEvent, KeyEvent, KeyRepeatEvent, KeyUpEvent, LogicalKeyboardKey;
 
 import '../sources/source.dart';
+import '../widgets/routed_focus_node.dart';
 
 /// Which live pane last held focus — used to route arrow keys when focus
 /// transiently lands on an unlabeled node.
@@ -21,9 +22,12 @@ enum LiveFocusArea { category, channels, search, unknown }
 /// preview/info panel that follows focus can rebuild through the screen's
 /// body listenable instead of a whole-screen setState.
 ///
-/// Routing is keyed off [FocusNode.debugLabel] prefixes (the constants
-/// below). They are **load-bearing routing keys**, not debug decoration —
-/// every focusable the live tab creates must use them.
+/// Routing is keyed off [RoutedFocusNode.routeKey] prefixes (the constants
+/// below), read via [focusRouteKey]. They are **load-bearing routing keys**,
+/// not debug decoration — every focusable the live tab creates must use a
+/// [RoutedFocusNode] carrying one. (They were once read from
+/// [FocusNode.debugLabel], but that is `null` in release builds, which broke
+/// the whole ladder on real hardware.)
 class LiveFocusCoordinator extends ChangeNotifier {
   /// Prefix for per-channel focus nodes: `live.channel.<channelId>`.
   static const channelLabelPrefix = 'live.channel.';
@@ -37,8 +41,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// The stable node for the first visible channel row (gets `autofocus`).
   static const firstChannelLabel = '${channelLabelPrefix}first';
 
-  /// What an unlabeled FocusNode reports — routed via [lastFocusArea].
-  static const unlabeledLabel = 'Focus';
+  /// The route key of an unrouted node (plain `Focus`/`FocusScope`) — the empty
+  /// string, since [focusRouteKey] returns `''` for anything but a
+  /// [RoutedFocusNode]. Such focus is routed via [lastFocusArea].
+  static const unlabeledLabel = '';
 
   /// Estimated height of one channel row, for jump-scrolling an off-screen
   /// target into build range before focusing it.
@@ -91,10 +97,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// panel from this. Called with the channel and whether it gained focus.
   final void Function(Channel channel, bool hasFocus) onChannelFocusChanged;
 
-  final FocusNode firstChannelFocusNode = FocusNode(
-    debugLabel: firstChannelLabel,
-  );
-  final FocusNode searchCellFocusNode = FocusNode(debugLabel: searchCellLabel);
+  final FocusNode firstChannelFocusNode = RoutedFocusNode(firstChannelLabel);
+  final FocusNode searchCellFocusNode = RoutedFocusNode(searchCellLabel);
 
   final Map<String, FocusNode> _channelNodes = {};
   final Map<String, FocusNode> _categoryNodes = {};
@@ -231,7 +235,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   FocusNode focusNodeForChannel(String channelId) {
     return _channelNodes.putIfAbsent(channelId, () {
-      final node = FocusNode(debugLabel: '$channelLabelPrefix$channelId');
+      final node = RoutedFocusNode('$channelLabelPrefix$channelId');
       node.addListener(() {
         final channel = channelById(channelId);
         if (channel == null) return;
@@ -246,7 +250,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     final key = categoryId ?? 'all';
     return _categoryNodes.putIfAbsent(
       key,
-      () => FocusNode(debugLabel: '$categoryLabelPrefix$key'),
+      () => RoutedFocusNode('$categoryLabelPrefix$key'),
     );
   }
 
@@ -452,7 +456,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (attempts <= 0) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_disposed || !isMounted()) return;
-      final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+      final label = focusRouteKey(FocusManager.instance.primaryFocus);
       if (!shouldRetry(label)) return;
       targetNode.requestFocus();
       _reassertFocus(
@@ -479,7 +483,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
       _downHoldFromChannels = false;
     }
 
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    final label = focusRouteKey(FocusManager.instance.primaryFocus);
     if (_handleDigitKey(event, focusAreaFromLabel(label))) return true;
     if (key == LogicalKeyboardKey.arrowRight &&
         label.startsWith(categoryLabelPrefix)) {
@@ -533,7 +537,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
       return KeyEventResult.ignored;
     }
 
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    final label = focusRouteKey(FocusManager.instance.primaryFocus);
     final area = focusAreaFromLabel(label);
     if (area != LiveFocusArea.unknown) {
       lastFocusArea = area;

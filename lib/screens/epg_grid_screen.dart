@@ -271,22 +271,16 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   }
 
   void _activate(Channel channel, Programme programme) {
-    final now = DateTime.now();
-    final isCurrent =
-        !programme.start.isAfter(now) && programme.stop.isAfter(now);
-    if (isCurrent) {
-      widget.onPlayChannel(channel);
-      return;
-    }
-    final isPast = !programme.stop.isAfter(now);
-    if (isPast && channel.hasArchive) {
-      widget.onPlayArchive(channel, programme);
-      return;
-    }
     _showProgrammeDetails(channel, programme);
   }
 
   void _showProgrammeDetails(Channel channel, Programme programme) {
+    final now = DateTime.now();
+    final isCurrent =
+        !programme.start.isAfter(now) && programme.stop.isAfter(now);
+    final isPast = !programme.stop.isAfter(now);
+    final canCatchup = isPast && channel.hasArchive;
+
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -316,10 +310,34 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
         ),
         actions: [
           TextButton(
-            autofocus: true,
+            // Keep a focused control on a TV remote even when no contextual
+            // action button renders (a future programme, or a past one on a
+            // non-archive channel) — otherwise the dialog opens with nothing
+            // focused and the D-pad has no target.
+            autofocus: !canCatchup && !isCurrent,
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Close'),
           ),
+          if (canCatchup)
+            FilledButton.icon(
+              autofocus: true,
+              icon: const Icon(Icons.replay_rounded, size: 18),
+              label: const Text('Watch catch-up'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                widget.onPlayArchive(channel, programme);
+              },
+            )
+          else if (isCurrent)
+            FilledButton.icon(
+              autofocus: true,
+              icon: const Icon(Icons.play_arrow_rounded, size: 18),
+              label: const Text('Play live'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                widget.onPlayChannel(channel);
+              },
+            ),
         ],
       ),
     );
