@@ -332,10 +332,10 @@ packages:
     dependency: transitive
     description:
       name: gotrue
-      sha256: ac6b664b35304aece2034c66bc09ce761f9f7c8fb6066bbb6b2932aa87d82653
+      sha256: "360bba9606e58d5acc59a033ab64ae3cf571a6868f7a7267cb8e9a204b7bf1b2"
       url: "https://pub.dev"
     source: hosted
-    version: "2.25.0"
+    version: "2.26.0"
   gtk:
     dependency: transitive
     description:
@@ -596,10 +596,10 @@ packages:
     dependency: transitive
     description:
       name: passkeys_platform_interface
-      sha256: "56dd98bbe45d79de87e8683d25741b2f61743542a39a85207b0a5b4bccff600e"
+      sha256: "9610bd136b3382500390912ddd8517ee99505228b1af7b507b9c907f7e99a47d"
       url: "https://pub.dev"
     source: hosted
-    version: "2.7.0"
+    version: "2.8.0"
   path:
     dependency: "direct main"
     description:
@@ -716,10 +716,10 @@ packages:
     dependency: transitive
     description:
       name: realtime_client
-      sha256: cf816d406248a6286bf7aa2053b406583ff88bd0842ab7f3f3127d53f6f1c68b
+      sha256: "0cfbe0047e2591eba348938e9b4e620d5b1a8df6c374757e8eb8645252b8387f"
       url: "https://pub.dev"
     source: hosted
-    version: "2.10.0"
+    version: "2.11.0"
   record_use:
     dependency: transitive
     description:
@@ -921,18 +921,18 @@ packages:
     dependency: transitive
     description:
       name: supabase
-      sha256: "6933e60614652fa10749eb29fdcc6f2adb6515f5638e5ce28376ae08a626d745"
+      sha256: "3879996256325fcc9abb03b62b12c07e4eaae2e008e1bf043cc1525184159a43"
       url: "https://pub.dev"
     source: hosted
-    version: "2.13.4"
+    version: "2.14.0"
   supabase_flutter:
     dependency: "direct main"
     description:
       name: supabase_flutter
-      sha256: b6d34558565c14f1b44ff7bc9ca2979ed38ee2907b80ed73e699150cec08b739
+      sha256: c9916c1cd512ebf3107ec0f83c9dca13d2e1e789629c2a5df896586bff46ce5f
       url: "https://pub.dev"
     source: hosted
-    version: "2.15.4"
+    version: "2.16.0"
   synchronized:
     dependency: transitive
     description:

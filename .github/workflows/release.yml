@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 env:
-  FLUTTER_VERSION: 3.44.4
+  FLUTTER_VERSION: 3.44.5
 
 jobs:
   # Resolve the version string once (tag minus the leading `v`, or the manual input).
