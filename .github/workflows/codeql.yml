@@ -9,22 +9,22 @@ on:
     - cron: '23 5 * * 1' # weekly, Monday 05:23 UTC
 
 # CodeQL doesn't support Dart (the bulk of lib/), so this covers the native code
-# it can: the Windows-runner C++ (GDI overlay, HDR badges) and the workflow YAML.
+# it can: the Windows-runner C++ (GDI overlay, HDR badges), the Android Kotlin
+# (native HDR player / preview engine), and the workflow YAML.
+#
+# java-kotlin needs a CodeQL CLI that accepts the app's Kotlin (2.4.0). That
+# landed in CLI 2.26.0 / codeql-bundle-v2.26.0 (github/codeql#21970) — earlier
+# CLIs aborted with "Kotlin version 2.4.0 is too recent". The pinned
+# codeql-action major (@v4) must therefore resolve to a bundle >= v2.26.0.
 #
 # Not covered:
-#   - java-kotlin (the Android player/HDR code): the app is on Kotlin 2.4.0, and
-#     the latest released CodeQL CLI (2.25.6) still caps at < 2.3.30 ("Kotlin
-#     version 2.4.0 is too recent"). Support is merged upstream
-#     (github/codeql#21970) but not yet in a CLI release. Re-add a
-#     `{language: java-kotlin, build-mode: manual}` entry (with setup-java +
-#     `flutter build apk` + `lfs: true`) once a CLI past 2.25.6 ships it.
 #   - javascript-typescript: web/ is only Flutter's generated bootstrap (no source).
 #   - swift: the iOS/macOS shells are Flutter template code (no first-party logic).
 permissions:
   contents: read
 
 env:
-  FLUTTER_VERSION: 3.44.4
+  FLUTTER_VERSION: 3.44.5
 
 jobs:
   analyze:
@@ -42,19 +42,27 @@ jobs:
           - language: c-cpp
             build-mode: manual
             runner: windows-latest
+          - language: java-kotlin
+            build-mode: manual
+            runner: ubuntu-latest
           - language: actions
             build-mode: none
             runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The Android build links the libdovi libmpv AAR, which lives in Git LFS
+          # (android/app/libs/libmpv-dovi.aar); other languages don't need it.
+          lfs: ${{ matrix.language == 'java-kotlin' }}
 
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      # C++ is Flutter-driven, so CodeQL's autobuild can't build it — run the real
-      # Flutter build under build-mode manual so the tracer sees the compiler.
+      # Both native builds are Flutter-driven, so CodeQL's autobuild can't build
+      # them — run the real Flutter build under build-mode manual so the tracer
+      # sees the compiler.
       - if: matrix.build-mode == 'manual'
         uses: subosito/flutter-action@v2
         with:
@@ -62,12 +70,25 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Set up JDK
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Build Windows (C++)
         if: matrix.language == 'c-cpp'
         run: |
           flutter config --enable-windows-desktop
           flutter pub get
           flutter build windows --debug
+
+      - name: Build Android (Kotlin)
+        if: matrix.language == 'java-kotlin'
+        run: |
+          flutter pub get
+          flutter build apk --debug
 
       - uses: github/codeql-action/analyze@v4
         with:
