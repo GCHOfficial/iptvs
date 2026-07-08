@@ -6,6 +6,7 @@ import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../sources/source.dart';
+import '../widgets/routed_focus_node.dart';
 
 /// Pseudo-category id for the "Favorites" view (live and media). Not a provider
 /// category — it loads the full "All" set and is filtered client-side.
@@ -43,7 +44,7 @@ class MediaTabController extends ChangeNotifier {
     required this.kind,
     required this.repo,
     this.onEnrichError,
-  }) : firstFocusNode = FocusNode(debugLabel: 'media.${kind.name}.first'),
+  }) : firstFocusNode = RoutedFocusNode('media.${kind.name}.first'),
        scrollController = ScrollController();
 
   /// Loaded page(s) for the current category (drives paging / "load more").

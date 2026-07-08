@@ -14,6 +14,7 @@ import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/profile_avatar.dart';
+import '../widgets/routed_focus_node.dart';
 import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
 import 'diagnostics_screen.dart';
@@ -97,9 +98,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // screen relies on a single flat scope with FocusTraversalGroups so arrow-down
   // flows tabs → toolbar → list, and a nested scope would trap that traversal.
   final Map<ContentKind, FocusNode> _tabFocusNodes = {
-    ContentKind.live: FocusNode(debugLabel: 'content.tab.live'),
-    ContentKind.movie: FocusNode(debugLabel: 'content.tab.movie'),
-    ContentKind.series: FocusNode(debugLabel: 'content.tab.series'),
+    ContentKind.live: RoutedFocusNode('content.tab.live'),
+    ContentKind.movie: RoutedFocusNode('content.tab.movie'),
+    ContentKind.series: RoutedFocusNode('content.tab.series'),
   };
   String? _lastPlayedLiveChannelId;
   // The channel played before the current one — the zap ("last channel")
@@ -253,12 +254,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     super.dispose();
   }
 
-  /// On Android (phone + TV) previews are deliberate: started by an explicit
-  /// OK press (TV split-pane) or long-press (phone), and they carry audio
-  /// Preview is always deliberate (requires an explicit OK/Enter press to
-  /// start). Once running it follows D-pad focus via a short debounce, but
-  /// focus alone never auto-starts a new preview.
-  bool get _deliberatePreview => true;
+  /// Whether previews are *deliberate* on this platform. On Android (phone + TV)
+  /// they are: a preview starts only on an explicit OK press (TV split-pane) or
+  /// long-press (phone), carries audio, and — once running — stays **locked** to
+  /// that channel. D-pad focus moving around never starts, stops, or retargets a
+  /// preview; only pressing OK on a different channel switches it. On desktop
+  /// previews are *not* deliberate: they auto-start muted, mouse-hover style,
+  /// after a short focus debounce (the branch at the end of
+  /// [_onChannelFocusChanged]).
+  bool get _deliberatePreview => Platform.isAndroid;
 
   void _onChannelFocusChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
@@ -269,7 +273,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
 
     if (_deliberatePreview) {
-      // Preview is always deliberate: requires an explicit OK/Enter press to
+      // Android (TV/phone): the preview requires an explicit OK/Enter press to
       // start and to switch channels. Focus alone never starts, stops, or
       // retargets a preview — it stays locked to the channel it was started on
       // until the user presses OK on a different one.
@@ -856,6 +860,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         onToggleFavorite: () => _toggleFavorite(item.kind, item.id),
         onChanged: _replaceMediaItem,
         resume: resume,
+        // Episodes picked in the series browser play through the same path as
+        // movies, so "Continue watching" reloads on return (the sheet used to
+        // push its own player, which skipped that reload — the series rail then
+        // went stale until a manual refresh).
+        onPlayEpisode: _playMedia,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
             ? () {
@@ -985,7 +994,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// and only on a second Back within [_exitConfirmWindow].
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
-    final label = FocusManager.instance.primaryFocus?.debugLabel ?? '';
+    final label = focusRouteKey(FocusManager.instance.primaryFocus);
     // Flutter invokes every registered PopScope when a pop is blocked, so defer
     // entirely to TvTextField's own PopScope while its inner field is actually
     // being edited — it already exits edit mode on Back.
@@ -1314,8 +1323,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             continueWatching: _media(_tab).continueWatching,
             onResume: _playMedia,
-            onRemoveContinueWatching: (e) =>
-                _media(_tab).removeFromContinueWatching(e),
+            onRemoveContinueWatching: (entry) =>
+                _media(_tab).removeFromContinueWatching(entry),
           );
   }
 

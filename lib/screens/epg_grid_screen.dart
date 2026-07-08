@@ -310,6 +310,11 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
         ),
         actions: [
           TextButton(
+            // Keep a focused control on a TV remote even when no contextual
+            // action button renders (a future programme, or a past one on a
+            // non-archive channel) — otherwise the dialog opens with nothing
+            // focused and the D-pad has no target.
+            autofocus: !canCatchup && !isCurrent,
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('Close'),
           ),

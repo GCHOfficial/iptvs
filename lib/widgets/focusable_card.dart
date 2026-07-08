@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'routed_focus_node.dart';
 
 /// A card that behaves well under mouse, touch, and a TV remote's D-pad:
 /// - shows a clear accent focus ring when focused (not just a hover tint),
@@ -42,8 +43,8 @@ class FocusableCard extends StatefulWidget {
 
 class _FocusableCardState extends State<FocusableCard> {
   bool _focused = false;
-  late final FocusNode _ownedFocusNode = FocusNode(
-    debugLabel: widget.debugLabel ?? 'FocusableCard',
+  late final FocusNode _ownedFocusNode = RoutedFocusNode(
+    widget.debugLabel ?? 'FocusableCard',
   );
 
   FocusNode get _effectiveFocusNode => widget.focusNode ?? _ownedFocusNode;

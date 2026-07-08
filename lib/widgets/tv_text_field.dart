@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
+import 'routed_focus_node.dart';
 
 /// A text field that behaves under a TV remote's D-pad as well as touch/mouse.
 ///
@@ -59,9 +60,9 @@ class TvTextField extends StatefulWidget {
 }
 
 class _TvTextFieldState extends State<TvTextField> {
-  final FocusNode _cellFocus = FocusNode(debugLabel: 'TvTextField.cell');
-  final FocusNode _fieldFocus = FocusNode(debugLabel: 'TvTextField.field');
-  final FocusNode _toggleFocus = FocusNode(debugLabel: 'TvTextField.toggle');
+  final FocusNode _cellFocus = RoutedFocusNode('TvTextField.cell');
+  final FocusNode _fieldFocus = RoutedFocusNode('TvTextField.field');
+  final FocusNode _toggleFocus = RoutedFocusNode('TvTextField.toggle');
   bool _editing = false;
   bool _cellFocused = false;
   bool _toggleFocused = false;
