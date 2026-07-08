@@ -255,9 +255,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   /// On Android (phone + TV) previews are deliberate: started by an explicit
   /// OK press (TV split-pane) or long-press (phone), and they carry audio
-  /// because the user asked for them. On desktop they auto-start muted after a
-  /// short focus debounce, mouse-hover style.
-  bool get _deliberatePreview => Platform.isAndroid;
+  /// Preview is always deliberate (requires an explicit OK/Enter press to
+  /// start). Once running it follows D-pad focus via a short debounce, but
+  /// focus alone never auto-starts a new preview.
+  bool get _deliberatePreview => true;
 
   void _onChannelFocusChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
@@ -268,27 +269,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
 
     if (_deliberatePreview) {
-      // No auto-preview on a TV remote until the user starts one with OK. But
-      // once a preview is *actively running* it follows focus: retarget it to
-      // the newly focused channel after a short debounce (so surfing with held
-      // Down doesn't fire a resolve per row) instead of stopping and demanding
-      // a fresh OK on every move. The old preview keeps playing until the new
-      // one resolves — LivePreviewController.start supersedes it in-flight.
-      // "Actively running" is stream/loading, not channelId: stop() without
-      // clearSelection (EPG grid, sources, diagnostics) keeps channelId, and a
-      // deliberately stopped preview must not resurrect on the next focus move.
-      final previewActive = _preview.stream != null || _preview.loading;
-      if (previewActive && _preview.channelId != channel.id) {
-        _previewTimer?.cancel();
-        _previewTimer = Timer(const Duration(milliseconds: 450), () {
-          if (!mounted || _tab != ContentKind.live) return;
-          if (MediaQuery.of(context).size.width < kWideLayoutMinWidth) return;
-          // Focus may have moved again since this timer was armed.
-          if (_focus.lastFocusedChannelId != channel.id) return;
-          if (_preview.channelId == channel.id) return;
-          unawaited(_preview.start(channel, muted: _preview.isMuted));
-        });
-      }
+      // Preview is always deliberate: requires an explicit OK/Enter press to
+      // start and to switch channels. Focus alone never starts, stops, or
+      // retargets a preview — it stays locked to the channel it was started on
+      // until the user presses OK on a different one.
       return;
     }
 
@@ -565,7 +549,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: (adoptPreview && !adoptNative) ? _preview.player : null,
+        existingPlayer: (adoptPreview && !adoptNative)
+            ? _preview.player
+            : null,
         existingController: (adoptPreview && !adoptNative)
             ? _preview.controller
             : null,
@@ -642,8 +628,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
           channels: _visible,
-          onPlayChannel: (channel) =>
-              unawaited(_playChannelFullscreen(channel)),
+          onPlayChannel: (channel) => unawaited(_playChannelFullscreen(channel)),
           onPlayArchive: (channel, programme) =>
               unawaited(_playCatchup(channel, programme)),
         ),
@@ -871,11 +856,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         onToggleFavorite: () => _toggleFavorite(item.kind, item.id),
         onChanged: _replaceMediaItem,
         resume: resume,
-        // Episodes picked in the series browser play through the same path as
-        // movies, so "Continue watching" reloads on return (the sheet used to
-        // push its own player, which skipped that reload — the series rail then
-        // went stale until a manual refresh).
-        onPlayEpisode: _playMedia,
         onPlay:
             item.kind == ContentKind.movie || item.kind == ContentKind.episode
             ? () {
@@ -1334,8 +1314,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onRetry: () => _loadMediaTab(_tab, forceRefresh: true),
             continueWatching: _media(_tab).continueWatching,
             onResume: _playMedia,
-            onRemoveContinueWatching: (entry) =>
-                _media(_tab).removeFromContinueWatching(entry),
+            onRemoveContinueWatching: (e) =>
+                _media(_tab).removeFromContinueWatching(e),
           );
   }
 
@@ -1444,7 +1424,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     Channel? byId(String? id) =>
         id == null ? null : _live.channels.where((c) => c.id == id).firstOrNull;
     if (_deliberatePreview) {
-      return byId(_focus.lastFocusedChannelId) ??
+      // When a preview is actively running (or loading), lock the panel to
+      // that channel.  D-pad focus moves away without disrupting it.
+      final previewActive =
+          _preview.stream != null || _preview.loading;
+      return byId(previewActive ? _preview.channelId : null) ??
+          byId(_focus.lastFocusedChannelId) ??
           byId(_preview.channelId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;

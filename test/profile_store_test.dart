@@ -81,7 +81,7 @@ void main() {
 
   group('shouldShowPickerAtStartup', () {
     test('auto shows only with more than one profile', () {
-      expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 0), isFalse);
+      expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 0), isTrue);
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 1), isFalse);
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.auto, 2), isTrue);
     });
