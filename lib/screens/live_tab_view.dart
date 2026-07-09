@@ -13,6 +13,25 @@ import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 import 'live_preview_controller.dart';
 
+// ── Shared EPG wording ───────────────────────────────────────────────────────
+// One home for how the current/next programme reads, so the channel list, the
+// wide preview panel, and the phone preview sheet all use the same terms. Change
+// the label here and every surface follows.
+
+String _epgTime(DateTime t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+/// The current-programme label (leads with the show so a long channel name
+/// can't crowd it out): e.g. `Now · The Morning Show`.
+String nowProgrammeLabel(Programme p) => 'Now · ${p.title}';
+
+/// The next-programme label: e.g. `Next · News at Nine`.
+String nextProgrammeLabel(Programme p) => 'Next · ${p.title}';
+
+/// A programme's clock range, e.g. `20:00 – 21:00`.
+String programmeTimeRange(Programme p) =>
+    '${_epgTime(p.start)} – ${_epgTime(p.stop)}';
+
 class _MoveRightToChannelsIntent extends Intent {
   const _MoveRightToChannelsIntent();
 }
@@ -380,12 +399,6 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.onCatchup,
   });
 
-  String _fmt(DateTime time) {
-    final h = time.hour.toString().padLeft(2, '0');
-    final m = time.minute.toString().padLeft(2, '0');
-    return '$h:$m';
-  }
-
   String? get _hint {
     if (previewActive && previewError == null) {
       return 'Press OK/Select to play fullscreen';
@@ -555,7 +568,7 @@ class _LivePreviewPanel extends StatelessWidget {
                       const SizedBox(height: 8),
                       if (current != null)
                         Text(
-                          '${_fmt(current.start)} - ${_fmt(current.stop)} · ${current.title}',
+                          '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -615,7 +628,7 @@ class _LivePreviewPanel extends StatelessWidget {
                       ],
                       if (upcoming != null)
                         Text(
-                          'Next · ${_fmt(upcoming.start)} - ${_fmt(upcoming.stop)} · ${upcoming.title}',
+                          '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -875,9 +888,6 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
     super.dispose();
   }
 
-  String _fmt(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
   @override
   Widget build(BuildContext context) {
     final current = widget.now;
@@ -961,7 +971,7 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
             const SizedBox(height: 6),
             if (current != null)
               Text(
-                '${_fmt(current.start)} - ${_fmt(current.stop)} · ${current.title}',
+                '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textHi, fontSize: 14),
@@ -974,7 +984,7 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
             if (upcoming != null) ...[
               const SizedBox(height: 4),
               Text(
-                'Next · ${_fmt(upcoming.start)} - ${_fmt(upcoming.stop)} · ${upcoming.title}',
+                '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textLo, fontSize: 13),
@@ -1027,12 +1037,6 @@ class _ChannelTile extends StatelessWidget {
     required this.onMoveDown,
   });
 
-  static String _formatProgrammeTime(DateTime time) {
-    final hours = time.hour.toString().padLeft(2, '0');
-    final minutes = time.minute.toString().padLeft(2, '0');
-    return '$hours:$minutes';
-  }
-
   @override
   Widget build(BuildContext context) {
     final current = now;
@@ -1084,33 +1088,52 @@ class _ChannelTile extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   if (current != null) ...[
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 8),
+                    // Current show on its own emphasized line — leads with the
+                    // title so a long channel name never hides it.
                     Text(
-                      'Live · ${_formatProgrammeTime(current.start)} – ${_formatProgrammeTime(current.stop)} · ${current.title}',
+                      nowProgrammeLabel(current),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: AppColors.textLo,
-                        fontSize: 12,
+                        color: AppColors.accent,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(height: 6),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 3,
-                        backgroundColor: AppColors.line,
-                        valueColor: const AlwaysStoppedAnimation<Color>(
-                          AppColors.accent,
+                    // Time range + progress share a row so the bar reads as
+                    // "where we are between these times".
+                    Row(
+                      children: [
+                        Text(
+                          programmeTimeRange(current),
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(3),
+                            child: LinearProgressIndicator(
+                              value: progress,
+                              minHeight: 3,
+                              backgroundColor: AppColors.line,
+                              valueColor: const AlwaysStoppedAnimation<Color>(
+                                AppColors.accent,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                     if (upcoming != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
                         child: Text(
-                          'Next · ${_formatProgrammeTime(upcoming.start)} – ${_formatProgrammeTime(upcoming.stop)} · ${upcoming.title}',
+                          nextProgrammeLabel(upcoming),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(

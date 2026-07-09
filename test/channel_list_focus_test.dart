@@ -400,4 +400,87 @@ void main() {
 
     await unmount(tester);
   });
+
+  focusTestWidgets(
+      'Back peels correctly immediately after selecting a category',
+      (tester) async {
+    // Regression for "Back does nothing after freshly selecting a category
+    // until you scroll the channel list once": selecting a category must land
+    // focus on the routed category node (not an unlabeled/channel node), so the
+    // Back ladder can peel category -> All -> tabs right away.
+    await pumpWideScreen(tester);
+
+    // Select the "Test streams" category (DemoSource's only live category).
+    await tester.tap(find.text('Test streams'));
+    await tester.pump();
+    // Let the post-frame focusCategory reassert converge onto the category node
+    // (it re-requests focus for a few frames to win the autofocus/scroll race).
+    for (var i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(
+      focusLabel(),
+      startsWith('live.category.'),
+      reason: 'selecting a category should leave focus on its routed node',
+    );
+
+    Future<void> back() async {
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+    }
+
+    // Specific category -> "All channels".
+    await back();
+    expect(focusLabel(), 'live.category.all');
+    // "All channels" -> the content-kind tabs.
+    await back();
+    expect(focusLabel(), 'content.tab.live');
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets(
+      'Back recovers to the tabs from unlabeled focus instead of exiting',
+      (tester) async {
+    // Regression for "directional keys break Back": arrowing onto an un-routed
+    // node (toolbar / AppBar action / category dropdown) leaves
+    // focusRouteKey == '', which the Back ladder must treat as "recover to the
+    // tabs", not "top of the ladder -> exit".
+    final popMethods = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        popMethods.add(call.method);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
+    await pumpWideScreen(tester);
+
+    // Drop routed focus so focusRouteKey reads '' — the state an un-routed
+    // toolbar/AppBar node produces.
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    expect(focusLabel(), '');
+
+    Future<void> back() async {
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+    }
+
+    await back();
+    expect(
+      focusLabel(),
+      'content.tab.live',
+      reason: 'Back from unlabeled focus should recover to the tabs',
+    );
+    expect(popMethods, isNot(contains('SystemNavigator.pop')));
+
+    await unmount(tester);
+  });
 }

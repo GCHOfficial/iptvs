@@ -310,6 +310,23 @@ class LiveFocusCoordinator extends ChangeNotifier {
     lastFocusArea = LiveFocusArea.channels;
   }
 
+  /// Land focus on [categoryId]'s pane node, retrying across a few frames so a
+  /// fresh-selection rebuild/autofocus race (the channel list's first-row
+  /// autofocus + the scroll-to-top) can't strand focus on the channel list or
+  /// an unlabeled node — which would leave the root Back ladder unable to tell
+  /// where it is. Sets the last-focus area to category.
+  void focusCategory(String? categoryId) {
+    final node = focusNodeForCategory(categoryId);
+    node.requestFocus();
+    _reassertFocus(
+      node,
+      shouldRetry: (label) =>
+          label.startsWith(channelLabelPrefix) || label == unlabeledLabel,
+      attempts: 6,
+    );
+    lastFocusArea = LiveFocusArea.category;
+  }
+
   /// Move focus from the channel pane back to the selected category.
   void focusCategoryFromChannels() {
     _downHoldFromChannels = false;

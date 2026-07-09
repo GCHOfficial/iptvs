@@ -183,6 +183,11 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       _profiles = entries;
       _activeProfileId = activeId;
       _activeSource = activeSource;
+      // Manage mode is meaningless with zero profiles — and while it's on the
+      // build hides the "+" add button, Skip, and the Manage/Done toggle, which
+      // is exactly the empty-screen dead-end you'd hit after deleting the last
+      // profile. Drop out of it whenever the list empties.
+      _manageMode = entries.isEmpty ? false : _manageMode;
       _checking = false;
     });
   }
