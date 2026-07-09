@@ -88,6 +88,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
   final ScrollController _scrollController = ScrollController();
+  // The live category sidebar's controller, so the focus coordinator can
+  // jump-scroll an off-screen category into build range before focusing it
+  // (a bare requestFocus on an unbuilt node silently no-ops).
+  final ScrollController _categoryScrollController = ScrollController();
   // Live D-pad focus machinery (nodes, pane routing, down-hold lock, resume
   // bookkeeping) lives in the coordinator; see live_focus_coordinator.dart.
   late final LiveFocusCoordinator _focus;
@@ -144,8 +148,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     };
     _focus = LiveFocusCoordinator(
       scrollController: _scrollController,
+      categoryScrollController: _categoryScrollController,
       visibleChannels: () => _visible,
       categoryId: () => _categoryId,
+      orderedCategoryIds: () => [
+        null,
+        for (final category in _liveCategoriesForUi) category.id,
+      ],
       channelById: _findChannelById,
       isLiveTab: () => _tab == ContentKind.live,
       isRouteCurrent: () =>
@@ -251,6 +260,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
     _searchController.dispose();
     _scrollController.dispose();
+    _categoryScrollController.dispose();
     super.dispose();
   }
 
@@ -1021,6 +1031,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       }
       return;
     }
+    // The preview panel controls sit at the top of the channel column — one
+    // rung above the list — so Back peels them to the category pane (wide) or
+    // straight to the tabs (narrow, which has no preview controls/sidebar).
+    if (label == LiveFocusCoordinator.previewFavoriteLabel ||
+        label == LiveFocusCoordinator.previewCatchupLabel) {
+      if (wideLive) {
+        _focus.focusCategoryFromChannels();
+      } else {
+        focusTabs();
+      }
+      return;
+    }
     // On a specific category → move the highlight to "All channels" without
     // changing the current filter (the user presses OK to actually switch).
     if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix) &&
@@ -1383,6 +1405,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       deliberate: _deliberatePreview,
       resolving: _resolving,
       scrollController: _scrollController,
+      categoryScrollController: _categoryScrollController,
       firstChannelFocusNode: _focus.firstChannelFocusNode,
       focusNodeForChannel: _focus.focusNodeForChannel,
       lastPlayedChannelId: _lastPlayedLiveChannelId,
@@ -1396,6 +1419,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         _focus.focusCategoryFromChannels();
       },
       onChannelMoveDown: _focus.moveDownInChannels,
+      onChannelMoveUp: _focus.moveUpInChannels,
       onCatchup: _showCatchupSheet,
       categories: _liveCategoriesForUi,
       selectedCategoryId: _categoryId,
@@ -1413,7 +1437,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         });
       },
       onMoveRightToChannels: _focus.focusChannelsFromCategory,
+      onCategoryCardKey: _focus.handleCategoryCardKey,
       onPaneFallbackKey: _focus.handlePaneFallbackKey,
+      previewFavoriteFocusNode: _focus.previewFavoriteFocusNode,
+      previewCatchupFocusNode: _focus.previewCatchupFocusNode,
+      onPreviewControlKey: _focus.handlePreviewControlKey,
       previewVideoBuilder: () => PreviewVideo(preview: _preview),
       previewLoading: _preview.loading,
       previewError: _preview.error,
@@ -1479,6 +1507,11 @@ class _ContentTabs extends StatelessWidget {
     // A focusable chip strip (not a SegmentedButton): it's the natural top of the
     // D-pad focus order, left/right moves between Live/Movies/Series, and OK/tap
     // selects. Grouped so directional traversal stays within the strip.
+    //
+    // The chips deliberately do NOT autofocus: on entry we want focus in the
+    // content (the first channel / grid tile, so OK plays immediately), reaching
+    // the tabs via Up or the Back ladder. Autofocusing the tab here would win the
+    // load-time race and strand focus on the strip.
     return FocusTraversalGroup(
       child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
@@ -1489,7 +1522,7 @@ class _ContentTabs extends StatelessWidget {
               icon: Icons.live_tv_rounded,
               label: 'Live',
               selected: value == ContentKind.live,
-              autofocus: value == ContentKind.live,
+              autofocus: false,
               focusNode: focusNodes[ContentKind.live],
               onTap: () => onChanged(ContentKind.live),
             ),
@@ -1498,7 +1531,7 @@ class _ContentTabs extends StatelessWidget {
               icon: Icons.movie_outlined,
               label: 'Movies',
               selected: value == ContentKind.movie,
-              autofocus: value == ContentKind.movie,
+              autofocus: false,
               focusNode: focusNodes[ContentKind.movie],
               onTap: () => onChanged(ContentKind.movie),
             ),
@@ -1507,7 +1540,7 @@ class _ContentTabs extends StatelessWidget {
               icon: Icons.tv_outlined,
               label: 'Series',
               selected: value == ContentKind.series,
-              autofocus: value == ContentKind.series,
+              autofocus: false,
               focusNode: focusNodes[ContentKind.series],
               onTap: () => onChanged(ContentKind.series),
             ),

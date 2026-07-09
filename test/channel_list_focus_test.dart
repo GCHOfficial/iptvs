@@ -33,6 +33,7 @@ import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/sources/demo_source.dart';
+import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
 import 'package:iptvs/widgets/routed_focus_node.dart';
@@ -91,18 +92,29 @@ void main() {
 
   // Pump the screen in a wide (TV/desktop) layout so the side-by-side category
   // pane + channel list are present, then let the async load settle.
-  Future<void> pumpWideScreen(WidgetTester tester) async {
+  Future<void> pumpWideScreenWith(WidgetTester tester, Source source) async {
     tester.view.physicalSize = const Size(1600, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    final repo = LibraryRepository(source: DemoSource(), db: db);
+    final repo = LibraryRepository(source: source, db: db);
     await tester.pumpWidget(
       MaterialApp(home: ChannelListScreen(repo: repo, config: config)),
     );
     // "Playlists" is the live category pane header — present once loaded.
     await pumpUntil(tester, find.text('Playlists'));
+  }
+
+  Future<void> pumpWideScreen(WidgetTester tester) =>
+      pumpWideScreenWith(tester, DemoSource());
+
+  // Pump a handful of frames so a coordinator focus move that jump-scrolls an
+  // off-screen row into range (post-frame focus + retry) can converge.
+  Future<void> settle(WidgetTester tester) async {
+    for (var i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
   }
 
   // Unmount so State.dispose runs (cancels the EPG timer, disposes the preview
@@ -483,4 +495,224 @@ void main() {
 
     await unmount(tester);
   });
+
+  // ── Long-list D-pad cases (need a source DemoSource can't provide) ──────────
+  // DemoSource has 1 category / 4 channels, so its sidebar never scrolls and
+  // Down-past-the-last-category never overflows. These use _ManySource (30
+  // categories, 12 channels) to pin the containment + off-screen focus-landing
+  // behaviour behind the two reported bugs.
+
+  focusTestWidgets(
+      'category Up/Down wrap within the sidebar and never spill into channels',
+      (tester) async {
+    await pumpWideScreenWith(tester, _ManySource());
+    cardByLabel(tester, 'live.category.all').focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.category.all');
+
+    // Up from the first entry wraps to the LAST category — off-screen in the
+    // tall sidebar, so this also exercises the scroll-into-view landing.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+    expect(
+      focusLabel(),
+      'live.category.cat29',
+      reason: 'Up at the first category should wrap to the last',
+    );
+
+    // Down from the last category wraps back to All — the reported bug was that
+    // it jumped into the channel pane instead.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await settle(tester);
+    expect(
+      focusLabel(),
+      'live.category.all',
+      reason: 'Down at the last category wraps to All, never a channel',
+    );
+    expect(focusLabel(), isNot(startsWith('live.channel.')));
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets('Back peels after selecting an off-screen category',
+      (tester) async {
+    // Problem 1 on real (long) lists: selecting a category whose sidebar node
+    // is scrolled out of build range must still land focus on it (not no-op),
+    // so the Back ladder can peel category -> All -> tabs.
+    await pumpWideScreenWith(tester, _ManySource());
+    cardByLabel(tester, 'live.category.all').focusNode!.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp); // wrap to cat29
+    await settle(tester);
+    expect(focusLabel(), 'live.category.cat29');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter); // select it (OK)
+    await settle(tester);
+    expect(
+      focusLabel(),
+      'live.category.cat29',
+      reason: 'selecting an off-screen category lands focus on its routed node',
+    );
+
+    Future<void> back() async {
+      await tester.binding.handlePopRoute();
+      await settle(tester);
+    }
+
+    await back();
+    expect(focusLabel(), 'live.category.all');
+    await back();
+    expect(focusLabel(), 'content.tab.live');
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets('returning from channels lands on the last-focused category',
+      (tester) async {
+    await pumpWideScreenWith(tester, _ManySource());
+    cardByLabel(tester, 'live.category.all').focusNode!.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp); // focus cat29
+    await settle(tester);
+    expect(focusLabel(), 'live.category.cat29');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight); // into channels
+    await settle(tester);
+    expect(focusLabel(), startsWith('live.channel.'));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft); // back out
+    await settle(tester);
+    expect(
+      focusLabel(),
+      'live.category.cat29',
+      reason: 'Left from channels returns to the category the user was on',
+    );
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets(
+      'channel ArrowUp reaches the preview controls, then wraps to the last',
+      (tester) async {
+    await pumpWideScreenWith(tester, _ManySource());
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    // Up from the first channel lands on the preview panel's Favorite control —
+    // the only TV-reachable way to favorite a live channel.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+    expect(focusLabel(), 'live.preview.favorite');
+
+    // Up again wraps to the last channel (channel column wrap).
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+    expect(focusLabel(), startsWith('live.channel.'));
+    expect(focusLabel(), isNot('live.channel.first'));
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets('initial focus lands in the channel list, not a category',
+      (tester) async {
+    // With the contested dual-autofocus removed, the first channel is the sole
+    // autofocus, so OK plays immediately on entry.
+    await pumpWideScreenWith(tester, _ManySource());
+    await settle(tester);
+    expect(focusLabel(), startsWith('live.channel.'));
+
+    await unmount(tester);
+  });
+}
+
+/// A live-only fake with enough categories to scroll the sidebar (30) and
+/// enough channels to navigate (12) — the conditions DemoSource can't create,
+/// where the category→channel overflow and off-screen focus-landing bugs live.
+/// Channels are split between the first and last category so both are
+/// non-empty (selecting an empty category would hide the sidebar entirely).
+class _ManySource implements Source {
+  static final List<Category> _cats = [
+    for (var i = 0; i < 30; i++) Category(id: 'cat$i', title: 'Category $i'),
+  ];
+  static final List<Channel> _chans = [
+    for (var i = 0; i < 12; i++)
+      Channel(
+        id: 'ch$i',
+        name: 'Channel $i',
+        categoryId: i < 6 ? 'cat0' : 'cat29',
+        number: i + 1,
+      ),
+  ];
+
+  @override
+  String get id => 'many';
+
+  @override
+  String get name => 'Many';
+
+  @override
+  Future<void> connect() async {}
+
+  @override
+  Future<List<Category>> categories() async => _cats;
+
+  @override
+  Future<List<Channel>> channels({String? categoryId}) async => _chans;
+
+  @override
+  Future<StreamInfo> resolve(Channel channel) async =>
+      const StreamInfo(url: 'http://stream');
+
+  @override
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => throw UnsupportedError('no catch-up');
+
+  @override
+  Future<List<Programme>> epg(List<Channel> channels) async => const [];
+
+  @override
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
+      const [];
+
+  @override
+  Future<List<MediaItem>> mediaItems(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int? maxPages,
+  }) async => const [];
+
+  @override
+  Future<MediaPage> mediaItemsPage(
+    ContentKind kind, {
+    String? categoryId,
+    MediaItem? parent,
+    int page = 1,
+  }) async => MediaPage(items: const [], page: page, totalPages: page);
+
+  @override
+  Future<List<MediaItem>> searchMedia(
+    ContentKind kind,
+    String query, {
+    String? categoryId,
+  }) async => const [];
+
+  @override
+  Future<MediaItem> mediaDetails(MediaItem item) async => item;
+
+  @override
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      throw UnsupportedError('not playable');
+
+  @override
+  Future<DateTime?> subscriptionExpiry() async => null;
+
+  @override
+  Future<void> dispose() async {}
 }

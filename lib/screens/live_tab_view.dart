@@ -57,6 +57,10 @@ class LiveTabView extends StatelessWidget {
   final bool resolving;
   final ScrollController scrollController;
 
+  /// Scroll controller for the category sidebar, so the focus coordinator can
+  /// jump an off-screen category into build range before focusing it.
+  final ScrollController categoryScrollController;
+
   final FocusNode firstChannelFocusNode;
   final FocusNode Function(String channelId) focusNodeForChannel;
   final String? lastPlayedChannelId;
@@ -68,6 +72,7 @@ class LiveTabView extends StatelessWidget {
   final ValueChanged<Channel> onLongPressChannel;
   final ValueChanged<String> onChannelMoveLeft;
   final ValueChanged<String> onChannelMoveDown;
+  final ValueChanged<String> onChannelMoveUp;
 
   /// Opens catch-up for a channel (called only for archive-capable channels).
   final ValueChanged<Channel> onCatchup;
@@ -81,7 +86,19 @@ class LiveTabView extends StatelessWidget {
   final FocusNode Function(String? categoryId) focusNodeForCategory;
   final ValueChanged<String?> onCategorySelected;
   final VoidCallback onMoveRightToChannels;
+
+  /// D-pad handler for a category card (Right → channels, Up/Down cycle the
+  /// category list with wrap). Keyed by the card's own category id.
+  final KeyEventResult Function(String? categoryId, KeyEvent event)
+  onCategoryCardKey;
   final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
+
+  /// Routed focus nodes + D-pad handler for the preview panel's Favorite /
+  /// Catch-up controls (the top of the channel column on the wide layout).
+  final FocusNode previewFavoriteFocusNode;
+  final FocusNode previewCatchupFocusNode;
+  final KeyEventResult Function(bool fromCatchup, KeyEvent event)
+  onPreviewControlKey;
 
   /// Built lazily (only when the wide preview panel actually renders) so no
   /// video output — native platform view or media_kit texture — is created
@@ -102,6 +119,7 @@ class LiveTabView extends StatelessWidget {
     required this.deliberate,
     required this.resolving,
     required this.scrollController,
+    required this.categoryScrollController,
     required this.firstChannelFocusNode,
     required this.focusNodeForChannel,
     required this.lastPlayedChannelId,
@@ -112,13 +130,18 @@ class LiveTabView extends StatelessWidget {
     required this.onLongPressChannel,
     required this.onChannelMoveLeft,
     required this.onChannelMoveDown,
+    required this.onChannelMoveUp,
     required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
     required this.focusNodeForCategory,
     required this.onCategorySelected,
     required this.onMoveRightToChannels,
+    required this.onCategoryCardKey,
     required this.onPaneFallbackKey,
+    required this.previewFavoriteFocusNode,
+    required this.previewCatchupFocusNode,
+    required this.onPreviewControlKey,
     required this.previewVideoBuilder,
     required this.previewLoading,
     required this.previewError,
@@ -157,6 +180,7 @@ class LiveTabView extends StatelessWidget {
           selected: c.id == previewChannelId,
           onMoveLeftToCategory: () => onChannelMoveLeft(c.id),
           onMoveDown: () => onChannelMoveDown(c.id),
+          onMoveUp: () => onChannelMoveUp(c.id),
         );
       },
     );
@@ -209,9 +233,11 @@ class LiveTabView extends StatelessWidget {
                   child: _LiveCategoryPane(
                     categories: categories,
                     selectedCategoryId: selectedCategoryId,
+                    scrollController: categoryScrollController,
                     focusNodeForCategory: focusNodeForCategory,
                     onSelected: onCategorySelected,
                     onMoveRightToChannels: onMoveRightToChannels,
+                    onCategoryCardKey: onCategoryCardKey,
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -235,6 +261,9 @@ class LiveTabView extends StatelessWidget {
                         onCatchup: preview.hasArchive
                             ? () => onCatchup(preview)
                             : null,
+                        favoriteFocusNode: previewFavoriteFocusNode,
+                        catchupFocusNode: previewCatchupFocusNode,
+                        onControlKey: onPreviewControlKey,
                       ),
                       const SizedBox(height: 8),
                       Expanded(
@@ -258,16 +287,21 @@ class LiveTabView extends StatelessWidget {
 class _LiveCategoryPane extends StatelessWidget {
   final List<Category> categories;
   final String? selectedCategoryId;
+  final ScrollController scrollController;
   final FocusNode Function(String? categoryId) focusNodeForCategory;
   final ValueChanged<String?> onSelected;
   final VoidCallback onMoveRightToChannels;
+  final KeyEventResult Function(String? categoryId, KeyEvent event)
+  onCategoryCardKey;
 
   const _LiveCategoryPane({
     required this.categories,
     required this.selectedCategoryId,
+    required this.scrollController,
     required this.focusNodeForCategory,
     required this.onSelected,
     required this.onMoveRightToChannels,
+    required this.onCategoryCardKey,
   });
 
   @override
@@ -313,23 +347,17 @@ class _LiveCategoryPane extends StatelessWidget {
               ),
               Expanded(
                 child: ListView(
+                  controller: scrollController,
                   children: [
                     for (final item in items)
                       Builder(
                         builder: (context) {
                           final selected = item.id == selectedCategoryId;
                           return FocusableCard(
-                            autofocus: selected,
                             focusNode: focusNodeForCategory(item.id),
                             debugLabel: 'live.category.${item.id ?? 'all'}',
-                            onKeyEvent: (node, event) {
-                              final isRight =
-                                  event.logicalKey ==
-                                  LogicalKeyboardKey.arrowRight;
-                              if (!isRight) return KeyEventResult.ignored;
-                              onMoveRightToChannels();
-                              return KeyEventResult.handled;
-                            },
+                            onKeyEvent: (node, event) =>
+                                onCategoryCardKey(item.id, event),
                             onTap: () => onSelected(item.id),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -385,6 +413,12 @@ class _LivePreviewPanel extends StatelessWidget {
   /// Opens catch-up; null when the channel has no archive.
   final VoidCallback? onCatchup;
 
+  /// Routed focus nodes + D-pad handler for the Favorite / Catch-up controls,
+  /// so they join the channel column's contained navigation.
+  final FocusNode favoriteFocusNode;
+  final FocusNode catchupFocusNode;
+  final KeyEventResult Function(bool fromCatchup, KeyEvent event) onControlKey;
+
   const _LivePreviewPanel({
     required this.channel,
     required this.now,
@@ -397,6 +431,9 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.favorite,
     required this.onToggleFavorite,
     required this.onCatchup,
+    required this.favoriteFocusNode,
+    required this.catchupFocusNode,
+    required this.onControlKey,
   });
 
   String? get _hint {
@@ -558,10 +595,18 @@ class _LivePreviewPanel extends StatelessWidget {
                             ),
                           ),
                           if (onCatchup != null)
-                            _CatchupButton(onPressed: onCatchup!),
+                            _CatchupButton(
+                              onPressed: onCatchup!,
+                              focusNode: catchupFocusNode,
+                              onKeyEvent: (node, event) =>
+                                  onControlKey(true, event),
+                            ),
                           FavoriteButton(
                             favorite: favorite,
                             onPressed: onToggleFavorite,
+                            focusNode: favoriteFocusNode,
+                            onKeyEvent: (node, event) =>
+                                onControlKey(false, event),
                           ),
                         ],
                       ),
@@ -652,14 +697,31 @@ class _LivePreviewPanel extends StatelessWidget {
 /// channel reports [Channel.hasArchive].
 class _CatchupButton extends StatelessWidget {
   final VoidCallback onPressed;
-  const _CatchupButton({required this.onPressed});
+
+  /// Optional routed focus node + D-pad key handler (live preview panel only).
+  final FocusNode? focusNode;
+  final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
+
+  const _CatchupButton({
+    required this.onPressed,
+    this.focusNode,
+    this.onKeyEvent,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
+    final button = IconButton(
       tooltip: 'Catch-up',
+      focusNode: focusNode,
       icon: const Icon(Icons.history_rounded, color: AppColors.textLo),
       onPressed: onPressed,
+    );
+    if (onKeyEvent == null) return button;
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: onKeyEvent,
+      child: button,
     );
   }
 }
@@ -1020,6 +1082,7 @@ class _ChannelTile extends StatelessWidget {
   final VoidCallback? onLongPress;
   final VoidCallback onMoveLeftToCategory;
   final VoidCallback onMoveDown;
+  final VoidCallback onMoveUp;
 
   const _ChannelTile({
     required this.channel,
@@ -1035,6 +1098,7 @@ class _ChannelTile extends StatelessWidget {
     this.onLongPress,
     required this.onMoveLeftToCategory,
     required this.onMoveDown,
+    required this.onMoveUp,
   });
 
   @override
@@ -1056,12 +1120,17 @@ class _ChannelTile extends StatelessWidget {
       onKeyEvent: (node, event) {
         final isLeft = event.logicalKey == LogicalKeyboardKey.arrowLeft;
         final isDown = event.logicalKey == LogicalKeyboardKey.arrowDown;
-        if (!isLeft && !isDown) return KeyEventResult.ignored;
+        final isUp = event.logicalKey == LogicalKeyboardKey.arrowUp;
+        if (!isLeft && !isDown && !isUp) return KeyEventResult.ignored;
         if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
           return KeyEventResult.handled;
         }
         if (isLeft) {
           onMoveLeftToCategory();
+          return KeyEventResult.handled;
+        }
+        if (isUp) {
+          onMoveUp();
           return KeyEventResult.handled;
         }
         onMoveDown();
