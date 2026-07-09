@@ -41,6 +41,12 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// The stable node for the first visible channel row (gets `autofocus`).
   static const firstChannelLabel = '${channelLabelPrefix}first';
 
+  /// The preview panel's Favorite control (top of the channel column).
+  static const previewFavoriteLabel = 'live.preview.favorite';
+
+  /// The preview panel's Catch-up control (shown only for archive channels).
+  static const previewCatchupLabel = 'live.preview.catchup';
+
   /// The route key of an unrouted node (plain `Focus`/`FocusScope`) — the empty
   /// string, since [focusRouteKey] returns `''` for anything but a
   /// [RoutedFocusNode]. Such focus is routed via [lastFocusArea].
@@ -50,10 +56,16 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// target into build range before focusing it.
   static const _estimatedChannelRowExtent = 104.0;
 
+  /// Estimated height of one category row in the sidebar, for the same
+  /// jump-scroll-into-build-range trick as channels.
+  static const _estimatedCategoryRowExtent = 48.0;
+
   LiveFocusCoordinator({
     required this.scrollController,
+    required this.categoryScrollController,
     required this.visibleChannels,
     required this.categoryId,
+    required this.orderedCategoryIds,
     required this.channelById,
     required this.isLiveTab,
     required this.isRouteCurrent,
@@ -71,11 +83,20 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// The live list's scroll controller (owned by the screen).
   final ScrollController scrollController;
 
+  /// The category sidebar's scroll controller (owned by the screen), so an
+  /// off-screen category can be jump-scrolled into build range before it's
+  /// focused — otherwise `requestFocus` on an unbuilt node silently no-ops.
+  final ScrollController categoryScrollController;
+
   /// Current filtered channel list (the screen's memoized `_visible`).
   final List<Channel> Function() visibleChannels;
 
   /// Currently selected live category id (null = All).
   final String? Function() categoryId;
+
+  /// The category sidebar in display order (null = "All channels"), for
+  /// index-based Up/Down navigation with wrap.
+  final List<String?> Function() orderedCategoryIds;
 
   /// Channel lookup across the *full* (unfiltered) channel list.
   final Channel? Function(String id) channelById;
@@ -100,6 +121,15 @@ class LiveFocusCoordinator extends ChangeNotifier {
   final FocusNode firstChannelFocusNode = RoutedFocusNode(firstChannelLabel);
   final FocusNode searchCellFocusNode = RoutedFocusNode(searchCellLabel);
 
+  /// The preview panel's Favorite / Catch-up controls — the top of the channel
+  /// column, reached by ArrowUp from the first channel (wide layout only).
+  final FocusNode previewFavoriteFocusNode = RoutedFocusNode(
+    previewFavoriteLabel,
+  );
+  final FocusNode previewCatchupFocusNode = RoutedFocusNode(
+    previewCatchupLabel,
+  );
+
   final Map<String, FocusNode> _channelNodes = {};
   final Map<String, FocusNode> _categoryNodes = {};
   bool _pruneScheduled = false;
@@ -109,12 +139,20 @@ class LiveFocusCoordinator extends ChangeNotifier {
   String? get lastFocusedChannelId => _lastFocusedChannelId;
   String? _lastFocusedChannelId;
 
+  /// Last category that held focus in the sidebar, so returning from the
+  /// channel pane lands where the user was — not always the selected one.
+  String? get lastFocusedCategoryId => _lastFocusedCategoryId;
+  String? _lastFocusedCategoryId;
+
   LiveFocusArea lastFocusArea = LiveFocusArea.unknown;
 
-  /// Down-hold lock: once a Down hold starts in the channel list, subsequent
-  /// Down events stay locked to channel navigation until key-up, so a held
-  /// key can't leak into the category pane.
-  bool _downHoldFromChannels = false;
+  /// Vertical-hold lock: once a Up/Down hold starts in a pane, a *held* key
+  /// whose repeats land mid-scroll (focus transiently detached during a wrap
+  /// jump-scroll) keeps walking the *same* pane in the *same* direction until
+  /// key-up, so it can't leak into the neighbouring pane. [_heldArea] is the
+  /// locked pane (channels/category), [_heldForward] its direction (Down/next).
+  LiveFocusArea? _heldArea;
+  bool _heldForward = false;
 
   /// Per-category memory of the channel the user was on, so re-entering the
   /// channel pane resumes there instead of at the top.
@@ -248,10 +286,21 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   FocusNode focusNodeForCategory(String? categoryId) {
     final key = categoryId ?? 'all';
-    return _categoryNodes.putIfAbsent(
-      key,
-      () => RoutedFocusNode('$categoryLabelPrefix$key'),
-    );
+    return _categoryNodes.putIfAbsent(key, () {
+      final node = RoutedFocusNode('$categoryLabelPrefix$key');
+      node.addListener(() {
+        if (node.hasFocus) _lastFocusedCategoryId = categoryId;
+      });
+      return node;
+    });
+  }
+
+  /// The category id encoded in a `live.category.<key>` label (null for
+  /// `all`), or null for a non-category label.
+  String? categoryIdFromFocusLabel(String label) {
+    if (!label.startsWith(categoryLabelPrefix)) return null;
+    final key = label.substring(categoryLabelPrefix.length);
+    return key == 'all' ? null : key;
   }
 
   /// Per-channel [FocusNode]s are created lazily as rows scroll into view.
@@ -310,35 +359,215 @@ class LiveFocusCoordinator extends ChangeNotifier {
     lastFocusArea = LiveFocusArea.channels;
   }
 
-  /// Land focus on [categoryId]'s pane node, retrying across a few frames so a
-  /// fresh-selection rebuild/autofocus race (the channel list's first-row
-  /// autofocus + the scroll-to-top) can't strand focus on the channel list or
-  /// an unlabeled node — which would leave the root Back ladder unable to tell
-  /// where it is. Sets the last-focus area to category.
+  /// Land focus on [categoryId]'s pane node, scrolled into build range first
+  /// (an off-screen sidebar node has a null context, so a bare `requestFocus`
+  /// would no-op), then retrying across a few frames so a fresh-selection
+  /// rebuild/autofocus race (the channel list's first-row autofocus + the
+  /// scroll-to-top) can't strand focus on the channel list or an unlabeled
+  /// node — which would leave the root Back ladder unable to tell where it is.
   void focusCategory(String? categoryId) {
-    final node = focusNodeForCategory(categoryId);
-    node.requestFocus();
+    final ids = orderedCategoryIds();
+    final index = ids.indexOf(categoryId);
+    if (index >= 0) {
+      _focusCategoryByIndex(ids, index);
+    } else {
+      focusNodeForCategory(categoryId).requestFocus();
+      lastFocusArea = LiveFocusArea.category;
+    }
     _reassertFocus(
-      node,
+      focusNodeForCategory(categoryId),
       shouldRetry: (label) =>
           label.startsWith(channelLabelPrefix) || label == unlabeledLabel,
       attempts: 6,
     );
-    lastFocusArea = LiveFocusArea.category;
+    _lastFocusedCategoryId = categoryId;
   }
 
-  /// Move focus from the channel pane back to the selected category.
+  /// Move focus from the channel pane back to the category the user last had
+  /// (falling back to the selected one) — scrolled into range so it always
+  /// lands, even from a long, scrolled sidebar.
   void focusCategoryFromChannels() {
-    _downHoldFromChannels = false;
-    final categoryNode = focusNodeForCategory(categoryId());
-    categoryNode.requestFocus();
+    _heldArea = null;
+    final targetId = _lastFocusedCategoryId ?? categoryId();
+    final ids = orderedCategoryIds();
+    final index = ids.indexOf(targetId);
+    if (index >= 0) {
+      _focusCategoryByIndex(ids, index);
+    } else {
+      focusNodeForCategory(targetId).requestFocus();
+      lastFocusArea = LiveFocusArea.category;
+    }
     _reassertFocus(
-      categoryNode,
+      focusNodeForCategory(targetId),
       shouldRetry: (label) =>
           label.startsWith(channelLabelPrefix) || label == unlabeledLabel,
       attempts: 4,
     );
+  }
+
+  /// Focus the category at [index] in [ids], jump-scrolling the sidebar to
+  /// build the row first when it's off-screen (mirrors [_focusChannelByIndex]).
+  void _focusCategoryByIndex(List<String?> ids, int index) {
+    if (ids.isEmpty) return;
+    final clamped = index.clamp(0, ids.length - 1);
+    final targetId = ids[clamped];
+    final node = focusNodeForCategory(targetId);
+    _lastFocusedCategoryId = targetId;
     lastFocusArea = LiveFocusArea.category;
+    final targetLabel = '$categoryLabelPrefix${targetId ?? 'all'}';
+
+    // Is the target row painted within the viewport (not merely built in the
+    // cache extent)? A built-but-cached (off-screen) node can't take focus via a
+    // bare requestFocus — it must be scrolled into the visible range first. A
+    // non-scrolling sidebar (everything fits) is always on-screen.
+    bool onScreen() {
+      if (node.context == null || !categoryScrollController.hasClients) {
+        return false;
+      }
+      final pos = categoryScrollController.position;
+      if (pos.maxScrollExtent <= 0) return true;
+      final top = clamped * _estimatedCategoryRowExtent;
+      return top >= pos.pixels &&
+          top + _estimatedCategoryRowExtent <= pos.pixels + pos.viewportDimension;
+    }
+
+    if (!onScreen() && categoryScrollController.hasClients) {
+      // Jump the target roughly to the viewport centre (so the card's own
+      // scroll-on-focus doesn't then re-animate it), then focus post-frame —
+      // re-requesting the next frame, plus the reassert, so it lands once the
+      // jumped-to row has actually built.
+      final pos = categoryScrollController.position;
+      final centered =
+          (clamped * _estimatedCategoryRowExtent -
+                  (pos.viewportDimension - _estimatedCategoryRowExtent) / 2)
+              .clamp(0.0, pos.maxScrollExtent);
+      categoryScrollController.jumpTo(centered);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_disposed || !isMounted()) return;
+        node.requestFocus();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_disposed || !isMounted()) return;
+          node.requestFocus();
+        });
+      });
+      _reassertFocus(
+        node,
+        shouldRetry: (label) => label != targetLabel,
+        attempts: 4,
+      );
+      return;
+    }
+    node.requestFocus();
+    _reassertFocus(
+      node,
+      shouldRetry: (label) => label != targetLabel,
+      attempts: 4,
+    );
+  }
+
+  /// Move focus one category down, wrapping past the last back to the first.
+  void moveDownInCategories(String? currentId) {
+    final ids = orderedCategoryIds();
+    if (ids.isEmpty) return;
+    final i = ids.indexOf(currentId);
+    if (i < 0) return;
+    _focusCategoryByIndex(ids, (i + 1) % ids.length);
+  }
+
+  /// Move focus one category up, wrapping past the first back to the last.
+  void moveUpInCategories(String? currentId) {
+    final ids = orderedCategoryIds();
+    if (ids.isEmpty) return;
+    final i = ids.indexOf(currentId);
+    if (i < 0) return;
+    _focusCategoryByIndex(ids, (i - 1 + ids.length) % ids.length);
+  }
+
+  /// Key handler for a category sidebar card. Right → channels; Up/Down cycle
+  /// within the category list (wrapping) and are consumed so directional
+  /// traversal can't spill focus into the channel pane. Returns [KeyEventResult]
+  /// for the card's `onKeyEvent`.
+  KeyEventResult handleCategoryCardKey(String? categoryId, KeyEvent event) {
+    final key = event.logicalKey;
+    final isVertical =
+        key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown;
+    if (key != LogicalKeyboardKey.arrowRight && !isVertical) {
+      return KeyEventResult.ignored;
+    }
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      focusChannelsFromCategory();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      moveDownInCategories(categoryId);
+    } else {
+      moveUpInCategories(categoryId);
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// Move focus to the preview panel controls (the top of the channel column).
+  /// When they aren't attached (narrow/phone layout, or a wide frame before the
+  /// preview panel builds), wrap to the last channel instead.
+  void focusPreviewControls() {
+    if (previewFavoriteFocusNode.context != null) {
+      previewFavoriteFocusNode.requestFocus();
+      lastFocusArea = LiveFocusArea.unknown;
+      return;
+    }
+    _focusLastChannel();
+  }
+
+  /// Focus the last visible channel (used by the Up-wrap from the preview
+  /// controls), jump-scrolling it into range if needed.
+  void _focusLastChannel() {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    noteFocusedChannel(visible.last.id);
+    _focusChannelByIndex(visible, visible.length - 1);
+    lastFocusArea = LiveFocusArea.channels;
+  }
+
+  /// Key handler for a preview control (Favorite / Catch-up). Down → first
+  /// channel; Up → wrap to the last channel; Left → the sibling control or the
+  /// category pane; Right → the sibling control. [fromCatchup] tells which
+  /// control fired. Contained so focus can't leak out of the live column.
+  KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
+    final key = event.logicalKey;
+    final isNav =
+        key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.arrowLeft ||
+        key == LogicalKeyboardKey.arrowRight;
+    if (!isNav) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      focusFirstChannel();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _focusLastChannel();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (!fromCatchup && previewCatchupFocusNode.context != null) {
+        previewCatchupFocusNode.requestFocus();
+      } else {
+        focusCategoryFromChannels();
+      }
+      return KeyEventResult.handled;
+    }
+    // arrowRight
+    if (fromCatchup && previewFavoriteFocusNode.context != null) {
+      previewFavoriteFocusNode.requestFocus();
+    }
+    return KeyEventResult.handled;
   }
 
   void _focusChannelByIndex(List<Channel> visible, int index) {
@@ -428,6 +657,25 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _focusChannelByIndex(visible, nextIndex);
   }
 
+  /// Move focus one row up from [channelId]. From the first row it goes to the
+  /// preview panel controls (the top of the channel column) — or, when those
+  /// aren't present (narrow layout), wraps to the last row.
+  void moveUpInChannels(String channelId) {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    final currentIndex = visible.indexWhere(
+      (channel) => channel.id == channelId,
+    );
+    if (currentIndex < 0) return;
+    if (currentIndex == 0) {
+      focusPreviewControls();
+      return;
+    }
+    final prevIndex = currentIndex - 1;
+    noteFocusedChannel(visible[prevIndex].id);
+    _focusChannelByIndex(visible, prevIndex);
+  }
+
   /// Restore focus to [targetId] (e.g. the last-played channel) if visible,
   /// else the first row. No-op when the list is empty.
   void restoreFocusToChannel(String? targetId) {
@@ -490,15 +738,15 @@ class LiveFocusCoordinator extends ChangeNotifier {
   bool handleGlobalKeyEvent(KeyEvent event) {
     if (!isLiveTab() || !isRouteCurrent()) return false;
     final key = event.logicalKey;
-    if (key == LogicalKeyboardKey.arrowDown && event is KeyUpEvent) {
-      _downHoldFromChannels = false;
+    final isVertical =
+        key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown;
+    if (isVertical && event is KeyUpEvent) {
+      _heldArea = null;
       return false;
     }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
-
-    if (key != LogicalKeyboardKey.arrowDown) {
-      _downHoldFromChannels = false;
-    }
+    if (!isVertical) _heldArea = null;
 
     final label = focusRouteKey(FocusManager.instance.primaryFocus);
     if (_handleDigitKey(event, focusAreaFromLabel(label))) return true;
@@ -507,24 +755,48 @@ class LiveFocusCoordinator extends ChangeNotifier {
       focusChannelsFromCategory();
       return true;
     }
-    if (key == LogicalKeyboardKey.arrowDown) {
-      final channelId = channelIdFromFocusLabel(label);
-      if (channelId != null) {
-        _downHoldFromChannels = true;
-        noteFocusedChannel(channelId);
-        moveDownInChannels(channelId);
-        return true;
-      }
-      // Once a Down hold started in channels, keep all subsequent Down events
-      // locked to channel navigation until key-up to avoid pane leakage.
-      if (_downHoldFromChannels) {
-        final visible = visibleChannels();
-        if (visible.isEmpty) return true;
-        final fallbackId = _lastFocusedChannelId ?? visible.first.id;
-        moveDownInChannels(fallbackId);
-        return true;
-      }
+    if (!isVertical) return false;
+    // Preview controls run their own contained Up/Down handler — don't let the
+    // held-continuation logic below fight it.
+    if (label == previewFavoriteLabel || label == previewCatchupLabel) {
+      _heldArea = null;
       return false;
+    }
+
+    final forward = key == LogicalKeyboardKey.arrowDown;
+    // Attached on a channel row.
+    final channelId = channelIdFromFocusLabel(label);
+    if (channelId != null) {
+      _heldArea = LiveFocusArea.channels;
+      _heldForward = forward;
+      noteFocusedChannel(channelId);
+      forward ? moveDownInChannels(channelId) : moveUpInChannels(channelId);
+      return true;
+    }
+    // Attached on a category row.
+    if (label.startsWith(categoryLabelPrefix)) {
+      final catId = categoryIdFromFocusLabel(label);
+      _heldArea = LiveFocusArea.category;
+      _heldForward = forward;
+      forward ? moveDownInCategories(catId) : moveUpInCategories(catId);
+      return true;
+    }
+    // Detached mid-scroll but a hold is in progress: keep walking the same pane
+    // in the same direction so a held key can't leak into the neighbour pane.
+    if (_heldArea == LiveFocusArea.channels) {
+      final visible = visibleChannels();
+      if (visible.isEmpty) return true;
+      final fallbackId = _lastFocusedChannelId ?? visible.first.id;
+      _heldForward
+          ? moveDownInChannels(fallbackId)
+          : moveUpInChannels(fallbackId);
+      return true;
+    }
+    if (_heldArea == LiveFocusArea.category) {
+      _heldForward
+          ? moveDownInCategories(_lastFocusedCategoryId)
+          : moveUpInCategories(_lastFocusedCategoryId);
+      return true;
     }
     return false;
   }
@@ -582,7 +854,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (label.startsWith(categoryLabelPrefix) &&
         key == LogicalKeyboardKey.arrowDown &&
         (event is KeyDownEvent || event is KeyRepeatEvent) &&
-        _downHoldFromChannels) {
+        _heldArea == LiveFocusArea.channels &&
+        _heldForward) {
       final visible = visibleChannels();
       if (visible.isNotEmpty) {
         moveDownInChannels(_lastFocusedChannelId ?? visible.first.id);
@@ -619,6 +892,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _digitTimer?.cancel();
     searchCellFocusNode.dispose();
     firstChannelFocusNode.dispose();
+    previewFavoriteFocusNode.dispose();
+    previewCatchupFocusNode.dispose();
     for (final node in _channelNodes.values) {
       node.dispose();
     }

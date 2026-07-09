@@ -17,8 +17,10 @@ void main() {
   }) {
     return LiveFocusCoordinator(
       scrollController: ScrollController(),
+      categoryScrollController: ScrollController(),
       visibleChannels: () => visible,
       categoryId: () => categoryId,
+      orderedCategoryIds: () => const [null],
       channelById: (id) =>
           visible.where((channel) => channel.id == id).firstOrNull,
       isLiveTab: () => true,
@@ -66,6 +68,20 @@ void main() {
       expect(coordinator.channelIdFromFocusLabel('live.category.all'), isNull);
       expect(coordinator.channelIdFromFocusLabel('Focus'), isNull);
       expect(coordinator.channelIdFromFocusLabel('live.channel.'), isNull);
+    });
+  });
+
+  group('categoryIdFromFocusLabel', () {
+    test('maps the "all" label to null and others to their id', () {
+      final coordinator = makeCoordinator();
+      addTearDown(coordinator.dispose);
+      expect(coordinator.categoryIdFromFocusLabel('live.category.all'), isNull);
+      expect(
+        coordinator.categoryIdFromFocusLabel('live.category.news'),
+        'news',
+      );
+      expect(coordinator.categoryIdFromFocusLabel('live.channel.a'), isNull);
+      expect(coordinator.categoryIdFromFocusLabel('Focus'), isNull);
     });
   });
 
@@ -176,8 +192,10 @@ void main() {
     var visible = channels(['a', 'b', 'c']);
     final coordinator = LiveFocusCoordinator(
       scrollController: ScrollController(),
+      categoryScrollController: ScrollController(),
       visibleChannels: () => visible,
       categoryId: () => null,
+      orderedCategoryIds: () => const [null],
       channelById: (id) =>
           visible.where((channel) => channel.id == id).firstOrNull,
       isLiveTab: () => true,

@@ -9,21 +9,36 @@ class FavoriteButton extends StatelessWidget {
   final bool favorite;
   final VoidCallback onPressed;
 
+  /// Optional routed focus node + D-pad key handler, so the live preview panel
+  /// can slot the star into its contained Up/Down/Left/Right navigation.
+  final FocusNode? focusNode;
+  final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
+
   const FavoriteButton({
     super.key,
     required this.favorite,
     required this.onPressed,
+    this.focusNode,
+    this.onKeyEvent,
   });
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
+    final button = IconButton(
       tooltip: favorite ? 'Remove from favorites' : 'Add to favorites',
+      focusNode: focusNode,
       icon: Icon(
         favorite ? Icons.star_rounded : Icons.star_outline_rounded,
         color: favorite ? AppColors.accent : AppColors.textLo,
       ),
       onPressed: onPressed,
+    );
+    if (onKeyEvent == null) return button;
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: onKeyEvent,
+      child: button,
     );
   }
 }
