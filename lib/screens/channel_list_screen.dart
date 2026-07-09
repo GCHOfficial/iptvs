@@ -1025,8 +1025,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // changing the current filter (the user presses OK to actually switch).
     if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix) &&
         label != '${LiveFocusCoordinator.categoryLabelPrefix}all') {
-      _focus.focusNodeForCategory(null).requestFocus();
-      _focus.noteFocusArea(LiveFocusArea.category);
+      _focus.focusCategory(null);
       return;
     }
     // Movies/series grid — same top-of-list rung as the channel list, then
@@ -1064,9 +1063,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       focusTabs();
       return;
     }
-    // Tabs, app-bar buttons, or anything unlabeled: nothing left to peel —
-    // exit, behind a double-Back confirmation so mashing Back up the ladder
-    // can't overshoot into the launcher.
+    // Focus on an un-routed node reads as '' — the toolbar/enrich button, an
+    // AppBar action, the category dropdown, or a transient node mid-rebuild.
+    // That is never the top of the ladder (the content tabs are
+    // RoutedFocusNodes), so recover to the current tab — one rung below exit —
+    // instead of falling through to the exit path. Without this, arrowing onto
+    // the toolbar or a fresh category selection would make Back exit the app.
+    if (label.isEmpty) {
+      focusTabs();
+      return;
+    }
+    // The content tabs, or anything else routed but unhandled: nothing left to
+    // peel — exit, behind a double-Back confirmation so mashing Back up the
+    // ladder can't overshoot into the launcher.
     // This screen is HomeShell's root content (not a pushed route), so there
     // may be nothing to pop to — fall back to the platform default (exit).
     if (Navigator.of(context).canPop()) {
@@ -1397,8 +1406,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         _scrollToTop();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
-          _focus.focusNodeForCategory(_categoryId).requestFocus();
-          _focus.noteFocusArea(LiveFocusArea.category);
+          // Reassert focus for a few frames — a bare requestFocus here races
+          // the channel-list autofocus/scroll and can leave focus on an
+          // unlabeled node, which strands the Back ladder until you scroll.
+          _focus.focusCategory(_categoryId);
         });
       },
       onMoveRightToChannels: _focus.focusChannelsFromCategory,
