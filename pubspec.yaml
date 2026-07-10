@@ -49,6 +49,7 @@ dependencies:
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
   cached_network_image: ^3.4.1
+  package_info_plus: ^10.2.0
 
 dev_dependencies:
   flutter_test:

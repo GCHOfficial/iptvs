@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider roots. `getTemporaryDirectory()` (path_provider) maps to the
+     app's cache dir on Android, where update_installer.dart writes the APK. -->
+<paths>
+    <cache-path name="downloads" path="." />
+</paths>

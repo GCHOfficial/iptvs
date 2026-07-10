@@ -6,6 +6,7 @@ import '../data/cloud_config.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
+import '../data/update_service.dart';
 import '../sources/source_config.dart';
 import '../sources/xtream_source.dart';
 import '../theme.dart';
@@ -14,6 +15,7 @@ import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
 import 'profile_pick_screen.dart';
 import 'source_settings_screen.dart';
+import 'update_flow.dart';
 
 IconData _kindIcon(SourceKind k) {
   switch (k) {
@@ -235,6 +237,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
                 const Padding(
                   padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
                   child: _PickerStartupCard(),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: _UpdateCard(),
                 ),
                 Expanded(
                   child: _sources.isEmpty
@@ -1174,6 +1180,95 @@ class _PickerStartupCardState extends State<_PickerStartupCard> {
                 fontWeight: FontWeight.w600,
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Check for updates" row. A single focus stop (like [_PickerStartupCard]);
+/// OK/tap runs a manual GitHub check and drives the update flow. The hint shows
+/// the running version (see [appVersion]).
+class _UpdateCard extends StatefulWidget {
+  const _UpdateCard();
+
+  @override
+  State<_UpdateCard> createState() => _UpdateCardState();
+}
+
+class _UpdateCardState extends State<_UpdateCard> {
+  String? _version; // null while loading
+  bool _checking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion();
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final version = await appVersion();
+      if (mounted) setState(() => _version = version);
+    } catch (_) {
+      // Leave the generic label if the platform version is unavailable.
+    }
+  }
+
+  Future<void> _check() async {
+    if (_checking) return;
+    setState(() => _checking = true);
+    try {
+      await runUpdateCheck(context, manual: true);
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _check,
+      scrollOnFocus: false,
+      debugLabel: 'sources.checkUpdate',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.system_update_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Check for updates'),
+                  Text(
+                    _version == null ? 'Current version' : 'Version $_version',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_checking)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.chevron_right,
+                size: 20,
+                color: AppColors.textLo,
+              ),
           ],
         ),
       ),
