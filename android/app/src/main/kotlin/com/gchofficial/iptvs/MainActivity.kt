@@ -1,18 +1,23 @@
 package com.gchofficial.iptvs
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.lang.ref.WeakReference
 
 @UnstableApi
 class MainActivity : FlutterActivity() {
     private lateinit var nativeHdrChannel: MethodChannel
     private lateinit var previewChannel: MethodChannel
+    private lateinit var updatesChannel: MethodChannel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -209,6 +214,63 @@ class MainActivity : FlutterActivity() {
                     }
                     startActivityForResult(intent, REQUEST_NATIVE_PLAYER)
                     result.success(true)
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
+        // In-app update: launches the system package installer for a
+        // downloaded release APK, and the "install unknown apps" settings.
+        updatesChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "iptvs/updates",
+        )
+        updatesChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "installApk" -> {
+                    val path = (call.arguments as? Map<*, *>)?.get("path") as? String
+                    if (path.isNullOrBlank()) {
+                        result.error("bad_args", "Missing APK path", null)
+                        return@setMethodCallHandler
+                    }
+                    // minSdk 26 → canRequestPackageInstalls() always applies.
+                    if (!packageManager.canRequestPackageInstalls()) {
+                        result.success("needs_permission")
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val uri = FileProvider.getUriForFile(
+                            this,
+                            "$packageName.fileprovider",
+                            File(path),
+                        )
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_ACTIVITY_NEW_TASK,
+                            )
+                        }
+                        startActivity(intent)
+                        result.success("launched")
+                    } catch (e: Exception) {
+                        result.error("install_failed", e.message, null)
+                    }
+                }
+
+                "requestInstallPermission" -> {
+                    try {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName"),
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("settings_failed", e.message, null)
+                    }
                 }
 
                 else -> result.notImplemented()

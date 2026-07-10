@@ -12,6 +12,9 @@ import '../data/metadata_provider.dart';
 import '../data/source_store.dart';
 import '../data/tmdb_client.dart';
 import '../data/tvdb_client.dart';
+import '../data/update_installer.dart';
+import '../data/update_service.dart';
+import '../data/update_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../widgets/profile_avatar.dart';
@@ -19,6 +22,7 @@ import 'channel_list_screen.dart';
 import 'cloud_sync_screen.dart';
 import 'profile_pick_screen.dart';
 import 'sources_screen.dart';
+import 'update_flow.dart';
 
 /// Top-level shell: resolves the active source, builds its repository, and
 /// shows the channel list — or an empty state when nothing is configured.
@@ -52,6 +56,19 @@ class _HomeShellState extends State<HomeShell> {
       return true;
     }());
     _loadActive();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeCheckForUpdate());
+  }
+
+  /// Throttled boot-time update check. Runs only on the release platforms
+  /// (Android/Windows) where an in-app install is possible, and only if we
+  /// haven't checked recently. [runUpdateCheck] prompts (respecting the
+  /// skipped-version preference) and records the check time.
+  Future<void> _maybeCheckForUpdate() async {
+    if (!UpdateInstaller.isSupported) return;
+    const store = UpdateStore();
+    if (!shouldAutoCheck(await store.lastCheck(), DateTime.now())) return;
+    if (!mounted) return;
+    await runUpdateCheck(context, manual: false, store: store);
   }
 
   @override
