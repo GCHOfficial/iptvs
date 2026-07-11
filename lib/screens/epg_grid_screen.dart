@@ -2,21 +2,26 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/library_repository.dart';
 import '../sources/source.dart';
 import '../theme.dart';
-import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 
 /// EPG timeline grid: one row per channel, programme cells positioned on a
 /// shared time axis (now − 1h → now + 24h, fixed scale).
 ///
-/// Layout: rows are a lazy vertical `ListView`; the horizontal axis is **not**
-/// a Scrollable — every row (and the hour header) is translated by one shared
-/// [ValueNotifier] offset, which avoids N linked ScrollControllers and keeps
-/// all rows aligned. D-pad focus drives the horizontal offset (a focused cell
-/// scrolls itself into view); touch/mouse drag pans it.
+/// Navigation uses an explicit **selection cursor**, not Flutter's geometry
+/// traversal. The screen owns `_selectedRow` + a `_cursorTime`; the selected
+/// programme on a row is the one airing at the cursor time. A single [Focus]
+/// on the grid captures the D-pad and moves the selection deterministically —
+/// Left/Right step programme boundaries, Up/Down change channel **keeping the
+/// time column** (the way a TV guide should feel), and the screen drives the
+/// pan/scroll itself. This means navigation never depends on whether a lazy
+/// row or an async programme cell happens to be built, and the cells
+/// themselves are cheap (no per-cell focus node / InkWell / Material), so
+/// scrolling stays smooth on long, dense guides.
 ///
 /// OK on a *current* programme plays the channel; on a *past* programme of an
 /// archive-capable channel it plays catch-up; anything else shows details.
@@ -44,7 +49,8 @@ class EpgGridScreen extends StatefulWidget {
   State<EpgGridScreen> createState() => _EpgGridScreenState();
 }
 
-class _EpgGridScreenState extends State<EpgGridScreen> {
+class _EpgGridScreenState extends State<EpgGridScreen>
+    with SingleTickerProviderStateMixin {
   static const _pxPerMinute = 4.0; // 30-min slot = 120px
   static const _rowHeight = 52.0;
   static const _channelColumnWidth = 168.0;
@@ -52,9 +58,7 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   late final DateTime _windowStart = _floorToHalfHour(
     DateTime.now().subtract(const Duration(hours: 1)),
   );
-  late final DateTime _windowEnd = _windowStart.add(
-    const Duration(hours: 25),
-  );
+  late final DateTime _windowEnd = _windowStart.add(const Duration(hours: 25));
 
   double get _totalWidth =>
       _windowEnd.difference(_windowStart).inMinutes * _pxPerMinute;
@@ -63,14 +67,31 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   final ValueNotifier<double> _hOffset = ValueNotifier(0);
   final ScrollController _vController = ScrollController();
 
-  /// The programme whose cell currently holds D-pad focus — shown in full in
-  /// the detail bar below the grid, since narrow cells truncate their title.
-  final ValueNotifier<(Channel, Programme)?> _focused = ValueNotifier(null);
+  /// Smooth horizontal pans (D-pad reveal / jump-to-now); touch drag sets the
+  /// offset directly instead.
+  late final AnimationController _panController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 220),
+  );
+  Animation<double>? _panTween;
 
-  /// Per-channel programme futures, request-coalesced: rows built in the same
-  /// frame share one `programmesForChannels` query instead of N single-channel
-  /// lookups.
-  final Map<String, Completer<List<Programme>>> _programmeRequests = {};
+  /// The grid's single D-pad focus target — cells are not individually
+  /// focusable, so navigation is a pure selection model.
+  final FocusNode _gridFocus = FocusNode(debugLabel: 'epg.grid');
+
+  /// Selection cursor: which channel row, and the anchor time whose programme
+  /// is selected. Up/Down keep [_cursorTime] so movement holds the time column.
+  int _selectedRow = 0;
+  late DateTime _cursorTime = DateTime.now();
+
+  /// Width of the timeline area (viewport minus the channel column), cached
+  /// from the body [LayoutBuilder] for the reveal/clamp math.
+  double _timelineWidth = 0;
+
+  /// Resolved per-channel programmes, loaded lazily and request-coalesced: rows
+  /// built in the same frame share one `programmesForChannels` query.
+  final Map<String, List<Programme>> _programmes = {};
+  final Set<String> _requested = {};
   final Set<String> _pendingBatch = {};
   bool _batchScheduled = false;
 
@@ -84,63 +105,36 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   @override
   void initState() {
     super.initState();
+    _panController.addListener(() {
+      final tween = _panTween;
+      if (tween != null) _hOffset.value = tween.value;
+    });
+    if (widget.channels.isNotEmpty) _ensureLoaded(widget.channels.first.id);
     // Open at "now" minus a little context.
     WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToNow());
   }
 
   @override
   void dispose() {
+    _panController.dispose();
     _hOffset.dispose();
     _vController.dispose();
-    _focused.dispose();
+    _gridFocus.dispose();
     super.dispose();
   }
 
-  double _offsetForTime(DateTime time) =>
-      time.difference(_windowStart).inMinutes * _pxPerMinute;
+  // ── Programme loading ──────────────────────────────────────────────────────
 
-  double get _maxOffset {
-    final viewport =
-        (context.findRenderObject() as RenderBox?)?.size.width ??
-        MediaQuery.sizeOf(context).width;
-    final visible = viewport - _channelColumnWidth;
-    return (_totalWidth - visible).clamp(0.0, double.infinity);
-  }
-
-  void _panTo(double offset) =>
-      _hOffset.value = offset.clamp(0.0, _maxOffset);
-
-  void _jumpToNow() {
-    if (!mounted) return;
-    _panTo(_offsetForTime(DateTime.now()) - 120);
-  }
-
-  /// Keep the focused cell's span in view.
-  void _revealSpan(double left, double width) {
-    final viewport =
-        ((context.findRenderObject() as RenderBox?)?.size.width ??
-            MediaQuery.sizeOf(context).width) -
-        _channelColumnWidth;
-    final offset = _hOffset.value;
-    if (left < offset) {
-      _panTo(left - 24);
-    } else if (left + width > offset + viewport) {
-      _panTo(left + width - viewport + 24);
+  void _ensureLoaded(String channelId) {
+    if (_programmes.containsKey(channelId) || _requested.contains(channelId)) {
+      return;
     }
-  }
-
-  Future<List<Programme>> _programmesFor(Channel channel) {
-    final existing = _programmeRequests[channel.id];
-    if (existing != null) return existing.future;
-    final completer = Completer<List<Programme>>();
-    _programmeRequests[channel.id] = completer;
-    _pendingBatch.add(channel.id);
+    _requested.add(channelId);
+    _pendingBatch.add(channelId);
     if (!_batchScheduled) {
       _batchScheduled = true;
-      // Coalesce all channels requested this frame into one query.
       scheduleMicrotask(_runBatch);
     }
-    return completer.future;
   }
 
   Future<void> _runBatch() async {
@@ -148,6 +142,8 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
     final ids = _pendingBatch.toList();
     _pendingBatch.clear();
     if (ids.isEmpty) return;
+    List<Programme> forId(Map<String, List<Programme>> byChannel, String id) =>
+        byChannel[id] ?? const [];
     try {
       final byChannel = await widget.repo.db.programmesForChannels(
         widget.repo.source.id,
@@ -155,17 +151,179 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
         from: _windowStart,
         to: _windowEnd,
       );
-      for (final id in ids) {
-        _programmeRequests[id]?.complete(byChannel[id] ?? const []);
-      }
-    } catch (error) {
-      for (final id in ids) {
-        final completer = _programmeRequests.remove(id);
-        if (completer != null && !completer.isCompleted) {
-          completer.complete(const []);
+      if (!mounted) return;
+      setState(() {
+        for (final id in ids) {
+          _programmes[id] = forId(byChannel, id);
         }
-      }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        for (final id in ids) {
+          _programmes[id] = const [];
+        }
+      });
     }
+  }
+
+  // ── Geometry / reveal ──────────────────────────────────────────────────────
+
+  double _offsetForTime(DateTime time) =>
+      time.difference(_windowStart).inMinutes * _pxPerMinute;
+
+  double get _maxOffset =>
+      (_totalWidth - _timelineWidth).clamp(0.0, double.infinity);
+
+  /// Set the offset directly (touch drag), cancelling any running pan.
+  void _panTo(double offset) {
+    _panController.stop();
+    _hOffset.value = offset.clamp(0.0, _maxOffset);
+  }
+
+  /// Smoothly pan to [target] (D-pad reveal / jump-to-now).
+  void _animatePanTo(double target) {
+    final clamped = target.clamp(0.0, _maxOffset);
+    if ((clamped - _hOffset.value).abs() < 0.5) return;
+    _panTween = Tween<double>(begin: _hOffset.value, end: clamped).animate(
+      CurvedAnimation(parent: _panController, curve: Curves.easeOutCubic),
+    );
+    _panController.forward(from: 0);
+  }
+
+  /// Keep [programme]'s span horizontally in view.
+  void _revealProgramme(Programme programme) {
+    final left = _offsetForTime(_clampStart(programme));
+    final width = _cellWidth(programme, _windowStart, _windowEnd);
+    final offset = _hOffset.value;
+    if (left < offset) {
+      _animatePanTo(left - 24);
+    } else if (left + width > offset + _timelineWidth) {
+      _animatePanTo(left + width - _timelineWidth + 24);
+    }
+  }
+
+  /// Scroll the vertical list so channel [row] is visible.
+  void _revealRow(int row) {
+    if (!_vController.hasClients) return;
+    final position = _vController.position;
+    final top = row * _rowHeight;
+    final current = position.pixels;
+    final viewport = position.viewportDimension;
+    double? target;
+    if (top < current) {
+      target = top;
+    } else if (top + _rowHeight > current + viewport) {
+      target = top + _rowHeight - viewport;
+    }
+    if (target == null) return;
+    _vController.animateTo(
+      target.clamp(0.0, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  DateTime _clampStart(Programme p) =>
+      p.start.isBefore(_windowStart) ? _windowStart : p.start;
+
+  void _jumpToNow() {
+    if (!mounted) return;
+    final now = DateTime.now();
+    setState(() => _cursorTime = now);
+    // Instant, not animated: the guide should open already at "now", and an
+    // auto-started ticker here would fight the widget-test clock.
+    _panTo(_offsetForTime(now) - 120);
+  }
+
+  // ── Selection / navigation ─────────────────────────────────────────────────
+
+  /// The currently selected (channel, programme), or null when the selected
+  /// row has no loaded programmes yet.
+  (Channel, Programme)? get _selection {
+    if (widget.channels.isEmpty) return null;
+    final channel = widget.channels[_selectedRow];
+    final items = _programmes[channel.id];
+    if (items == null || items.isEmpty) return null;
+    final index = _selectedIndexIn(items, _cursorTime);
+    if (index < 0) return null;
+    return (channel, items[index]);
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowUp) {
+      // At the top row, let focus escape upward to the AppBar action instead of
+      // being trapped in the grid.
+      if (_selectedRow == 0) return KeyEventResult.ignored;
+      return _moveRow(-1);
+    }
+    if (key == LogicalKeyboardKey.arrowDown) return _moveRow(1);
+    if (key == LogicalKeyboardKey.arrowLeft) return _moveColumn(-1);
+    if (key == LogicalKeyboardKey.arrowRight) return _moveColumn(1);
+    if (key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter ||
+        key == LogicalKeyboardKey.space) {
+      _activateSelected();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// Move the selection [delta] rows, clamped (no wrap). Keeps [_cursorTime] so
+  /// the time column holds; drives the vertical scroll deterministically.
+  KeyEventResult _moveRow(int delta) {
+    final channels = widget.channels;
+    if (channels.isEmpty) return KeyEventResult.handled;
+    final next = (_selectedRow + delta).clamp(0, channels.length - 1);
+    if (next == _selectedRow) return KeyEventResult.handled;
+    setState(() => _selectedRow = next);
+    _ensureLoaded(channels[next].id);
+    _revealRow(next);
+    // The selected programme sits at the same time, so it's usually already in
+    // view; reveal it anyway in case its span extends off-screen.
+    final items = _programmes[channels[next].id];
+    if (items != null && items.isNotEmpty) {
+      final index = _selectedIndexIn(items, _cursorTime);
+      if (index >= 0) _revealProgramme(items[index]);
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// Step the selection [delta] programmes along the current row, clamped (no
+  /// wrap), moving [_cursorTime] to the new programme's start.
+  KeyEventResult _moveColumn(int delta) {
+    final channels = widget.channels;
+    if (channels.isEmpty) return KeyEventResult.handled;
+    final items = _programmes[channels[_selectedRow].id];
+    if (items == null || items.isEmpty) return KeyEventResult.handled;
+    final current = _selectedIndexIn(items, _cursorTime);
+    final next = (current + delta).clamp(0, items.length - 1);
+    if (next == current) return KeyEventResult.handled;
+    final programme = items[next];
+    setState(() => _cursorTime = _clampStart(programme));
+    _revealProgramme(programme);
+    return KeyEventResult.handled;
+  }
+
+  void _activateSelected() {
+    final selection = _selection;
+    if (selection == null) return;
+    _showProgrammeDetails(selection.$1, selection.$2);
+  }
+
+  /// Touch: select the tapped cell and open its details.
+  void _selectAndActivate(int row, Programme programme) {
+    setState(() {
+      _selectedRow = row;
+      _cursorTime = _clampStart(programme);
+    });
+    _gridFocus.requestFocus();
+    _showProgrammeDetails(widget.channels[row], programme);
   }
 
   @override
@@ -181,97 +339,104 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
           ),
         ],
       ),
-      body: GestureDetector(
-        onHorizontalDragUpdate: (details) =>
-            _panTo(_hOffset.value - details.delta.dx),
-        child: Column(
-          children: [
-            _hourHeader(),
-            const Divider(height: 1, color: AppColors.line),
-            Expanded(
-              child: widget.channels.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No channels',
-                        style: TextStyle(color: AppColors.textLo),
-                      ),
-                    )
-                  : ListView.builder(
-                      controller: _vController,
-                      itemExtent: _rowHeight,
-                      itemCount: widget.channels.length,
-                      itemBuilder: (context, i) => _ChannelRow(
-                        channel: widget.channels[i],
-                        autofocus: i == 0,
-                        programmes: _programmesFor(widget.channels[i]),
-                        windowStart: _windowStart,
-                        windowEnd: _windowEnd,
-                        pxPerMinute: _pxPerMinute,
-                        totalWidth: _totalWidth,
-                        channelColumnWidth: _channelColumnWidth,
-                        hOffset: _hOffset,
-                        onRevealSpan: _revealSpan,
-                        onActivate: (programme) =>
-                            _activate(widget.channels[i], programme),
-                        onFocusProgramme: (programme) =>
-                            _focused.value = (widget.channels[i], programme),
-                      ),
-                    ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          _timelineWidth = (constraints.maxWidth - _channelColumnWidth).clamp(
+            0.0,
+            double.infinity,
+          );
+          return Focus(
+            focusNode: _gridFocus,
+            autofocus: true,
+            onKeyEvent: _onKey,
+            child: GestureDetector(
+              onHorizontalDragUpdate: (details) =>
+                  _panTo(_hOffset.value - details.delta.dx),
+              child: Column(
+                children: [
+                  _hourHeader(),
+                  const Divider(height: 1, color: AppColors.line),
+                  Expanded(
+                    child: widget.channels.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No channels',
+                              style: TextStyle(color: AppColors.textLo),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: _vController,
+                            itemExtent: _rowHeight,
+                            itemCount: widget.channels.length,
+                            itemBuilder: (context, i) {
+                              final channel = widget.channels[i];
+                              _ensureLoaded(channel.id);
+                              return _ChannelRow(
+                                channel: channel,
+                                programmes: _programmes[channel.id] ?? const [],
+                                isSelectedRow: i == _selectedRow,
+                                cursorTime: _cursorTime,
+                                windowStart: _windowStart,
+                                windowEnd: _windowEnd,
+                                pxPerMinute: _pxPerMinute,
+                                timelineWidth: _timelineWidth,
+                                channelColumnWidth: _channelColumnWidth,
+                                hOffset: _hOffset,
+                                onTapProgramme: (programme) =>
+                                    _selectAndActivate(i, programme),
+                              );
+                            },
+                          ),
+                  ),
+                  _focusedDetailBar(),
+                ],
+              ),
             ),
-            _focusedDetailBar(),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
 
-  /// Detail strip for the focused cell: cells too narrow for their title (a
+  /// Detail strip for the selected cell: cells too narrow for their title (a
   /// 15-minute programme is ~60px wide) get their full name/time read here.
   Widget _focusedDetailBar() {
-    return ValueListenableBuilder<(Channel, Programme)?>(
-      valueListenable: _focused,
-      builder: (context, value, _) {
-        if (value == null) return const SizedBox.shrink();
-        final (channel, programme) = value;
-        final description = programme.description;
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
-          decoration: const BoxDecoration(
-            color: AppColors.panel,
-            border: Border(top: BorderSide(color: AppColors.line)),
+    final selection = _selection;
+    if (selection == null) return const SizedBox.shrink();
+    final (channel, programme) = selection;
+    final description = programme.description;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      decoration: const BoxDecoration(
+        color: AppColors.panel,
+        border: Border(top: BorderSide(color: AppColors.line)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            programme.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: AppColors.textHi,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                programme.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: AppColors.textHi,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}'
-                '${description != null && description.isNotEmpty ? ' · $description' : ''}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
-              ),
-            ],
+          const SizedBox(height: 2),
+          Text(
+            '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}'
+            '${description != null && description.isNotEmpty ? ' · $description' : ''}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: AppColors.textLo, fontSize: 12),
           ),
-        );
-      },
+        ],
+      ),
     );
-  }
-
-  void _activate(Channel channel, Programme programme) {
-    _showProgrammeDetails(channel, programme);
   }
 
   void _showProgrammeDetails(Channel channel, Programme programme) {
@@ -394,40 +559,73 @@ class _EpgGridScreenState extends State<EpgGridScreen> {
   }
 }
 
+/// Index of the programme selected at [t]: the one whose [start, stop) contains
+/// [t], else (in a gap, or before the first) the last one starting at/before
+/// [t], else the first. [items] must be sorted by start. -1 when empty.
+int _selectedIndexIn(List<Programme> items, DateTime t) {
+  if (items.isEmpty) return -1;
+  for (var i = 0; i < items.length; i++) {
+    final p = items[i];
+    if (!p.start.isAfter(t) && p.stop.isAfter(t)) return i;
+  }
+  var index = 0;
+  for (var i = 0; i < items.length; i++) {
+    if (!items[i].start.isAfter(t)) {
+      index = i;
+    } else {
+      break;
+    }
+  }
+  return index;
+}
+
+double _cellWidth(Programme programme, DateTime windowStart, DateTime windowEnd) {
+  final start = programme.start.isBefore(windowStart)
+      ? windowStart
+      : programme.start;
+  final stop = programme.stop.isAfter(windowEnd) ? windowEnd : programme.stop;
+  final width = stop.difference(start).inMinutes * _EpgGridScreenState._pxPerMinute;
+  return width < 24 ? 24 : width;
+}
+
 class _ChannelRow extends StatelessWidget {
   final Channel channel;
-  final bool autofocus;
-  final Future<List<Programme>> programmes;
+  final List<Programme> programmes;
+  final bool isSelectedRow;
+  final DateTime cursorTime;
   final DateTime windowStart;
   final DateTime windowEnd;
   final double pxPerMinute;
-  final double totalWidth;
+  final double timelineWidth;
   final double channelColumnWidth;
   final ValueNotifier<double> hOffset;
-  final void Function(double left, double width) onRevealSpan;
-  final ValueChanged<Programme> onActivate;
-  final ValueChanged<Programme> onFocusProgramme;
+  final ValueChanged<Programme> onTapProgramme;
 
   const _ChannelRow({
     required this.channel,
-    required this.autofocus,
     required this.programmes,
+    required this.isSelectedRow,
+    required this.cursorTime,
     required this.windowStart,
     required this.windowEnd,
     required this.pxPerMinute,
-    required this.totalWidth,
+    required this.timelineWidth,
     required this.channelColumnWidth,
     required this.hOffset,
-    required this.onRevealSpan,
-    required this.onActivate,
-    required this.onFocusProgramme,
+    required this.onTapProgramme,
   });
 
   double _left(DateTime time) =>
       time.difference(windowStart).inMinutes * pxPerMinute;
 
+  DateTime _clampStart(Programme p) =>
+      p.start.isBefore(windowStart) ? windowStart : p.start;
+
   @override
   Widget build(BuildContext context) {
+    final selectedIndex = isSelectedRow
+        ? _selectedIndexIn(programmes, cursorTime)
+        : -1;
     return Row(
       children: [
         SizedBox(
@@ -458,10 +656,7 @@ class _ChannelRow extends StatelessWidget {
                         : channel.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppColors.textHi,
-                      fontSize: 12,
-                    ),
+                    style: const TextStyle(color: AppColors.textHi, fontSize: 12),
                   ),
                 ),
               ],
@@ -472,97 +667,56 @@ class _ChannelRow extends StatelessWidget {
           child: ClipRect(
             child: ValueListenableBuilder<double>(
               valueListenable: hOffset,
-              builder: (context, offset, child) => Transform.translate(
-                offset: Offset(-offset, 0),
-                child: child,
-              ),
-              child: OverflowBox(
-                alignment: Alignment.centerLeft,
-                minWidth: 0,
-                maxWidth: totalWidth,
-                child: SizedBox(
-                  width: totalWidth,
-                  child: FutureBuilder<List<Programme>>(
-                    future: programmes,
-                    builder: (context, snapshot) {
-                      final items = snapshot.data;
-                      if (items == null || items.isEmpty) {
-                        return const SizedBox.shrink();
-                      }
-                      return Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          for (final (i, programme) in items.indexed)
-                            Positioned(
-                              left: _left(
-                                programme.start.isBefore(windowStart)
-                                    ? windowStart
-                                    : programme.start,
-                              ),
-                              width: _cellWidth(programme),
-                              top: 2,
-                              bottom: 2,
-                              child: _ProgrammeCell(
-                                programme: programme,
-                                autofocus: autofocus && i == _nowIndex(items),
-                                onTap: () => onActivate(programme),
-                                onFocused: () {
-                                  onFocusProgramme(programme);
-                                  onRevealSpan(
-                                    _left(
-                                      programme.start.isBefore(windowStart)
-                                          ? windowStart
-                                          : programme.start,
-                                    ),
-                                    _cellWidth(programme),
-                                  );
-                                },
-                              ),
-                            ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              ),
+              builder: (context, offset, _) {
+                // Horizontal virtualization: build only the cells whose span
+                // intersects the visible window (+ a buffer). Safe now that
+                // cells aren't focus targets — nothing to strand.
+                const buffer = 240.0;
+                final from = offset - buffer;
+                final to = offset + timelineWidth + buffer;
+                final cells = <Widget>[];
+                for (var i = 0; i < programmes.length; i++) {
+                  final p = programmes[i];
+                  final left = _left(_clampStart(p));
+                  final width = _cellWidth(p, windowStart, windowEnd);
+                  if (left + width < from || left > to) continue;
+                  cells.add(
+                    Positioned(
+                      left: left - offset,
+                      width: width,
+                      top: 2,
+                      bottom: 2,
+                      child: _ProgrammeCell(
+                        programme: p,
+                        selected: i == selectedIndex,
+                        onTap: () => onTapProgramme(p),
+                      ),
+                    ),
+                  );
+                }
+                return Stack(clipBehavior: Clip.hardEdge, children: cells);
+              },
             ),
           ),
         ),
       ],
     );
   }
-
-  double _cellWidth(Programme programme) {
-    final start = programme.start.isBefore(windowStart)
-        ? windowStart
-        : programme.start;
-    final stop = programme.stop.isAfter(windowEnd)
-        ? windowEnd
-        : programme.stop;
-    final width = stop.difference(start).inMinutes * pxPerMinute;
-    return width < 24 ? 24 : width;
-  }
-
-  int _nowIndex(List<Programme> items) {
-    final now = DateTime.now();
-    final index = items.indexWhere(
-      (p) => !p.start.isAfter(now) && p.stop.isAfter(now),
-    );
-    return index < 0 ? 0 : index;
-  }
 }
 
+/// A lightweight programme cell — a plain tappable container with a
+/// selection-driven highlight. Deliberately *not* a [FocusableCard]: hundreds
+/// are laid out per screen, so it carries no focus node, InkWell, Material or
+/// implicit animation. Focus/selection lives in the parent grid.
 class _ProgrammeCell extends StatelessWidget {
   final Programme programme;
-  final bool autofocus;
+  final bool selected;
   final VoidCallback onTap;
-  final VoidCallback onFocused;
 
   const _ProgrammeCell({
     required this.programme,
-    required this.autofocus,
+    required this.selected,
     required this.onTap,
-    required this.onFocused,
   });
 
   @override
@@ -571,18 +725,18 @@ class _ProgrammeCell extends StatelessWidget {
     final isCurrent =
         !programme.start.isAfter(now) && programme.stop.isAfter(now);
     final isPast = !programme.stop.isAfter(now);
-    return Focus(
-      canRequestFocus: false,
-      skipTraversal: true,
-      onFocusChange: (focused) {
-        if (focused) onFocused();
-      },
-      child: FocusableCard(
-        onTap: onTap,
-        autofocus: autofocus,
-        // The horizontal axis isn't a Scrollable; onFocused pans it instead.
-        // Vertical ensureVisible still applies via the outer ListView.
-        scrollOnFocus: true,
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        decoration: BoxDecoration(
+          color: selected ? AppColors.panelHi : AppColors.panel,
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.line,
+            width: selected ? 2 : 1,
+          ),
+        ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           child: Align(
