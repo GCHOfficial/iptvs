@@ -109,6 +109,23 @@ void main() {
   Future<void> pumpWideScreen(WidgetTester tester) =>
       pumpWideScreenWith(tester, DemoSource());
 
+  // Pump the screen in a narrow (phone) layout: no category side-pane, no
+  // inline preview panel — just the channel list. Used to exercise the phone
+  // Up-from-first-channel wrap (which lands on the last, off-screen, row).
+  Future<void> pumpNarrowScreenWith(WidgetTester tester, Source source) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final repo = LibraryRepository(source: source, db: db);
+    await tester.pumpWidget(
+      MaterialApp(home: ChannelListScreen(repo: repo, config: config)),
+    );
+    // The first channel row marks a loaded live list (no "Playlists" pane here).
+    await pumpUntil(tester, find.text('Channel 0'));
+  }
+
   // Pump a handful of frames so a coordinator focus move that jump-scrolls an
   // off-screen row into range (post-frame focus + retry) can converge.
   Future<void> settle(WidgetTester tester) async {
@@ -592,7 +609,7 @@ void main() {
   });
 
   focusTestWidgets(
-      'channel ArrowUp reaches the preview controls, then wraps to the last',
+      'channel ArrowUp reaches the preview controls and stays there',
       (tester) async {
     await pumpWideScreenWith(tester, _ManySource());
     final firstChannel = tester
@@ -608,11 +625,45 @@ void main() {
     await settle(tester);
     expect(focusLabel(), 'live.preview.favorite');
 
-    // Up again wraps to the last channel (channel column wrap).
+    // Up again is contained: the preview controls are the top of the channel
+    // column, so focus stays put. It must NOT wrap to the last channel — that
+    // flung a long list to its bottom and stranded the Back ladder mid-list.
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
     await settle(tester);
-    expect(focusLabel(), startsWith('live.channel.'));
-    expect(focusLabel(), isNot('live.channel.first'));
+    expect(focusLabel(), 'live.preview.favorite');
+
+    // And Back from here peels cleanly to the category sidebar (not mid-list).
+    await tester.binding.handlePopRoute();
+    await settle(tester);
+    expect(focusLabel(), startsWith('live.category.'));
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets(
+      'narrow layout: ArrowUp from the first channel lands on the last (no limbo)',
+      (tester) async {
+    // The phone/narrow layout has no preview controls above the list, so Up
+    // from the first channel wraps to the last. On a list long enough that the
+    // last row is off-screen, focus must actually LAND on it (the hardened
+    // jump-scroll + reassert) rather than sit in limbo with no row highlighted —
+    // the reported "focused no channel for some time" symptom.
+    await pumpNarrowScreenWith(tester, _ManySource());
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+
+    expect(
+      focusLabel(),
+      'live.channel.ch11',
+      reason: 'Up from the first channel should land on the last, not limbo',
+    );
 
     await unmount(tester);
   });

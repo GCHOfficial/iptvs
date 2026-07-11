@@ -522,8 +522,9 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _focusLastChannel();
   }
 
-  /// Focus the last visible channel (used by the Up-wrap from the preview
-  /// controls), jump-scrolling it into range if needed.
+  /// Focus the last visible channel — the narrow/phone-layout Up-wrap from the
+  /// first channel, where there are no preview controls above it to land on —
+  /// jump-scrolling it into range if needed.
   void _focusLastChannel() {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
@@ -533,9 +534,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
   }
 
   /// Key handler for a preview control (Favorite / Catch-up). Down → first
-  /// channel; Up → wrap to the last channel; Left → the sibling control or the
-  /// category pane; Right → the sibling control. [fromCatchup] tells which
-  /// control fired. Contained so focus can't leak out of the live column.
+  /// channel; Up → contained (these controls are the top of the channel
+  /// column, so Up stays put); Left → the sibling control or the category
+  /// pane; Right → the sibling control. [fromCatchup] tells which control
+  /// fired. Contained so focus can't leak out of the live column.
   KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
     final key = event.logicalKey;
     final isNav =
@@ -552,7 +554,9 @@ class LiveFocusCoordinator extends ChangeNotifier {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
-      _focusLastChannel();
+      // Stay on the control: it's the top of the channel column. Up used to
+      // wrap to the last channel, which flung a long list to its bottom and
+      // stranded the Back ladder mid-list — jarring and disorienting.
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
@@ -578,6 +582,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
       return;
     }
     final node = focusNodeForChannel(visible[clamped].id);
+    final targetLabel = '$channelLabelPrefix${visible[clamped].id}';
     if (node.context == null && scrollController.hasClients) {
       // The target row isn't built — jump-scroll it into range, then focus
       // post-frame (with one nudge retry if the estimate fell short).
@@ -604,6 +609,17 @@ class LiveFocusCoordinator extends ChangeNotifier {
           node.requestFocus();
         });
       });
+      // A big jump (wrap to the last/first row, a digit jump) can leave the
+      // freshly-scrolled row a frame or two from building, so the post-frame
+      // `requestFocus` above no-ops and focus sits in limbo (no row
+      // highlighted) — the reported "focused no channel for some time". Keep
+      // re-requesting across a few frames until the row builds and takes focus
+      // (same self-correcting retry the category-landing paths use).
+      _reassertFocus(
+        node,
+        shouldRetry: (label) => label != targetLabel,
+        attempts: 6,
+      );
       return;
     }
     node.requestFocus();
