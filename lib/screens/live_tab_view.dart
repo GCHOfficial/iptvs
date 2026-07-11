@@ -955,113 +955,148 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
     final current = widget.now;
     final upcoming = widget.next;
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: AppColors.line,
-                  borderRadius: BorderRadius.circular(2),
+      child: ConstrainedBox(
+        // Cap the sheet height so it never expands to the full screen: that
+        // pushed the drag handle up against the status bar (a downward drag
+        // pulled the OS notification shade) and clipped the lower controls
+        // off with no way to scroll to them. Mirrors CatchupSheet.
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.85,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: AppColors.line,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
-            ),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: AspectRatio(
-                aspectRatio: 16 / 9,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Container(color: Colors.black),
-                    // Only once loaded: building PreviewVideo earlier would spin
-                    // up the media_kit texture while the native path is still
-                    // deciding whether it's needed at all.
-                    if (widget.preview.channelId == widget.channel.id &&
-                        widget.preview.stream != null &&
-                        widget.preview.error == null)
-                      PreviewVideo(preview: widget.preview),
-                    if (widget.preview.loading || _buffering)
-                      const Center(
-                        child: SizedBox(
-                          width: 28,
-                          height: 28,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+              // Scroll the video + text/EPG so tall content (large/landscape
+              // phones) never clips; the Play button below stays pinned and
+              // always tappable.
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: AspectRatio(
+                          aspectRatio: 16 / 9,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Container(color: Colors.black),
+                              // Only once loaded: building PreviewVideo earlier
+                              // would spin up the media_kit texture while the
+                              // native path is still deciding whether it's
+                              // needed at all.
+                              if (widget.preview.channelId ==
+                                      widget.channel.id &&
+                                  widget.preview.stream != null &&
+                                  widget.preview.error == null)
+                                PreviewVideo(preview: widget.preview),
+                              if (widget.preview.loading || _buffering)
+                                const Center(
+                                  child: SizedBox(
+                                    width: 28,
+                                    height: 28,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.channel.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppColors.textHi,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                    ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.channel.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.textHi,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          if (widget.onCatchup != null)
+                            _CatchupButton(
+                              onPressed: () {
+                                Navigator.of(context).pop();
+                                widget.onCatchup!();
+                              },
+                            ),
+                          FavoriteButton(
+                            favorite: _favorite,
+                            onPressed: () {
+                              setState(() => _favorite = !_favorite);
+                              widget.onToggleFavorite();
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      if (current != null)
+                        Text(
+                          '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textHi,
+                            fontSize: 14,
+                          ),
+                        )
+                      else
+                        const Text(
+                          'No programme information',
+                          style: TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 14,
+                          ),
+                        ),
+                      if (upcoming != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-                if (widget.onCatchup != null)
-                  _CatchupButton(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      widget.onCatchup!();
-                    },
-                  ),
-                FavoriteButton(
-                  favorite: _favorite,
-                  onPressed: () {
-                    setState(() => _favorite = !_favorite);
-                    widget.onToggleFavorite();
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            if (current != null)
-              Text(
-                '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textHi, fontSize: 14),
-              )
-            else
-              const Text(
-                'No programme information',
-                style: TextStyle(color: AppColors.textLo, fontSize: 14),
               ),
-            if (upcoming != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textLo, fontSize: 13),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: widget.onPlay,
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: const Text('Play fullscreen'),
+                ),
               ),
             ],
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: widget.onPlay,
-                icon: const Icon(Icons.play_arrow_rounded),
-                label: const Text('Play fullscreen'),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
