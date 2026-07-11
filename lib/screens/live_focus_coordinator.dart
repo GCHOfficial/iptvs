@@ -534,10 +534,11 @@ class LiveFocusCoordinator extends ChangeNotifier {
   }
 
   /// Key handler for a preview control (Favorite / Catch-up). Down → first
-  /// channel; Up → contained (these controls are the top of the channel
-  /// column, so Up stays put); Left → the sibling control or the category
+  /// channel; Up → the toolbar's search box (the one focusable directly above
+  /// the preview panel), so search/tabs are reachable by D-pad from here, not
+  /// only via the Back ladder; Left → the sibling control or the category
   /// pane; Right → the sibling control. [fromCatchup] tells which control
-  /// fired. Contained so focus can't leak out of the live column.
+  /// fired. Left/Right/Down stay contained in the live column.
   KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
     final key = event.logicalKey;
     final isNav =
@@ -554,9 +555,15 @@ class LiveFocusCoordinator extends ChangeNotifier {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
-      // Stay on the control: it's the top of the channel column. Up used to
-      // wrap to the last channel, which flung a long list to its bottom and
-      // stranded the Back ladder mid-list — jarring and disorienting.
+      // Climb out of the channel column to the toolbar's search box, which sits
+      // directly above the preview panel — so the search field (and, above it,
+      // the content tabs) is reachable by D-pad from here, not only via the Back
+      // ladder. It deliberately does NOT wrap to the last channel: that flung a
+      // long list to its bottom and stranded the Back ladder mid-list.
+      if (searchCellFocusNode.context != null) {
+        searchCellFocusNode.requestFocus();
+        lastFocusArea = LiveFocusArea.search;
+      }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft) {

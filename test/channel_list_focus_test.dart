@@ -609,7 +609,7 @@ void main() {
   });
 
   focusTestWidgets(
-      'channel ArrowUp reaches the preview controls and stays there',
+      'channel ArrowUp reaches the preview controls, then the search box; Back peels to categories',
       (tester) async {
     await pumpWideScreenWith(tester, _ManySource());
     final firstChannel = tester
@@ -625,17 +625,88 @@ void main() {
     await settle(tester);
     expect(focusLabel(), 'live.preview.favorite');
 
-    // Up again is contained: the preview controls are the top of the channel
-    // column, so focus stays put. It must NOT wrap to the last channel — that
-    // flung a long list to its bottom and stranded the Back ladder mid-list.
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
-    await settle(tester);
-    expect(focusLabel(), 'live.preview.favorite');
-
-    // And Back from here peels cleanly to the category sidebar (not mid-list).
+    // Back from the preview controls peels cleanly to the category sidebar (not
+    // mid-list — it must NOT wrap to the last channel).
     await tester.binding.handlePopRoute();
     await settle(tester);
     expect(focusLabel(), startsWith('live.category.'));
+
+    // Return to the preview Favorite and press Up: it now climbs out of the
+    // channel column to the toolbar's search box (directly above the preview
+    // panel), so search/tabs are reachable by D-pad from here.
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+    expect(focusLabel(), 'live.preview.favorite');
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await settle(tester);
+    expect(focusLabel(), 'live.search.cell');
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets(
+      'OK-hold opens the D-pad-navigable channel menu; a quick OK does not',
+      (tester) async {
+    // The wide-layout path to favorite the focused channel without scrolling up
+    // to the preview panel: hold OK to open a menu on that channel.
+    await pumpWideScreenWith(tester, _ManySource());
+    final firstChannel = tester
+        .widgetList<FocusableCard>(find.byType(FocusableCard))
+        .firstWhere((c) => c.focusNode?.debugLabel == 'live.channel.first');
+    firstChannel.focusNode!.requestFocus();
+    await tester.pump();
+    expect(focusLabel(), 'live.channel.first');
+
+    // A quick OK (down→up well under the hold threshold) must NOT open the menu
+    // — it activates the tile exactly as before, so the TV play/preview gesture
+    // is untouched.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
+    await tester.pump(const Duration(milliseconds: 80));
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+    await tester.pump(const Duration(milliseconds: 600)); // past the hold window
+    expect(
+      find.text('Add to favorites'),
+      findsNothing,
+      reason: 'a quick OK press must not open the context menu',
+    );
+
+    // Hold OK past the threshold → the context menu opens on that channel.
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
+    await tester.pump(const Duration(milliseconds: 550)); // hold fires the timer
+    await tester.pump(const Duration(milliseconds: 250)); // dialog transition
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+    await tester.pump();
+
+    expect(
+      find.text('Play'),
+      findsOneWidget,
+      reason: 'OK-hold opens the channel context menu',
+    );
+    expect(find.text('Add to favorites'), findsOneWidget);
+    expect(
+      find.text('Catch-up'),
+      findsNothing,
+      reason: 'this channel has no archive → no Catch-up entry',
+    );
+
+    // Fully D-pad navigable: the first action autofocuses and Down moves between
+    // actions (proper TV-remote navigability inside the menu).
+    expect(focusLabel(), 'channel.menu.Play');
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(
+      focusLabel(),
+      'channel.menu.Add to favorites',
+      reason: 'Down moves between menu actions',
+    );
+
+    // Back closes the menu and returns to the channel (its scroll spot).
+    await tester.binding.handlePopRoute();
+    await tester.pump(); // start the pop
+    await tester.pump(const Duration(milliseconds: 300)); // finish dismiss anim
+    expect(find.text('Add to favorites'), findsNothing);
 
     await unmount(tester);
   });

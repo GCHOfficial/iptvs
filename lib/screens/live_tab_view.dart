@@ -4,7 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart'
-    show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
+    show KeyDownEvent, KeyEvent, KeyRepeatEvent, KeyUpEvent, LogicalKeyboardKey;
 
 import '../sources/source.dart';
 import '../theme.dart';
@@ -69,7 +69,12 @@ class LiveTabView extends StatelessWidget {
   final bool Function(String id) isFavorite;
   final ValueChanged<String> onToggleFavorite;
   final ValueChanged<Channel> onPlayChannel;
-  final ValueChanged<Channel> onLongPressChannel;
+
+  /// Opens the per-channel context menu (Play / Favorite / Catch-up, plus
+  /// Preview on phones) for the focused channel — the path to favorite a channel
+  /// *in place*, without scrolling up to the preview panel. Triggered by OK-hold
+  /// (D-pad, wide layout) or a touch long-press (wide layout or Android phone).
+  final ValueChanged<Channel> onContextMenuChannel;
   final ValueChanged<String> onChannelMoveLeft;
   final ValueChanged<String> onChannelMoveDown;
   final ValueChanged<String> onChannelMoveUp;
@@ -127,7 +132,7 @@ class LiveTabView extends StatelessWidget {
     required this.isFavorite,
     required this.onToggleFavorite,
     required this.onPlayChannel,
-    required this.onLongPressChannel,
+    required this.onContextMenuChannel,
     required this.onChannelMoveLeft,
     required this.onChannelMoveDown,
     required this.onChannelMoveUp,
@@ -151,8 +156,14 @@ class LiveTabView extends StatelessWidget {
     BuildContext context, {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
-    final allowLongPressPreview =
-        deliberate && MediaQuery.of(context).size.width < kWideLayoutMinWidth;
+    final wide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+    // The channel context menu is the in-place favorite path (Play / Favorite /
+    // Catch-up, plus Preview on phones). Touch long-press opens it on the wide
+    // layout (TV/desktop) and on Android phones; OK-hold (D-pad) opens it wherever
+    // there's a remote (the wide layout). The phone's audible Preview sheet is an
+    // entry in the menu, so moving long-press onto the menu loses nothing.
+    final allowMenuLongPress = wide || deliberate;
+    final allowMenuHold = wide;
     return ListView.builder(
       controller: scrollController,
       padding: padding,
@@ -174,9 +185,10 @@ class LiveTabView extends StatelessWidget {
               : c.id == lastPlayedChannelId,
           focusNode: i == 0 ? firstChannelFocusNode : focusNodeForChannel(c.id),
           onTap: () => onPlayChannel(c),
-          onLongPress: allowLongPressPreview
-              ? () => onLongPressChannel(c)
+          onLongPress: allowMenuLongPress
+              ? () => onContextMenuChannel(c)
               : null,
+          onContextMenu: allowMenuHold ? () => onContextMenuChannel(c) : null,
           selected: c.id == previewChannelId,
           onMoveLeftToCategory: () => onChannelMoveLeft(c.id),
           onMoveDown: () => onChannelMoveDown(c.id),
@@ -1103,7 +1115,7 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
   }
 }
 
-class _ChannelTile extends StatelessWidget {
+class _ChannelTile extends StatefulWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
@@ -1115,6 +1127,12 @@ class _ChannelTile extends StatelessWidget {
   final String? debugLabel;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+
+  /// Opens the channel context menu on an OK-hold (D-pad). Null disables the
+  /// hold gesture entirely, so OK activates on press exactly as before — kept
+  /// off on phone/desktop where the wide preview panel / long-press sheet cover
+  /// favoriting. See [_ChannelTileState._onKey].
+  final VoidCallback? onContextMenu;
   final VoidCallback onMoveLeftToCategory;
   final VoidCallback onMoveDown;
   final VoidCallback onMoveUp;
@@ -1131,15 +1149,92 @@ class _ChannelTile extends StatelessWidget {
     this.debugLabel,
     required this.onTap,
     this.onLongPress,
+    this.onContextMenu,
     required this.onMoveLeftToCategory,
     required this.onMoveDown,
     required this.onMoveUp,
   });
 
   @override
+  State<_ChannelTile> createState() => _ChannelTileState();
+}
+
+class _ChannelTileState extends State<_ChannelTile> {
+  /// How long OK must be held before it opens the context menu instead of
+  /// playing — the platform long-press duration, so a normal OK tap (down→up)
+  /// never reaches it and the TV preview/play gesture is untouched.
+  static const _holdDuration = Duration(milliseconds: 500);
+
+  Timer? _holdTimer;
+  // Set once the hold timer has opened the menu, so the eventual key-up doesn't
+  // *also* play the channel.
+  bool _menuFired = false;
+
+  static bool _isActivateKey(LogicalKeyboardKey k) =>
+      k == LogicalKeyboardKey.select ||
+      k == LogicalKeyboardKey.enter ||
+      k == LogicalKeyboardKey.numpadEnter ||
+      k == LogicalKeyboardKey.gameButtonA ||
+      k == LogicalKeyboardKey.space;
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    super.dispose();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final isLeft = key == LogicalKeyboardKey.arrowLeft;
+    final isDown = key == LogicalKeyboardKey.arrowDown;
+    final isUp = key == LogicalKeyboardKey.arrowUp;
+    if (isLeft || isDown || isUp) {
+      if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+        return KeyEventResult.handled;
+      }
+      if (isLeft) {
+        widget.onMoveLeftToCategory();
+      } else if (isUp) {
+        widget.onMoveUp();
+      } else {
+        widget.onMoveDown();
+      }
+      return KeyEventResult.handled;
+    }
+
+    // OK-hold → context menu (TV only, when a menu is wired). We own the whole
+    // OK gesture here so a quick press still plays: activation fires on key-*up*
+    // (unless the hold timer already opened the menu), and we consume the event
+    // so the default ActivateIntent doesn't play on key-down underneath us.
+    if (widget.onContextMenu != null && _isActivateKey(key)) {
+      if (event is KeyDownEvent) {
+        _menuFired = false;
+        _holdTimer?.cancel();
+        _holdTimer = Timer(_holdDuration, () {
+          _menuFired = true;
+          widget.onContextMenu?.call();
+        });
+        return KeyEventResult.handled;
+      }
+      if (event is KeyUpEvent) {
+        _holdTimer?.cancel();
+        _holdTimer = null;
+        if (!_menuFired) widget.onTap();
+        return KeyEventResult.handled;
+      }
+      // Swallow key-repeats so a held OK doesn't leak into anything else.
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final current = now;
-    final upcoming = next;
+    final channel = widget.channel;
+    final current = widget.now;
+    final upcoming = widget.next;
+    final selected = widget.selected;
+    final enabled = widget.enabled;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1148,31 +1243,13 @@ class _ChannelTile extends StatelessWidget {
     }
 
     return FocusableCard(
-      autofocus: autofocus,
-      focusNode: focusNode,
-      debugLabel: debugLabel ?? 'live.channel.${channel.id}',
+      autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
+      debugLabel: widget.debugLabel ?? 'live.channel.${channel.id}',
       scrollOnFocus: true,
-      onKeyEvent: (node, event) {
-        final isLeft = event.logicalKey == LogicalKeyboardKey.arrowLeft;
-        final isDown = event.logicalKey == LogicalKeyboardKey.arrowDown;
-        final isUp = event.logicalKey == LogicalKeyboardKey.arrowUp;
-        if (!isLeft && !isDown && !isUp) return KeyEventResult.ignored;
-        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-          return KeyEventResult.handled;
-        }
-        if (isLeft) {
-          onMoveLeftToCategory();
-          return KeyEventResult.handled;
-        }
-        if (isUp) {
-          onMoveUp();
-          return KeyEventResult.handled;
-        }
-        onMoveDown();
-        return KeyEventResult.handled;
-      },
-      onTap: onTap,
-      onLongPress: onLongPress,
+      onKeyEvent: _onKey,
+      onTap: widget.onTap,
+      onLongPress: widget.onLongPress,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
@@ -1250,7 +1327,10 @@ class _ChannelTile extends StatelessWidget {
                 ],
               ),
             ),
-            if (favorite) ...[const SizedBox(width: 8), const FavoriteBadge()],
+            if (widget.favorite) ...[
+              const SizedBox(width: 8),
+              const FavoriteBadge(),
+            ],
             const SizedBox(width: 8),
             Icon(
               selected

@@ -701,6 +701,111 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (!handedOff) await _preview.stop(clearSelection: true);
   }
 
+  /// Per-channel context menu: favorite the focused channel *in place* — no
+  /// scrolling up to the preview panel and losing your row — plus Play and
+  /// Catch-up so favoriting isn't the only option. On phones it also carries a
+  /// **Preview** entry (the audible preview sheet), since long-press opens this
+  /// menu there instead of the sheet directly. Opened by an OK-hold / long-press
+  /// on the channel tile; the first action autofocuses and Up/Down move between
+  /// them, so it's fully D-pad navigable. `showDialog` restores focus to the same
+  /// tile on dismiss, so the scroll position is preserved.
+  Future<void> _showChannelMenu(Channel channel) async {
+    if (_resolving) return;
+    final favorite = _isFavorite(ContentKind.live, channel.id);
+    final narrow =
+        MediaQuery.of(context).size.width < kWideLayoutMinWidth;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        Widget action({
+          required IconData icon,
+          required String label,
+          required VoidCallback onSelected,
+          bool autofocus = false,
+        }) {
+          return FocusableCard(
+            autofocus: autofocus,
+            scrollOnFocus: false,
+            debugLabel: 'channel.menu.$label',
+            onTap: () {
+              Navigator.of(dialogContext).pop();
+              onSelected();
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Icon(icon, color: AppColors.textLo, size: 20),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textHi,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
+        return AlertDialog(
+          backgroundColor: AppColors.panel,
+          contentPadding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
+          title: Text(
+            channel.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: AppColors.textHi),
+          ),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                action(
+                  icon: Icons.play_arrow_rounded,
+                  label: 'Play',
+                  autofocus: true,
+                  onSelected: () => unawaited(_playChannelFullscreen(channel)),
+                ),
+                if (narrow)
+                  action(
+                    icon: Icons.smart_display_outlined,
+                    label: 'Preview',
+                    onSelected: () => unawaited(_showPreviewSheet(channel)),
+                  ),
+                action(
+                  icon: favorite
+                      ? Icons.star_rounded
+                      : Icons.star_outline_rounded,
+                  label: favorite
+                      ? 'Remove from favorites'
+                      : 'Add to favorites',
+                  onSelected: () =>
+                      unawaited(_toggleFavorite(ContentKind.live, channel.id)),
+                ),
+                if (channel.hasArchive)
+                  action(
+                    icon: Icons.history_rounded,
+                    label: 'Catch-up',
+                    onSelected: () => unawaited(_showCatchupSheet(channel)),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Open the catch-up picker for an archive-capable [channel]: list its cached
   /// past programmes and play the chosen one via [_playCatchup].
   Future<void> _showCatchupSheet(Channel channel) async {
@@ -1413,7 +1518,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       isFavorite: (id) => _isFavorite(ContentKind.live, id),
       onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
       onPlayChannel: _play,
-      onLongPressChannel: _showPreviewSheet,
+      onContextMenuChannel: _showChannelMenu,
       onChannelMoveLeft: (id) {
         _focus.rememberBrowsedChannel(id);
         _focus.focusCategoryFromChannels();
