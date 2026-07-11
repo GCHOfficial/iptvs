@@ -589,6 +589,10 @@ double _cellWidth(Programme programme, DateTime windowStart, DateTime windowEnd)
 }
 
 class _ChannelRow extends StatelessWidget {
+  /// Subtle full-row lift behind the selected channel (sits over the scaffold
+  /// ink; the cells keep their own fills on top).
+  static final Color _rowTint = AppColors.panelHi.withValues(alpha: 0.45);
+
   final Channel channel;
   final List<Programme> programmes;
   final bool isSelectedRow;
@@ -626,80 +630,113 @@ class _ChannelRow extends StatelessWidget {
     final selectedIndex = isSelectedRow
         ? _selectedIndexIn(programmes, cursorTime)
         : -1;
-    return Row(
-      children: [
-        SizedBox(
-          width: channelColumnWidth,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            child: Row(
+    // A full-row lift plus an accent bar in the channel column marks the active
+    // channel across the whole width — so it's clear *which* row the cursor is on
+    // even when the selected cell sits far along the timeline. A ColoredBox (no
+    // border/inset) keeps every row's timeline aligned with the hour ruler.
+    return ColoredBox(
+      color: isSelectedRow ? _rowTint : Colors.transparent,
+      child: Row(
+        children: [
+          SizedBox(
+            width: channelColumnWidth,
+            child: Stack(
               children: [
-                if (channel.logo case final logo? when logo.isNotEmpty)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: CachedNetworkImage(
-                      imageUrl: logo,
-                      width: 30,
-                      height: 30,
-                      fit: BoxFit.cover,
-                      memCacheWidth: imageCacheSize(context, 30),
-                      errorWidget: (_, _, _) => const SizedBox(width: 30),
-                    ),
-                  )
-                else
-                  const SizedBox(width: 30),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    channel.number != null
-                        ? '${channel.number} ${channel.name}'
-                        : channel.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: AppColors.textHi, fontSize: 12),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      if (channel.logo case final logo? when logo.isNotEmpty)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: CachedNetworkImage(
+                            imageUrl: logo,
+                            width: 30,
+                            height: 30,
+                            fit: BoxFit.cover,
+                            memCacheWidth: imageCacheSize(context, 30),
+                            errorWidget: (_, _, _) => const SizedBox(width: 30),
+                          ),
+                        )
+                      else
+                        const SizedBox(width: 30),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          channel.number != null
+                              ? '${channel.number} ${channel.name}'
+                              : channel.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: AppColors.textHi,
+                            fontSize: 12,
+                            fontWeight: isSelectedRow
+                                ? FontWeight.w700
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
+                if (isSelectedRow)
+                  Positioned(
+                    left: 0,
+                    top: 8,
+                    bottom: 8,
+                    child: Container(
+                      width: 3,
+                      decoration: BoxDecoration(
+                        color: AppColors.accent,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
-        ),
-        Expanded(
-          child: ClipRect(
-            child: ValueListenableBuilder<double>(
-              valueListenable: hOffset,
-              builder: (context, offset, _) {
-                // Horizontal virtualization: build only the cells whose span
-                // intersects the visible window (+ a buffer). Safe now that
-                // cells aren't focus targets — nothing to strand.
-                const buffer = 240.0;
-                final from = offset - buffer;
-                final to = offset + timelineWidth + buffer;
-                final cells = <Widget>[];
-                for (var i = 0; i < programmes.length; i++) {
-                  final p = programmes[i];
-                  final left = _left(_clampStart(p));
-                  final width = _cellWidth(p, windowStart, windowEnd);
-                  if (left + width < from || left > to) continue;
-                  cells.add(
-                    Positioned(
-                      left: left - offset,
-                      width: width,
-                      top: 2,
-                      bottom: 2,
-                      child: _ProgrammeCell(
-                        programme: p,
-                        selected: i == selectedIndex,
-                        onTap: () => onTapProgramme(p),
+          Expanded(
+            child: ClipRect(
+              child: ValueListenableBuilder<double>(
+                valueListenable: hOffset,
+                builder: (context, offset, _) {
+                  // Horizontal virtualization: build only the cells whose span
+                  // intersects the visible window (+ a buffer). Safe now that
+                  // cells aren't focus targets — nothing to strand.
+                  const buffer = 240.0;
+                  final from = offset - buffer;
+                  final to = offset + timelineWidth + buffer;
+                  final cells = <Widget>[];
+                  for (var i = 0; i < programmes.length; i++) {
+                    final p = programmes[i];
+                    final left = _left(_clampStart(p));
+                    final width = _cellWidth(p, windowStart, windowEnd);
+                    if (left + width < from || left > to) continue;
+                    cells.add(
+                      Positioned(
+                        left: left - offset,
+                        width: width,
+                        top: 2,
+                        bottom: 2,
+                        child: _ProgrammeCell(
+                          programme: p,
+                          selected: i == selectedIndex,
+                          onTap: () => onTapProgramme(p),
+                        ),
                       ),
-                    ),
-                  );
-                }
-                return Stack(clipBehavior: Clip.hardEdge, children: cells);
-              },
+                    );
+                  }
+                  return Stack(clipBehavior: Clip.hardEdge, children: cells);
+                },
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -719,6 +756,14 @@ class _ProgrammeCell extends StatelessWidget {
     required this.onTap,
   });
 
+  /// Selected cell fill: a solid accent-tinted lift (not just [AppColors.panelHi]),
+  /// so the selection cursor reads clearly from across the room and it's obvious
+  /// the D-pad is doing something — the reported "looks like nothing's selected".
+  static final Color _selectedFill = Color.alphaBlend(
+    AppColors.accent.withValues(alpha: 0.30),
+    AppColors.panel,
+  );
+
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
@@ -730,7 +775,7 @@ class _ProgrammeCell extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Container(
         decoration: BoxDecoration(
-          color: selected ? AppColors.panelHi : AppColors.panel,
+          color: selected ? _selectedFill : AppColors.panel,
           borderRadius: BorderRadius.circular(AppRadius.tile),
           border: Border.all(
             color: selected ? AppColors.accent : AppColors.line,
@@ -746,13 +791,17 @@ class _ProgrammeCell extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: isCurrent
+                color: selected || isCurrent
                     ? AppColors.textHi
                     : isPast
                     ? AppColors.textLo
                     : AppColors.textLo.withValues(alpha: 0.8),
                 fontSize: 12,
-                fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
+                fontWeight: selected
+                    ? FontWeight.w700
+                    : isCurrent
+                    ? FontWeight.w600
+                    : FontWeight.w400,
               ),
             ),
           ),
