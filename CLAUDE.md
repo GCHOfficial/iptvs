@@ -190,8 +190,10 @@ Playback headers (e.g. a MAG `User-Agent` / `Referer` for Stalker) are passed bo
 The app self-updates from its own **GitHub Releases** (`GCHOfficial/iptvs`; the `release.yml`
 pipeline attaches `iptvs-<ver>-android.apk` and `iptvs-<ver>-windows-x64.zip` to a `v<ver>` tag).
 The release body opens with a short **AI-generated changelog** (release.yml's "Generate AI
-changelog" step: commit subjects since the previous tag → Gemini `gemini-3.5-flash`, key in the
-`GEMINI_API_KEY` repo secret → `body_path`), with GitHub's auto-generated notes appended below.
+changelog" step: commit subjects since the previous tag → Gemini, key in the `GEMINI_API_KEY`
+repo secret → `body_path`), with GitHub's auto-generated notes appended below. It tries
+`gemini-3.5-flash` → `gemini-3.1-flash-lite` → `gemini-3-flash-preview` (two attempts each — the
+primary 503s under load, which cut v0.1.29 without a changelog).
 The step is fail-open — no key / no previous tag / API error just yields the auto notes — and the
 body is what the in-app update dialog renders.
 Layered like everything else — a shared Dart service does the network check + version compare; the
