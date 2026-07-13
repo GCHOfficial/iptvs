@@ -3,11 +3,13 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../data/update_installer.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../theme.dart';
+import '../widgets/release_notes_view.dart';
 
 /// The user's choice on the "Update available" dialog.
 enum UpdateChoice { update, later, skip }
@@ -89,53 +91,177 @@ Future<UpdateChoice?> showUpdateDialog(
       UpdateInstaller.isSupported && release.assetForCurrentPlatform() != null;
   return showDialog<UpdateChoice>(
     context: context,
-    builder: (_) => AlertDialog(
-      backgroundColor: AppColors.panelHi,
-      title: Text('Update available — ${release.version}'),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440, maxHeight: 340),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'You have $current. Version ${release.version} is available.',
-              style: const TextStyle(color: AppColors.textLo),
-            ),
-            if (release.notes.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Text(
-                    release.notes,
-                    style: const TextStyle(fontSize: 13, height: 1.35),
-                  ),
+    builder: (_) =>
+        _UpdateDialog(release: release, current: current, canInstall: canInstall),
+  );
+}
+
+/// The update prompt as a stateful dialog so D-pad focus stays **trapped**: on a
+/// TV, bare Up/Down otherwise fell through the modal barrier onto the channel
+/// list behind it. A boundary [Focus] consumes vertical arrows (they never
+/// escape) and routes them between the actions and a focusable, scrollable
+/// changelog, which is rendered by [ReleaseNotesView] instead of raw markdown.
+class _UpdateDialog extends StatefulWidget {
+  const _UpdateDialog({
+    required this.release,
+    required this.current,
+    required this.canInstall,
+  });
+
+  final ReleaseInfo release;
+  final String current;
+  final bool canInstall;
+
+  @override
+  State<_UpdateDialog> createState() => _UpdateDialogState();
+}
+
+class _UpdateDialogState extends State<_UpdateDialog> {
+  final FocusNode _notesFocus = FocusNode(debugLabel: 'update.notes');
+  final FocusNode _primaryFocus = FocusNode(debugLabel: 'update.primary');
+  final ScrollController _notesScroll = ScrollController();
+
+  bool get _hasNotes => widget.release.notes.isNotEmpty;
+
+  @override
+  void dispose() {
+    _notesFocus.dispose();
+    _primaryFocus.dispose();
+    _notesScroll.dispose();
+    super.dispose();
+  }
+
+  /// Boundary key wall: bare Up/Down are always consumed so focus can never
+  /// leave the dialog. Up enters the changelog; Down from the changelog returns
+  /// to the actions. Everything else (Left/Right traversal, OK, Back) flows on.
+  KeyEventResult _boundaryKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final isVertical =
+        key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown;
+    if (!isVertical) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.handled; // swallow the key-up too
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      if (_hasNotes && !_notesFocus.hasFocus) _notesFocus.requestFocus();
+      return KeyEventResult.handled;
+    }
+    // arrowDown
+    if (_notesFocus.hasFocus) _primaryFocus.requestFocus();
+    return KeyEventResult.handled;
+  }
+
+  /// While the changelog is focused, Up/Down scroll it; at an edge they fall
+  /// through (ignored) so the boundary can move focus in/out of the notes.
+  KeyEventResult _notesKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final up = key == LogicalKeyboardKey.arrowUp;
+    final down = key == LogicalKeyboardKey.arrowDown;
+    if ((!up && !down) || !_notesScroll.hasClients) {
+      return KeyEventResult.ignored;
+    }
+    final pos = _notesScroll.position;
+    if (up && pos.pixels <= pos.minScrollExtent) return KeyEventResult.ignored;
+    if (down && pos.pixels >= pos.maxScrollExtent) {
+      return KeyEventResult.ignored;
+    }
+    const step = 90.0;
+    _notesScroll.animateTo(
+      (pos.pixels + (up ? -step : step)).clamp(
+        pos.minScrollExtent,
+        pos.maxScrollExtent,
+      ),
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+    );
+    return KeyEventResult.handled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _boundaryKey,
+      child: FocusTraversalGroup(
+        child: AlertDialog(
+          backgroundColor: AppColors.panelHi,
+          title: Text('Update available — ${widget.release.version}'),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460, maxHeight: 360),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'You have ${widget.current}. Version '
+                  '${widget.release.version} is available.',
+                  style: const TextStyle(color: AppColors.textLo),
                 ),
-              ),
-            ],
+                if (_hasNotes) ...[
+                  const SizedBox(height: 12),
+                  Flexible(
+                    child: Focus(
+                      focusNode: _notesFocus,
+                      onKeyEvent: _notesKey,
+                      onFocusChange: (_) => setState(() {}),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 120),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppColors.panel,
+                          borderRadius: BorderRadius.circular(AppRadius.tile),
+                          border: Border.all(
+                            color: _notesFocus.hasFocus
+                                ? AppColors.accent
+                                : AppColors.line,
+                            width: _notesFocus.hasFocus ? 2 : 1,
+                          ),
+                        ),
+                        child: Scrollbar(
+                          controller: _notesScroll,
+                          child: SingleChildScrollView(
+                            controller: _notesScroll,
+                            child: ReleaseNotesView(widget.release.notes),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, UpdateChoice.skip),
+              child: const Text('Skip this version'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, UpdateChoice.later),
+              child: const Text('Later'),
+            ),
+            FilledButton(
+              // Autofocus so a TV remote's OK acts on the dialog immediately —
+              // the modal's focus scope otherwise lands on nothing until the
+              // first arrow press. The primary action gets the focus ring.
+              focusNode: _primaryFocus,
+              autofocus: true,
+              onPressed: () => Navigator.pop(context, UpdateChoice.update),
+              child: Text(widget.canInstall ? 'Update' : 'View release'),
+            ),
           ],
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, UpdateChoice.skip),
-          child: const Text('Skip this version'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, UpdateChoice.later),
-          child: const Text('Later'),
-        ),
-        FilledButton(
-          // Autofocus so a TV remote's OK acts on the dialog immediately — the
-          // modal's focus scope otherwise lands on nothing until the first
-          // arrow press. The primary action gets the focus ring.
-          autofocus: true,
-          onPressed: () => Navigator.pop(context, UpdateChoice.update),
-          child: Text(canInstall ? 'Update' : 'View release'),
-        ),
-      ],
-    ),
-  );
+    );
+  }
 }
 
 Future<void> _downloadAndInstall(

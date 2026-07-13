@@ -47,18 +47,36 @@ void main() {
   const channels = [
     Channel(id: 'a', name: 'ChanA', number: 1),
     Channel(id: 'b', name: 'ChanB', number: 2),
+    Channel(id: 'c', name: 'ChanC', number: 3),
   ];
 
-  // ChanA on :00/:30 boundaries; ChanB offset by 15 minutes. Titles are unique.
+  // A long synopsis on A-now to exercise the multi-line detail bar (Bug #3).
+  const longSynopsis =
+      'A long synopsis that should now wrap onto its own multi-line row in the '
+      'detail bar instead of being cut off on the meta line.';
+
+  // ChanA on :00/:30 boundaries; ChanB offset by 15 minutes; ChanC has an
+  // *overlapping* overlong programme (C-long runs across C-1 and C-2) — the
+  // real-world guide data that used to trap the cursor (Bugs #2/#4). Titles are
+  // unique.
   final programmes = <Programme>[
     Programme(channelId: 'a', start: at(-30), stop: at(0), title: 'A-early'),
-    Programme(channelId: 'a', start: at(0), stop: at(30), title: 'A-now'),
+    Programme(
+      channelId: 'a',
+      start: at(0),
+      stop: at(30),
+      title: 'A-now',
+      description: longSynopsis,
+    ),
     Programme(channelId: 'a', start: at(30), stop: at(60), title: 'A-next'),
     Programme(channelId: 'a', start: at(60), stop: at(90), title: 'A-later'),
     Programme(channelId: 'b', start: at(-45), stop: at(-15), title: 'B0'),
     Programme(channelId: 'b', start: at(-15), stop: at(15), title: 'B1'),
     Programme(channelId: 'b', start: at(15), stop: at(45), title: 'B2'),
     Programme(channelId: 'b', start: at(45), stop: at(75), title: 'B3'),
+    Programme(channelId: 'c', start: at(-60), stop: at(120), title: 'C-long'),
+    Programme(channelId: 'c', start: at(0), stop: at(30), title: 'C-1'),
+    Programme(channelId: 'c', start: at(30), stop: at(60), title: 'C-2'),
   ];
 
   // The detail bar's title Text is the only one at fontSize 15 (cells and the
@@ -166,6 +184,57 @@ void main() {
       reason: 'Down holds the time column: the B programme containing now+30',
     );
     expect(detailTitle('A-next'), findsNothing);
+
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'ArrowRight advances past an overlong overlapping programme (Bugs #2/#4)',
+    (tester) async {
+      await pumpGrid(tester);
+
+      // Drop onto ChanC (row 2), holding the time column at "now".
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await pumpUntil(tester, detailTitle('C-1'));
+      expect(detailTitle('C-1'), findsOneWidget);
+
+      // Left onto the overlong C-long (which overlaps C-1 and C-2).
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(detailTitle('C-long'), findsOneWidget);
+
+      // Right must escape it — under the old time-re-resolution this snapped
+      // straight back to C-long and the cursor was trapped.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(
+        detailTitle('C-1'),
+        findsOneWidget,
+        reason: 'Right steps by index, so overlap can no longer trap the cursor',
+      );
+      expect(detailTitle('C-long'), findsNothing);
+
+      // And it keeps advancing.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(detailTitle('C-2'), findsOneWidget);
+
+      await unmount(tester);
+    },
+  );
+
+  testWidgets('the detail bar shows the full multi-line description (Bug #3)',
+      (tester) async {
+    await pumpGrid(tester);
+
+    // The selected A-now carries a long synopsis; it renders on its own line
+    // (up to three) rather than being crammed onto the meta row.
+    final descFinder = find.text(longSynopsis);
+    expect(descFinder, findsOneWidget);
+    final text = tester.widget<Text>(descFinder);
+    expect(text.maxLines, 3);
 
     await unmount(tester);
   });

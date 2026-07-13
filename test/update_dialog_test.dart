@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/update_service.dart';
 import 'package:iptvs/screens/update_flow.dart';
 import 'package:iptvs/theme.dart';
+import 'package:iptvs/widgets/release_notes_view.dart';
 
 /// Guards the TV-remote behaviour of the update prompt: the modal must open with
 /// its primary action already focused, so a D-pad OK acts immediately instead
@@ -82,5 +83,43 @@ void main() {
     expect(find.text('Later'), findsOneWidget);
     // The primary action (labelled 'Update' or 'View release' by platform).
     expect(find.byType(FilledButton), findsOneWidget);
+  });
+
+  testWidgets('the changelog renders formatted, not as raw markdown', (
+    tester,
+  ) async {
+    await openDialog(tester);
+    expect(find.byType(ReleaseNotesView), findsOneWidget);
+  });
+
+  testWidgets('D-pad Up/Down stay trapped inside the dialog', (tester) async {
+    await openDialog(tester);
+
+    // Up enters the focusable changelog region…
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'update.notes');
+
+    // …and Down leaves it back to the actions — never onto anything behind the
+    // modal barrier (the reported "focus escapes and I can scroll the channels").
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    expect(
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<AlertDialog>(),
+      isNotNull,
+    );
+
+    // Mash Down a few more times: focus must remain within the dialog.
+    for (var i = 0; i < 4; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+    }
+    expect(
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<AlertDialog>(),
+      isNotNull,
+      reason: 'no vertical arrow escapes the dialog',
+    );
   });
 }
