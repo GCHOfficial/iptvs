@@ -70,4 +70,83 @@ void main() {
     await pump(tester, '');
     expect(find.byType(ReleaseNotesView), findsOneWidget);
   });
+
+  testWidgets('renders inline code and italics without literal markers',
+      (tester) async {
+    await pump(
+      tester,
+      'Set `SUPABASE_URL` to enable sync — *optional*, and **safe** to skip.',
+    );
+    final text = renderedText(tester);
+
+    expect(text, contains('SUPABASE_URL'));
+    expect(text, contains('optional'));
+    expect(text.contains('`'), isFalse, reason: 'code backticks stripped');
+    expect(text.contains('*'), isFalse, reason: 'italic/bold markers stripped');
+
+    // The code span carries the monospace style.
+    final richTexts = tester.widgetList<RichText>(
+      find.descendant(
+        of: find.byType(ReleaseNotesView),
+        matching: find.byType(RichText),
+      ),
+    );
+    var sawCode = false;
+    var sawItalic = false;
+    for (final rt in richTexts) {
+      rt.text.visitChildren((span) {
+        final style = span.style;
+        if (span is TextSpan && style != null) {
+          if (span.text == 'SUPABASE_URL' && style.fontFamily == 'monospace') {
+            sawCode = true;
+          }
+          if (span.text == 'optional' &&
+              style.fontStyle == FontStyle.italic) {
+            sawItalic = true;
+          }
+        }
+        return true;
+      });
+    }
+    expect(sawCode, isTrue, reason: 'inline code renders monospace');
+    expect(sawItalic, isTrue, reason: '*italic* renders italic');
+  });
+
+  testWidgets('drops code fences and indents nested bullets', (tester) async {
+    await pump(tester, '''
+## Highlights
+- **Live TV**: denser channel list
+  - category rows tightened too
+```
+some fenced text
+```
+''');
+    final text = renderedText(tester);
+
+    expect(text, contains('denser channel list'));
+    expect(text, contains('category rows tightened too'));
+    expect(text, contains('some fenced text'));
+    expect(text.contains('```'), isFalse, reason: 'fence markers dropped');
+
+    // The nested bullet's row is inset further than the top-level one.
+    double bulletLeftPad(String content) {
+      final padding = tester.widget<Padding>(
+        find
+            .ancestor(
+              of: find.byWidgetPredicate(
+                (w) => w is RichText && w.text.toPlainText().contains(content),
+              ),
+              matching: find.byType(Padding),
+            )
+            .first, // nearest Padding ancestor = the bullet row's inset
+      );
+      return (padding.padding as EdgeInsets).left;
+    }
+
+    expect(
+      bulletLeftPad('category rows tightened too'),
+      greaterThan(bulletLeftPad('denser channel list')),
+      reason: 'nested bullets inset one extra level',
+    );
+  });
 }

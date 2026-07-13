@@ -37,13 +37,13 @@ String programmeTimeRange(Programme p) =>
 // two sizes: with EPG (name + now/next + progress) and without.
 
 /// Channel row height when the source has EPG (now/next lines).
-const double kChannelRowExtentWithEpg = 136;
+const double kChannelRowExtentWithEpg = 112;
 
 /// Channel row height when there's no EPG to show (logo + name only).
-const double kChannelRowExtentPlain = 88;
+const double kChannelRowExtentPlain = 72;
 
 /// Category sidebar row height.
-const double kCategoryRowExtent = 48;
+const double kCategoryRowExtent = 44;
 
 /// The channel row height for a list that does ([hasEpg]) or doesn't carry EPG.
 double channelRowExtentFor(bool hasEpg) =>
@@ -432,7 +432,7 @@ class _CategoryRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final focused = cursor && listFocused;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
@@ -1227,7 +1227,7 @@ class _ChannelTile extends StatelessWidget {
 
     final active = cursor && listFocused;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
@@ -1247,12 +1247,12 @@ class _ChannelTile extends StatelessWidget {
               ),
             ),
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
             _Logo(channel: channel),
-            const SizedBox(width: 14),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -1265,7 +1265,7 @@ class _ChannelTile extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   if (current != null) ...[
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
                     // Current show on its own emphasized line — leads with the
                     // title so a long channel name never hides it.
                     Text(
@@ -1274,11 +1274,11 @@ class _ChannelTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppColors.accent,
-                        fontSize: 13,
+                        fontSize: 12.5,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     // Time range + progress share a row so the bar reads as
                     // "where we are between these times".
                     Row(
@@ -1287,7 +1287,7 @@ class _ChannelTile extends StatelessWidget {
                           programmeTimeRange(current),
                           style: const TextStyle(
                             color: AppColors.textLo,
-                            fontSize: 12,
+                            fontSize: 11.5,
                           ),
                         ),
                         const SizedBox(width: 10),
@@ -1308,14 +1308,14 @@ class _ChannelTile extends StatelessWidget {
                     ),
                     if (upcoming != null)
                       Padding(
-                        padding: const EdgeInsets.only(top: 6),
+                        padding: const EdgeInsets.only(top: 4),
                         child: Text(
                           nextProgrammeLabel(upcoming),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             color: AppColors.textLo,
-                            fontSize: 12,
+                            fontSize: 11.5,
                           ),
                         ),
                       ),
@@ -1369,7 +1369,7 @@ class _LogoState extends State<_Logo> {
 
   @override
   Widget build(BuildContext context) {
-    const size = 48.0;
+    const size = 40.0;
     final cacheSize = imageCacheSize(context, size);
     final fallback = Container(
       width: size,

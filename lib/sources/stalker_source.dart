@@ -709,20 +709,17 @@ class StalkerSource implements Source {
   Future<DateTime?> subscriptionExpiry() async {
     final r = await _call({'type': 'account_info', 'action': 'get_main_info'});
     final js = r['js'];
-    if (js is! Map) return null;
-    for (final key in const [
-      'end_date',
-      'expire_billing_date',
-      'subscription_expire',
-      'exp_date',
-    ]) {
-      final parsed = parseExpiryValue(js[key]);
+    if (js is Map) {
+      final parsed = expiryFromStalkerFields(js);
       if (parsed != null) return parsed;
     }
-    final tariff = js['tariff'];
-    if (tariff is Map) {
-      final parsed = parseExpiryValue(tariff['expire_date']);
-      if (parsed != null) return parsed;
+    // Some portals omit the expiry from account_info and only carry it on the
+    // STB profile.
+    try {
+      final profile = await _getProfile();
+      if (profile is Map) return expiryFromStalkerFields(profile);
+    } on Exception {
+      // Best-effort fallback — the badge shows "Expiry unknown".
     }
     return null;
   }
@@ -1833,10 +1830,12 @@ class StalkerSource implements Source {
     return null;
   }
 
-  Future<void> _getProfile() async {
+  /// Sends the STB `get_profile` (part of auth); returns the profile `js` map
+  /// so callers can also read fields off it (e.g. the subscription expiry).
+  Future<dynamic> _getProfile() async {
     final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final identity = MagIdentity.fromMac(mac);
-    await _call({
+    final r = await _call({
       'type': 'stb',
       'action': 'get_profile',
       'ver':
@@ -1854,6 +1853,7 @@ class StalkerSource implements Source {
       'prehash': '',
       ...identity.profileParams(profile: profile, timestamp: timestamp),
     });
+    return r['js'];
   }
 
   /// Calls the resolved endpoint, re-handshaking once if the token expired.

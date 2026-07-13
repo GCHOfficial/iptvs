@@ -192,7 +192,16 @@ class _UpdateDialogState extends State<_UpdateDialog> {
           backgroundColor: AppColors.panelHi,
           title: Text('Update available — ${widget.release.version}'),
           content: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 460, maxHeight: 360),
+            // Grows with the screen so a longer (AI-generated) changelog shows
+            // more before scrolling — but never taller than 60% of the screen,
+            // and no smaller than the old fixed cap on phones.
+            constraints: BoxConstraints(
+              maxWidth: 460,
+              maxHeight: (MediaQuery.sizeOf(context).height * 0.6).clamp(
+                280.0,
+                520.0,
+              ),
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,

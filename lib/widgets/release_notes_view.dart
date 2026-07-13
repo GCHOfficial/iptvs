@@ -8,8 +8,10 @@ import '../theme.dart';
 /// hand-written headings/bullets), not the whole CommonMark spec:
 ///
 ///  * `#`…`######` headings → bold, sized by level,
-///  * `*` / `-` / `+` list items → a bullet + inline-formatted text,
-///  * `**bold**` / `__bold__` → emphasised spans,
+///  * `*` / `-` / `+` list items → a bullet + inline-formatted text; indented
+///    items render as nested bullets (one extra level of inset),
+///  * `**bold**` / `__bold__` → emphasised spans; `*italic*` → italics;
+///    `` `code` `` → a monospace chip; ``` fence lines are dropped,
 ///  * `[text](url)` → just `text`; `…/pull/123` → `#123`; `…/compare/a...b` →
 ///    `a…b`; any other bare URL → its last path segment — so links read as
 ///    short labels rather than long noise (the dialog's own button opens the
@@ -28,6 +30,12 @@ class ReleaseNotesView extends StatelessWidget {
     color: AppColors.textHi,
     fontWeight: FontWeight.w700,
   );
+  static const _italicStyle = TextStyle(fontStyle: FontStyle.italic);
+  static const _codeStyle = TextStyle(
+    color: AppColors.textHi,
+    fontFamily: 'monospace',
+    backgroundColor: AppColors.panelHi,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +50,8 @@ class ReleaseNotesView extends StatelessWidget {
         }
         continue;
       }
+      // Drop code-fence markers; the fenced lines render as plain body text.
+      if (line.startsWith('```')) continue;
 
       final heading = _headingPattern.firstMatch(line);
       if (heading != null) {
@@ -67,9 +77,11 @@ class ReleaseNotesView extends StatelessWidget {
 
       final bullet = _bulletPattern.firstMatch(line);
       if (bullet != null) {
+        // One extra inset level for indented (nested) list items.
+        final nested = raw.length - raw.trimLeft().length >= 2;
         blocks.add(
           Padding(
-            padding: const EdgeInsets.only(left: 2, top: 2, bottom: 2),
+            padding: EdgeInsets.only(left: nested ? 18 : 2, top: 2, bottom: 2),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -117,17 +129,36 @@ final _pullInPattern = RegExp(r'\bin\s+https?://\S*?/pull/(\d+)\b');
 final _comparePattern = RegExp(r'https?://\S*?/compare/(\S+?)\.\.\.(\S+)');
 final _bareUrlPattern = RegExp(r'https?://\S+');
 final _boldPattern = RegExp(r'\*\*(.+?)\*\*|__(.+?)__');
+final _codePattern = RegExp(r'`([^`]+)`');
+// Single-asterisk italics only — `_x_` would mangle snake_case identifiers.
+final _italicPattern = RegExp(r'\*([^*]+)\*');
 
-/// Collapse links/URLs to short labels, then split `**bold**` runs into spans.
+/// Collapse links/URLs to short labels, then split the inline markers into
+/// styled spans — `` `code` `` first (so markers inside code stay literal),
+/// then `**bold**`, then `*italic*` in what remains.
 List<InlineSpan> _inlineSpans(String text) {
   final cleaned = _shortenLinks(text);
   final spans = <InlineSpan>[];
+  _emitCode(cleaned, spans);
+  if (spans.isEmpty) spans.add(TextSpan(text: cleaned));
+  return spans;
+}
+
+void _emitCode(String text, List<InlineSpan> out) {
   var last = 0;
-  for (final m in _boldPattern.allMatches(cleaned)) {
-    if (m.start > last) {
-      spans.add(TextSpan(text: cleaned.substring(last, m.start)));
-    }
-    spans.add(
+  for (final m in _codePattern.allMatches(text)) {
+    if (m.start > last) _emitBold(text.substring(last, m.start), out);
+    out.add(TextSpan(text: m.group(1), style: ReleaseNotesView._codeStyle));
+    last = m.end;
+  }
+  if (last < text.length) _emitBold(text.substring(last), out);
+}
+
+void _emitBold(String text, List<InlineSpan> out) {
+  var last = 0;
+  for (final m in _boldPattern.allMatches(text)) {
+    if (m.start > last) _emitItalic(text.substring(last, m.start), out);
+    out.add(
       TextSpan(
         text: m.group(1) ?? m.group(2) ?? '',
         style: ReleaseNotesView._boldStyle,
@@ -135,9 +166,19 @@ List<InlineSpan> _inlineSpans(String text) {
     );
     last = m.end;
   }
-  if (last < cleaned.length) spans.add(TextSpan(text: cleaned.substring(last)));
-  if (spans.isEmpty) spans.add(TextSpan(text: cleaned));
-  return spans;
+  if (last < text.length) _emitItalic(text.substring(last), out);
+}
+
+void _emitItalic(String text, List<InlineSpan> out) {
+  var last = 0;
+  for (final m in _italicPattern.allMatches(text)) {
+    if (m.start > last) {
+      out.add(TextSpan(text: text.substring(last, m.start)));
+    }
+    out.add(TextSpan(text: m.group(1), style: ReleaseNotesView._italicStyle));
+    last = m.end;
+  }
+  if (last < text.length) out.add(TextSpan(text: text.substring(last)));
 }
 
 String _shortenLinks(String s) {

@@ -222,22 +222,16 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     }
   }
 
-  /// Scroll the vertical list so channel [row] is visible.
+  /// Scroll the vertical list so channel [row] sits centered in the viewport —
+  /// a row that hugged the bottom edge would be covered by the detail bar.
   void _revealRow(int row) {
     if (!_vController.hasClients) return;
     final position = _vController.position;
-    final top = row * _rowHeight;
-    final current = position.pixels;
-    final viewport = position.viewportDimension;
-    double? target;
-    if (top < current) {
-      target = top;
-    } else if (top + _rowHeight > current + viewport) {
-      target = top + _rowHeight - viewport;
-    }
-    if (target == null) return;
+    final target = (row * _rowHeight - (position.viewportDimension - _rowHeight) / 2)
+        .clamp(0.0, position.maxScrollExtent);
+    if ((target - position.pixels).abs() < 0.5) return;
     _vController.animateTo(
-      target.clamp(0.0, position.maxScrollExtent),
+      target,
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
     );
@@ -649,11 +643,23 @@ int _selectedIndexIn(List<Programme> items, DateTime t) {
   return index;
 }
 
-double _cellWidth(Programme programme, DateTime windowStart, DateTime windowEnd) {
+/// Painted width of [programme]'s cell. [nextStart] — the following
+/// programme's start — visually truncates an overlong entry (bad guide
+/// runtimes, e.g. a 13:00–17:00 row overlapping the 14:00 one) so cells never
+/// overlap; the detail bar still shows the programme's real times.
+double _cellWidth(
+  Programme programme,
+  DateTime windowStart,
+  DateTime windowEnd, {
+  DateTime? nextStart,
+}) {
   final start = programme.start.isBefore(windowStart)
       ? windowStart
       : programme.start;
-  final stop = programme.stop.isAfter(windowEnd) ? windowEnd : programme.stop;
+  var stop = programme.stop.isAfter(windowEnd) ? windowEnd : programme.stop;
+  if (nextStart != null && nextStart.isAfter(start) && nextStart.isBefore(stop)) {
+    stop = nextStart;
+  }
   final width = stop.difference(start).inMinutes * _EpgGridScreenState._pxPerMinute;
   return width < 24 ? 24 : width;
 }
@@ -782,25 +788,39 @@ class _ChannelRow extends StatelessWidget {
                   final from = offset - buffer;
                   final to = offset + timelineWidth + buffer;
                   final cells = <Widget>[];
+                  // The selected cell is appended last so it paints above any
+                  // residual overlap (e.g. the 24px minimum width).
+                  Widget? selectedCell;
                   for (var i = 0; i < programmes.length; i++) {
                     final p = programmes[i];
                     final left = _left(_clampStart(p));
-                    final width = _cellWidth(p, windowStart, windowEnd);
+                    final width = _cellWidth(
+                      p,
+                      windowStart,
+                      windowEnd,
+                      nextStart: i + 1 < programmes.length
+                          ? programmes[i + 1].start
+                          : null,
+                    );
                     if (left + width < from || left > to) continue;
-                    cells.add(
-                      Positioned(
-                        left: left - offset,
-                        width: width,
-                        top: 2,
-                        bottom: 2,
-                        child: _ProgrammeCell(
-                          programme: p,
-                          selected: i == selectedIndex,
-                          onTap: () => onTapProgramme(p),
-                        ),
+                    final cell = Positioned(
+                      left: left - offset,
+                      width: width,
+                      top: 2,
+                      bottom: 2,
+                      child: _ProgrammeCell(
+                        programme: p,
+                        selected: i == selectedIndex,
+                        onTap: () => onTapProgramme(p),
                       ),
                     );
+                    if (i == selectedIndex) {
+                      selectedCell = cell;
+                    } else {
+                      cells.add(cell);
+                    }
                   }
+                  if (selectedCell != null) cells.add(selectedCell);
                   return Stack(clipBehavior: Clip.hardEdge, children: cells);
                 },
               ),
