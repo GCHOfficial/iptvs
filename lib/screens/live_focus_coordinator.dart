@@ -7,122 +7,123 @@ import 'package:flutter/services.dart'
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
 
-/// Which live pane last held focus — used to route arrow keys when focus
-/// transiently lands on an unlabeled node.
-enum LiveFocusArea { category, channels, search, unknown }
+/// Which live region currently owns the D-pad.
+enum LiveFocusRegion { none, channels, categories, previewControls, search }
 
-/// Owns the live tab's D-pad focus machinery: the channel/category focus
-/// nodes (created lazily, pruned to the visible set), the category↔channel
-/// pane routing, the down-hold lock, and the per-category "resume on the
-/// channel you left" bookkeeping. Extracted from `ChannelListScreen`'s State
-/// so the routing logic has one home and its label-based dispatch is
-/// unit-testable.
+/// The live tab's D-pad navigation, as a **selection model** — the same pattern
+/// the TV guide ([EpgGridScreen]) uses, and for the same reason.
 ///
-/// A [ChangeNotifier]: notifies when [lastFocusedChannelId] changes, so the
-/// preview/info panel that follows focus can rebuild through the screen's
-/// body listenable instead of a whole-screen setState.
+/// The channel list and the category sidebar each have exactly **one** focus
+/// node and a **selected index**. Rows are not focus targets: they are plain
+/// widgets highlighted at `i == selectedIndex`, and this class drives the scroll
+/// itself with exact `itemExtent` math. That kills an entire class of bug the
+/// previous per-row-focus design kept producing: an off-screen row in a lazy
+/// `ListView` has no context, so `requestFocus` silently no-ops, which forced a
+/// *jump-scroll → post-frame requestFocus → re-assert retry* pipeline that key
+/// auto-repeat outran, that Flutter's geometry traversal leaked out of, and that
+/// stale re-asserts fought. None of that exists any more: selecting row N is a
+/// synchronous integer assignment that cannot fail or race.
 ///
-/// Routing is keyed off [RoutedFocusNode.routeKey] prefixes (the constants
-/// below), read via [focusRouteKey]. They are **load-bearing routing keys**,
-/// not debug decoration — every focusable the live tab creates must use a
-/// [RoutedFocusNode] carrying one. (They were once read from
-/// [FocusNode.debugLabel], but that is `null` in release builds, which broke
-/// the whole ladder on real hardware.)
+/// **Movement rules** (the contract, deliberately asymmetric):
+/// - **Down wraps** at the end of the channel list and of the category list —
+///   this is the *only* infinite motion in the tab.
+/// - **Up never wraps.** At the first row it *escapes upward*: categories → the
+///   search box; channels → the preview controls (wide) or the search box
+///   (phone). This is what makes the sidebar escapable — the old design wrapped
+///   Up too, so the only ways out were Right or Back ("stuck in the categories").
+/// - Left/Right cross between the panes; every arrow is consumed, so Flutter's
+///   geometry traversal never runs inside the live body.
+///
+/// Route keys ([RoutedFocusNode.routeKey], read via [focusRouteKey]) still name
+/// the regions for the Back ladder — they are release-safe, unlike `debugLabel`.
 class LiveFocusCoordinator extends ChangeNotifier {
-  /// Prefix for per-channel focus nodes: `live.channel.<channelId>`.
-  static const channelLabelPrefix = 'live.channel.';
+  /// The channel list's single D-pad node.
+  static const channelsLabel = 'live.channels';
 
-  /// Prefix for category-pane nodes: `live.category.<categoryId|all>`.
-  static const categoryLabelPrefix = 'live.category.';
+  /// The category sidebar's single D-pad node (wide layout only).
+  static const categoriesLabel = 'live.categories';
 
   /// The search box's "OK to edit" cell.
   static const searchCellLabel = 'live.search.cell';
 
-  /// The stable node for the first visible channel row (gets `autofocus`).
-  static const firstChannelLabel = '${channelLabelPrefix}first';
-
-  /// The preview panel's Favorite control (top of the channel column).
+  /// The preview panel's Favorite / Catch-up controls.
   static const previewFavoriteLabel = 'live.preview.favorite';
-
-  /// The preview panel's Catch-up control (shown only for archive channels).
   static const previewCatchupLabel = 'live.preview.catchup';
-
-  /// The route key of an unrouted node (plain `Focus`/`FocusScope`) — the empty
-  /// string, since [focusRouteKey] returns `''` for anything but a
-  /// [RoutedFocusNode]. Such focus is routed via [lastFocusArea].
-  static const unlabeledLabel = '';
-
-  /// Estimated height of one channel row, for jump-scrolling an off-screen
-  /// target into build range before focusing it.
-  static const _estimatedChannelRowExtent = 104.0;
-
-  /// Estimated height of one category row in the sidebar, for the same
-  /// jump-scroll-into-build-range trick as channels.
-  static const _estimatedCategoryRowExtent = 48.0;
 
   LiveFocusCoordinator({
     required this.scrollController,
     required this.categoryScrollController,
     required this.visibleChannels,
-    required this.categoryId,
     required this.orderedCategoryIds,
-    required this.channelById,
-    required this.isLiveTab,
-    required this.isRouteCurrent,
+    required this.channelRowExtent,
+    required this.categoryRowExtent,
+    required this.isWide,
     required this.isMounted,
-    required this.onChannelFocusChanged,
+    required this.onChannelSelectionChanged,
+    required this.onCategoryActivated,
+    required this.onPlayChannel,
+    required this.onContextMenuChannel,
+    required this.onFocusTabs,
   }) {
-    firstChannelFocusNode.addListener(() {
-      final visible = visibleChannels();
-      if (visible.isEmpty) return;
-      if (firstChannelFocusNode.hasFocus) noteFocusedChannel(visible.first.id);
-      onChannelFocusChanged(visible.first, firstChannelFocusNode.hasFocus);
-    });
+    // The cursor highlight is drawn from each list's `hasFocus`, and a focus
+    // change rebuilds nothing on its own — so without this the highlight stayed
+    // painted in the channel list after Left/Back moved the D-pad to the
+    // categories, and the user couldn't see where they were. Notifying on focus
+    // change re-renders the body so the cursor visibly hands over between panes.
+    for (final node in [
+      channelsFocusNode,
+      categoriesFocusNode,
+      previewFavoriteFocusNode,
+      previewCatchupFocusNode,
+      searchCellFocusNode,
+    ]) {
+      node.addListener(_notify);
+    }
   }
 
-  /// The live list's scroll controller (owned by the screen).
+  /// The channel list's scroll controller (owned by the screen).
   final ScrollController scrollController;
 
-  /// The category sidebar's scroll controller (owned by the screen), so an
-  /// off-screen category can be jump-scrolled into build range before it's
-  /// focused — otherwise `requestFocus` on an unbuilt node silently no-ops.
+  /// The category sidebar's scroll controller (owned by the screen).
   final ScrollController categoryScrollController;
 
-  /// Current filtered channel list (the screen's memoized `_visible`).
+  /// The current filtered channel list (the screen's memoized `_visible`).
   final List<Channel> Function() visibleChannels;
 
-  /// Currently selected live category id (null = All).
-  final String? Function() categoryId;
-
-  /// The category sidebar in display order (null = "All channels"), for
-  /// index-based Up/Down navigation with wrap.
+  /// The sidebar in display order; index 0 is always `null` = "All channels".
   final List<String?> Function() orderedCategoryIds;
 
-  /// Channel lookup across the *full* (unfiltered) channel list.
-  final Channel? Function(String id) channelById;
+  /// Uniform row heights — the whole point of the model: index → offset is exact.
+  final double Function() channelRowExtent;
+  final double Function() categoryRowExtent;
 
-  /// Whether the live tab is the active content tab.
-  final bool Function() isLiveTab;
-
-  /// Whether the screen's route is on top. [handleGlobalKeyEvent] is
-  /// registered on [HardwareKeyboard] for the screen's whole lifetime, so
-  /// without this guard it would keep intercepting arrow keys behind any
-  /// pushed route (player, sources, diagnostics) whose focus nodes happen to
-  /// be unlabeled.
-  final bool Function() isRouteCurrent;
+  /// Wide (TV/desktop two-column) vs narrow (phone). Decides whether the
+  /// category sidebar and preview controls exist at all.
+  final bool Function() isWide;
 
   /// Whether the owning State is still mounted (guards post-frame work).
   final bool Function() isMounted;
 
-  /// Focus-follow hook: the screen starts/stops previews and updates the info
-  /// panel from this. Called with the channel and whether it gained focus.
-  final void Function(Channel channel, bool hasFocus) onChannelFocusChanged;
+  /// Selection-follow hook: the screen starts/stops previews and updates the
+  /// info panel from this. `focused` is whether the channel region holds the
+  /// D-pad (so a desktop auto-preview can be cancelled when it doesn't).
+  final void Function(Channel channel, bool focused) onChannelSelectionChanged;
 
-  final FocusNode firstChannelFocusNode = RoutedFocusNode(firstChannelLabel);
+  /// OK on a category row — applies that filter.
+  final void Function(String? categoryId) onCategoryActivated;
+
+  /// OK (quick press) on a channel row.
+  final void Function(Channel channel) onPlayChannel;
+
+  /// OK held ~500ms on a channel row (wide/TV only) — the in-place favorite menu.
+  final void Function(Channel channel) onContextMenuChannel;
+
+  /// Escape hatch upward out of the live body (search → the content tabs).
+  final VoidCallback onFocusTabs;
+
+  final FocusNode channelsFocusNode = RoutedFocusNode(channelsLabel);
+  final FocusNode categoriesFocusNode = RoutedFocusNode(categoriesLabel);
   final FocusNode searchCellFocusNode = RoutedFocusNode(searchCellLabel);
-
-  /// The preview panel's Favorite / Catch-up controls — the top of the channel
-  /// column, reached by ArrowUp from the first channel (wide layout only).
   final FocusNode previewFavoriteFocusNode = RoutedFocusNode(
     previewFavoriteLabel,
   );
@@ -130,37 +131,385 @@ class LiveFocusCoordinator extends ChangeNotifier {
     previewCatchupLabel,
   );
 
-  final Map<String, FocusNode> _channelNodes = {};
-  final Map<String, FocusNode> _categoryNodes = {};
-  bool _pruneScheduled = false;
+  /// The D-pad cursor into [visibleChannels].
+  int get selectedChannelIndex => _selectedChannelIndex;
+  int _selectedChannelIndex = 0;
+
+  /// The D-pad cursor into [orderedCategoryIds] (0 = "All channels").
+  int get selectedCategoryIndex => _selectedCategoryIndex;
+  int _selectedCategoryIndex = 0;
+
   bool _disposed = false;
 
-  /// Last channel that held focus in the list (drives the TV info panel).
-  String? get lastFocusedChannelId => _lastFocusedChannelId;
-  String? _lastFocusedChannelId;
-
-  /// Last category that held focus in the sidebar, so returning from the
-  /// channel pane lands where the user was — not always the selected one.
-  String? get lastFocusedCategoryId => _lastFocusedCategoryId;
-  String? _lastFocusedCategoryId;
-
-  LiveFocusArea lastFocusArea = LiveFocusArea.unknown;
-
-  /// Vertical-hold lock: once a Up/Down hold starts in a pane, a *held* key
-  /// whose repeats land mid-scroll (focus transiently detached during a wrap
-  /// jump-scroll) keeps walking the *same* pane in the *same* direction until
-  /// key-up, so it can't leak into the neighbouring pane. [_heldArea] is the
-  /// locked pane (channels/category), [_heldForward] its direction (Down/next).
-  LiveFocusArea? _heldArea;
-  bool _heldForward = false;
-
-  /// Per-category memory of the channel the user was on, so re-entering the
-  /// channel pane resumes there instead of at the top.
+  /// Per-category memory of the row the user was on, so re-entering the channel
+  /// pane resumes where they left instead of jumping to the top.
   final Map<String, String> _lastBrowsedByCategory = {};
 
-  /// Digits typed on the remote while browsing live — committed to a
-  /// channel-number jump after [_digitCommitDelay] (or OK). Non-empty means
-  /// the screen shows the entry chip. Notifies on every change.
+  // ── Selection ──────────────────────────────────────────────────────────────
+
+  /// The channel under the cursor, or null when the list is empty.
+  Channel? get selectedChannel {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return null;
+    final index = _selectedChannelIndex.clamp(0, visible.length - 1);
+    return visible[index];
+  }
+
+  String? get selectedChannelId => selectedChannel?.id;
+
+  /// The category id under the cursor (null = "All channels").
+  String? get selectedCategoryId {
+    final ids = orderedCategoryIds();
+    if (ids.isEmpty) return null;
+    return ids[_selectedCategoryIndex.clamp(0, ids.length - 1)];
+  }
+
+  bool get onFirstChannel => _selectedChannelIndex == 0;
+  bool get onFirstCategory => _selectedCategoryIndex == 0;
+
+  /// Which region owns the D-pad right now (drives the Back ladder).
+  LiveFocusRegion get region {
+    if (channelsFocusNode.hasFocus) return LiveFocusRegion.channels;
+    if (categoriesFocusNode.hasFocus) return LiveFocusRegion.categories;
+    if (previewFavoriteFocusNode.hasFocus ||
+        previewCatchupFocusNode.hasFocus) {
+      return LiveFocusRegion.previewControls;
+    }
+    if (searchCellFocusNode.hasFocus) return LiveFocusRegion.search;
+    return LiveFocusRegion.none;
+  }
+
+  /// Keep the cursor in range when the visible list shrinks (search, filter,
+  /// refresh). Call whenever the channel list changes.
+  void clampSelection() {
+    final visible = visibleChannels();
+    final maxIndex = visible.isEmpty ? 0 : visible.length - 1;
+    final channel = _selectedChannelIndex.clamp(0, maxIndex);
+    final ids = orderedCategoryIds();
+    final maxCategory = ids.isEmpty ? 0 : ids.length - 1;
+    final category = _selectedCategoryIndex.clamp(0, maxCategory);
+    if (channel == _selectedChannelIndex && category == _selectedCategoryIndex) {
+      return;
+    }
+    _selectedChannelIndex = channel;
+    _selectedCategoryIndex = category;
+    _notify();
+  }
+
+  /// Put the channel cursor back at the top (a new filter/search starts fresh).
+  void resetChannelSelection() {
+    if (_selectedChannelIndex == 0) return;
+    _selectedChannelIndex = 0;
+    _notify();
+  }
+
+  /// Move the channel cursor to [index] (clamped), reveal it, and tell the
+  /// screen (preview-follow).
+  void selectChannel(int index, {bool reveal = true}) {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    final next = index.clamp(0, visible.length - 1);
+    final changed = next != _selectedChannelIndex;
+    _selectedChannelIndex = next;
+    _rememberBrowsed(visible[next].id);
+    if (reveal) _revealChannel(next);
+    if (changed) _notify();
+    onChannelSelectionChanged(visible[next], channelsFocusNode.hasFocus);
+  }
+
+  /// Move the category cursor to [index] (clamped) and reveal it. This only
+  /// moves the *highlight* — the filter changes on OK ([onCategoryActivated]).
+  void selectCategory(int index, {bool reveal = true}) {
+    final ids = orderedCategoryIds();
+    if (ids.isEmpty) return;
+    final next = index.clamp(0, ids.length - 1);
+    if (next != _selectedCategoryIndex) {
+      _selectedCategoryIndex = next;
+      _notify();
+    }
+    if (reveal) _revealCategory(next);
+  }
+
+  /// Park the cursor on [channelId] (e.g. the channel we just came back from
+  /// playing), else the first row.
+  void restoreSelectionToChannel(String? channelId) {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    final index = channelId == null
+        ? 0
+        : visible.indexWhere((channel) => channel.id == channelId);
+    selectChannel(index < 0 ? 0 : index);
+    focusChannels();
+  }
+
+  /// Sync the category cursor to the *active* filter (e.g. after it's changed
+  /// from the phone dropdown), without moving focus.
+  void syncCategorySelection(String? categoryId) {
+    final index = orderedCategoryIds().indexOf(categoryId);
+    if (index < 0) return;
+    selectCategory(index, reveal: false);
+  }
+
+  String _categoryKey(String? id) => id ?? '__all__';
+
+  void _rememberBrowsed(String channelId) {
+    _lastBrowsedByCategory[_categoryKey(selectedCategoryId)] = channelId;
+  }
+
+  // ── Scroll (exact, because rows are a uniform extent) ──────────────────────
+
+  void _revealChannel(int index) =>
+      _reveal(scrollController, index, channelRowExtent());
+
+  void _revealCategory(int index) =>
+      _reveal(categoryScrollController, index, categoryRowExtent());
+
+  /// Scroll [controller] the minimum amount to bring row [index] fully into
+  /// view. No focus involved, nothing to build first — pure arithmetic.
+  void _reveal(ScrollController controller, int index, double extent) {
+    if (!controller.hasClients || extent <= 0) return;
+    final position = controller.position;
+    final top = index * extent;
+    final bottom = top + extent;
+    final viewport = position.viewportDimension;
+    double? target;
+    if (top < position.pixels) {
+      target = top;
+    } else if (bottom > position.pixels + viewport) {
+      target = bottom - viewport;
+    }
+    if (target == null) return;
+    controller.animateTo(
+      target.clamp(0.0, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 140),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  // ── Region focus moves ─────────────────────────────────────────────────────
+
+  void focusChannels() {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    channelsFocusNode.requestFocus();
+    _revealChannel(_selectedChannelIndex.clamp(0, visible.length - 1));
+    onChannelSelectionChanged(
+      visible[_selectedChannelIndex.clamp(0, visible.length - 1)],
+      true,
+    );
+  }
+
+  /// Enter the channel pane from the sidebar, resuming on the row the user last
+  /// browsed in this category.
+  void focusChannelsFromCategory() {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    final resumeId = _lastBrowsedByCategory[_categoryKey(selectedCategoryId)];
+    final index = resumeId == null
+        ? -1
+        : visible.indexWhere((channel) => channel.id == resumeId);
+    if (index >= 0) _selectedChannelIndex = index;
+    _notify();
+    focusChannels();
+  }
+
+  void focusCategories() {
+    if (!isWide()) return;
+    categoriesFocusNode.requestFocus();
+    _revealCategory(_selectedCategoryIndex);
+  }
+
+  void focusSearch() => searchCellFocusNode.requestFocus();
+
+  /// The preview panel's controls, when they exist (wide layout).
+  bool focusPreviewControls() {
+    if (previewFavoriteFocusNode.context == null) return false;
+    previewFavoriteFocusNode.requestFocus();
+    return true;
+  }
+
+  /// Up out of the top of the channel list: the preview controls if they're
+  /// there (wide), else straight to the search box (phone). Never wraps.
+  void escapeUpFromChannels() {
+    if (focusPreviewControls()) return;
+    focusSearch();
+  }
+
+  // ── Key handling ───────────────────────────────────────────────────────────
+
+  static bool _isActivate(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.select ||
+      key == LogicalKeyboardKey.enter ||
+      key == LogicalKeyboardKey.numpadEnter ||
+      key == LogicalKeyboardKey.gameButtonA ||
+      key == LogicalKeyboardKey.space;
+
+  static bool _isPress(KeyEvent event) =>
+      event is KeyDownEvent || event is KeyRepeatEvent;
+
+  /// How long OK must be held on a channel before it opens the context menu
+  /// instead of playing.
+  static const _holdDuration = Duration(milliseconds: 500);
+  Timer? _holdTimer;
+  bool _menuFired = false;
+
+  /// The channel list owns the D-pad while it has focus.
+  KeyEventResult handleChannelsKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final visible = visibleChannels();
+    if (visible.isEmpty) return KeyEventResult.ignored;
+
+    if (_handleDigit(event)) return KeyEventResult.handled;
+
+    if (key == LogicalKeyboardKey.arrowDown) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      // The one infinite motion: Down wraps past the last row to the first.
+      selectChannel((_selectedChannelIndex + 1) % visible.length);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      if (_selectedChannelIndex == 0) {
+        // Never wrap upward — climb out of the list instead.
+        escapeUpFromChannels();
+      } else {
+        selectChannel(_selectedChannelIndex - 1);
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      if (isWide()) focusCategories();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      return KeyEventResult.handled; // consumed: nothing to the right
+    }
+
+    if (_isActivate(key)) return _handleChannelActivate(event);
+    return KeyEventResult.ignored;
+  }
+
+  /// OK on a channel. Where the context menu exists (wide/TV) we own the whole
+  /// gesture: a quick press plays on key-**up**, a ~500ms hold opens the menu.
+  /// Elsewhere OK plays immediately on key-down.
+  KeyEventResult _handleChannelActivate(KeyEvent event) {
+    final channel = selectedChannel;
+    if (channel == null) return KeyEventResult.ignored;
+    if (!isWide()) {
+      if (event is KeyDownEvent) onPlayChannel(channel);
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent) {
+      _menuFired = false;
+      _holdTimer?.cancel();
+      _holdTimer = Timer(_holdDuration, () {
+        _menuFired = true;
+        final held = selectedChannel;
+        if (held != null) onContextMenuChannel(held);
+      });
+      return KeyEventResult.handled;
+    }
+    if (event is KeyUpEvent) {
+      _holdTimer?.cancel();
+      _holdTimer = null;
+      if (!_menuFired) onPlayChannel(channel);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.handled; // swallow repeats
+  }
+
+  /// The category sidebar owns the D-pad while it has focus.
+  KeyEventResult handleCategoriesKey(FocusNode node, KeyEvent event) {
+    final key = event.logicalKey;
+    final ids = orderedCategoryIds();
+    if (ids.isEmpty) return KeyEventResult.ignored;
+
+    if (key == LogicalKeyboardKey.arrowDown) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      selectCategory((_selectedCategoryIndex + 1) % ids.length); // wraps
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      if (_selectedCategoryIndex == 0) {
+        // The fix for "stuck in the categories": Up at the top escapes to the
+        // search box rather than wrapping back to the bottom.
+        focusSearch();
+      } else {
+        selectCategory(_selectedCategoryIndex - 1);
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      focusChannelsFromCategory();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      return KeyEventResult.handled; // consumed: nothing to the left
+    }
+    if (_isActivate(key)) {
+      if (event is KeyDownEvent) onCategoryActivated(selectedCategoryId);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// The preview panel's Favorite / Catch-up controls sit between the search box
+  /// and the channel list.
+  KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
+    final key = event.logicalKey;
+    final isArrow =
+        key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.arrowLeft ||
+        key == LogicalKeyboardKey.arrowRight;
+    if (!isArrow) return KeyEventResult.ignored;
+    if (!_isPress(event)) return KeyEventResult.handled;
+
+    if (key == LogicalKeyboardKey.arrowDown) {
+      focusChannels();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      focusSearch();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (!fromCatchup && previewCatchupFocusNode.context != null) {
+        previewCatchupFocusNode.requestFocus();
+      } else {
+        focusCategories();
+      }
+      return KeyEventResult.handled;
+    }
+    // arrowRight
+    if (fromCatchup && previewFavoriteFocusNode.context != null) {
+      previewFavoriteFocusNode.requestFocus();
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// Search box: Down drops into the channel list, Up climbs to the content tabs.
+  KeyEventResult handleSearchCellKey(FocusNode node, KeyEvent event) {
+    if (!searchCellFocusNode.hasFocus) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      focusChannels();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      if (!_isPress(event)) return KeyEventResult.handled;
+      onFocusTabs();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  // ── Digit-entry channel jump ───────────────────────────────────────────────
+
   String get digitBuffer => _digitBuffer;
   String _digitBuffer = '';
   Timer? _digitTimer;
@@ -191,60 +540,34 @@ class LiveFocusCoordinator extends ChangeNotifier {
     LogicalKeyboardKey.numpad9: 9,
   };
 
-  static int? _digitFor(LogicalKeyboardKey key) => _digitKeys[key];
-
-  /// Digit-entry channel jump. Returns true when the event was consumed.
-  /// Only active while focus sits in one of the live panes ([area] known) —
-  /// never while a text field is editing (that focus is `TvTextField.field`,
-  /// which classifies as unknown, so typed digits reach the editor).
-  bool _handleDigitKey(KeyEvent event, LiveFocusArea area) {
-    if (event is! KeyDownEvent) {
-      // Swallow digit-key repeats so a held digit doesn't leak into nav.
-      return event is KeyRepeatEvent &&
-          area != LiveFocusArea.unknown &&
-          _digitFor(event.logicalKey) != null;
-    }
-    final key = event.logicalKey;
-    final digit = _digitFor(key);
-    if (digit != null) {
-      if (area == LiveFocusArea.unknown) return false;
-      appendDigit(digit);
-      return true;
-    }
-    if (_digitBuffer.isEmpty) return false;
-    if (key == LogicalKeyboardKey.select ||
-        key == LogicalKeyboardKey.enter ||
-        key == LogicalKeyboardKey.numpadEnter) {
-      commitDigitBuffer();
-      return true;
-    }
-    if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.goBack) {
-      clearDigitBuffer();
-      return true;
-    }
-    return false;
+  /// Digits typed on the remote jump to a channel number. Only live while the
+  /// channel list holds the D-pad, so a search field never loses its digits.
+  bool _handleDigit(KeyEvent event) {
+    final digit = _digitKeys[event.logicalKey];
+    if (digit == null) return false;
+    if (event is KeyDownEvent) appendDigit(digit);
+    return true; // swallow repeats/ups too, so a held digit can't leak into nav
   }
 
-  /// Append a typed digit and (re)arm the auto-commit timer.
   void appendDigit(int digit) {
     if (_digitBuffer.length >= _maxDigits) return;
     _digitBuffer += '$digit';
     _digitTimer?.cancel();
     _digitTimer = Timer(_digitCommitDelay, commitDigitBuffer);
-    if (!_disposed) notifyListeners();
+    _notify();
   }
 
-  /// Jump to the visible channel whose [Channel.number] matches the buffer.
+  /// Jump the cursor to the visible channel whose [Channel.number] matches.
   void commitDigitBuffer() {
     final number = int.tryParse(_digitBuffer);
     clearDigitBuffer();
     if (number == null) return;
-    final visible = visibleChannels();
-    final index = visible.indexWhere((channel) => channel.number == number);
+    final index = visibleChannels().indexWhere(
+      (channel) => channel.number == number,
+    );
     if (index < 0) return;
-    noteFocusedChannel(visible[index].id);
-    _focusChannelByIndex(visible, index);
-    lastFocusArea = LiveFocusArea.channels;
+    selectChannel(index);
+    focusChannels();
   }
 
   void clearDigitBuffer() {
@@ -252,677 +575,23 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _digitTimer = null;
     if (_digitBuffer.isEmpty) return;
     _digitBuffer = '';
+    _notify();
+  }
+
+  void _notify() {
     if (!_disposed) notifyListeners();
-  }
-
-  void noteFocusedChannel(String id) {
-    if (_lastFocusedChannelId == id) return;
-    _lastFocusedChannelId = id;
-    if (!_disposed) notifyListeners();
-  }
-
-  /// Record [area] as the last known pane (used by the screen's Back-peel).
-  void noteFocusArea(LiveFocusArea area) => lastFocusArea = area;
-
-  String _categoryKey(String? id) => id ?? '__live.channels__';
-
-  /// Remember [channelId] as where the user left the current category.
-  void rememberBrowsedChannel(String channelId) {
-    _lastBrowsedByCategory[_categoryKey(categoryId())] = channelId;
-  }
-
-  FocusNode focusNodeForChannel(String channelId) {
-    return _channelNodes.putIfAbsent(channelId, () {
-      final node = RoutedFocusNode('$channelLabelPrefix$channelId');
-      node.addListener(() {
-        final channel = channelById(channelId);
-        if (channel == null) return;
-        if (node.hasFocus) noteFocusedChannel(channelId);
-        onChannelFocusChanged(channel, node.hasFocus);
-      });
-      return node;
-    });
-  }
-
-  FocusNode focusNodeForCategory(String? categoryId) {
-    final key = categoryId ?? 'all';
-    return _categoryNodes.putIfAbsent(key, () {
-      final node = RoutedFocusNode('$categoryLabelPrefix$key');
-      node.addListener(() {
-        if (node.hasFocus) _lastFocusedCategoryId = categoryId;
-      });
-      return node;
-    });
-  }
-
-  /// The category id encoded in a `live.category.<key>` label (null for
-  /// `all`), or null for a non-category label.
-  String? categoryIdFromFocusLabel(String label) {
-    if (!label.startsWith(categoryLabelPrefix)) return null;
-    final key = label.substring(categoryLabelPrefix.length);
-    return key == 'all' ? null : key;
-  }
-
-  /// Per-channel [FocusNode]s are created lazily as rows scroll into view.
-  /// Left unbounded they'd accumulate the union of every channel browsed this
-  /// session (thousands, on a large playlist). Prune back to the current
-  /// working set — the filtered visible list — whenever that set changes.
-  /// Runs post-frame so we never dispose a node still attached to a live
-  /// widget, and never disposes the focused node.
-  void scheduleFocusNodePrune() {
-    if (_pruneScheduled) return;
-    _pruneScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _pruneScheduled = false;
-      if (_disposed || !isMounted()) return;
-      final keep = visibleChannels().map((c) => c.id).toSet();
-      _channelNodes.removeWhere((id, node) {
-        if (keep.contains(id) || node.hasFocus) return false;
-        node.dispose();
-        return true;
-      });
-    });
-  }
-
-  /// Move focus into the channel pane, resuming on the channel the user last
-  /// browsed in this category (jump-scrolled into range if needed).
-  void focusChannelsFromCategory() {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    final resumeId = _lastBrowsedByCategory[_categoryKey(categoryId())];
-    final hasResume =
-        resumeId != null && visible.any((channel) => channel.id == resumeId);
-    final resumeIndex = hasResume
-        ? visible.indexWhere((channel) => channel.id == resumeId)
-        : -1;
-    if (hasResume && resumeIndex > 0 && scrollController.hasClients) {
-      final targetOffset = resumeIndex * _estimatedChannelRowExtent;
-      final maxOffset = scrollController.position.maxScrollExtent;
-      scrollController.jumpTo(targetOffset.clamp(0, maxOffset));
-    }
-    final FocusNode targetNode = hasResume && visible.first.id != resumeId
-        ? focusNodeForChannel(resumeId)
-        : firstChannelFocusNode;
-    targetNode.requestFocus();
-    _reassertFocus(
-      targetNode,
-      shouldRetry: (label) =>
-          label.startsWith(categoryLabelPrefix) || label == unlabeledLabel,
-      attempts: 4,
-    );
-    _reassertFocus(
-      firstChannelFocusNode,
-      shouldRetry: (label) =>
-          label.startsWith(categoryLabelPrefix) || label == unlabeledLabel,
-      attempts: 6,
-    );
-    lastFocusArea = LiveFocusArea.channels;
-  }
-
-  /// Land focus on [categoryId]'s pane node, scrolled into build range first
-  /// (an off-screen sidebar node has a null context, so a bare `requestFocus`
-  /// would no-op), then retrying across a few frames so a fresh-selection
-  /// rebuild/autofocus race (the channel list's first-row autofocus + the
-  /// scroll-to-top) can't strand focus on the channel list or an unlabeled
-  /// node — which would leave the root Back ladder unable to tell where it is.
-  void focusCategory(String? categoryId) {
-    final ids = orderedCategoryIds();
-    final index = ids.indexOf(categoryId);
-    if (index >= 0) {
-      _focusCategoryByIndex(ids, index);
-    } else {
-      focusNodeForCategory(categoryId).requestFocus();
-      lastFocusArea = LiveFocusArea.category;
-    }
-    _reassertFocus(
-      focusNodeForCategory(categoryId),
-      shouldRetry: (label) =>
-          label.startsWith(channelLabelPrefix) || label == unlabeledLabel,
-      attempts: 6,
-    );
-    _lastFocusedCategoryId = categoryId;
-  }
-
-  /// Move focus from the channel pane back to the category the user last had
-  /// (falling back to the selected one) — scrolled into range so it always
-  /// lands, even from a long, scrolled sidebar.
-  void focusCategoryFromChannels() {
-    _heldArea = null;
-    final targetId = _lastFocusedCategoryId ?? categoryId();
-    final ids = orderedCategoryIds();
-    final index = ids.indexOf(targetId);
-    if (index >= 0) {
-      _focusCategoryByIndex(ids, index);
-    } else {
-      focusNodeForCategory(targetId).requestFocus();
-      lastFocusArea = LiveFocusArea.category;
-    }
-    _reassertFocus(
-      focusNodeForCategory(targetId),
-      shouldRetry: (label) =>
-          label.startsWith(channelLabelPrefix) || label == unlabeledLabel,
-      attempts: 4,
-    );
-  }
-
-  /// Focus the category at [index] in [ids], jump-scrolling the sidebar to
-  /// build the row first when it's off-screen (mirrors [_focusChannelByIndex]).
-  void _focusCategoryByIndex(List<String?> ids, int index) {
-    if (ids.isEmpty) return;
-    final clamped = index.clamp(0, ids.length - 1);
-    final targetId = ids[clamped];
-    final node = focusNodeForCategory(targetId);
-    _lastFocusedCategoryId = targetId;
-    lastFocusArea = LiveFocusArea.category;
-    final targetLabel = '$categoryLabelPrefix${targetId ?? 'all'}';
-
-    // Is the target row painted within the viewport (not merely built in the
-    // cache extent)? A built-but-cached (off-screen) node can't take focus via a
-    // bare requestFocus — it must be scrolled into the visible range first. A
-    // non-scrolling sidebar (everything fits) is always on-screen.
-    bool onScreen() {
-      if (node.context == null || !categoryScrollController.hasClients) {
-        return false;
-      }
-      final pos = categoryScrollController.position;
-      if (pos.maxScrollExtent <= 0) return true;
-      final top = clamped * _estimatedCategoryRowExtent;
-      return top >= pos.pixels &&
-          top + _estimatedCategoryRowExtent <= pos.pixels + pos.viewportDimension;
-    }
-
-    if (!onScreen() && categoryScrollController.hasClients) {
-      // Jump the target roughly to the viewport centre (so the card's own
-      // scroll-on-focus doesn't then re-animate it), then focus post-frame —
-      // re-requesting the next frame, plus the reassert, so it lands once the
-      // jumped-to row has actually built.
-      final pos = categoryScrollController.position;
-      final centered =
-          (clamped * _estimatedCategoryRowExtent -
-                  (pos.viewportDimension - _estimatedCategoryRowExtent) / 2)
-              .clamp(0.0, pos.maxScrollExtent);
-      categoryScrollController.jumpTo(centered);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_disposed || !isMounted()) return;
-        node.requestFocus();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_disposed || !isMounted()) return;
-          node.requestFocus();
-        });
-      });
-      _reassertFocus(
-        node,
-        shouldRetry: (label) => label != targetLabel,
-        attempts: 4,
-      );
-      return;
-    }
-    node.requestFocus();
-    _reassertFocus(
-      node,
-      shouldRetry: (label) => label != targetLabel,
-      attempts: 4,
-    );
-  }
-
-  /// Move focus one category down, wrapping past the last back to the first.
-  void moveDownInCategories(String? currentId) {
-    final ids = orderedCategoryIds();
-    if (ids.isEmpty) return;
-    final i = ids.indexOf(currentId);
-    if (i < 0) return;
-    _focusCategoryByIndex(ids, (i + 1) % ids.length);
-  }
-
-  /// Move focus one category up, wrapping past the first back to the last.
-  void moveUpInCategories(String? currentId) {
-    final ids = orderedCategoryIds();
-    if (ids.isEmpty) return;
-    final i = ids.indexOf(currentId);
-    if (i < 0) return;
-    _focusCategoryByIndex(ids, (i - 1 + ids.length) % ids.length);
-  }
-
-  /// Key handler for a category sidebar card. Right → channels; Up/Down cycle
-  /// within the category list (wrapping) and are consumed so directional
-  /// traversal can't spill focus into the channel pane. Returns [KeyEventResult]
-  /// for the card's `onKeyEvent`.
-  KeyEventResult handleCategoryCardKey(String? categoryId, KeyEvent event) {
-    final key = event.logicalKey;
-    final isVertical =
-        key == LogicalKeyboardKey.arrowUp ||
-        key == LogicalKeyboardKey.arrowDown;
-    if (key != LogicalKeyboardKey.arrowRight && !isVertical) {
-      return KeyEventResult.ignored;
-    }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.arrowRight) {
-      focusChannelsFromCategory();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.arrowDown) {
-      moveDownInCategories(categoryId);
-    } else {
-      moveUpInCategories(categoryId);
-    }
-    return KeyEventResult.handled;
-  }
-
-  /// Move focus to the preview panel controls (the top of the channel column).
-  /// When they aren't attached (narrow/phone layout, or a wide frame before the
-  /// preview panel builds), wrap to the last channel instead.
-  void focusPreviewControls() {
-    if (previewFavoriteFocusNode.context != null) {
-      previewFavoriteFocusNode.requestFocus();
-      lastFocusArea = LiveFocusArea.unknown;
-      return;
-    }
-    _focusLastChannel();
-  }
-
-  /// Focus the last visible channel — the narrow/phone-layout Up-wrap from the
-  /// first channel, where there are no preview controls above it to land on —
-  /// jump-scrolling it into range if needed.
-  void _focusLastChannel() {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    noteFocusedChannel(visible.last.id);
-    _focusChannelByIndex(visible, visible.length - 1);
-    lastFocusArea = LiveFocusArea.channels;
-  }
-
-  /// Key handler for a preview control (Favorite / Catch-up). Down → first
-  /// channel; Up → the toolbar's search box (the one focusable directly above
-  /// the preview panel), so search/tabs are reachable by D-pad from here, not
-  /// only via the Back ladder; Left → the sibling control or the category
-  /// pane; Right → the sibling control. [fromCatchup] tells which control
-  /// fired. Left/Right/Down stay contained in the live column.
-  KeyEventResult handlePreviewControlKey(bool fromCatchup, KeyEvent event) {
-    final key = event.logicalKey;
-    final isNav =
-        key == LogicalKeyboardKey.arrowUp ||
-        key == LogicalKeyboardKey.arrowDown ||
-        key == LogicalKeyboardKey.arrowLeft ||
-        key == LogicalKeyboardKey.arrowRight;
-    if (!isNav) return KeyEventResult.ignored;
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.arrowDown) {
-      focusFirstChannel();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.arrowUp) {
-      // Climb out of the channel column to the toolbar's search box, which sits
-      // directly above the preview panel — so the search field (and, above it,
-      // the content tabs) is reachable by D-pad from here, not only via the Back
-      // ladder. It deliberately does NOT wrap to the last channel: that flung a
-      // long list to its bottom and stranded the Back ladder mid-list.
-      if (searchCellFocusNode.context != null) {
-        searchCellFocusNode.requestFocus();
-        lastFocusArea = LiveFocusArea.search;
-      }
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.arrowLeft) {
-      if (!fromCatchup && previewCatchupFocusNode.context != null) {
-        previewCatchupFocusNode.requestFocus();
-      } else {
-        focusCategoryFromChannels();
-      }
-      return KeyEventResult.handled;
-    }
-    // arrowRight
-    if (fromCatchup && previewFavoriteFocusNode.context != null) {
-      previewFavoriteFocusNode.requestFocus();
-    }
-    return KeyEventResult.handled;
-  }
-
-  void _focusChannelByIndex(List<Channel> visible, int index) {
-    if (visible.isEmpty) return;
-    final clamped = index.clamp(0, visible.length - 1);
-    if (clamped == 0) {
-      firstChannelFocusNode.requestFocus();
-      return;
-    }
-    final node = focusNodeForChannel(visible[clamped].id);
-    final targetLabel = '$channelLabelPrefix${visible[clamped].id}';
-    if (node.context == null && scrollController.hasClients) {
-      // The target row isn't built — jump-scroll it into range, then focus
-      // post-frame (with one nudge retry if the estimate fell short).
-      final maxOffset = scrollController.position.maxScrollExtent;
-      final targetOffset = (clamped * _estimatedChannelRowExtent)
-          .clamp(0, maxOffset)
-          .toDouble();
-      scrollController.jumpTo(targetOffset);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_disposed || !isMounted()) return;
-        if (node.context != null) {
-          node.requestFocus();
-          return;
-        }
-        if (scrollController.hasClients) {
-          final nudged =
-              (scrollController.position.pixels + _estimatedChannelRowExtent)
-                  .clamp(0, scrollController.position.maxScrollExtent)
-                  .toDouble();
-          scrollController.jumpTo(nudged);
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_disposed || !isMounted()) return;
-          node.requestFocus();
-        });
-      });
-      // A big jump (wrap to the last/first row, a digit jump) can leave the
-      // freshly-scrolled row a frame or two from building, so the post-frame
-      // `requestFocus` above no-ops and focus sits in limbo (no row
-      // highlighted) — the reported "focused no channel for some time". Keep
-      // re-requesting across a few frames until the row builds and takes focus
-      // (same self-correcting retry the category-landing paths use).
-      _reassertFocus(
-        node,
-        shouldRetry: (label) => label != targetLabel,
-        attempts: 6,
-      );
-      return;
-    }
-    node.requestFocus();
-  }
-
-  /// True when the channel list is scrolled more than one viewport deep —
-  /// the threshold for the "first Back returns to the top of the list" rung.
-  bool get channelListIsDeep =>
-      scrollController.hasClients &&
-      scrollController.position.pixels >
-          scrollController.position.viewportDimension;
-
-  /// Jump the list to the top and focus the first visible channel (used by
-  /// the down-wrap and the Back-to-top rung). The first row may not be built
-  /// yet right after the jump, hence the post-frame focus with one retry.
-  void focusFirstChannel() {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    noteFocusedChannel(visible.first.id);
-    if (scrollController.hasClients) {
-      scrollController.jumpTo(0);
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_disposed || !isMounted()) return;
-      if (firstChannelFocusNode.context != null) {
-        firstChannelFocusNode.requestFocus();
-        return;
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_disposed || !isMounted()) return;
-        firstChannelFocusNode.requestFocus();
-      });
-    });
-    lastFocusArea = LiveFocusArea.channels;
-  }
-
-  /// Move focus one row down from [channelId], wrapping to the top.
-  void moveDownInChannels(String channelId) {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    final currentIndex = visible.indexWhere(
-      (channel) => channel.id == channelId,
-    );
-    if (currentIndex < 0) return;
-    final nextIndex = (currentIndex + 1) % visible.length;
-    if (nextIndex == 0) {
-      focusFirstChannel();
-      return;
-    }
-    noteFocusedChannel(visible[nextIndex].id);
-    _focusChannelByIndex(visible, nextIndex);
-  }
-
-  /// Move focus one row up from [channelId]. From the first row it goes to the
-  /// preview panel controls (the top of the channel column) — or, when those
-  /// aren't present (narrow layout), wraps to the last row.
-  void moveUpInChannels(String channelId) {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    final currentIndex = visible.indexWhere(
-      (channel) => channel.id == channelId,
-    );
-    if (currentIndex < 0) return;
-    if (currentIndex == 0) {
-      focusPreviewControls();
-      return;
-    }
-    final prevIndex = currentIndex - 1;
-    noteFocusedChannel(visible[prevIndex].id);
-    _focusChannelByIndex(visible, prevIndex);
-  }
-
-  /// Restore focus to [targetId] (e.g. the last-played channel) if visible,
-  /// else the first row. No-op when the list is empty.
-  void restoreFocusToChannel(String? targetId) {
-    final visible = visibleChannels();
-    if (visible.isEmpty) return;
-    final hasTarget =
-        targetId != null && visible.any((channel) => channel.id == targetId);
-    if (hasTarget && visible.first.id != targetId) {
-      focusNodeForChannel(targetId).requestFocus();
-    } else {
-      firstChannelFocusNode.requestFocus();
-    }
-  }
-
-  /// The channel id encoded in a focus [label], or null for non-channel
-  /// labels. `live.channel.first` maps to the first visible channel.
-  String? channelIdFromFocusLabel(String label) {
-    if (label == firstChannelLabel) {
-      final visible = visibleChannels();
-      return visible.isEmpty ? null : visible.first.id;
-    }
-    if (!label.startsWith(channelLabelPrefix)) return null;
-    final id = label.substring(channelLabelPrefix.length);
-    if (id.isEmpty || id == 'first') return null;
-    return id;
-  }
-
-  /// Which pane a focus [label] belongs to.
-  LiveFocusArea focusAreaFromLabel(String label) {
-    if (label.startsWith(categoryLabelPrefix)) return LiveFocusArea.category;
-    if (label.startsWith(channelLabelPrefix)) return LiveFocusArea.channels;
-    if (label == searchCellLabel) return LiveFocusArea.search;
-    return LiveFocusArea.unknown;
-  }
-
-  /// A focus request racing a rebuild can be stolen by the old pane's node —
-  /// re-request for a few frames while focus still reads as the wrong side.
-  void _reassertFocus(
-    FocusNode targetNode, {
-    required bool Function(String label) shouldRetry,
-    int attempts = 3,
-  }) {
-    if (attempts <= 0) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_disposed || !isMounted()) return;
-      final label = focusRouteKey(FocusManager.instance.primaryFocus);
-      if (!shouldRetry(label)) return;
-      targetNode.requestFocus();
-      _reassertFocus(
-        targetNode,
-        shouldRetry: shouldRetry,
-        attempts: attempts - 1,
-      );
-    });
-  }
-
-  /// Global (HardwareKeyboard) handler: category→channels on Right, and the
-  /// down-hold lock that keeps a held Down key walking the channel list.
-  /// Registered by the screen for its lifetime.
-  bool handleGlobalKeyEvent(KeyEvent event) {
-    if (!isLiveTab() || !isRouteCurrent()) return false;
-    final key = event.logicalKey;
-    final isVertical =
-        key == LogicalKeyboardKey.arrowUp ||
-        key == LogicalKeyboardKey.arrowDown;
-    if (isVertical && event is KeyUpEvent) {
-      _heldArea = null;
-      return false;
-    }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
-    if (!isVertical) _heldArea = null;
-
-    final label = focusRouteKey(FocusManager.instance.primaryFocus);
-    if (_handleDigitKey(event, focusAreaFromLabel(label))) return true;
-    if (key == LogicalKeyboardKey.arrowRight &&
-        label.startsWith(categoryLabelPrefix)) {
-      focusChannelsFromCategory();
-      return true;
-    }
-    if (!isVertical) return false;
-    // Preview controls run their own contained Up/Down handler — don't let the
-    // held-continuation logic below fight it.
-    if (label == previewFavoriteLabel || label == previewCatchupLabel) {
-      _heldArea = null;
-      return false;
-    }
-
-    final forward = key == LogicalKeyboardKey.arrowDown;
-    // Attached on a channel row.
-    final channelId = channelIdFromFocusLabel(label);
-    if (channelId != null) {
-      _heldArea = LiveFocusArea.channels;
-      _heldForward = forward;
-      noteFocusedChannel(channelId);
-      forward ? moveDownInChannels(channelId) : moveUpInChannels(channelId);
-      return true;
-    }
-    // Attached on a category row.
-    if (label.startsWith(categoryLabelPrefix)) {
-      final catId = categoryIdFromFocusLabel(label);
-      _heldArea = LiveFocusArea.category;
-      _heldForward = forward;
-      forward ? moveDownInCategories(catId) : moveUpInCategories(catId);
-      return true;
-    }
-    // Detached mid-scroll but a hold is in progress: keep walking the same pane
-    // in the same direction so a held key can't leak into the neighbour pane.
-    if (_heldArea == LiveFocusArea.channels) {
-      final visible = visibleChannels();
-      if (visible.isEmpty) return true;
-      final fallbackId = _lastFocusedChannelId ?? visible.first.id;
-      _heldForward
-          ? moveDownInChannels(fallbackId)
-          : moveUpInChannels(fallbackId);
-      return true;
-    }
-    if (_heldArea == LiveFocusArea.category) {
-      _heldForward
-          ? moveDownInCategories(_lastFocusedCategoryId)
-          : moveUpInCategories(_lastFocusedCategoryId);
-      return true;
-    }
-    return false;
-  }
-
-  /// Search cell: Down leaves the search box into the channel pane.
-  KeyEventResult handleSearchCellKey(FocusNode node, KeyEvent event) {
-    if (!isLiveTab()) return KeyEventResult.ignored;
-    if (!searchCellFocusNode.hasFocus) return KeyEventResult.ignored;
-    if (event.logicalKey != LogicalKeyboardKey.arrowDown) {
-      return KeyEventResult.ignored;
-    }
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-      return KeyEventResult.handled;
-    }
-    focusChannelsFromCategory();
-    return KeyEventResult.handled;
-  }
-
-  /// Pane-level fallback (attached to the live body's Focus widget): tracks
-  /// the last known pane, handles category↔channel arrows, and routes arrows
-  /// deterministically when focus lands on an unlabeled node.
-  KeyEventResult handlePaneFallbackKey(FocusNode node, KeyEvent event) {
-    if (!isLiveTab()) return KeyEventResult.ignored;
-    if (event is! KeyDownEvent &&
-        event is! KeyRepeatEvent &&
-        event is! KeyUpEvent) {
-      return KeyEventResult.ignored;
-    }
-
-    final label = focusRouteKey(FocusManager.instance.primaryFocus);
-    final area = focusAreaFromLabel(label);
-    if (area != LiveFocusArea.unknown) {
-      lastFocusArea = area;
-      if (area == LiveFocusArea.channels) {
-        final focusedChannelId = channelIdFromFocusLabel(label);
-        if (focusedChannelId != null) {
-          noteFocusedChannel(focusedChannelId);
-        }
-      }
-    }
-
-    final key = event.logicalKey;
-
-    if (label.startsWith(categoryLabelPrefix) &&
-        key == LogicalKeyboardKey.arrowRight) {
-      focusChannelsFromCategory();
-      return KeyEventResult.handled;
-    }
-    if (label.startsWith(channelLabelPrefix) &&
-        key == LogicalKeyboardKey.arrowLeft) {
-      focusCategoryFromChannels();
-      return KeyEventResult.handled;
-    }
-
-    if (label.startsWith(categoryLabelPrefix) &&
-        key == LogicalKeyboardKey.arrowDown &&
-        (event is KeyDownEvent || event is KeyRepeatEvent) &&
-        _heldArea == LiveFocusArea.channels &&
-        _heldForward) {
-      final visible = visibleChannels();
-      if (visible.isNotEmpty) {
-        moveDownInChannels(_lastFocusedChannelId ?? visible.first.id);
-      }
-      return KeyEventResult.handled;
-    }
-
-    // If focus transiently lands on an unlabeled node, route based on the last
-    // known pane so navigation stays deterministic.
-    if (label == unlabeledLabel) {
-      if (key == LogicalKeyboardKey.arrowRight &&
-          lastFocusArea == LiveFocusArea.category) {
-        focusChannelsFromCategory();
-        return KeyEventResult.handled;
-      }
-      if (key == LogicalKeyboardKey.arrowLeft &&
-          lastFocusArea == LiveFocusArea.channels) {
-        focusCategoryFromChannels();
-        return KeyEventResult.handled;
-      }
-      if (key == LogicalKeyboardKey.arrowDown &&
-          lastFocusArea == LiveFocusArea.search) {
-        focusChannelsFromCategory();
-        return KeyEventResult.handled;
-      }
-    }
-
-    return KeyEventResult.ignored;
   }
 
   @override
   void dispose() {
     _disposed = true;
     _digitTimer?.cancel();
+    _holdTimer?.cancel();
+    channelsFocusNode.dispose();
+    categoriesFocusNode.dispose();
     searchCellFocusNode.dispose();
-    firstChannelFocusNode.dispose();
     previewFavoriteFocusNode.dispose();
     previewCatchupFocusNode.dispose();
-    for (final node in _channelNodes.values) {
-      node.dispose();
-    }
-    for (final node in _categoryNodes.values) {
-      node.dispose();
-    }
     super.dispose();
   }
 }

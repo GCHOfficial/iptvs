@@ -3,7 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show HardwareKeyboard, KeyEvent, KeyRepeatEvent, SystemNavigator;
+    show KeyEvent, KeyRepeatEvent, SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
 import '../data/diagnostics_log.dart';
@@ -150,17 +150,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       scrollController: _scrollController,
       categoryScrollController: _categoryScrollController,
       visibleChannels: () => _visible,
-      categoryId: () => _categoryId,
       orderedCategoryIds: () => [
         null,
         for (final category in _liveCategoriesForUi) category.id,
       ],
-      channelById: _findChannelById,
-      isLiveTab: () => _tab == ContentKind.live,
-      isRouteCurrent: () =>
-          !mounted || (ModalRoute.of(context)?.isCurrent ?? true),
+      channelRowExtent: () => channelRowExtentFor(_live.now.isNotEmpty),
+      categoryRowExtent: () => kCategoryRowExtent,
+      isWide: _isWide,
       isMounted: () => mounted,
-      onChannelFocusChanged: _onChannelFocusChanged,
+      onChannelSelectionChanged: _onChannelSelectionChanged,
+      onCategoryActivated: _selectCategory,
+      onPlayChannel: _play,
+      onContextMenuChannel: _showChannelMenu,
+      onFocusTabs: _focusTabs,
     );
     _dataListenable = Listenable.merge([
       _live,
@@ -168,7 +170,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       ..._mediaControllers.values,
     ]);
     _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
-    HardwareKeyboard.instance.addHandler(_focus.handleGlobalKeyEvent);
     WidgetsBinding.instance.addObserver(this);
     _loadLive();
     _live.startEpgRefresh();
@@ -195,7 +196,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   Future<void> _loadLive({bool forceRefresh = false}) async {
     await _live.load(forceRefresh: forceRefresh);
     if (!mounted) return;
-    _focus.scheduleFocusNodePrune();
+    _focus.clampSelection();
     await _loadFavorites(ContentKind.live);
   }
 
@@ -245,7 +246,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    HardwareKeyboard.instance.removeHandler(_focus.handleGlobalKeyEvent);
     _live.dispose();
     _preview.dispose();
     _favorites.dispose();
@@ -271,10 +271,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// preview; only pressing OK on a different channel switches it. On desktop
   /// previews are *not* deliberate: they auto-start muted, mouse-hover style,
   /// after a short focus debounce (the branch at the end of
-  /// [_onChannelFocusChanged]).
+  /// [_onChannelSelectionChanged]).
   bool get _deliberatePreview => Platform.isAndroid;
 
-  void _onChannelFocusChanged(Channel channel, bool hasFocus) {
+  void _onChannelSelectionChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
       if (!_deliberatePreview && _preview.channelId == channel.id) {
         _previewTimer?.cancel();
@@ -313,7 +313,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (_tab == ContentKind.live) {
-        _focus.restoreFocusToChannel(_lastPlayedLiveChannelId);
+        _focus.restoreSelectionToChannel(_lastPlayedLiveChannelId);
         return;
       }
       if (_tab == ContentKind.movie || _tab == ContentKind.series) {
@@ -327,7 +327,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     setState(() => _query = value);
     _searchTimer?.cancel();
     if (_tab == ContentKind.live) {
-      _focus.scheduleFocusNodePrune();
+      // A new result set starts at the top — otherwise the cursor would keep an
+      // index that now points at an unrelated channel.
+      _focus.resetChannelSelection();
+      _focus.clampSelection();
       return;
     }
     final controller = _media(_tab);
@@ -1094,19 +1097,41 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     _scrollToTop();
   }
 
+  /// The two-column (TV/desktop) layout, which is the only one with a category
+  /// sidebar and preview panel. The coordinator routes the D-pad off this.
+  bool _isWide() =>
+      mounted && MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+
+  /// The content tabs — the top of the Back ladder and the D-pad's ceiling.
+  void _focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
+
+  /// Apply a live category filter: OK on a sidebar row, a tap, or the phone
+  /// dropdown. The channel cursor restarts at the top of the new list; the D-pad
+  /// stays where it is (the sidebar), so the user can keep browsing categories.
+  void _selectCategory(String? categoryId) {
+    setState(() => _categoryId = categoryId);
+    _focus.syncCategorySelection(categoryId);
+    _focus.resetChannelSelection();
+    _focus.clampSelection();
+    _scrollToTop();
+  }
+
   /// Double-Back exit confirmation: the first Back at the top of the ladder
   /// arms this and shows "Press Back again to exit"; a second Back inside the
   /// window actually exits.
   DateTime? _exitArmedAt;
   static const _exitConfirmWindow = Duration(seconds: 2);
 
-  /// Peels one D-pad rung per Back press, keyed off what's focused. Live
-  /// (wide/TV) ladder: deep channel list → top of the list → category sidebar
-  /// (last selected) → "All channels" highlight → content-kind tabs
-  /// (Live/Movies/Series) → exit (double-Back). Media: deep grid → top of the
-  /// grid → tabs → exit. The app only exits from the top of the ladder — the
-  /// section tabs, the toolbar/app-bar, or anything else above the content —
-  /// and only on a second Back within [_exitConfirmWindow].
+  /// Peels exactly one rung per Back press. The live ladder, in order:
+  ///
+  ///   channel list (cursor not on the first row) → **first channel**
+  ///     → **categories** (wide) → **first category** ("All channels")
+  ///     → **search box** → **content tabs** → exit (double-Back).
+  ///
+  /// Because the live lists are a selection model, each rung is a plain check on
+  /// the coordinator's region + selected index — no focus-label archaeology.
+  /// Media: deep grid → top of the grid → tabs → exit. The app only ever exits
+  /// from the tabs, and only on a second Back within [_exitConfirmWindow].
   void _handleRootBack(bool didPop, Object? result) {
     if (didPop) return;
     final label = focusRouteKey(FocusManager.instance.primaryFocus);
@@ -1115,46 +1140,51 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // being edited — it already exits edit mode on Back.
     if (label == 'TvTextField.field') return;
 
-    final wideLive =
-        _tab == ContentKind.live &&
-        MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
-    // The single "one rung below exit" target — every content-level focus
-    // peels here before the app can exit.
-    void focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
+    final wideLive = _tab == ContentKind.live && _isWide();
 
-    // Live channel list. More than a screen deep, the first Back returns to
-    // the top of the list (you're navigating *within* the list; climbing out
-    // starts from its top). From the top: the category sidebar (wide) or
-    // straight to the tabs (narrow, which has no sidebar).
-    if (label.startsWith(LiveFocusCoordinator.channelLabelPrefix)) {
-      if (_focus.channelListIsDeep) {
-        _focus.focusFirstChannel();
-      } else if (wideLive) {
-        _focus.focusCategoryFromChannels();
-      } else {
-        focusTabs();
+    if (_tab == ContentKind.live) {
+      switch (_focus.region) {
+        case LiveFocusRegion.channels:
+          // Rung 1: climbing out of the list starts from its top.
+          if (!_focus.onFirstChannel) {
+            _focus.selectChannel(0);
+            return;
+          }
+          // Rung 2: out of the list into the sidebar (wide) — phones have no
+          // sidebar, so they peel straight to the search box.
+          if (wideLive) {
+            _focus.focusCategories();
+          } else {
+            _focus.focusSearch();
+          }
+          return;
+        case LiveFocusRegion.previewControls:
+          // The preview controls sit between the search box and the list.
+          if (wideLive) {
+            _focus.focusCategories();
+          } else {
+            _focus.focusSearch();
+          }
+          return;
+        case LiveFocusRegion.categories:
+          // Rung 3: move the *highlight* to "All channels" — this deliberately
+          // does not change the active filter (OK does that).
+          if (!_focus.onFirstCategory) {
+            _focus.selectCategory(0);
+            return;
+          }
+          // Rung 4: out of the sidebar into the search box.
+          _focus.focusSearch();
+          return;
+        case LiveFocusRegion.search:
+          // Rung 5: search → the section tabs.
+          _focusTabs();
+          return;
+        case LiveFocusRegion.none:
+          break; // fall through to the shared handling below
       }
-      return;
     }
-    // The preview panel controls sit at the top of the channel column — one
-    // rung above the list — so Back peels them to the category pane (wide) or
-    // straight to the tabs (narrow, which has no preview controls/sidebar).
-    if (label == LiveFocusCoordinator.previewFavoriteLabel ||
-        label == LiveFocusCoordinator.previewCatchupLabel) {
-      if (wideLive) {
-        _focus.focusCategoryFromChannels();
-      } else {
-        focusTabs();
-      }
-      return;
-    }
-    // On a specific category → move the highlight to "All channels" without
-    // changing the current filter (the user presses OK to actually switch).
-    if (label.startsWith(LiveFocusCoordinator.categoryLabelPrefix) &&
-        label != '${LiveFocusCoordinator.categoryLabelPrefix}all') {
-      _focus.focusCategory(null);
-      return;
-    }
+
     // Movies/series grid — same top-of-list rung as the channel list, then
     // the tabs.
     if (label.startsWith('media.')) {
@@ -1177,29 +1207,32 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           });
         });
       } else {
-        focusTabs();
+        _focusTabs();
       }
       return;
     }
-    // Everything else at content level — "All channels" (the sidebar's top),
-    // the search box (live's coordinator node or the media tabs' internal
-    // TvTextField cell) — peels to the tabs.
-    if (label == '${LiveFocusCoordinator.categoryLabelPrefix}all' ||
-        label == LiveFocusCoordinator.searchCellLabel ||
-        label == 'TvTextField.cell') {
-      focusTabs();
+    // The media tabs' own search cell peels to the tabs (live's search box is
+    // handled by the region ladder above).
+    if (label == 'TvTextField.cell') {
+      _focusTabs();
       return;
     }
-    // Focus on an un-routed node reads as '' — the toolbar/enrich button, an
-    // AppBar action, the category dropdown, or a transient node mid-rebuild.
-    // That is never the top of the ladder (the content tabs are
-    // RoutedFocusNodes), so recover to the current tab — one rung below exit —
-    // instead of falling through to the exit path. Without this, arrowing onto
-    // the toolbar or a fresh category selection would make Back exit the app.
-    if (label.isEmpty) {
-      focusTabs();
+    // Un-routed focus (route key '') is the app **chrome** — the AppBar actions
+    // and the toolbar's buttons are plain IconButtons, while every *content*
+    // focusable on this screen carries a route key. The chrome sits above the
+    // ladder, so Back from it goes straight to the exit prompt rather than
+    // diving back down into the sections and making the user climb out again.
+    //
+    // The one exception is a bare scope / nothing actually focused (a transient
+    // state, e.g. right after a dialog is dismissed): that isn't somewhere the
+    // user can *be*, so recover to the tabs instead of offering to exit.
+    final focusedNode = FocusManager.instance.primaryFocus;
+    if (label.isEmpty && (focusedNode == null || focusedNode is FocusScopeNode)) {
+      _focusTabs();
       return;
     }
+    // Otherwise fall through: the content tabs and the chrome are both the top
+    // of the ladder — exit, behind a double-Back confirmation.
     // The content tabs, or anything else routed but unhandled: nothing left to
     // peel — exit, behind a double-Back confirmation so mashing Back up the
     // ladder can't overshoot into the launcher.
@@ -1374,11 +1407,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                     ? _CategoryDropdown(
                         categories: _liveCategoriesForUi,
                         value: _categoryId,
-                        onChanged: (v) {
-                          setState(() => _categoryId = v);
-                          _focus.scheduleFocusNodePrune();
-                          _scrollToTop();
-                        },
+                        onChanged: _selectCategory,
                       )
                     : _MediaCategoryDropdown(
                         categories: _mediaCategoriesForUi(_tab),
@@ -1511,39 +1540,25 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       resolving: _resolving,
       scrollController: _scrollController,
       categoryScrollController: _categoryScrollController,
-      firstChannelFocusNode: _focus.firstChannelFocusNode,
-      focusNodeForChannel: _focus.focusNodeForChannel,
+      channelsFocusNode: _focus.channelsFocusNode,
+      selectedChannelIndex: _focus.selectedChannelIndex,
+      onChannelsKey: _focus.handleChannelsKey,
+      channelRowExtent: channelRowExtentFor(_live.now.isNotEmpty),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
       isFavorite: (id) => _isFavorite(ContentKind.live, id),
       onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
       onPlayChannel: _play,
       onContextMenuChannel: _showChannelMenu,
-      onChannelMoveLeft: (id) {
-        _focus.rememberBrowsedChannel(id);
-        _focus.focusCategoryFromChannels();
-      },
-      onChannelMoveDown: _focus.moveDownInChannels,
-      onChannelMoveUp: _focus.moveUpInChannels,
+      onSelectChannelIndex: (i) => _focus.selectChannel(i, reveal: false),
       onCatchup: _showCatchupSheet,
       categories: _liveCategoriesForUi,
       selectedCategoryId: _categoryId,
-      focusNodeForCategory: _focus.focusNodeForCategory,
-      onCategorySelected: (value) {
-        setState(() => _categoryId = value);
-        _focus.scheduleFocusNodePrune();
-        _scrollToTop();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          // Reassert focus for a few frames — a bare requestFocus here races
-          // the channel-list autofocus/scroll and can leave focus on an
-          // unlabeled node, which strands the Back ladder until you scroll.
-          _focus.focusCategory(_categoryId);
-        });
-      },
-      onMoveRightToChannels: _focus.focusChannelsFromCategory,
-      onCategoryCardKey: _focus.handleCategoryCardKey,
-      onPaneFallbackKey: _focus.handlePaneFallbackKey,
+      categoriesFocusNode: _focus.categoriesFocusNode,
+      selectedCategoryIndex: _focus.selectedCategoryIndex,
+      onCategoriesKey: _focus.handleCategoriesKey,
+      onCategorySelected: _selectCategory,
+      onSelectCategoryIndex: (i) => _focus.selectCategory(i, reveal: false),
       previewFavoriteFocusNode: _focus.previewFavoriteFocusNode,
       previewCatchupFocusNode: _focus.previewCatchupFocusNode,
       onPreviewControlKey: _focus.handlePreviewControlKey,
@@ -1582,7 +1597,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       final previewActive =
           _preview.stream != null || _preview.loading;
       return byId(previewActive ? _preview.channelId : null) ??
-          byId(_focus.lastFocusedChannelId) ??
+          byId(_focus.selectedChannelId) ??
           byId(_preview.channelId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;

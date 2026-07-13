@@ -84,6 +84,12 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   int _selectedRow = 0;
   late DateTime _cursorTime = DateTime.now();
 
+  /// The selected programme's index within the current row's list — the single
+  /// source of truth for the highlight and the detail bar. Left/Right step this
+  /// directly (pure index stepping, immune to overlapping/gappy guide data);
+  /// only a row change re-derives it from [_cursorTime] via [_selectedIndexIn].
+  int _selectedCol = 0;
+
   /// Width of the timeline area (viewport minus the channel column), cached
   /// from the body [LayoutBuilder] for the reveal/clamp math.
   double _timelineWidth = 0;
@@ -156,6 +162,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
         for (final id in ids) {
           _programmes[id] = forId(byChannel, id);
         }
+        _resolveSelectedColOnLoad(ids);
       });
     } catch (_) {
       if (!mounted) return;
@@ -165,6 +172,18 @@ class _EpgGridScreenState extends State<EpgGridScreen>
         }
       });
     }
+  }
+
+  /// Once the *selected* row's programmes finish loading, resolve which one the
+  /// held cursor time selects — so the initial selection (and the detail bar)
+  /// appears as soon as row 0 loads, and a row we scrolled onto before its data
+  /// arrived catches up.
+  void _resolveSelectedColOnLoad(List<String> loadedIds) {
+    if (widget.channels.isEmpty) return;
+    final selectedId = widget.channels[_selectedRow].id;
+    if (!loadedIds.contains(selectedId)) return;
+    final col = _resolveColForRow(_selectedRow);
+    if (col >= 0) _selectedCol = col;
   }
 
   // ── Geometry / reveal ──────────────────────────────────────────────────────
@@ -230,7 +249,11 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   void _jumpToNow() {
     if (!mounted) return;
     final now = DateTime.now();
-    setState(() => _cursorTime = now);
+    setState(() {
+      _cursorTime = now;
+      final col = _resolveColForRow(_selectedRow);
+      if (col >= 0) _selectedCol = col;
+    });
     // Instant, not animated: the guide should open already at "now", and an
     // auto-started ticker here would fight the widget-test clock.
     _panTo(_offsetForTime(now) - 120);
@@ -245,9 +268,17 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     final channel = widget.channels[_selectedRow];
     final items = _programmes[channel.id];
     if (items == null || items.isEmpty) return null;
-    final index = _selectedIndexIn(items, _cursorTime);
-    if (index < 0) return null;
+    final index = _selectedCol.clamp(0, items.length - 1);
     return (channel, items[index]);
+  }
+
+  /// Re-derive [_selectedCol] for [row] from the held [_cursorTime]. Returns the
+  /// programme index, or -1 when that row has no loaded programmes yet.
+  int _resolveColForRow(int row) {
+    if (row < 0 || row >= widget.channels.length) return -1;
+    final items = _programmes[widget.channels[row].id];
+    if (items == null || items.isEmpty) return -1;
+    return _selectedIndexIn(items, _cursorTime);
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -275,37 +306,52 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   }
 
   /// Move the selection [delta] rows, clamped (no wrap). Keeps [_cursorTime] so
-  /// the time column holds; drives the vertical scroll deterministically.
+  /// the time column holds; re-derives the selected programme on the new row
+  /// (the one airing at the held time) and drives the vertical scroll.
   KeyEventResult _moveRow(int delta) {
     final channels = widget.channels;
     if (channels.isEmpty) return KeyEventResult.handled;
     final next = (_selectedRow + delta).clamp(0, channels.length - 1);
     if (next == _selectedRow) return KeyEventResult.handled;
-    setState(() => _selectedRow = next);
     _ensureLoaded(channels[next].id);
+    setState(() {
+      _selectedRow = next;
+      // Hold the time column: pick the programme airing at [_cursorTime] on the
+      // new row. When the row isn't loaded yet, _runBatch derives it on arrival.
+      final col = _resolveColForRow(next);
+      if (col >= 0) _selectedCol = col;
+    });
     _revealRow(next);
     // The selected programme sits at the same time, so it's usually already in
     // view; reveal it anyway in case its span extends off-screen.
     final items = _programmes[channels[next].id];
     if (items != null && items.isNotEmpty) {
-      final index = _selectedIndexIn(items, _cursorTime);
-      if (index >= 0) _revealProgramme(items[index]);
+      _revealProgramme(items[_selectedCol.clamp(0, items.length - 1)]);
     }
     return KeyEventResult.handled;
   }
 
   /// Step the selection [delta] programmes along the current row, clamped (no
-  /// wrap), moving [_cursorTime] to the new programme's start.
+  /// wrap). Pure index stepping — the highlight follows [_selectedCol], not a
+  /// re-resolution of [_cursorTime], so overlapping/duplicate guide entries
+  /// can't trap the cursor. [_cursorTime] tracks the new programme's start so a
+  /// later Up/Down still holds the right time column.
   KeyEventResult _moveColumn(int delta) {
     final channels = widget.channels;
     if (channels.isEmpty) return KeyEventResult.handled;
     final items = _programmes[channels[_selectedRow].id];
     if (items == null || items.isEmpty) return KeyEventResult.handled;
-    final current = _selectedIndexIn(items, _cursorTime);
+    final current = _selectedCol.clamp(0, items.length - 1);
     final next = (current + delta).clamp(0, items.length - 1);
-    if (next == current) return KeyEventResult.handled;
+    if (next == current) {
+      if (_selectedCol != current) setState(() => _selectedCol = current);
+      return KeyEventResult.handled;
+    }
     final programme = items[next];
-    setState(() => _cursorTime = _clampStart(programme));
+    setState(() {
+      _selectedCol = next;
+      _cursorTime = _clampStart(programme);
+    });
     _revealProgramme(programme);
     return KeyEventResult.handled;
   }
@@ -318,8 +364,11 @@ class _EpgGridScreenState extends State<EpgGridScreen>
 
   /// Touch: select the tapped cell and open its details.
   void _selectAndActivate(int row, Programme programme) {
+    final items = _programmes[widget.channels[row].id] ?? const [];
+    final index = items.indexOf(programme);
     setState(() {
       _selectedRow = row;
+      if (index >= 0) _selectedCol = index;
       _cursorTime = _clampStart(programme);
     });
     _gridFocus.requestFocus();
@@ -375,7 +424,9 @@ class _EpgGridScreenState extends State<EpgGridScreen>
                                 channel: channel,
                                 programmes: _programmes[channel.id] ?? const [],
                                 isSelectedRow: i == _selectedRow,
-                                cursorTime: _cursorTime,
+                                selectedIndex: i == _selectedRow
+                                    ? _selectedCol
+                                    : -1,
                                 windowStart: _windowStart,
                                 windowEnd: _windowEnd,
                                 pxPerMinute: _pxPerMinute,
@@ -428,12 +479,27 @@ class _EpgGridScreenState extends State<EpgGridScreen>
           ),
           const SizedBox(height: 2),
           Text(
-            '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}'
-            '${description != null && description.isNotEmpty ? ' · $description' : ''}',
+            '${channel.name} · ${_hm(programme.start)} – ${_hm(programme.stop)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(color: AppColors.textLo, fontSize: 12),
           ),
+          if (description != null && description.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            // Give the synopsis its own room (up to three lines) instead of
+            // cramming it onto the meta line — the reported "make the box bigger
+            // to fit all the text".
+            Text(
+              description,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textLo,
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -560,14 +626,18 @@ class _EpgGridScreenState extends State<EpgGridScreen>
 }
 
 /// Index of the programme selected at [t]: the one whose [start, stop) contains
-/// [t], else (in a gap, or before the first) the last one starting at/before
-/// [t], else the first. [items] must be sorted by start. -1 when empty.
+/// [t] — the **latest-starting** such programme when guide entries overlap, so
+/// it matches the front-painted cell — else (in a gap, or before the first) the
+/// last one starting at/before [t], else the first. [items] must be sorted by
+/// start. -1 when empty.
 int _selectedIndexIn(List<Programme> items, DateTime t) {
   if (items.isEmpty) return -1;
+  int? containing;
   for (var i = 0; i < items.length; i++) {
     final p = items[i];
-    if (!p.start.isAfter(t) && p.stop.isAfter(t)) return i;
+    if (!p.start.isAfter(t) && p.stop.isAfter(t)) containing = i;
   }
+  if (containing != null) return containing;
   var index = 0;
   for (var i = 0; i < items.length; i++) {
     if (!items[i].start.isAfter(t)) {
@@ -596,7 +666,11 @@ class _ChannelRow extends StatelessWidget {
   final Channel channel;
   final List<Programme> programmes;
   final bool isSelectedRow;
-  final DateTime cursorTime;
+
+  /// The selected programme index on this row, or -1 when it isn't the selected
+  /// row. Driven by the grid's [_EpgGridScreenState._selectedCol] so the
+  /// highlight matches index stepping exactly (no per-row re-resolution).
+  final int selectedIndex;
   final DateTime windowStart;
   final DateTime windowEnd;
   final double pxPerMinute;
@@ -609,7 +683,7 @@ class _ChannelRow extends StatelessWidget {
     required this.channel,
     required this.programmes,
     required this.isSelectedRow,
-    required this.cursorTime,
+    required this.selectedIndex,
     required this.windowStart,
     required this.windowEnd,
     required this.pxPerMinute,
@@ -627,9 +701,6 @@ class _ChannelRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final selectedIndex = isSelectedRow
-        ? _selectedIndexIn(programmes, cursorTime)
-        : -1;
     // A full-row lift plus an accent bar in the channel column marks the active
     // channel across the whole width — so it's clear *which* row the cursor is on
     // even when the selected cell sits far along the timeline. A ColoredBox (no

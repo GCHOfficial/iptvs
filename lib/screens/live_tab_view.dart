@@ -2,9 +2,6 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
-import 'package:flutter/services.dart'
-    show KeyDownEvent, KeyEvent, KeyRepeatEvent, KeyUpEvent, LogicalKeyboardKey;
 
 import '../sources/source.dart';
 import '../theme.dart';
@@ -32,15 +29,35 @@ String nextProgrammeLabel(Programme p) => 'Next · ${p.title}';
 String programmeTimeRange(Programme p) =>
     '${_epgTime(p.start)} – ${_epgTime(p.stop)}';
 
-class _MoveRightToChannelsIntent extends Intent {
-  const _MoveRightToChannelsIntent();
-}
+// ── Uniform row heights ──────────────────────────────────────────────────────
+// The channel list and category sidebar are navigated by a *selection cursor*
+// (see [LiveFocusCoordinator]), which scrolls by computing `index * extent`.
+// That only works if rows are a uniform, known height — so both lists set an
+// explicit `itemExtent` instead of sizing to their content. Channel rows come in
+// two sizes: with EPG (name + now/next + progress) and without.
+
+/// Channel row height when the source has EPG (now/next lines).
+const double kChannelRowExtentWithEpg = 136;
+
+/// Channel row height when there's no EPG to show (logo + name only).
+const double kChannelRowExtentPlain = 88;
+
+/// Category sidebar row height.
+const double kCategoryRowExtent = 48;
+
+/// The channel row height for a list that does ([hasEpg]) or doesn't carry EPG.
+double channelRowExtentFor(bool hasEpg) =>
+    hasEpg ? kChannelRowExtentWithEpg : kChannelRowExtentPlain;
 
 /// The live-TV browsing body: the channel list (with the category side-pane and
 /// preview panel on wide layouts, plain list on phones), plus its D-pad focus
 /// wiring. Extracted from `ChannelListScreen`'s State as a widget with an
 /// explicit contract so it rebuilds independently; the preview player, focus
 /// nodes, and D-pad handlers stay owned by the screen and are injected here.
+///
+/// D-pad note: the two lists are **selection models**, not collections of focus
+/// nodes. Each has a single [FocusNode] and highlights the row at its selected
+/// index; rows themselves are not focusable (they stay tappable for touch).
 class LiveTabView extends StatelessWidget {
   final bool loading;
   final String? error;
@@ -57,12 +74,18 @@ class LiveTabView extends StatelessWidget {
   final bool resolving;
   final ScrollController scrollController;
 
-  /// Scroll controller for the category sidebar, so the focus coordinator can
-  /// jump an off-screen category into build range before focusing it.
+  /// Scroll controller for the category sidebar; the coordinator drives it.
   final ScrollController categoryScrollController;
 
-  final FocusNode firstChannelFocusNode;
-  final FocusNode Function(String channelId) focusNodeForChannel;
+  /// The channel list's single D-pad node + the row its cursor sits on.
+  final FocusNode channelsFocusNode;
+  final int selectedChannelIndex;
+  final KeyEventResult Function(FocusNode, KeyEvent) onChannelsKey;
+
+  /// Uniform channel row height (see [channelRowExtentFor]) — must match what
+  /// the coordinator uses for its scroll math.
+  final double channelRowExtent;
+
   final String? lastPlayedChannelId;
   final String? previewChannelId;
 
@@ -75,28 +98,29 @@ class LiveTabView extends StatelessWidget {
   /// *in place*, without scrolling up to the preview panel. Triggered by OK-hold
   /// (D-pad, wide layout) or a touch long-press (wide layout or Android phone).
   final ValueChanged<Channel> onContextMenuChannel;
-  final ValueChanged<String> onChannelMoveLeft;
-  final ValueChanged<String> onChannelMoveDown;
-  final ValueChanged<String> onChannelMoveUp;
+
+  /// Touch/mouse: move the D-pad cursor onto a tapped row before acting on it,
+  /// so the cursor and the pointer never disagree.
+  final ValueChanged<int> onSelectChannelIndex;
 
   /// Opens catch-up for a channel (called only for archive-capable channels).
   final ValueChanged<Channel> onCatchup;
 
   final List<Category> categories;
+
+  /// The *active* filter (bolded), which is not necessarily where the D-pad
+  /// cursor sits — Back moves the cursor without changing the filter.
   final String? selectedCategoryId;
 
-  /// Stable focus node per category id (null → "All channels"), so Back can move
-  /// the highlight to a specific entry (e.g. "All channels") without changing the
-  /// filter. Each card wires up its own node.
-  final FocusNode Function(String? categoryId) focusNodeForCategory;
-  final ValueChanged<String?> onCategorySelected;
-  final VoidCallback onMoveRightToChannels;
+  /// The category sidebar's single D-pad node + the row its cursor sits on.
+  final FocusNode categoriesFocusNode;
+  final int selectedCategoryIndex;
+  final KeyEventResult Function(FocusNode, KeyEvent) onCategoriesKey;
 
-  /// D-pad handler for a category card (Right → channels, Up/Down cycle the
-  /// category list with wrap). Keyed by the card's own category id.
-  final KeyEventResult Function(String? categoryId, KeyEvent event)
-  onCategoryCardKey;
-  final KeyEventResult Function(FocusNode, KeyEvent) onPaneFallbackKey;
+  final ValueChanged<String?> onCategorySelected;
+
+  /// Touch/mouse: move the category cursor onto a tapped row.
+  final ValueChanged<int> onSelectCategoryIndex;
 
   /// Routed focus nodes + D-pad handler for the preview panel's Favorite /
   /// Catch-up controls (the top of the channel column on the wide layout).
@@ -125,25 +149,25 @@ class LiveTabView extends StatelessWidget {
     required this.resolving,
     required this.scrollController,
     required this.categoryScrollController,
-    required this.firstChannelFocusNode,
-    required this.focusNodeForChannel,
+    required this.channelsFocusNode,
+    required this.selectedChannelIndex,
+    required this.onChannelsKey,
+    required this.channelRowExtent,
     required this.lastPlayedChannelId,
     required this.previewChannelId,
     required this.isFavorite,
     required this.onToggleFavorite,
     required this.onPlayChannel,
     required this.onContextMenuChannel,
-    required this.onChannelMoveLeft,
-    required this.onChannelMoveDown,
-    required this.onChannelMoveUp,
+    required this.onSelectChannelIndex,
     required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
-    required this.focusNodeForCategory,
+    required this.categoriesFocusNode,
+    required this.selectedCategoryIndex,
+    required this.onCategoriesKey,
     required this.onCategorySelected,
-    required this.onMoveRightToChannels,
-    required this.onCategoryCardKey,
-    required this.onPaneFallbackKey,
+    required this.onSelectCategoryIndex,
     required this.previewFavoriteFocusNode,
     required this.previewCatchupFocusNode,
     required this.onPreviewControlKey,
@@ -152,6 +176,10 @@ class LiveTabView extends StatelessWidget {
     required this.previewError,
   });
 
+  /// The channel list. One [Focus] owns the whole list's D-pad ([onChannelsKey]);
+  /// rows are plain, non-focusable widgets highlighted at [selectedChannelIndex].
+  /// `itemExtent` keeps rows uniform so the coordinator's `index * extent` scroll
+  /// math is exact.
   Widget _buildChannelList(
     BuildContext context, {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
@@ -159,42 +187,46 @@ class LiveTabView extends StatelessWidget {
     final wide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
     // The channel context menu is the in-place favorite path (Play / Favorite /
     // Catch-up, plus Preview on phones). Touch long-press opens it on the wide
-    // layout (TV/desktop) and on Android phones; OK-hold (D-pad) opens it wherever
-    // there's a remote (the wide layout). The phone's audible Preview sheet is an
-    // entry in the menu, so moving long-press onto the menu loses nothing.
+    // layout (TV/desktop) and on Android phones; the D-pad OK-hold equivalent
+    // lives in the coordinator's key handler.
     final allowMenuLongPress = wide || deliberate;
-    final allowMenuHold = wide;
-    return ListView.builder(
-      controller: scrollController,
-      padding: padding,
-      scrollCacheExtent: const ScrollCacheExtent.pixels(
-        120,
-      ), // keep nearby rows built for D-pad without over-prefetching logos
-      itemCount: visible.length,
-      itemBuilder: (context, i) {
-        final c = visible[i];
-        return _ChannelTile(
-          channel: c,
-          now: now[c.id],
-          next: next[c.id],
-          favorite: isFavorite(c.id),
-          debugLabel: 'live.channel.${c.id}',
-          enabled: !resolving,
-          autofocus: lastPlayedChannelId == null
-              ? i == 0
-              : c.id == lastPlayedChannelId,
-          focusNode: i == 0 ? firstChannelFocusNode : focusNodeForChannel(c.id),
-          onTap: () => onPlayChannel(c),
-          onLongPress: allowMenuLongPress
-              ? () => onContextMenuChannel(c)
-              : null,
-          onContextMenu: allowMenuHold ? () => onContextMenuChannel(c) : null,
-          selected: c.id == previewChannelId,
-          onMoveLeftToCategory: () => onChannelMoveLeft(c.id),
-          onMoveDown: () => onChannelMoveDown(c.id),
-          onMoveUp: () => onChannelMoveUp(c.id),
-        );
-      },
+    return Focus(
+      focusNode: channelsFocusNode,
+      autofocus: true,
+      onKeyEvent: onChannelsKey,
+      child: ListView.builder(
+        controller: scrollController,
+        padding: padding,
+        itemExtent: channelRowExtent,
+        itemCount: visible.length,
+        itemBuilder: (context, i) {
+          final c = visible[i];
+          return _ChannelTile(
+            channel: c,
+            now: now[c.id],
+            next: next[c.id],
+            favorite: isFavorite(c.id),
+            enabled: !resolving,
+            // The cursor is drawn even when the list doesn't own the D-pad —
+            // subdued rather than accented — so you can always see where you'll
+            // land when you come back, while the *accent* clearly marks which
+            // pane the D-pad is actually in.
+            cursor: i == selectedChannelIndex,
+            listFocused: channelsFocusNode.hasFocus,
+            previewing: c.id == previewChannelId,
+            onTap: () {
+              onSelectChannelIndex(i);
+              onPlayChannel(c);
+            },
+            onLongPress: allowMenuLongPress
+                ? () {
+                    onSelectChannelIndex(i);
+                    onContextMenuChannel(c);
+                  }
+                : null,
+          );
+        },
+      ),
     );
   }
 
@@ -231,64 +263,62 @@ class LiveTabView extends StatelessWidget {
     final preview = previewChannel!;
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < kWideLayoutMinWidth) return _buildChannelList(context);
-        return Focus(
-          canRequestFocus: false,
-          skipTraversal: true,
-          onKeyEvent: onPaneFallbackKey,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 240,
-                  child: _LiveCategoryPane(
-                    categories: categories,
-                    selectedCategoryId: selectedCategoryId,
-                    scrollController: categoryScrollController,
-                    focusNodeForCategory: focusNodeForCategory,
-                    onSelected: onCategorySelected,
-                    onMoveRightToChannels: onMoveRightToChannels,
-                    onCategoryCardKey: onCategoryCardKey,
-                  ),
+        if (constraints.maxWidth < kWideLayoutMinWidth) {
+          return _buildChannelList(context);
+        }
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 240,
+                child: _LiveCategoryPane(
+                  categories: categories,
+                  selectedCategoryId: selectedCategoryId,
+                  selectedIndex: selectedCategoryIndex,
+                  focusNode: categoriesFocusNode,
+                  onKey: onCategoriesKey,
+                  scrollController: categoryScrollController,
+                  onSelected: onCategorySelected,
+                  onSelectIndex: onSelectCategoryIndex,
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    children: [
-                      _LivePreviewPanel(
-                        channel: preview,
-                        now: now[preview.id],
-                        next: next[preview.id],
-                        previewVideo: previewVideoBuilder(),
-                        previewActive: previewChannelId == preview.id,
-                        previewLoading:
-                            previewLoading && previewChannelId == preview.id,
-                        previewError: previewChannelId == preview.id
-                            ? previewError
-                            : null,
-                        deliberate: deliberate,
-                        favorite: isFavorite(preview.id),
-                        onToggleFavorite: () => onToggleFavorite(preview.id),
-                        onCatchup: preview.hasArchive
-                            ? () => onCatchup(preview)
-                            : null,
-                        favoriteFocusNode: previewFavoriteFocusNode,
-                        catchupFocusNode: previewCatchupFocusNode,
-                        onControlKey: onPreviewControlKey,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  children: [
+                    _LivePreviewPanel(
+                      channel: preview,
+                      now: now[preview.id],
+                      next: next[preview.id],
+                      previewVideo: previewVideoBuilder(),
+                      previewActive: previewChannelId == preview.id,
+                      previewLoading:
+                          previewLoading && previewChannelId == preview.id,
+                      previewError: previewChannelId == preview.id
+                          ? previewError
+                          : null,
+                      deliberate: deliberate,
+                      favorite: isFavorite(preview.id),
+                      onToggleFavorite: () => onToggleFavorite(preview.id),
+                      onCatchup: preview.hasArchive
+                          ? () => onCatchup(preview)
+                          : null,
+                      favoriteFocusNode: previewFavoriteFocusNode,
+                      catchupFocusNode: previewCatchupFocusNode,
+                      onControlKey: onPreviewControlKey,
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: _buildChannelList(
+                        context,
+                        padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
                       ),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: _buildChannelList(
-                          context,
-                          padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
@@ -296,24 +326,29 @@ class LiveTabView extends StatelessWidget {
   }
 }
 
+/// The category sidebar as a selection model: a single [FocusNode] owns the
+/// D-pad, rows are plain widgets highlighted at [selectedIndex]. The *active
+/// filter* ([selectedCategoryId]) is a separate, bolded state — Back moves the
+/// cursor without changing the filter, so the two must be drawn differently.
 class _LiveCategoryPane extends StatelessWidget {
   final List<Category> categories;
   final String? selectedCategoryId;
+  final int selectedIndex;
+  final FocusNode focusNode;
+  final KeyEventResult Function(FocusNode, KeyEvent) onKey;
   final ScrollController scrollController;
-  final FocusNode Function(String? categoryId) focusNodeForCategory;
   final ValueChanged<String?> onSelected;
-  final VoidCallback onMoveRightToChannels;
-  final KeyEventResult Function(String? categoryId, KeyEvent event)
-  onCategoryCardKey;
+  final ValueChanged<int> onSelectIndex;
 
   const _LiveCategoryPane({
     required this.categories,
     required this.selectedCategoryId,
+    required this.selectedIndex,
+    required this.focusNode,
+    required this.onKey,
     required this.scrollController,
-    required this.focusNodeForCategory,
     required this.onSelected,
-    required this.onMoveRightToChannels,
-    required this.onCategoryCardKey,
+    required this.onSelectIndex,
   });
 
   @override
@@ -322,81 +357,110 @@ class _LiveCategoryPane extends StatelessWidget {
       (id: null, label: 'All channels'),
       ...categories.map((category) => (id: category.id, label: category.title)),
     ];
-    return Shortcuts(
-      shortcuts: {
-        LogicalKeySet(LogicalKeyboardKey.arrowRight):
-            const _MoveRightToChannelsIntent(),
-      },
-      child: Actions(
-        actions: {
-          _MoveRightToChannelsIntent:
-              CallbackAction<_MoveRightToChannelsIntent>(
-                onInvoke: (_) {
-                  onMoveRightToChannels();
-                  return null;
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.panel,
+        borderRadius: BorderRadius.circular(AppRadius.tile),
+        border: Border.all(color: AppColors.line),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(8, 4, 8, 8),
+            child: Text(
+              'Playlists',
+              style: TextStyle(
+                color: AppColors.textLo,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Focus(
+              focusNode: focusNode,
+              onKeyEvent: onKey,
+              child: ListView.builder(
+                controller: scrollController,
+                itemExtent: kCategoryRowExtent,
+                itemCount: items.length,
+                itemBuilder: (context, i) {
+                  final item = items[i];
+                  return _CategoryRow(
+                    label: item.label,
+                    active: item.id == selectedCategoryId,
+                    cursor: i == selectedIndex,
+                    listFocused: focusNode.hasFocus,
+                    onTap: () {
+                      onSelectIndex(i);
+                      onSelected(item.id);
+                    },
+                  );
                 },
               ),
-        },
-        child: Container(
-          decoration: BoxDecoration(
-            color: AppColors.panel,
-            borderRadius: BorderRadius.circular(AppRadius.tile),
-            border: Border.all(color: AppColors.line),
+            ),
           ),
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(8, 4, 8, 8),
-                child: Text(
-                  'Playlists',
-                  style: TextStyle(
-                    color: AppColors.textLo,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CategoryRow extends StatelessWidget {
+  final String label;
+
+  /// This category is the active filter.
+  final bool active;
+
+  /// The D-pad cursor is on this row.
+  final bool cursor;
+
+  /// The sidebar currently owns the D-pad (see [_ChannelTile.listFocused]).
+  final bool listFocused;
+  final VoidCallback onTap;
+
+  const _CategoryRow({
+    required this.label,
+    required this.active,
+    required this.cursor,
+    required this.listFocused,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final focused = cursor && listFocused;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          canRequestFocus: false,
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          hoverColor: AppColors.panelHi,
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            decoration: BoxDecoration(
+              color: cursor ? AppColors.panelHi : AppColors.panel,
+              borderRadius: BorderRadius.circular(AppRadius.tile),
+              border: Border.all(
+                color: focused ? AppColors.accent : AppColors.line,
+                width: focused ? 2 : 1,
               ),
-              Expanded(
-                child: ListView(
-                  controller: scrollController,
-                  children: [
-                    for (final item in items)
-                      Builder(
-                        builder: (context) {
-                          final selected = item.id == selectedCategoryId;
-                          return FocusableCard(
-                            focusNode: focusNodeForCategory(item.id),
-                            debugLabel: 'live.category.${item.id ?? 'all'}',
-                            onKeyEvent: (node, event) =>
-                                onCategoryCardKey(item.id, event),
-                            onTap: () => onSelected(item.id),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 10,
-                              ),
-                              child: Text(
-                                item.label,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: selected
-                                      ? AppColors.textHi
-                                      : AppColors.textLo,
-                                  fontWeight: selected
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                  ],
-                ),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            alignment: Alignment.centerLeft,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: active || cursor ? AppColors.textHi : AppColors.textLo,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -1115,27 +1179,27 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
   }
 }
 
-class _ChannelTile extends StatefulWidget {
+/// A channel row. **Not focusable** — the list's single focus node owns the
+/// D-pad and this row simply draws the cursor when it's the selected index (see
+/// [LiveFocusCoordinator]). It stays tappable/long-pressable for touch + mouse.
+class _ChannelTile extends StatelessWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
   final bool favorite;
   final bool enabled;
-  final bool autofocus;
-  final bool selected;
-  final FocusNode? focusNode;
-  final String? debugLabel;
+
+  /// The D-pad selection cursor is on this row.
+  final bool cursor;
+
+  /// The channel list currently owns the D-pad. A cursor in an *unfocused* list
+  /// still shows, but subdued — the accent always marks the active pane.
+  final bool listFocused;
+
+  /// This channel is the one currently being previewed.
+  final bool previewing;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
-
-  /// Opens the channel context menu on an OK-hold (D-pad). Null disables the
-  /// hold gesture entirely, so OK activates on press exactly as before — kept
-  /// off on phone/desktop where the wide preview panel / long-press sheet cover
-  /// favoriting. See [_ChannelTileState._onKey].
-  final VoidCallback? onContextMenu;
-  final VoidCallback onMoveLeftToCategory;
-  final VoidCallback onMoveDown;
-  final VoidCallback onMoveUp;
 
   const _ChannelTile({
     required this.channel,
@@ -1143,98 +1207,17 @@ class _ChannelTile extends StatefulWidget {
     required this.next,
     required this.favorite,
     required this.enabled,
-    required this.autofocus,
-    required this.selected,
-    this.focusNode,
-    this.debugLabel,
+    required this.cursor,
+    required this.listFocused,
+    required this.previewing,
     required this.onTap,
     this.onLongPress,
-    this.onContextMenu,
-    required this.onMoveLeftToCategory,
-    required this.onMoveDown,
-    required this.onMoveUp,
   });
 
   @override
-  State<_ChannelTile> createState() => _ChannelTileState();
-}
-
-class _ChannelTileState extends State<_ChannelTile> {
-  /// How long OK must be held before it opens the context menu instead of
-  /// playing — the platform long-press duration, so a normal OK tap (down→up)
-  /// never reaches it and the TV preview/play gesture is untouched.
-  static const _holdDuration = Duration(milliseconds: 500);
-
-  Timer? _holdTimer;
-  // Set once the hold timer has opened the menu, so the eventual key-up doesn't
-  // *also* play the channel.
-  bool _menuFired = false;
-
-  static bool _isActivateKey(LogicalKeyboardKey k) =>
-      k == LogicalKeyboardKey.select ||
-      k == LogicalKeyboardKey.enter ||
-      k == LogicalKeyboardKey.numpadEnter ||
-      k == LogicalKeyboardKey.gameButtonA ||
-      k == LogicalKeyboardKey.space;
-
-  @override
-  void dispose() {
-    _holdTimer?.cancel();
-    super.dispose();
-  }
-
-  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    final key = event.logicalKey;
-    final isLeft = key == LogicalKeyboardKey.arrowLeft;
-    final isDown = key == LogicalKeyboardKey.arrowDown;
-    final isUp = key == LogicalKeyboardKey.arrowUp;
-    if (isLeft || isDown || isUp) {
-      if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
-        return KeyEventResult.handled;
-      }
-      if (isLeft) {
-        widget.onMoveLeftToCategory();
-      } else if (isUp) {
-        widget.onMoveUp();
-      } else {
-        widget.onMoveDown();
-      }
-      return KeyEventResult.handled;
-    }
-
-    // OK-hold → context menu (TV only, when a menu is wired). We own the whole
-    // OK gesture here so a quick press still plays: activation fires on key-*up*
-    // (unless the hold timer already opened the menu), and we consume the event
-    // so the default ActivateIntent doesn't play on key-down underneath us.
-    if (widget.onContextMenu != null && _isActivateKey(key)) {
-      if (event is KeyDownEvent) {
-        _menuFired = false;
-        _holdTimer?.cancel();
-        _holdTimer = Timer(_holdDuration, () {
-          _menuFired = true;
-          widget.onContextMenu?.call();
-        });
-        return KeyEventResult.handled;
-      }
-      if (event is KeyUpEvent) {
-        _holdTimer?.cancel();
-        _holdTimer = null;
-        if (!_menuFired) widget.onTap();
-        return KeyEventResult.handled;
-      }
-      // Swallow key-repeats so a held OK doesn't leak into anything else.
-      return KeyEventResult.handled;
-    }
-    return KeyEventResult.ignored;
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final channel = widget.channel;
-    final current = widget.now;
-    final upcoming = widget.next;
-    final selected = widget.selected;
-    final enabled = widget.enabled;
+    final current = now;
+    final upcoming = next;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1242,19 +1225,32 @@ class _ChannelTileState extends State<_ChannelTile> {
       progress = total <= 0 ? null : (elapsed / total).clamp(0.0, 1.0);
     }
 
-    return FocusableCard(
-      autofocus: widget.autofocus,
-      focusNode: widget.focusNode,
-      debugLabel: widget.debugLabel ?? 'live.channel.${channel.id}',
-      scrollOnFocus: true,
-      onKeyEvent: _onKey,
-      onTap: widget.onTap,
-      onLongPress: widget.onLongPress,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
+    final active = cursor && listFocused;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          canRequestFocus: false,
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          hoverColor: AppColors.panelHi,
+          onTap: onTap,
+          onLongPress: onLongPress,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            decoration: BoxDecoration(
+              color: cursor ? AppColors.panelHi : AppColors.panel,
+              borderRadius: BorderRadius.circular(AppRadius.tile),
+              border: Border.all(
+                color: active ? AppColors.accent : AppColors.line,
+                width: active ? 2 : 1,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
             _Logo(channel: channel),
             const SizedBox(width: 14),
             Expanded(
@@ -1323,24 +1319,27 @@ class _ChannelTileState extends State<_ChannelTile> {
                           ),
                         ),
                       ),
-                  ],
+                      ],
+                    ],
+                  ),
+                ),
+                if (favorite) ...[
+                  const SizedBox(width: 8),
+                  const FavoriteBadge(),
                 ],
-              ),
+                const SizedBox(width: 8),
+                Icon(
+                  previewing
+                      ? Icons.play_circle_fill_rounded
+                      : Icons.play_arrow_rounded,
+                  color: enabled ? AppColors.accent : AppColors.textLo,
+                ),
+              ],
             ),
-            if (widget.favorite) ...[
-              const SizedBox(width: 8),
-              const FavoriteBadge(),
-            ],
-            const SizedBox(width: 8),
-            Icon(
-              selected
-                  ? Icons.play_circle_fill_rounded
-                  : Icons.play_arrow_rounded,
-              color: enabled ? AppColors.accent : AppColors.textLo,
-            ),
-          ],
+          ),
         ),
       ),
+    ),
     );
   }
 }
