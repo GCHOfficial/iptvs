@@ -23,6 +23,7 @@ import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/screens/epg_grid_screen.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/theme.dart';
 import 'package:iptvs/widgets/focusable_card.dart';
 
 void main() {
@@ -98,7 +99,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  Future<void> pumpGrid(WidgetTester tester) async {
+  Future<void> pumpGrid(
+    WidgetTester tester, {
+    List<Channel> gridChannels = channels,
+  }) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -110,9 +114,14 @@ void main() {
     final repo = LibraryRepository(source: _FakeSource(), db: db);
     await tester.pumpWidget(
       MaterialApp(
+        // The real text-button styling (the dialog Close focus ring) without
+        // AppTheme.dark itself — its GoogleFonts fetch breaks under runAsync.
+        theme: ThemeData.dark(
+          useMaterial3: true,
+        ).copyWith(textButtonTheme: AppTheme.textButtonTheme),
         home: EpgGridScreen(
           repo: repo,
-          channels: channels,
+          channels: gridChannels,
           onPlayChannel: (_) {},
           onPlayArchive: (_, _) {},
         ),
@@ -224,6 +233,131 @@ void main() {
       await unmount(tester);
     },
   );
+
+  testWidgets('ArrowDown keeps the selected row centered in the viewport',
+      (tester) async {
+    // Enough rows that the list actually scrolls; only ChanA has programmes
+    // (the centering maths doesn't care what a row shows).
+    final many = <Channel>[
+      channels[0],
+      for (var i = 1; i < 30; i++) Channel(id: 'x$i', name: 'Chan$i', number: i + 1),
+    ];
+    await pumpGrid(tester, gridChannels: many);
+
+    for (var i = 0; i < 15; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    // Let the 220ms reveal animation settle.
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final position = tester
+        .stateList<ScrollableState>(find.byType(Scrollable))
+        .map((s) => s.position)
+        .firstWhere((p) => p.axis == Axis.vertical);
+    const rowHeight = 52.0;
+    final expected =
+        (15 * rowHeight - (position.viewportDimension - rowHeight) / 2)
+            .clamp(0.0, position.maxScrollExtent);
+    expect(
+      position.pixels,
+      moreOrLessEquals(expected, epsilon: 1.0),
+      reason: 'the selected row is centered, not left at the bottom edge '
+          'where the detail bar covers it',
+    );
+
+    await unmount(tester);
+  });
+
+  testWidgets(
+    'an overlong programme cell is clamped at the next programme start',
+    (tester) async {
+      await pumpGrid(tester);
+
+      // Reach ChanC so its programmes are loaded/painted.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await pumpUntil(tester, detailTitle('C-1'));
+
+      Positioned cellOf(String title) => tester.widget<Positioned>(
+            find
+                .ancestor(of: find.text(title), matching: find.byType(Positioned))
+                .first,
+          );
+
+      // C-long really runs 180 minutes (720px) but is visually cut at C-1's
+      // start: 60 minutes → 240px. The 30-minute cells stay 120px.
+      expect(cellOf('C-long').width, 240);
+      expect(cellOf('C-1').width, 120);
+      expect(cellOf('C-2').width, 120);
+
+      await unmount(tester);
+    },
+  );
+
+  testWidgets('the selected cell paints on top of overlapping neighbours',
+      (tester) async {
+    await pumpGrid(tester);
+
+    // Select the overlong C-long (Down ×2 onto ChanC, Left from C-1).
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await pumpUntil(tester, detailTitle('C-1'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(detailTitle('C-long'), findsOneWidget);
+
+    // The row's timeline Stack must list the selected cell last (Stack paints
+    // later children on top). C-long's clamped 240px width identifies it.
+    final stack = tester.widget<Stack>(
+      find
+          .ancestor(of: find.text('C-long'), matching: find.byType(Stack))
+          .first,
+    );
+    final last = stack.children.last as Positioned;
+    expect(
+      last.width,
+      240,
+      reason: 'the selected (overlong) cell is appended last so its highlight '
+          'is never covered by overlapping neighbours',
+    );
+
+    await unmount(tester);
+  });
+
+  testWidgets('the details dialog Close button shows a visible focus ring',
+      (tester) async {
+    await pumpGrid(tester);
+
+    // A future programme (A-next) → the dialog has no contextual action, so
+    // Close autofocuses.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    final closeFinder = find.widgetWithText(TextButton, 'Close');
+    expect(closeFinder, findsOneWidget);
+    final material = tester.widget<Material>(
+      find.descendant(of: closeFinder, matching: find.byType(Material)).first,
+    );
+    final shape = material.shape as RoundedRectangleBorder?;
+    expect(
+      shape?.side.color,
+      AppColors.accent,
+      reason: 'a focused dialog button must carry the accent ring — the '
+          'default overlay alone is invisible on the dark panel',
+    );
+    expect(shape?.side.width, 2);
+
+    // Close it so the test ends with no open route.
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    await unmount(tester);
+  });
 
   testWidgets('the detail bar shows the full multi-line description (Bug #3)',
       (tester) async {

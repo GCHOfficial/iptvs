@@ -24,6 +24,39 @@ class AppRadius {
 const double kWideLayoutMinWidth = 950;
 
 class AppTheme {
+  /// Text-button styling, exposed separately from [dark] (which pulls
+  /// GoogleFonts and so can't be built in fake-clock widget tests). The
+  /// focused state carries an accent ring + fill — the default overlay tint
+  /// alone is invisible on dark dialog panels (the EPG programme dialog's
+  /// "Close" looked unfocused on TV).
+  static final TextButtonThemeData textButtonTheme = TextButtonThemeData(
+    style:
+        TextButton.styleFrom(
+          foregroundColor: AppColors.textHi,
+          minimumSize: const Size(44, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.control),
+          ),
+        ).copyWith(
+          side: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? const BorderSide(color: AppColors.accent, width: 2)
+                : null,
+          ),
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? AppColors.accent.withValues(alpha: 0.22)
+                : null,
+          ),
+          overlayColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? AppColors.accent.withValues(alpha: 0.16)
+                : null,
+          ),
+        ),
+  );
+
   static ThemeData get dark {
     final base = ThemeData.dark(useMaterial3: true);
 
@@ -138,23 +171,7 @@ class AppTheme {
               ),
             ),
       ),
-      textButtonTheme: TextButtonThemeData(
-        style:
-            TextButton.styleFrom(
-              foregroundColor: AppColors.textHi,
-              minimumSize: const Size(44, 40),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppRadius.control),
-              ),
-            ).copyWith(
-              overlayColor: WidgetStateProperty.resolveWith(
-                (states) => states.contains(WidgetState.focused)
-                    ? AppColors.accent.withValues(alpha: 0.16)
-                    : null,
-              ),
-            ),
-      ),
+      textButtonTheme: textButtonTheme,
       iconButtonTheme: IconButtonThemeData(
         style: ButtonStyle(
           // Clear accent disc when an icon button (Edit/Delete, refresh) takes
