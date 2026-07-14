@@ -116,7 +116,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         // The real text-button styling (the dialog Close focus ring) without
-        // AppTheme.dark itself — its GoogleFonts fetch breaks under runAsync.
+        // Keep this focused on dialog layout rather than the full app theme.
         theme: ThemeData.dark(
           useMaterial3: true,
         ).copyWith(textButtonTheme: AppTheme.textButtonTheme),
@@ -136,8 +136,9 @@ void main() {
   Future<void> unmount(WidgetTester tester) =>
       tester.pumpWidget(const SizedBox());
 
-  testWidgets('the grid holds one focus node and no per-cell FocusableCards',
-      (tester) async {
+  testWidgets('the grid holds one focus node and no per-cell FocusableCards', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     expect(
@@ -154,8 +155,9 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets('ArrowRight steps to the next programme on the row',
-      (tester) async {
+  testWidgets('ArrowRight steps to the next programme on the row', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     // Initial selection is the now-programme (contains the cursor = now).
@@ -174,8 +176,9 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets('ArrowDown changes channel but holds the time column',
-      (tester) async {
+  testWidgets('ArrowDown changes channel but holds the time column', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     // Move the cursor to A-next (starts at now+30).
@@ -222,7 +225,8 @@ void main() {
       expect(
         detailTitle('C-1'),
         findsOneWidget,
-        reason: 'Right steps by index, so overlap can no longer trap the cursor',
+        reason:
+            'Right steps by index, so overlap can no longer trap the cursor',
       );
       expect(detailTitle('C-long'), findsNothing);
 
@@ -235,13 +239,15 @@ void main() {
     },
   );
 
-  testWidgets('ArrowDown keeps the selected row centered in the viewport',
-      (tester) async {
+  testWidgets('ArrowDown keeps the selected row centered in the viewport', (
+    tester,
+  ) async {
     // Enough rows that the list actually scrolls; only ChanA has programmes
     // (the centering maths doesn't care what a row shows).
     final many = <Channel>[
       channels[0],
-      for (var i = 1; i < 30; i++) Channel(id: 'x$i', name: 'Chan$i', number: i + 1),
+      for (var i = 1; i < 30; i++)
+        Channel(id: 'x$i', name: 'Chan$i', number: i + 1),
     ];
     await pumpGrid(tester, gridChannels: many);
 
@@ -258,12 +264,15 @@ void main() {
         .firstWhere((p) => p.axis == Axis.vertical);
     const rowHeight = 52.0;
     final expected =
-        (15 * rowHeight - (position.viewportDimension - rowHeight) / 2)
-            .clamp(0.0, position.maxScrollExtent);
+        (15 * rowHeight - (position.viewportDimension - rowHeight) / 2).clamp(
+          0.0,
+          position.maxScrollExtent,
+        );
     expect(
       position.pixels,
       moreOrLessEquals(expected, epsilon: 1.0),
-      reason: 'the selected row is centered, not left at the bottom edge '
+      reason:
+          'the selected row is centered, not left at the bottom edge '
           'where the detail bar covers it',
     );
 
@@ -282,10 +291,10 @@ void main() {
       await pumpUntil(tester, detailTitle('C-1'));
 
       Positioned cellOf(String title) => tester.widget<Positioned>(
-            find
-                .ancestor(of: find.text(title), matching: find.byType(Positioned))
-                .first,
-          );
+        find
+            .ancestor(of: find.text(title), matching: find.byType(Positioned))
+            .first,
+      );
 
       // C-long really runs 180 minutes (720px) but is visually cut at C-1's
       // start: 60 minutes → 240px. The 30-minute cells stay 120px.
@@ -297,8 +306,9 @@ void main() {
     },
   );
 
-  testWidgets('the selected cell paints on top of overlapping neighbours',
-      (tester) async {
+  testWidgets('the selected cell paints on top of overlapping neighbours', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     // Select the overlong C-long (Down ×2 onto ChanC, Left from C-1).
@@ -321,15 +331,17 @@ void main() {
     expect(
       last.width,
       240,
-      reason: 'the selected (overlong) cell is appended last so its highlight '
+      reason:
+          'the selected (overlong) cell is appended last so its highlight '
           'is never covered by overlapping neighbours',
     );
 
     await unmount(tester);
   });
 
-  testWidgets('the details dialog Close button shows a visible focus ring',
-      (tester) async {
+  testWidgets('the details dialog Close button shows a visible focus ring', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     // A future programme (A-next) → the dialog has no contextual action, so
@@ -348,7 +360,8 @@ void main() {
     expect(
       shape?.side.color,
       AppColors.accent,
-      reason: 'a focused dialog button must carry the accent ring — the '
+      reason:
+          'a focused dialog button must carry the accent ring — the '
           'default overlay alone is invisible on the dark panel',
     );
     expect(shape?.side.width, 2);
@@ -360,8 +373,9 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets('the detail bar shows the full multi-line description (Bug #3)',
-      (tester) async {
+  testWidgets('the detail bar shows the full multi-line description (Bug #3)', (
+    tester,
+  ) async {
     await pumpGrid(tester);
 
     // The selected A-now carries a long synopsis; it renders on its own line
@@ -374,8 +388,7 @@ void main() {
     await unmount(tester);
   });
 
-  testWidgets(
-      'focus restoration after playback is route-scoped: a covered '
+  testWidgets('focus restoration after playback is route-scoped: a covered '
       'channel-list restore must not steal the grid\'s D-pad', (tester) async {
     // Regression for "the EPG screen stops responding to the remote after
     // watching a channel": launching playback from the pushed grid route left
@@ -442,19 +455,19 @@ void main() {
     unawaited(
       navigator
           .push(
-        MaterialPageRoute<void>(
-          builder: (_) => const Scaffold(body: SizedBox.expand()),
-        ),
-      )
+            MaterialPageRoute<void>(
+              builder: (_) => const Scaffold(body: SizedBox.expand()),
+            ),
+          )
           .then((_) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          // The guard under test: the host (main screen) route is NOT the
-          // visible top route — the grid still is — so the restore must bail
-          // instead of stealing primaryFocus cross-route.
-          if (ModalRoute.of(hostContext)?.isCurrent == false) return;
-          bgChannels.requestFocus();
-        });
-      }),
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              // The guard under test: the host (main screen) route is NOT the
+              // visible top route — the grid still is — so the restore must bail
+              // instead of stealing primaryFocus cross-route.
+              if (ModalRoute.of(hostContext)?.isCurrent == false) return;
+              bgChannels.requestFocus();
+            });
+          }),
     );
     await tester.pumpAndSettle();
     navigator.pop();
@@ -463,7 +476,8 @@ void main() {
     expect(
       FocusManager.instance.primaryFocus?.debugLabel,
       'epg.grid',
-      reason: 'route focus restoration must hand the D-pad back to the grid — '
+      reason:
+          'route focus restoration must hand the D-pad back to the grid — '
           'the covered channel-list node must not steal it',
     );
 
@@ -499,8 +513,10 @@ class _FakeSource implements Source {
       const StreamInfo(url: 'http://stream');
 
   @override
-  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
-      throw UnsupportedError('no catch-up');
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => throw UnsupportedError('no catch-up');
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async => const [];

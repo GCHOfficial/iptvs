@@ -17,6 +17,9 @@ body {
   font: 15px/1.5 Inter, system-ui, sans-serif;
 }
 
+a { color: #a99fff; }
+a:hover { color: #c4bdff; }
+
 .bar {
   display: flex;
   align-items: center;
@@ -106,6 +109,18 @@ input, select {
 .muted { color: var(--text-lo); }
 .hint { margin: 0 0 12px; font-size: 13px; }
 .error { color: var(--danger); }
+.legal-links { margin-top: 20px; }
+.account-section h2 { margin-bottom: 4px; }
+.danger-zone {
+  margin-top: 28px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+}
+.danger-zone h3 { margin: 0 0 8px; color: #ff8d91; }
+.danger-zone p { margin: 0 0 14px; }
+button.danger-solid { background: var(--danger); color: #fff; }
 
 .toast {
   position: fixed;

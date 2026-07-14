@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
@@ -14,6 +13,12 @@ import 'cloud_sync_screen.dart';
 import 'home_shell.dart';
 
 enum _ProfileSource { cloud, local }
+
+@visibleForTesting
+String profileSelectionHint(NavigationMode mode) =>
+    mode == NavigationMode.directional
+    ? 'Use D-pad to choose a profile'
+    : 'Choose a profile to continue';
 
 /// A unified entry shown in the profile grid — a cloud profile (when the
 /// device is paired) or a locally-stored profile.
@@ -433,7 +438,11 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                 // footer. Scale the fixed chrome down with available height.
                 final compact = constraints.maxHeight < 640;
                 final tight = constraints.maxHeight < 520;
-                final avatarSize = tight ? 64.0 : compact ? 80.0 : 100.0;
+                final avatarSize = tight
+                    ? 64.0
+                    : compact
+                    ? 80.0
+                    : 100.0;
                 return Column(
                   children: [
                     SizedBox(height: compact ? 16 : 40),
@@ -441,7 +450,8 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                     SizedBox(height: compact ? 14 : 40),
                     Text(
                       "Who's watching?",
-                      style: GoogleFonts.spaceGrotesk(
+                      style: TextStyle(
+                        fontFamily: 'Inter',
                         fontSize: compact ? 28 : 38,
                         fontWeight: FontWeight.w700,
                         color: AppColors.textHi,
@@ -471,8 +481,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                                 if (i > 0) const SizedBox(width: 32),
                                 _ProfileCircle(
                                   entry: _profiles[i],
-                                  isActive:
-                                      _profiles[i].id == _activeProfileId,
+                                  isActive: _profiles[i].id == _activeProfileId,
                                   autofocus:
                                       _profiles[i].id == _activeProfileId,
                                   busy: _busy,
@@ -526,7 +535,9 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                       )
                     else
                       Text(
-                        'Use D-pad to choose a profile',
+                        profileSelectionHint(
+                          MediaQuery.navigationModeOf(context),
+                        ),
                         style: TextStyle(
                           color: AppColors.textLo.withValues(alpha: 0.6),
                           fontSize: 13,
@@ -615,7 +626,8 @@ class _AppLogo extends StatelessWidget {
         const SizedBox(width: 12),
         Text(
           'iptvs',
-          style: GoogleFonts.spaceGrotesk(
+          style: const TextStyle(
+            fontFamily: 'Inter',
             fontSize: 26,
             fontWeight: FontWeight.w700,
             color: AppColors.textHi,
@@ -681,9 +693,13 @@ class _ProfileCircleState extends State<_ProfileCircle> {
     final ringColor = _focused
         ? Colors.white
         : widget.isActive
-            ? AppColors.accent
-            : Colors.transparent;
-    final ringWidth = _focused ? 3.0 : widget.isActive ? 3.5 : 0.0;
+        ? AppColors.accent
+        : Colors.transparent;
+    final ringWidth = _focused
+        ? 3.0
+        : widget.isActive
+        ? 3.5
+        : 0.0;
 
     return FocusableActionDetector(
       autofocus: widget.autofocus,
@@ -708,8 +724,8 @@ class _ProfileCircleState extends State<_ProfileCircle> {
         onTap: widget.busy
             ? null
             : widget.manageMode
-                ? widget.onDelete
-                : widget.onTap,
+            ? widget.onDelete
+            : widget.onTap,
         child: SizedBox(
           width: widget.avatarSize + 20,
           child: Column(
@@ -747,7 +763,8 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                       alignment: Alignment.center,
                       child: Text(
                         initial,
-                        style: GoogleFonts.spaceGrotesk(
+                        style: TextStyle(
+                          fontFamily: 'Inter',
                           fontSize: widget.avatarSize * 0.38,
                           fontWeight: FontWeight.w700,
                           color: Colors.white,
@@ -785,10 +802,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           decoration: BoxDecoration(
                             color: AppColors.panel,
                             shape: BoxShape.circle,
-                            border: Border.all(
-                              color: AppColors.line,
-                              width: 1,
-                            ),
+                            border: Border.all(color: AppColors.line, width: 1),
                           ),
                           child: Icon(
                             Icons.lock_outline_rounded,
@@ -826,10 +840,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                         decoration: BoxDecoration(
                           color: AppColors.panel,
                           shape: BoxShape.circle,
-                          border: Border.all(
-                            color: AppColors.line,
-                            width: 1,
-                          ),
+                          border: Border.all(color: AppColors.line, width: 1),
                         ),
                         child: Icon(
                           widget.entry.isCloud
@@ -850,11 +861,11 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color:
-                      widget.isActive ? AppColors.textHi : AppColors.textLo,
+                  color: widget.isActive ? AppColors.textHi : AppColors.textLo,
                   fontSize: widget.compact ? 13 : 15,
-                  fontWeight:
-                      widget.isActive ? FontWeight.w600 : FontWeight.w400,
+                  fontWeight: widget.isActive
+                      ? FontWeight.w600
+                      : FontWeight.w400,
                 ),
               ),
             ],
@@ -1003,8 +1014,7 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(context).pop(_controller.text.trim()),
+          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
           child: const Text('Create'),
         ),
       ],

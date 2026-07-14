@@ -30,6 +30,10 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   (`enforce_profile_cap`) limits each account to **20** profiles. Enforced in the
   database so neither the panel nor a crafted client can exceed it; the panel also
   mirrors the limit (`MAX_PROFILES`) to disable its add button.
+- **Account deletion** (`..._account_deletion.sql`) — the panel's
+  `delete_account` RPC removes only the signed-in real account. Owner foreign
+  keys cascade its cloud data, and the RPC also removes the anonymous auth
+  identities of devices paired to that account.
 
 ## One-time setup
 
@@ -91,3 +95,5 @@ Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy ano
 - [ ] Account A cannot read or write account B's profiles, sources, or favorites.
 - [ ] `claim_pairing` rejects an anonymous claimer, an expired code, and an already-claimed code.
 - [ ] Deleting a `devices` row immediately revokes that device's read access (and its push).
+- [ ] `delete_account` rejects anonymous devices, deletes only the caller, and
+      removes all owner rows plus the caller's paired anonymous auth users.

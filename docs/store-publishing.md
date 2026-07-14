@@ -117,6 +117,10 @@ Play Console identity verification and application creation completed on
 - [ ] Complete privacy, data-safety, content-rating, phone, and TV listings.
 - [ ] Test internal-track phone and Android TV installs before production.
 
+The exact current Console answers, listing copy, propagation troubleshooting,
+asset checklist, Android TV opt-in, and release smoke tests are tracked in
+[`google-play-submission.md`](google-play-submission.md).
+
 New Google Play apps and TV apps are published as Android App Bundles. Do not
 upload the direct-download APK as the Play production artifact.
 
@@ -225,6 +229,8 @@ These values are exact and case-sensitive:
 - [ ] Provide accurate screenshots, input requirements, and content disclosures.
 - [ ] Give certification a testable demo path that needs no IPTV credentials.
 - [ ] Confirm no bundled or promoted streams imply rights the app does not own.
+
+The public Store support and privacy contact is `gchofficial@gmail.com`.
 
 ## Release-channel invariant
 
