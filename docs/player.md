@@ -40,14 +40,16 @@ audio/subtitle/speed list-menus, aspect cycle, info panel, contextual hiding, a 
 favorite star** (see below), and **D-pad nav** (single-press Back peels menu→info→hide→exit;
 sliders are custom "OK to edit" controls, not Material `Slider`, so the D-pad isn't trapped).
 
-**Back is owned by the root `onPreviewKeyEvent`, not the `BackHandler`.** The preview phase runs
-ancestor-first, so handling Back there fires *before* any focused control can consume the press
-merely to clear its own highlight / exit a slider's edit mode — the "first Back only removes the
-highlight, then another to hide, then another to exit" bug. Consuming the key stops it reaching
-`onBackPressed`, so the `BackHandler` (kept for gesture-nav phones, which deliver Back through the
-dispatcher with *no* key event) can't double-fire. This is safe only because **predictive back is
-not enabled** (no `enableOnBackInvokedCallback` in the manifest) — under predictive back the
-dispatcher fires independently of key consumption, so Back would have to move to a single handler.
+**Back has one Activity-owned policy.** `HdrPlayerActivity.dispatchKeyEvent` consumes hardware and
+remote Back on both key-down and key-up before a focused Compose control can eat it; key repeat is
+ignored so a held button peels only one rung. Gesture navigation reaches the Activity's lifecycle-
+aware `onBackPressedDispatcher` callback; Compose does not register a second Back handler.
+`PlayerBackGuard` rejects duplicate key/dispatcher callbacks within 120ms on TV images that route
+one physical press through both paths. `handleSystemBack` then applies
+`nextPlayerBackAction`: close menu → close info → hide controls → exit. Keeping the state change at
+the Activity boundary prevents one physical press from being handled once by the Compose key path
+and again by Android's Back dispatcher. The visible overlay Back arrow remains an explicit Exit
+command rather than a system-Back gesture.
 
 **Live favorite star** (`PlayerUiState.canFavorite`/`isFavorite`, shown only for live channels):
 the Dart host owns the favorites store, so it seeds the initial state via an Intent extra

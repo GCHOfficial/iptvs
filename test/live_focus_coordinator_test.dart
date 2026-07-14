@@ -69,12 +69,18 @@ void main() {
     );
   }
 
-  KeyEvent keyDown(LogicalKeyboardKey key) =>
-      KeyDownEvent(physicalKey: PhysicalKeyboardKey.keyA, logicalKey: key, timeStamp: Duration.zero);
+  KeyEvent keyDown(LogicalKeyboardKey key) => KeyDownEvent(
+    physicalKey: PhysicalKeyboardKey.keyA,
+    logicalKey: key,
+    timeStamp: Duration.zero,
+  );
 
   // Attach the coordinator's nodes to a real tree so `hasFocus` / `context` work.
-  Future<void> host(WidgetTester tester, LiveFocusCoordinator focus,
-      {bool withPreview = true}) async {
+  Future<void> host(
+    WidgetTester tester,
+    LiveFocusCoordinator focus, {
+    bool withPreview = true,
+  }) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -164,22 +170,24 @@ void main() {
       expect(h.focus.region, LiveFocusRegion.previewControls);
     });
 
-    testWidgets('on a phone (no preview panel) Up from the top escapes to search',
-        (tester) async {
-      final h = make(visible: channels(['a', 'b']), wide: false);
-      addTearDown(h.focus.dispose);
-      await host(tester, h.focus, withPreview: false);
-      h.focus.focusChannels();
-      await tester.pump();
+    testWidgets(
+      'on a phone (no preview panel) Up from the top escapes to search',
+      (tester) async {
+        final h = make(visible: channels(['a', 'b']), wide: false);
+        addTearDown(h.focus.dispose);
+        await host(tester, h.focus, withPreview: false);
+        h.focus.focusChannels();
+        await tester.pump();
 
-      h.focus.handleChannelsKey(
-        h.focus.channelsFocusNode,
-        keyDown(LogicalKeyboardKey.arrowUp),
-      );
-      await tester.pump();
-      expect(h.focus.selectedChannelIndex, 0);
-      expect(h.focus.region, LiveFocusRegion.search);
-    });
+        h.focus.handleChannelsKey(
+          h.focus.channelsFocusNode,
+          keyDown(LogicalKeyboardKey.arrowUp),
+        );
+        await tester.pump();
+        expect(h.focus.selectedChannelIndex, 0);
+        expect(h.focus.region, LiveFocusRegion.search);
+      },
+    );
 
     testWidgets('Left crosses to the categories (wide only)', (tester) async {
       final h = make(visible: channels(['a']), categories: [null, 'news']);
@@ -261,8 +269,9 @@ void main() {
       expect(h.focus.region, LiveFocusRegion.categories);
     });
 
-    testWidgets('OK plays on the body and toggles on the favorite column',
-        (tester) async {
+    testWidgets('OK plays on the body and toggles on the favorite column', (
+      tester,
+    ) async {
       final h = make(visible: channels(['a', 'b']));
       addTearDown(h.focus.dispose);
       await host(tester, h.focus);
@@ -325,8 +334,9 @@ void main() {
       expect(h.focus.channelColumn, ChannelRowColumn.body);
     });
 
-    testWidgets('Up-escape at the first row also resets the column',
-        (tester) async {
+    testWidgets('Up-escape at the first row also resets the column', (
+      tester,
+    ) async {
       final h = make(visible: channels(['a', 'b']));
       addTearDown(h.focus.dispose);
       await host(tester, h.focus);
@@ -378,42 +388,44 @@ void main() {
     });
 
     testWidgets(
-        'Up NEVER wraps — at the first category it escapes to the search box '
-        '(the "stuck in categories" fix)', (tester) async {
-      final h = make(
-        visible: channels(['a']),
-        categories: [null, 'news', 'kids'],
-      );
-      addTearDown(h.focus.dispose);
-      await host(tester, h.focus);
-      h.focus.selectCategory(2);
-      h.focus.focusCategories();
-      await tester.pump();
+      'Up NEVER wraps — at the first category it escapes to the search box '
+      '(the "stuck in categories" fix)',
+      (tester) async {
+        final h = make(
+          visible: channels(['a']),
+          categories: [null, 'news', 'kids'],
+        );
+        addTearDown(h.focus.dispose);
+        await host(tester, h.focus);
+        h.focus.selectCategory(2);
+        h.focus.focusCategories();
+        await tester.pump();
 
-      h.focus.handleCategoriesKey(
-        h.focus.categoriesFocusNode,
-        keyDown(LogicalKeyboardKey.arrowUp),
-      );
-      expect(h.focus.selectedCategoryIndex, 1);
-      h.focus.handleCategoriesKey(
-        h.focus.categoriesFocusNode,
-        keyDown(LogicalKeyboardKey.arrowUp),
-      );
-      expect(h.focus.selectedCategoryIndex, 0);
+        h.focus.handleCategoriesKey(
+          h.focus.categoriesFocusNode,
+          keyDown(LogicalKeyboardKey.arrowUp),
+        );
+        expect(h.focus.selectedCategoryIndex, 1);
+        h.focus.handleCategoriesKey(
+          h.focus.categoriesFocusNode,
+          keyDown(LogicalKeyboardKey.arrowUp),
+        );
+        expect(h.focus.selectedCategoryIndex, 0);
 
-      // The old model wrapped here, trapping the user. Now it climbs out.
-      h.focus.handleCategoriesKey(
-        h.focus.categoriesFocusNode,
-        keyDown(LogicalKeyboardKey.arrowUp),
-      );
-      await tester.pump();
-      expect(
-        h.focus.selectedCategoryIndex,
-        0,
-        reason: 'must not wrap to the last category',
-      );
-      expect(h.focus.region, LiveFocusRegion.search);
-    });
+        // The old model wrapped here, trapping the user. Now it climbs out.
+        h.focus.handleCategoriesKey(
+          h.focus.categoriesFocusNode,
+          keyDown(LogicalKeyboardKey.arrowUp),
+        );
+        await tester.pump();
+        expect(
+          h.focus.selectedCategoryIndex,
+          0,
+          reason: 'must not wrap to the last category',
+        );
+        expect(h.focus.region, LiveFocusRegion.search);
+      },
+    );
 
     testWidgets('Right crosses into the channel list', (tester) async {
       final h = make(visible: channels(['a', 'b']), categories: [null, 'news']);
@@ -430,7 +442,9 @@ void main() {
       expect(h.focus.region, LiveFocusRegion.channels);
     });
 
-    testWidgets('OK applies that category as the filter', (tester) async {
+    testWidgets('OK applies the category and enters its channel list', (
+      tester,
+    ) async {
       final h = make(visible: channels(['a']), categories: [null, 'news']);
       addTearDown(h.focus.dispose);
       await host(tester, h.focus);
@@ -442,7 +456,9 @@ void main() {
         h.focus.categoriesFocusNode,
         keyDown(LogicalKeyboardKey.enter),
       );
+      await tester.pump();
       expect(h.activated, ['news']);
+      expect(h.focus.region, LiveFocusRegion.channels);
     });
   });
 

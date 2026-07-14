@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show KeyEvent, KeyRepeatEvent, SystemNavigator;
@@ -153,8 +154,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         null,
         for (final category in _liveCategoriesForUi) category.id,
       ],
-      channelRowExtent: () => channelRowExtentFor(_live.now.isNotEmpty),
-      categoryRowExtent: () => kCategoryRowExtent,
+      channelRowExtent: _liveChannelRowExtent,
+      categoryRowExtent: _liveCategoryRowExtent,
       isWide: _isWide,
       isMounted: () => mounted,
       onChannelSelectionChanged: _onChannelSelectionChanged,
@@ -595,9 +596,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: (adoptPreview && !adoptNative)
-            ? _preview.player
-            : null,
+        existingPlayer: (adoptPreview && !adoptNative) ? _preview.player : null,
         existingController: (adoptPreview && !adoptNative)
             ? _preview.controller
             : null,
@@ -681,7 +680,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
           channels: _visible,
-          onPlayChannel: (channel) => unawaited(_playChannelFullscreen(channel)),
+          onPlayChannel: (channel) =>
+              unawaited(_playChannelFullscreen(channel)),
           onPlayArchive: (channel, programme) =>
               unawaited(_playCatchup(channel, programme)),
         ),
@@ -1033,12 +1033,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   bool _isWide() =>
       mounted && MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
 
+  LiveLayoutMetrics get _liveLayoutMetrics => LiveLayoutMetrics.forSize(
+    mounted ? MediaQuery.sizeOf(context) : const Size(1280, 720),
+    compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+  );
+
+  double _liveChannelRowExtent() =>
+      _liveLayoutMetrics.channelRowExtent(_live.now.isNotEmpty);
+
+  double _liveCategoryRowExtent() => _liveLayoutMetrics.categoryRowExtent;
+
   /// The content tabs — the top of the Back ladder and the D-pad's ceiling.
   void _focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
 
   /// Apply a live category filter: OK on a sidebar row, a tap, or the phone
-  /// dropdown. The channel cursor restarts at the top of the new list; the D-pad
-  /// stays where it is (the sidebar), so the user can keep browsing categories.
+  /// dropdown. The channel cursor restarts at the top of the new list. The
+  /// focus coordinator moves OK activation into a non-empty channel list;
+  /// pointer/dropdown callers retain their natural focus behavior.
   void _selectCategory(String? categoryId) {
     setState(() => _categoryId = categoryId);
     _focus.syncCategorySelection(categoryId);
@@ -1175,7 +1186,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // state, e.g. right after a dialog is dismissed): that isn't somewhere the
     // user can *be*, so recover to the tabs instead of offering to exit.
     final focusedNode = FocusManager.instance.primaryFocus;
-    if (label.isEmpty && (focusedNode == null || focusedNode is FocusScopeNode)) {
+    if (label.isEmpty &&
+        (focusedNode == null || focusedNode is FocusScopeNode)) {
       _focusTabs();
       return;
     }
@@ -1492,7 +1504,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       selectedChannelIndex: _focus.selectedChannelIndex,
       onChannelsKey: _focus.handleChannelsKey,
       channelColumn: _focus.channelColumn,
-      channelRowExtent: channelRowExtentFor(_live.now.isNotEmpty),
+      channelRowExtent: _liveChannelRowExtent(),
+      categoryRowExtent: _liveCategoryRowExtent(),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
       isFavorite: (id) => _isFavorite(ContentKind.live, id),
@@ -1543,8 +1556,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (_deliberatePreview) {
       // When a preview is actively running (or loading), lock the panel to
       // that channel.  D-pad focus moves away without disrupting it.
-      final previewActive =
-          _preview.stream != null || _preview.loading;
+      final previewActive = _preview.stream != null || _preview.loading;
       return byId(previewActive ? _preview.channelId : null) ??
           byId(_focus.selectedChannelId) ??
           byId(_preview.channelId) ??

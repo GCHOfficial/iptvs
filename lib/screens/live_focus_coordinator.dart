@@ -119,7 +119,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// D-pad (so a desktop auto-preview can be cancelled when it doesn't).
   final void Function(Channel channel, bool focused) onChannelSelectionChanged;
 
-  /// OK on a category row — applies that filter.
+  /// OK on a category row — applies that filter synchronously. The coordinator
+  /// then enters the newly filtered channel list when it is non-empty.
   final void Function(String? categoryId) onCategoryActivated;
 
   /// OK on a channel row's body column.
@@ -186,8 +187,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
   LiveFocusRegion get region {
     if (channelsFocusNode.hasFocus) return LiveFocusRegion.channels;
     if (categoriesFocusNode.hasFocus) return LiveFocusRegion.categories;
-    if (previewFavoriteFocusNode.hasFocus ||
-        previewCatchupFocusNode.hasFocus) {
+    if (previewFavoriteFocusNode.hasFocus || previewCatchupFocusNode.hasFocus) {
       return LiveFocusRegion.previewControls;
     }
     if (searchCellFocusNode.hasFocus) return LiveFocusRegion.search;
@@ -203,7 +203,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
     final ids = orderedCategoryIds();
     final maxCategory = ids.isEmpty ? 0 : ids.length - 1;
     final category = _selectedCategoryIndex.clamp(0, maxCategory);
-    if (channel == _selectedChannelIndex && category == _selectedCategoryIndex) {
+    if (channel == _selectedChannelIndex &&
+        category == _selectedCategoryIndex) {
       return;
     }
     _selectedChannelIndex = channel;
@@ -232,7 +233,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
     final next = index.clamp(0, visible.length - 1);
-    final changed = next != _selectedChannelIndex ||
+    final changed =
+        next != _selectedChannelIndex ||
         _channelColumn != ChannelRowColumn.body;
     _selectedChannelIndex = next;
     _channelColumn = ChannelRowColumn.body;
@@ -473,7 +475,15 @@ class LiveFocusCoordinator extends ChangeNotifier {
       return KeyEventResult.handled; // consumed: nothing to the left
     }
     if (_isActivate(key)) {
-      if (event is KeyDownEvent) onCategoryActivated(selectedCategoryId);
+      if (event is KeyDownEvent) {
+        onCategoryActivated(selectedCategoryId);
+        // Category activation updates the screen's filter synchronously, so
+        // visibleChannels() now represents the selected category. Enter that
+        // result immediately instead of leaving the user in the sidebar and
+        // requiring a separate Right press. Empty categories deliberately keep
+        // focus here so the D-pad is not moved onto a list with no target.
+        focusChannelsFromCategory();
+      }
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;

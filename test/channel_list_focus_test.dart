@@ -89,15 +89,21 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  Future<void> pumpWideScreenWith(WidgetTester tester, Source source) async {
-    tester.view.physicalSize = const Size(1600, 900);
+  Future<void> pumpWideScreenWith(
+    WidgetTester tester,
+    Source source, {
+    Size size = const Size(1600, 900),
+  }) async {
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final repo = LibraryRepository(source: source, db: db);
     await tester.pumpWidget(
-      MaterialApp(home: ChannelListScreen(repo: repo, config: config)),
+      MaterialApp(
+        home: ChannelListScreen(repo: repo, config: config),
+      ),
     );
     // "Playlists" is the live category pane header — present once loaded.
     await pumpUntil(tester, find.text('Playlists'));
@@ -114,7 +120,9 @@ void main() {
 
     final repo = LibraryRepository(source: source, db: db);
     await tester.pumpWidget(
-      MaterialApp(home: ChannelListScreen(repo: repo, config: config)),
+      MaterialApp(
+        home: ChannelListScreen(repo: repo, config: config),
+      ),
     );
     await pumpUntil(tester, find.text('Channel 0'));
   }
@@ -178,8 +186,9 @@ void main() {
 
   // ── Channel list: Down wraps, Up escapes ───────────────────────────────────
 
-  focusTestWidgets('Down walks the channel list and wraps past the last row',
-      (tester) async {
+  focusTestWidgets('Down walks the channel list and wraps past the last row', (
+    tester,
+  ) async {
     // _ManySource has 12 channels, more than fit the viewport, so the cursor
     // genuinely scrolls the list.
     await pumpWideScreenWith(tester, _ManySource());
@@ -216,47 +225,50 @@ void main() {
   });
 
   focusTestWidgets(
-      'Up at the first channel escapes to the preview controls — it never wraps',
-      (tester) async {
-    await pumpWideScreenWith(tester, _ManySource());
-    await settle(tester);
-    expect(focusLabel(), 'live.channels');
+    'Up at the first channel escapes to the preview controls — it never wraps',
+    (tester) async {
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
 
-    await press(tester, LogicalKeyboardKey.arrowUp);
-    await settle(tester);
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
 
-    expect(focusLabel(), 'live.preview.favorite');
-    expect(
-      find.text('Channel 1'),
-      findsOneWidget,
-      reason: 'Up must not fling the list to its bottom (no wrap-around)',
-    );
+      expect(focusLabel(), 'live.preview.favorite');
+      expect(
+        find.text('Channel 1'),
+        findsOneWidget,
+        reason: 'Up must not fling the list to its bottom (no wrap-around)',
+      );
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
   focusTestWidgets(
-      'narrow layout: Up at the first channel escapes to the search box',
-      (tester) async {
-    // A phone has no sidebar and no preview panel, so the row above the list is
-    // the search box. It still must not wrap to the last channel.
-    await pumpNarrowScreenWith(tester, _ManySource());
-    await settle(tester);
-    expect(focusLabel(), 'live.channels');
+    'narrow layout: Up at the first channel escapes to the search box',
+    (tester) async {
+      // A phone has no sidebar and no preview panel, so the row above the list is
+      // the search box. It still must not wrap to the last channel.
+      await pumpNarrowScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
 
-    await press(tester, LogicalKeyboardKey.arrowUp);
-    await settle(tester);
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
 
-    expect(focusLabel(), 'live.search.cell');
-    expect(find.text('Channel 0'), findsOneWidget);
+      expect(focusLabel(), 'live.search.cell');
+      expect(find.text('Channel 0'), findsOneWidget);
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
   // ── Cross-pane ─────────────────────────────────────────────────────────────
 
-  focusTestWidgets('Left crosses to the categories and Right crosses back',
-      (tester) async {
+  focusTestWidgets('Left crosses to the categories and Right crosses back', (
+    tester,
+  ) async {
     await pumpWideScreenWith(tester, _ManySource());
     await settle(tester);
     expect(focusLabel(), 'live.channels');
@@ -275,32 +287,35 @@ void main() {
   // ── Category sidebar: Down wraps, Up escapes (the "stuck" fix) ─────────────
 
   focusTestWidgets(
-      'Up at the first category escapes to the search box — the "stuck in the '
-      'categories" fix', (tester) async {
-    await pumpWideScreenWith(tester, _ManySource());
-    await settle(tester);
-    await press(tester, LogicalKeyboardKey.arrowLeft);
-    await settle(tester);
-    expect(focusLabel(), 'live.categories');
-    expect(find.text('All channels'), findsOneWidget);
+    'Up at the first category escapes to the search box — the "stuck in the '
+    'categories" fix',
+    (tester) async {
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      await settle(tester);
+      expect(focusLabel(), 'live.categories');
+      expect(find.text('All channels'), findsOneWidget);
 
-    // The cursor starts on "All channels" (index 0). The old model wrapped Up
-    // to the last category here, so the only ways out were Right or Back.
-    await press(tester, LogicalKeyboardKey.arrowUp);
-    await settle(tester);
+      // The cursor starts on "All channels" (index 0). The old model wrapped Up
+      // to the last category here, so the only ways out were Right or Back.
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
 
-    expect(focusLabel(), 'live.search.cell');
-    expect(
-      find.text('All channels'),
-      findsOneWidget,
-      reason: 'Up must not wrap the sidebar to its bottom',
-    );
+      expect(focusLabel(), 'live.search.cell');
+      expect(
+        find.text('All channels'),
+        findsOneWidget,
+        reason: 'Up must not wrap the sidebar to its bottom',
+      );
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
-  focusTestWidgets('Down wraps at the end of the category sidebar',
-      (tester) async {
+  focusTestWidgets('Down wraps at the end of the category sidebar', (
+    tester,
+  ) async {
     // _ManySource has 30 categories + "All channels" = 31 rows.
     await pumpWideScreenWith(tester, _ManySource());
     await settle(tester);
@@ -332,109 +347,142 @@ void main() {
     await unmount(tester);
   });
 
-  // ── Search box ─────────────────────────────────────────────────────────────
-
-  focusTestWidgets('the search box drops into the channels and climbs to the tabs',
-      (tester) async {
+  focusTestWidgets('OK filters a category and enters its first channel', (
+    tester,
+  ) async {
     await pumpWideScreenWith(tester, _ManySource());
     await settle(tester);
-
-    // Reach the search box from the sidebar (Up at the first category).
     await press(tester, LogicalKeyboardKey.arrowLeft);
-    await press(tester, LogicalKeyboardKey.arrowUp);
     await settle(tester);
-    expect(focusLabel(), 'live.search.cell');
+    expect(focusLabel(), 'live.categories');
 
-    // Down goes back into the content.
-    await press(tester, LogicalKeyboardKey.arrowDown);
+    // cat29 is the final category and contains Channel 6–11. Walking there
+    // proves OK changes the data set, not merely the sidebar highlight.
+    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 30);
+    await press(tester, LogicalKeyboardKey.enter);
     await settle(tester);
+
     expect(focusLabel(), 'live.channels');
-
-    // Up from search reaches the section tabs — the ceiling.
-    await press(tester, LogicalKeyboardKey.arrowLeft);
-    await press(tester, LogicalKeyboardKey.arrowUp);
-    await settle(tester);
-    expect(focusLabel(), 'live.search.cell');
-    await press(tester, LogicalKeyboardKey.arrowUp);
-    await settle(tester);
-    expect(focusLabel(), 'content.tab.live');
+    expect(
+      find.text('Channel 6'),
+      findsWidgets,
+      reason: 'the filtered first channel appears in the row and preview panel',
+    );
+    expect(find.text('Channel 0'), findsNothing);
 
     await unmount(tester);
   });
+
+  // ── Search box ─────────────────────────────────────────────────────────────
+
+  focusTestWidgets(
+    'the search box drops into the channels and climbs to the tabs',
+    (tester) async {
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+
+      // Reach the search box from the sidebar (Up at the first category).
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
+      expect(focusLabel(), 'live.search.cell');
+
+      // Down goes back into the content.
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
+
+      // Up from search reaches the section tabs — the ceiling.
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
+      expect(focusLabel(), 'live.search.cell');
+      await press(tester, LogicalKeyboardKey.arrowUp);
+      await settle(tester);
+      expect(focusLabel(), 'content.tab.live');
+
+      await unmount(tester);
+    },
+  );
 
   // ── The Back ladder ────────────────────────────────────────────────────────
 
   focusTestWidgets(
-      'Back peels: channel -> first channel -> categories -> first category -> '
-      'search -> tabs -> exit', (tester) async {
-    final popMethods = <String>[];
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        popMethods.add(call.method);
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
+    'Back peels: channel -> first channel -> categories -> first category -> '
+    'search -> tabs -> exit',
+    (tester) async {
+      final popMethods = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          popMethods.add(call.method);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
 
-    await pumpWideScreenWith(tester, _ManySource());
-    await settle(tester);
-    expect(focusLabel(), 'live.channels');
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
 
-    // Walk the cursor down the list so the top of the list scrolls away.
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
-    expect(find.text('Channel 1'), findsNothing);
+      // Walk the cursor down the list so the top of the list scrolls away.
+      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
+      expect(find.text('Channel 1'), findsNothing);
 
-    // Rung 1: Back returns the cursor to the first channel (still in the list).
-    await back(tester);
-    expect(focusLabel(), 'live.channels');
-    expect(
-      find.text('Channel 1'),
-      findsOneWidget,
-      reason: 'the first Back resets the cursor to the first channel',
-    );
+      // Rung 1: Back returns the cursor to the first channel (still in the list).
+      await back(tester);
+      expect(focusLabel(), 'live.channels');
+      expect(
+        find.text('Channel 1'),
+        findsOneWidget,
+        reason: 'the first Back resets the cursor to the first channel',
+      );
 
-    // Rung 2: from the first channel, Back leaves the list for the sidebar.
-    await back(tester);
-    expect(focusLabel(), 'live.categories');
+      // Rung 2: from the first channel, Back leaves the list for the sidebar.
+      await back(tester);
+      expect(focusLabel(), 'live.categories');
 
-    // Walk the category cursor down, then Rung 3: Back returns it to the first
-    // category ("All channels") without leaving the sidebar.
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 20);
-    expect(find.text('All channels'), findsNothing);
-    await back(tester);
-    expect(focusLabel(), 'live.categories');
-    expect(
-      find.text('All channels'),
-      findsOneWidget,
-      reason: 'Back resets the category cursor to the first row',
-    );
+      // Walk the category cursor down, then Rung 3: Back returns it to the first
+      // category ("All channels") without leaving the sidebar.
+      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 20);
+      expect(find.text('All channels'), findsNothing);
+      await back(tester);
+      expect(focusLabel(), 'live.categories');
+      expect(
+        find.text('All channels'),
+        findsOneWidget,
+        reason: 'Back resets the category cursor to the first row',
+      );
 
-    // Rung 4: from the first category, Back peels to the search box.
-    await back(tester);
-    expect(focusLabel(), 'live.search.cell');
+      // Rung 4: from the first category, Back peels to the search box.
+      await back(tester);
+      expect(focusLabel(), 'live.search.cell');
 
-    // Rung 5: search → the section tabs.
-    await back(tester);
-    expect(focusLabel(), 'content.tab.live');
+      // Rung 5: search → the section tabs.
+      await back(tester);
+      expect(focusLabel(), 'content.tab.live');
 
-    // Top of the ladder: the first Back arms the confirmation, no exit yet.
-    await back(tester);
-    expect(find.text('Press Back again to exit'), findsOneWidget);
-    expect(popMethods, isNot(contains('SystemNavigator.pop')));
+      // Top of the ladder: the first Back arms the confirmation, no exit yet.
+      await back(tester);
+      expect(find.text('Press Back again to exit'), findsOneWidget);
+      expect(popMethods, isNot(contains('SystemNavigator.pop')));
 
-    // A second Back inside the window exits.
-    await back(tester);
-    expect(popMethods, contains('SystemNavigator.pop'));
+      // A second Back inside the window exits.
+      await back(tester);
+      expect(popMethods, contains('SystemNavigator.pop'));
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
-  focusTestWidgets('the cursor visibly hands over between the panes',
-      (tester) async {
+  focusTestWidgets('the cursor visibly hands over between the panes', (
+    tester,
+  ) async {
     // The cursor is drawn from each list's `hasFocus`, but a focus change
     // rebuilds nothing on its own — so the accent used to stay stuck in the
     // channel list after Left/Back moved the D-pad to the categories, and the
@@ -467,201 +515,218 @@ void main() {
     expect(
       borderOf(find.text('Channel 1')),
       isNot(AppColors.accent),
-      reason: 'the channel list must not keep the accent once it loses the D-pad',
+      reason:
+          'the channel list must not keep the accent once it loses the D-pad',
     );
-
-    await unmount(tester);
-  });
-
-  focusTestWidgets('Back from the top toolbar offers to exit, not the sections',
-      (tester) async {
-    // The AppBar/toolbar buttons are plain IconButtons with no route key. They
-    // sit *above* the ladder, so Back there should offer to exit rather than
-    // dropping focus back down into the sections to be climbed out of again.
-    final popMethods = <String>[];
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        popMethods.add(call.method);
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-
-    await pumpWideScreen(tester);
-    await settle(tester);
-
-    // Focus an AppBar action.
-    Focus.of(tester.element(find.byIcon(Icons.bug_report_outlined)))
-        .requestFocus();
-    await tester.pump();
-    expect(focusLabel(), '', reason: 'chrome buttons carry no route key');
-
-    await back(tester);
-    expect(
-      find.text('Press Back again to exit'),
-      findsOneWidget,
-      reason: 'Back from the chrome goes straight to the exit prompt',
-    );
-    expect(popMethods, isNot(contains('SystemNavigator.pop')));
-
-    await back(tester);
-    expect(popMethods, contains('SystemNavigator.pop'));
 
     await unmount(tester);
   });
 
   focusTestWidgets(
-      'Back recovers to the tabs from unlabeled focus instead of exiting',
-      (tester) async {
-    // Arrowing onto an un-routed node (toolbar / AppBar action) leaves
-    // focusRouteKey == '', which the ladder must treat as "recover to the tabs",
-    // not "top of the ladder → exit".
-    final popMethods = <String>[];
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async {
-        popMethods.add(call.method);
-        return null;
-      },
-    );
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
+    'Back from the top toolbar offers to exit, not the sections',
+    (tester) async {
+      // The AppBar/toolbar buttons are plain IconButtons with no route key. They
+      // sit *above* the ladder, so Back there should offer to exit rather than
+      // dropping focus back down into the sections to be climbed out of again.
+      final popMethods = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          popMethods.add(call.method);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
 
-    await pumpWideScreen(tester);
-    FocusManager.instance.primaryFocus?.unfocus();
-    await tester.pump();
-    expect(focusLabel(), '');
+      await pumpWideScreen(tester);
+      await settle(tester);
 
-    await back(tester);
-    expect(
-      focusLabel(),
-      'content.tab.live',
-      reason: 'Back from unlabeled focus should recover to the tabs',
-    );
-    expect(popMethods, isNot(contains('SystemNavigator.pop')));
+      // Focus an AppBar action.
+      Focus.of(
+        tester.element(find.byIcon(Icons.bug_report_outlined)),
+      ).requestFocus();
+      await tester.pump();
+      expect(focusLabel(), '', reason: 'chrome buttons carry no route key');
 
-    await unmount(tester);
-  });
+      await back(tester);
+      expect(
+        find.text('Press Back again to exit'),
+        findsOneWidget,
+        reason: 'Back from the chrome goes straight to the exit prompt',
+      );
+      expect(popMethods, isNot(contains('SystemNavigator.pop')));
+
+      await back(tester);
+      expect(popMethods, contains('SystemNavigator.pop'));
+
+      await unmount(tester);
+    },
+  );
+
+  focusTestWidgets(
+    'Back recovers to the tabs from unlabeled focus instead of exiting',
+    (tester) async {
+      // Arrowing onto an un-routed node (toolbar / AppBar action) leaves
+      // focusRouteKey == '', which the ladder must treat as "recover to the tabs",
+      // not "top of the ladder → exit".
+      final popMethods = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          popMethods.add(call.method);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await pumpWideScreen(tester);
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      expect(focusLabel(), '');
+
+      await back(tester);
+      expect(
+        focusLabel(),
+        'content.tab.live',
+        reason: 'Back from unlabeled focus should recover to the tabs',
+      );
+      expect(popMethods, isNot(contains('SystemNavigator.pop')));
+
+      await unmount(tester);
+    },
+  );
 
   // ── The per-row favorite star (intra-row action cursor) ────────────────────
 
   focusTestWidgets(
-      'Right highlights the row\'s favorite star and OK toggles it',
-      (tester) async {
-    await pumpWideScreenWith(tester, _ManySource());
-    await settle(tester);
-    expect(focusLabel(), 'live.channels');
+    'Right highlights the row\'s favorite star and OK toggles it',
+    (tester) async {
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
 
-    // Row 0's name also appears in the preview panel, so drive the cursor to
-    // row 1 to keep the finders unambiguous.
-    await press(tester, LogicalKeyboardKey.arrowDown);
-    await settle(tester);
+      // Row 0's name also appears in the preview panel, so drive the cursor to
+      // row 1 to keep the finders unambiguous.
+      await press(tester, LogicalKeyboardKey.arrowDown);
+      await settle(tester);
 
-    Finder rowOf(String name) => find
-        .ancestor(of: find.text(name), matching: find.byType(AnimatedContainer))
-        .first;
-    Finder starIconIn(String name) => find.descendant(
-          of: rowOf(name),
-          matching: find.byWidgetPredicate((w) =>
+      Finder rowOf(String name) => find
+          .ancestor(
+            of: find.text(name),
+            matching: find.byType(AnimatedContainer),
+          )
+          .first;
+      Finder starIconIn(String name) => find.descendant(
+        of: rowOf(name),
+        matching: find.byWidgetPredicate(
+          (w) =>
               w is Icon &&
               (w.icon == Icons.star_rounded ||
-                  w.icon == Icons.star_outline_rounded)),
-        );
-    // The star cell is the icon's nearest enclosing Container; its border is
-    // the intra-row cursor's accent ring.
-    Color? starBorderOf(String name) {
-      final container = tester.widget<Container>(
-        find
-            .ancestor(of: starIconIn(name), matching: find.byType(Container))
-            .first,
+                  w.icon == Icons.star_outline_rounded),
+        ),
       );
-      final border = (container.decoration as BoxDecoration?)?.border;
-      return (border as Border?)?.top.color;
-    }
+      // The star cell is the icon's nearest enclosing Container; its border is
+      // the intra-row cursor's accent ring.
+      Color? starBorderOf(String name) {
+        final container = tester.widget<Container>(
+          find
+              .ancestor(of: starIconIn(name), matching: find.byType(Container))
+              .first,
+        );
+        final border = (container.decoration as BoxDecoration?)?.border;
+        return (border as Border?)?.top.color;
+      }
 
-    // Every row carries a visible star; the cursor starts on the row body, so
-    // no accent ring on the star yet.
-    expect(starIconIn('Channel 1'), findsOneWidget);
-    expect(starBorderOf('Channel 1'), isNull);
+      // Every row carries a visible star; the cursor starts on the row body, so
+      // no accent ring on the star yet.
+      expect(starIconIn('Channel 1'), findsOneWidget);
+      expect(starBorderOf('Channel 1'), isNull);
 
-    // Right enters the row's favorite column — the star gets the accent ring
-    // and the D-pad stays in the channel list (no pane change).
-    await press(tester, LogicalKeyboardKey.arrowRight);
-    expect(focusLabel(), 'live.channels');
-    expect(starBorderOf('Channel 1'), AppColors.accent);
+      // Right enters the row's favorite column — the star gets the accent ring
+      // and the D-pad stays in the channel list (no pane change).
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      expect(focusLabel(), 'live.channels');
+      expect(starBorderOf('Channel 1'), AppColors.accent);
 
-    // OK toggles the favorite in place: the outline star fills in.
-    await press(tester, LogicalKeyboardKey.select);
-    await pumpUntil(
-      tester,
-      find.descendant(
-        of: rowOf('Channel 1'),
-        matching: find.byIcon(Icons.star_rounded),
-      ),
-    );
-    expect(
-      tester.widget<Icon>(starIconIn('Channel 1')).icon,
-      Icons.star_rounded,
-    );
-    expect(
-      find.text('Add to favorites'),
-      findsNothing,
-      reason: 'no dialog: favoriting is in place now',
-    );
+      // OK toggles the favorite in place: the outline star fills in.
+      await press(tester, LogicalKeyboardKey.select);
+      await pumpUntil(
+        tester,
+        find.descendant(
+          of: rowOf('Channel 1'),
+          matching: find.byIcon(Icons.star_rounded),
+        ),
+      );
+      expect(
+        tester.widget<Icon>(starIconIn('Channel 1')).icon,
+        Icons.star_rounded,
+      );
+      expect(
+        find.text('Add to favorites'),
+        findsNothing,
+        reason: 'no dialog: favoriting is in place now',
+      );
 
-    // Left peels the cursor back onto the row body before crossing panes.
-    await press(tester, LogicalKeyboardKey.arrowLeft);
-    expect(starBorderOf('Channel 1'), isNull);
-    expect(focusLabel(), 'live.channels');
-    await press(tester, LogicalKeyboardKey.arrowLeft);
-    await settle(tester);
-    expect(focusLabel(), 'live.categories');
+      // Left peels the cursor back onto the row body before crossing panes.
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      expect(starBorderOf('Channel 1'), isNull);
+      expect(focusLabel(), 'live.channels');
+      await press(tester, LogicalKeyboardKey.arrowLeft);
+      await settle(tester);
+      expect(focusLabel(), 'live.categories');
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
   focusTestWidgets(
-      'Back mirrors Left: it peels the favorite column before the first-row rung',
-      (tester) async {
-    await pumpWideScreenWith(tester, _ManySource());
-    await settle(tester);
-    expect(focusLabel(), 'live.channels');
+    'Back mirrors Left: it peels the favorite column before the first-row rung',
+    (tester) async {
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
 
-    // Walk the cursor down the list, then onto row 10's star, so both peels
-    // are observable (the row cursor must survive the first Back).
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
-    expect(find.text('Channel 1'), findsNothing);
-    await press(tester, LogicalKeyboardKey.arrowRight);
-    await settle(tester);
+      // Walk the cursor down the list, then onto row 10's star, so both peels
+      // are observable (the row cursor must survive the first Back).
+      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
+      expect(find.text('Channel 1'), findsNothing);
+      await press(tester, LogicalKeyboardKey.arrowRight);
+      await settle(tester);
 
-    // Back #1: off the star, back onto the row body — the row cursor (and the
-    // scroll position) must not move.
-    await back(tester);
-    expect(focusLabel(), 'live.channels');
-    expect(
-      find.text('Channel 1'),
-      findsNothing,
-      reason: 'peeling the star column must not reset the row cursor',
-    );
+      // Back #1: off the star, back onto the row body — the row cursor (and the
+      // scroll position) must not move.
+      await back(tester);
+      expect(focusLabel(), 'live.channels');
+      expect(
+        find.text('Channel 1'),
+        findsNothing,
+        reason: 'peeling the star column must not reset the row cursor',
+      );
 
-    // Back #2: now the normal first-channel rung runs.
-    await back(tester);
-    expect(focusLabel(), 'live.channels');
-    expect(find.text('Channel 1'), findsOneWidget);
+      // Back #2: now the normal first-channel rung runs.
+      await back(tester);
+      expect(focusLabel(), 'live.channels');
+      expect(find.text('Channel 1'), findsOneWidget);
 
-    await unmount(tester);
-  });
+      await unmount(tester);
+    },
+  );
 
   // ── Tabs / media (unchanged behaviour, still guarded) ──────────────────────
 
-  focusTestWidgets('switching to the Series tab swaps out the live pane',
-      (tester) async {
+  focusTestWidgets('switching to the Series tab swaps out the live pane', (
+    tester,
+  ) async {
     await pumpWideScreen(tester);
     expect(find.text('Playlists'), findsOneWidget);
 
@@ -679,8 +744,9 @@ void main() {
     await unmount(tester);
   });
 
-  focusTestWidgets('media tab content survives switching tabs and back',
-      (tester) async {
+  focusTestWidgets('media tab content survives switching tabs and back', (
+    tester,
+  ) async {
     await pumpWideScreen(tester);
 
     await tester.tap(find.text('Series'));
@@ -710,8 +776,9 @@ void main() {
 
   // ── Row extent ─────────────────────────────────────────────────────────────
 
-  focusTestWidgets('a channel row carrying EPG fits its fixed row extent',
-      (tester) async {
+  focusTestWidgets('a channel row carrying EPG fits its fixed row extent', (
+    tester,
+  ) async {
     // The lists navigate by `index * itemExtent`, so rows are a FIXED height.
     // A channel with now/next + a progress bar is the tallest row there is — if
     // kChannelRowExtentWithEpg were too small it would overflow, and every other
@@ -723,6 +790,23 @@ void main() {
     // A RenderFlex overflow throws, failing the test before we get here.
     expect(find.textContaining('Now · '), findsWidgets);
     expect(find.textContaining('Next · '), findsWidgets);
+    expect(tester.takeException(), isNull);
+
+    await unmount(tester);
+  });
+
+  focusTestWidgets('a 960x540 TV viewport shows at least three channel rows', (
+    tester,
+  ) async {
+    await pumpWideScreenWith(tester, DemoSource(), size: const Size(960, 540));
+
+    final thirdRow = find.text('Tears of Steel (H.264)');
+    expect(thirdRow, findsOneWidget);
+    expect(
+      tester.getRect(thirdRow).bottom,
+      lessThanOrEqualTo(540),
+      reason: 'the compact preview should leave three complete rows visible',
+    );
     expect(tester.takeException(), isNull);
 
     await unmount(tester);
@@ -757,7 +841,12 @@ class _EpgSource implements Source {
   static final DateTime _now = DateTime.now();
   static final List<Channel> _chans = [
     for (var i = 0; i < 3; i++)
-      Channel(id: 'e$i', name: 'Epg Channel $i', categoryId: 'c0', number: i + 1),
+      Channel(
+        id: 'e$i',
+        name: 'Epg Channel $i',
+        categoryId: 'c0',
+        number: i + 1,
+      ),
   ];
 
   @override
@@ -770,8 +859,9 @@ class _EpgSource implements Source {
   Future<void> connect() async {}
 
   @override
-  Future<List<Category>> categories() async =>
-      const [Category(id: 'c0', title: 'Cat 0')];
+  Future<List<Category>> categories() async => const [
+    Category(id: 'c0', title: 'Cat 0'),
+  ];
 
   @override
   Future<List<Channel>> channels({String? categoryId}) async => _chans;

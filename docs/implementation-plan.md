@@ -27,7 +27,7 @@ Status convention:
 
 - Last updated: 2026-07-14
 - Active phase: Phase 0 — Release and security blockers
-- Active PR: PRs 0–2 — Validation and trusted distribution
+- Active PR: PR 15 subset — Android TV Back, density, and category activation
 - Next planned PR: PR 3 — Bound HTTP and decompression workloads
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
@@ -38,10 +38,12 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 236 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 244 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
-  plus a disposable-key Play release AAB pass locally; device validation pending
+  plus a disposable-key Play release AAB pass locally; the development flavor's
+  TV live layout and native player Back behavior passed direct API-36 emulator
+  validation on 2026-07-14, while the wider device matrix remains pending
 - Windows native build/device validation: not performed during the audit
 
 ## Non-negotiable sequencing
@@ -491,12 +493,19 @@ their own lineage.
 
 ### Automated behavior
 
-- [ ] Category/channel/EPG pane boundaries match documented navigation.
-- [ ] Up/down wrapping rules match documented navigation.
+- [x] Category/channel/EPG pane boundaries match documented navigation. Channel
+  category activation/filter handoff is pinned by
+  `test/channel_list_focus_test.dart`; EPG boundaries remain covered by
+  `test/epg_grid_test.dart`.
+- [x] Up/down wrapping rules match documented navigation. Pure coordinator and
+  real-key widget tests cover channel/category wrapping and upward escape.
 - [ ] Search open/close restores the intended focus target.
-- [ ] Back ladder does not clear or change data prematurely.
+- [x] Back ladder does not clear or change data prematurely. Flutter tests cover
+  row/favorite/category/search/tab rungs; Android native unit and API-36 emulator
+  checks cover menu/info/controls/exit policy and duplicate Back suppression.
 - [ ] Dialog and sheet dismissal restores focus.
-- [ ] In-row favorite activation preserves logical selection.
+- [x] In-row favorite activation preserves logical selection. Covered by pure
+  coordinator and real-key widget tests.
 - [ ] Return from native playback restores focus.
 - [ ] Async rebuild retains logical selection and usable focus.
 - [ ] Held-key repeat cannot issue duplicate activation.
@@ -623,6 +632,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | PR 1 | In progress | Selected side-by-side Play/GitHub-direct/development package IDs, configured permanent GitHub signing, and documented the authenticated cloud migration with exact retained/reset state; protected workflow and old/new device evidence remain |
 | 2026-07-14 | PR 2 | In progress | Added signed manifests, pre-connection redirect approval, exact artifact gates, Android package/signer verification, staged Windows rollback, immutable Action pins, downgrade rejection, and signed GitHub stable/beta selection; PR #98 Windows rejection/rollback CI passed, while protected release and device evidence remain |
 | 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow, with two encrypted backups confirmed; Play enrollment and Store packages remain |
+| 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
 
 ## Removal checklist
 

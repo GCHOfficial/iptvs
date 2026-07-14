@@ -1,6 +1,5 @@
 package com.gchofficial.iptvs.player
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -148,41 +147,6 @@ fun PlayerScreen(
         }
     }
 
-    // Single source of truth for Back: peel one layer per press — close an open
-    // menu, then the info panel, then hide the controls — and report whether it
-    // handled the press. Returns false only when there's nothing left to dismiss.
-    fun handleBack(): Boolean = when {
-        state.openMenu != PlayerMenu.None -> {
-            state.openMenu = PlayerMenu.None
-            true
-        }
-        state.infoOpen -> {
-            state.infoOpen = false
-            true
-        }
-        state.controlsVisible -> {
-            state.controlsVisible = false
-            true
-        }
-        else -> false
-    }
-
-    // Back is delivered two ways, handled in two places that stay mutually
-    // exclusive so each press peels exactly one rung:
-    //  - TV remotes (and 3-button-nav phones) send Back as a *key event*. We
-    //    handle it in the root onPreviewKeyEvent below — the preview phase runs
-    //    ancestor-first, so it fires *before* any focused control (e.g. a slider
-    //    in edit mode) can eat the press just to clear its own highlight. That
-    //    was the "first Back only removes the highlight" bug. Consuming the key
-    //    stops it reaching onBackPressed, so this BackHandler doesn't also fire.
-    //  - Gesture-nav phones send Back through the dispatcher with no key event;
-    //    the onPreviewKeyEvent path never sees it, so this BackHandler catches it.
-    // (Predictive back is not enabled — no manifest opt-in — so a consumed key
-    // reliably never reaches the dispatcher; the two paths can't double-fire.)
-    BackHandler(enabled = true) {
-        if (!handleBack()) callbacks.onBack()
-    }
-
     Box(
         Modifier
             .fillMaxSize()
@@ -190,15 +154,6 @@ fun PlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                // Own Back here (preview phase, before focused controls) and
-                // consume every Back event — key-up too — so it never bubbles to
-                // onBackPressed after we've handled key-down.
-                if (event.key == Key.Back) {
-                    if (event.type == KeyEventType.KeyDown && !handleBack()) {
-                        callbacks.onBack()
-                    }
-                    return@onPreviewKeyEvent true
-                }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val wasHidden = !state.controlsVisible
                 poke()

@@ -53,14 +53,23 @@ The live tab is a selection model (`live_focus_coordinator.dart`) — the same p
 uses, and for the same reason. The channel list and the category sidebar each have exactly **one**
 focus node (`live.channels` / `live.categories`) and a **selected index**; rows are *not* focus
 targets (they stay tappable for touch), and the coordinator drives the scroll itself with exact
-`index * itemExtent` maths. This is why both lists set an explicit **`itemExtent`**
-(`kChannelRowExtentWithEpg` 112 / `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 44, in
-`live_tab_view.dart`) — uniform rows are what make index→offset exact. It replaced a per-row-focus
+`index * itemExtent` maths. This is why both lists set an explicit **`itemExtent`**. Their baseline
+extents are `kChannelRowExtentWithEpg` 112 / `kChannelRowExtentPlain` 72 /
+`kCategoryRowExtent` 44 in `live_tab_view.dart`; `LiveLayoutMetrics` reduces them within guarded
+minimums on short wide viewports, and the coordinator receives those exact computed values so its
+index→offset calculation cannot drift from the rendered list. It replaced a per-row-focus
 design that kept producing bugs: an off-screen row in a lazy `ListView` has no context, so
 `requestFocus` silently no-ops, which forced a *jump-scroll → post-frame requestFocus → re-assert
 retry* pipeline that key auto-repeat outran, that geometry traversal leaked out of, and that stale
 re-asserts fought. Selecting row N is now a synchronous integer assignment that cannot fail or
 race.
+
+Wide-layout geometry is also platform- and height-aware. Android TV images can expose either a
+960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot identify the
+required density. Android wide layouts use the compact 0.75 scale; other platforms scale from
+0.75–1.0 only when their viewport is short. Minimum row and D-pad target sizes are preserved and
+`MediaQuery` text scaling is not overridden. Phone portrait layouts retain the normal scale. The
+960×540 and 1920×1080 metric regressions pin both Android TV viewport forms.
 
 - **Movement rules (deliberately asymmetric).** **Down wraps** at the end of the channel list and
   of the category list — the *only* infinite motion in the tab. **Up never wraps**: at the first
@@ -73,6 +82,10 @@ race.
   between the panes, and every arrow is consumed, so Flutter's geometry traversal never runs
   inside the live body. Pinned by `test/live_focus_coordinator_test.dart` (pure index logic) and
   `test/channel_list_focus_test.dart` (real key events).
+- **Category activation.** Up/Down moves only the sidebar cursor; **OK applies that category and
+  enters the first/resumed channel in the filtered list**. If a provider exposes an empty category,
+  focus remains in the sidebar rather than moving to a channel pane with no activation target.
+  Pointer taps and the phone dropdown apply the same filter without forcing D-pad focus.
 - **Drawing the cursor.** Each list draws its cursor row accented **only while it owns the D-pad**
   (`listFocused`), and subdued (a panel-lift, no accent) when it doesn't — so the accent always
   telegraphs *which pane you are in*, while the resting mark still shows where you'll land on
