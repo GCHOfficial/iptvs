@@ -50,6 +50,7 @@ dependencies:
   url_launcher: ^6.3.2
   cached_network_image: ^3.4.1
   package_info_plus: ^10.2.0
+  cryptography: ^2.9.0
 
 dev_dependencies:
   flutter_test:

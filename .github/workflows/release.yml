@@ -11,12 +11,21 @@ on:
       version:
         description: 'Version without leading v (e.g. 1.2.3)'
         required: true
+      track:
+        description: 'Publish as a stable release or signed beta prerelease'
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - beta
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FLUTTER_VERSION: 3.44.5
+  MINIMUM_UPDATE_VERSION: 0.1.0
 
 jobs:
   # Resolve the version string once (tag minus the leading `v`, or the manual input).
@@ -25,35 +34,39 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      track: ${{ steps.v.outputs.track }}
     steps:
       - id: v
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "track=${{ inputs.track }}" >> "$GITHUB_OUTPUT"
           else
             tag="${{ github.ref_name }}"
             echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "track=stable" >> "$GITHUB_OUTPUT"
           fi
 
   build-android:
     name: Build Android (phone + TV)
     needs: version
     runs-on: ubuntu-latest
+    environment: release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           lfs: true # libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar)
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
           java-version: '17'
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - name: Cache Gradle
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.gradle/caches
@@ -62,12 +75,54 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
       - run: flutter pub get
+      - name: Prepare protected Android signing key
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          missing=0
+          for name in ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_KEYSTORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD ANDROID_RELEASE_CERT_SHA256; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not configured in the protected release environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/iptvs-release.jks"
       - name: Build release APK
         # Cloud-sync config (repo Variables; empty in forks → feature stays off).
-        run: flutter build apk --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        env:
+          IPTVS_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/iptvs-release.jks
+          IPTVS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: flutter build apk --release --flavor githubDirect --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
+      - name: Verify Android signing certificate
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)
+          if [ -z "$apksigner" ]; then
+            echo "::error::apksigner was not found in the Android SDK."
+            exit 1
+          fi
+          actual=$($apksigner verify --print-certs build/app/outputs/flutter-apk/app-githubdirect-release.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
+          expected=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')
+          if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::Android signing certificate mismatch. Expected $expected, received ${actual:-none}."
+            exit 1
+          fi
+          echo "Verified Android release certificate SHA-256: $actual"
       - name: Name artifact
-        run: cp build/app/outputs/flutter-apk/app-release.apk iptvs-${{ needs.version.outputs.version }}-android.apk
-      - uses: actions/upload-artifact@v7
+        run: cp build/app/outputs/flutter-apk/app-githubdirect-release.apk iptvs-${{ needs.version.outputs.version }}-android.apk
+      - name: Verify GitHub-direct updater manifest capability
+        run: ./tool/verify_android_distribution_manifest.sh iptvs-${{ needs.version.outputs.version }}-android.apk githubDirect
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: android
           path: iptvs-${{ needs.version.outputs.version }}-android.apk
@@ -78,24 +133,24 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - name: Cache libmpv DLL
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: windows/libmpv/libmpv-2.dll
           key: libmpv-dll-${{ hashFiles('windows/CMakeLists.txt') }}
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - name: Build release (Windows x64)
-        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows
           path: iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
@@ -105,14 +160,60 @@ jobs:
     name: Publish GitHub Release
     needs: [version, build-android, build-windows]
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0 # full history — the changelog step diffs against the previous tag
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
+      - name: Create and sign release manifest
+        env:
+          UPDATE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.UPDATE_MANIFEST_PRIVATE_KEY_BASE64 }}
+          UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD }}
+          UPDATE_MANIFEST_PUBLIC_KEY: ${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" ] || [ -z "$UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD" ] || [ -z "$UPDATE_MANIFEST_PUBLIC_KEY" ]; then
+            echo "::error::Update manifest signing key is not configured in the release environment."
+            exit 1
+          fi
+          android="dist/iptvs-$VERSION-android.apk"
+          windows="dist/iptvs-$VERSION-windows-x64.zip"
+          for artifact in "$android" "$windows"; do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::Missing release artifact: $artifact"
+              exit 1
+            fi
+          done
+          key="$RUNNER_TEMP/update-manifest-ed25519.pem"
+          printf '%s' "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" | base64 --decode > "$key"
+          chmod 600 "$key"
+          derived_public=$(openssl pkey -in "$key" -passin env:UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD -pubout -outform DER | tail -c 32 | base64 -w0)
+          if [ "$derived_public" != "$UPDATE_MANIFEST_PUBLIC_KEY" ]; then
+            echo "::error::Update manifest public and private keys do not match."
+            exit 1
+          fi
+          manifest="dist/iptvs-$VERSION-manifest.json"
+          jq -cn \
+            --arg version "$VERSION" \
+            --arg minimum "$MINIMUM_UPDATE_VERSION" \
+            --arg android_name "$(basename "$android")" \
+            --arg android_sha "$(sha256sum "$android" | cut -d ' ' -f 1)" \
+            --argjson android_size "$(stat -c '%s' "$android")" \
+            --arg windows_name "$(basename "$windows")" \
+            --arg windows_sha "$(sha256sum "$windows" | cut -d ' ' -f 1)" \
+            --argjson windows_size "$(stat -c '%s' "$windows")" \
+            '{schema:1,version:$version,minimum_version:$minimum,artifacts:[{platform:"android",filename:$android_name,byte_size:$android_size,sha256:$android_sha},{platform:"windows-x64",filename:$windows_name,byte_size:$windows_size,sha256:$windows_sha}]}' \
+            > "$manifest"
+          openssl pkeyutl -sign -rawin -inkey "$key" -passin env:UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD -in "$manifest" -out "$RUNNER_TEMP/manifest.sig"
+          base64 -w0 "$RUNNER_TEMP/manifest.sig" > "$manifest.sig"
+          rm -f "$key" "$RUNNER_TEMP/manifest.sig"
       # A short human-readable changelog generated by Gemini from the commit
       # subjects since the previous tag. Tries a chain of models (the primary
       # 503s under load — it cut v0.1.29 with no changelog), two attempts each.
@@ -172,10 +273,11 @@ jobs:
             echo "All models failed; continuing without AI changelog."
             : > body.md
           fi
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
-          name: iptvs ${{ needs.version.outputs.version }}
+          name: IPTVS Player ${{ needs.version.outputs.version }}${{ needs.version.outputs.track == 'beta' && ' Beta' || '' }}
+          prerelease: ${{ needs.version.outputs.track == 'beta' }}
           body_path: body.md
           generate_release_notes: true
           files: dist/**

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
+import '../data/distribution_channel.dart';
 import '../data/library_repository.dart';
 import '../data/local_profile_store.dart';
 import '../data/mdblist_client.dart';
@@ -64,6 +65,7 @@ class _HomeShellState extends State<HomeShell> {
   /// haven't checked recently. [runUpdateCheck] prompts (respecting the
   /// skipped-version preference) and records the check time.
   Future<void> _maybeCheckForUpdate() async {
+    if (!DistributionConfig.directUpdaterEnabled) return;
     if (!UpdateInstaller.isSupported) return;
     const store = UpdateStore();
     if (!shouldAutoCheck(await store.lastCheck(), DateTime.now())) return;
@@ -87,7 +89,10 @@ class _HomeShellState extends State<HomeShell> {
   void _installKeyboardLogger() {
     bool logger(KeyEvent event) {
       final focus = FocusManager.instance.primaryFocus;
-      final focusLabel = focus?.debugLabel ?? focus?.context?.widget.runtimeType.toString() ?? 'none';
+      final focusLabel =
+          focus?.debugLabel ??
+          focus?.context?.widget.runtimeType.toString() ??
+          'none';
       final keyLabel = event.logicalKey.keyLabel.isNotEmpty
           ? event.logicalKey.keyLabel
           : (event.logicalKey.debugName ?? event.logicalKey.keyId.toString());
@@ -162,8 +167,9 @@ class _HomeShellState extends State<HomeShell> {
         final activeId = await sync.activeProfileId();
         if (!mounted) return;
         final idx = profiles.indexWhere((p) => p.id == activeId);
-        final profile =
-            idx >= 0 ? profiles[idx] : (profiles.isNotEmpty ? profiles.first : null);
+        final profile = idx >= 0
+            ? profiles[idx]
+            : (profiles.isNotEmpty ? profiles.first : null);
         if (profile != null) {
           setState(() {
             _profileName = profile.name;

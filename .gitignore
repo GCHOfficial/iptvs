@@ -43,6 +43,12 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Private Android release-signing material. The tracked debug keystore is
+# deliberately non-secret and must never be used by the release build type.
+*.jks
+*.keystore
+**/key.properties
+
 # Claude Code agent memory store (not project files)
 /memory/
 

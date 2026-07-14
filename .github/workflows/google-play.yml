@@ -1,0 +1,82 @@
+name: Google Play Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without leading v (for example 1.2.3)'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.44.5
+
+jobs:
+  build:
+    name: Build signed Google Play AAB
+    runs-on: ubuntu-latest
+    environment: google-play
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          lfs: true # libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar)
+      - uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - run: flutter pub get
+      - name: Prepare protected Play upload key
+        env:
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
+        run: |
+          missing=0
+          for name in PLAY_UPLOAD_KEYSTORE_BASE64 PLAY_UPLOAD_KEYSTORE_PASSWORD PLAY_UPLOAD_KEY_ALIAS PLAY_UPLOAD_KEY_PASSWORD PLAY_UPLOAD_CERT_SHA256; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not configured in the protected google-play environment."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/iptvs-play-upload.p12"
+          chmod 600 "$RUNNER_TEMP/iptvs-play-upload.p12"
+      - name: Build signed App Bundle
+        env:
+          IPTVS_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/iptvs-play-upload.p12
+          IPTVS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+          IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+        run: flutter build appbundle --release --flavor googlePlay --build-name ${{ inputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+      - name: Verify bundle identity and upload signature
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
+        run: ./tool/verify_google_play_bundle.sh build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab build/app/intermediates/merged_manifests/googlePlayRelease/processGooglePlayReleaseManifest/AndroidManifest.xml
+      - name: Name artifact
+        run: cp build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab iptvs-player-${{ inputs.version }}-google-play.aab
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: google-play-${{ inputs.version }}
+          path: iptvs-player-${{ inputs.version }}-google-play.aab
+          if-no-files-found: error
+          retention-days: 14
