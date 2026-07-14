@@ -54,8 +54,28 @@ lean by delegating rather than doing mechanical work itself.
   → **deep-reasoner** (Opus, `.claude/agents/deep-reasoner.md`).
 - **Mechanical work** (boilerplate, tests following existing patterns, formatting, simple edits)
   → **fast-worker** (Sonnet, `.claude/agents/fast-worker.md`).
-- **High-stakes decisions**: run deep-reasoner **twice with slightly different framings** and
-  synthesize the best of both.
+- **Registration:** agent discovery happens at session startup and fails silently, so the
+  definitions are also symlinked into `~/.claude/agents/` (user-level, loads in every session —
+  re-create the symlinks when setting up a new machine). **Fallback** if the named types still
+  aren't registered ("agent type not found"): spawn `general-purpose` with the matching `model`
+  override and make the agent's first instruction "read `.claude/agents/<name>.md` and adopt it
+  as your operating rules" — keep the definition file the single source of truth instead of
+  paraphrasing it into the prompt.
+- **High-stakes decisions**: one deep-reasoner pass that must develop **≥2 competing designs and
+  argue the winner**; the orchestrator adjudicates. Reserve a true second, independently framed
+  run for hard-to-reverse decisions (schema migrations, RLS changes).
+- **Plan waves by file overlap.** Agents whose edits can't collide run in parallel in the same
+  tree; every implementing agent's prompt carries an explicit file-ownership list ("you own X;
+  don't touch Y"). Clusters that share files run in sequence — or run the shared-file cluster as
+  a **read-only diagnose/design pass** in the first wave (no file footprint, so it parallelizes
+  freely) and implement from its report in the next.
+- **Handoffs between waves**: pass the design report verbatim, plus two caveats — line numbers
+  may be stale (match by function name), and the tree contains uncommitted work from other
+  agents (build on top; never revert unexpected diffs).
+- If an agent dies mid-task (rate limit, crash), **resume it via SendMessage** — its context
+  (spec, files already read) survives; a fresh spawn re-pays the whole cold start. Stagger heavy
+  Opus agents that don't strictly need to run concurrently — parallel Opus waves can hit
+  session usage limits.
 - When delegating work in an area covered by a `docs/*.md` detail doc, tell the agent to read
   that doc first — agents get this file automatically, but not the detail docs.
 
@@ -250,3 +270,6 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 - **Known gap:** migration coverage exercises v1→8, fresh-create, and the v7→8
   `external_metadata` repair, but not the v3→7 ALTER/`media_page_state` rebuild branches. Worth
   adding if those paths change.
+- Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
+  every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
+  literal `username=…&password=…` pattern when the parser under test doesn't need it.

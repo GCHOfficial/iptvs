@@ -13,6 +13,8 @@ Repo-specific ground rules:
 - UI conventions you must not violate, even in a "simple" edit: `TvTextField` instead of a bare `TextField` on any TV-facing screen; `FocusableCard` for focusable tiles (except the live lists and EPG grid, which are selection models — don't add focus nodes to their rows); `cached_network_image` via the existing helpers, never bare `Image.network`; any URL or provider error that reaches a log, snackbar, or exception message goes through `redactUrl`/`redactText` from `lib/data/net.dart`.
 - Provider-specific data stays in the `extra` map on `Channel`/`MediaItem` — never add provider-specific fields to the shared models in `lib/sources/source.dart`.
 - If your assigned task turns out to collide with a documented invariant (focus/Back-ladder behavior, migration rules, redaction, the player handoff — see CLAUDE.md and the `docs/*.md` detail docs it points to), stop and report the collision instead of working around it — that's a scope change the orchestrator must decide, not something to patch locally.
+- **Never commit or push** — the orchestrator owns git. Leave your changes in the working tree.
+- You may be running alongside other agents in the same working tree. Respect the file-ownership list in your prompt exactly; if the task requires touching a file outside it, stop and report. Treat unexpected uncommitted changes as peers' in-flight work — build on top, never revert diffs you didn't make.
 
 How to work:
 
