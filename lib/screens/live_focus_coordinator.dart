@@ -2,13 +2,20 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show KeyDownEvent, KeyEvent, KeyRepeatEvent, KeyUpEvent, LogicalKeyboardKey;
+    show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
 
 /// Which live region currently owns the D-pad.
 enum LiveFocusRegion { none, channels, categories, previewControls, search }
+
+/// Which column of the selected channel row the D-pad cursor occupies: the
+/// row **body** (OK plays) or the trailing **favorite** star (OK toggles).
+/// Right enters the favorite column; Left, every vertical move, and every
+/// (re)entry into the channel pane peel it back to the body, so the star
+/// column is never sticky across rows.
+enum ChannelRowColumn { body, favorite }
 
 /// The live tab's D-pad navigation, as a **selection model** — the same pattern
 /// the TV guide ([EpgGridScreen]) uses, and for the same reason.
@@ -31,8 +38,11 @@ enum LiveFocusRegion { none, channels, categories, previewControls, search }
 ///   search box; channels → the preview controls (wide) or the search box
 ///   (phone). This is what makes the sidebar escapable — the old design wrapped
 ///   Up too, so the only ways out were Right or Back ("stuck in the categories").
-/// - Left/Right cross between the panes; every arrow is consumed, so Flutter's
-///   geometry traversal never runs inside the live body.
+/// - **Right** first enters the selected channel row's favorite star (the
+///   intra-row [ChannelRowColumn]); **Left** peels the star column back to the
+///   row body before crossing to the sidebar. Beyond that, Left/Right cross
+///   between the panes; every arrow is consumed, so Flutter's geometry
+///   traversal never runs inside the live body.
 ///
 /// Route keys ([RoutedFocusNode.routeKey], read via [focusRouteKey]) still name
 /// the regions for the Back ladder — they are release-safe, unlike `debugLabel`.
@@ -62,7 +72,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.onChannelSelectionChanged,
     required this.onCategoryActivated,
     required this.onPlayChannel,
-    required this.onContextMenuChannel,
+    required this.onToggleFavorite,
     required this.onFocusTabs,
   }) {
     // The cursor highlight is drawn from each list's `hasFocus`, and a focus
@@ -112,11 +122,12 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// OK on a category row — applies that filter.
   final void Function(String? categoryId) onCategoryActivated;
 
-  /// OK (quick press) on a channel row.
+  /// OK on a channel row's body column.
   final void Function(Channel channel) onPlayChannel;
 
-  /// OK held ~500ms on a channel row (wide/TV only) — the in-place favorite menu.
-  final void Function(Channel channel) onContextMenuChannel;
+  /// OK on the selected row's favorite column ([ChannelRowColumn.favorite]) —
+  /// toggles that channel's favorite state in place.
+  final void Function(Channel channel) onToggleFavorite;
 
   /// Escape hatch upward out of the live body (search → the content tabs).
   final VoidCallback onFocusTabs;
@@ -138,6 +149,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// The D-pad cursor into [orderedCategoryIds] (0 = "All channels").
   int get selectedCategoryIndex => _selectedCategoryIndex;
   int _selectedCategoryIndex = 0;
+
+  /// The intra-row column the channel cursor sits on (body vs favorite star).
+  ChannelRowColumn get channelColumn => _channelColumn;
+  ChannelRowColumn _channelColumn = ChannelRowColumn.body;
 
   bool _disposed = false;
 
@@ -203,14 +218,24 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _notify();
   }
 
+  /// Park the intra-row cursor back on the row body. No-op when already there.
+  void resetChannelColumn() {
+    if (_channelColumn == ChannelRowColumn.body) return;
+    _channelColumn = ChannelRowColumn.body;
+    _notify();
+  }
+
   /// Move the channel cursor to [index] (clamped), reveal it, and tell the
-  /// screen (preview-follow).
+  /// screen (preview-follow). Vertical motion always lands on the row *body* —
+  /// the favorite column never travels with the cursor.
   void selectChannel(int index, {bool reveal = true}) {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
     final next = index.clamp(0, visible.length - 1);
-    final changed = next != _selectedChannelIndex;
+    final changed = next != _selectedChannelIndex ||
+        _channelColumn != ChannelRowColumn.body;
     _selectedChannelIndex = next;
+    _channelColumn = ChannelRowColumn.body;
     _rememberBrowsed(visible[next].id);
     if (reveal) _revealChannel(next);
     if (changed) _notify();
@@ -291,6 +316,8 @@ class LiveFocusCoordinator extends ChangeNotifier {
   void focusChannels() {
     final visible = visibleChannels();
     if (visible.isEmpty) return;
+    // (Re)entering the pane always lands on the row body, never the star.
+    resetChannelColumn();
     channelsFocusNode.requestFocus();
     _revealChannel(_selectedChannelIndex.clamp(0, visible.length - 1));
     onChannelSelectionChanged(
@@ -347,12 +374,6 @@ class LiveFocusCoordinator extends ChangeNotifier {
   static bool _isPress(KeyEvent event) =>
       event is KeyDownEvent || event is KeyRepeatEvent;
 
-  /// How long OK must be held on a channel before it opens the context menu
-  /// instead of playing.
-  static const _holdDuration = Duration(milliseconds: 500);
-  Timer? _holdTimer;
-  bool _menuFired = false;
-
   /// The channel list owns the D-pad while it has focus.
   KeyEventResult handleChannelsKey(FocusNode node, KeyEvent event) {
     final key = event.logicalKey;
@@ -370,7 +391,9 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (key == LogicalKeyboardKey.arrowUp) {
       if (!_isPress(event)) return KeyEventResult.handled;
       if (_selectedChannelIndex == 0) {
-        // Never wrap upward — climb out of the list instead.
+        // Never wrap upward — climb out of the list instead. Leaving the pane
+        // parks the intra-row cursor back on the body.
+        resetChannelColumn();
         escapeUpFromChannels();
       } else {
         selectChannel(_selectedChannelIndex - 1);
@@ -379,44 +402,44 @@ class LiveFocusCoordinator extends ChangeNotifier {
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
       if (!_isPress(event)) return KeyEventResult.handled;
+      // Left peels the intra-row cursor off the favorite star first; only a
+      // second Left crosses into the sidebar.
+      if (_channelColumn == ChannelRowColumn.favorite) {
+        resetChannelColumn();
+        return KeyEventResult.handled;
+      }
       if (isWide()) focusCategories();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowRight) {
-      return KeyEventResult.handled; // consumed: nothing to the right
+      if (!_isPress(event)) return KeyEventResult.handled;
+      // Right enters the row's favorite star; always consumed (already on the
+      // star, or an empty list) so geometry traversal never runs.
+      if (_channelColumn == ChannelRowColumn.body && selectedChannel != null) {
+        _channelColumn = ChannelRowColumn.favorite;
+        _notify();
+      }
+      return KeyEventResult.handled;
     }
 
     if (_isActivate(key)) return _handleChannelActivate(event);
     return KeyEventResult.ignored;
   }
 
-  /// OK on a channel. Where the context menu exists (wide/TV) we own the whole
-  /// gesture: a quick press plays on key-**up**, a ~500ms hold opens the menu.
-  /// Elsewhere OK plays immediately on key-down.
+  /// OK on the selected channel row: the body column plays, the favorite
+  /// column toggles. Acts on key-down only — repeats and key-up are swallowed
+  /// so a held OK can't re-trigger.
   KeyEventResult _handleChannelActivate(KeyEvent event) {
     final channel = selectedChannel;
     if (channel == null) return KeyEventResult.ignored;
-    if (!isWide()) {
-      if (event is KeyDownEvent) onPlayChannel(channel);
-      return KeyEventResult.handled;
-    }
     if (event is KeyDownEvent) {
-      _menuFired = false;
-      _holdTimer?.cancel();
-      _holdTimer = Timer(_holdDuration, () {
-        _menuFired = true;
-        final held = selectedChannel;
-        if (held != null) onContextMenuChannel(held);
-      });
-      return KeyEventResult.handled;
+      if (_channelColumn == ChannelRowColumn.favorite) {
+        onToggleFavorite(channel);
+      } else {
+        onPlayChannel(channel);
+      }
     }
-    if (event is KeyUpEvent) {
-      _holdTimer?.cancel();
-      _holdTimer = null;
-      if (!_menuFired) onPlayChannel(channel);
-      return KeyEventResult.handled;
-    }
-    return KeyEventResult.handled; // swallow repeats
+    return KeyEventResult.handled;
   }
 
   /// The category sidebar owns the D-pad while it has focus.
@@ -586,7 +609,6 @@ class LiveFocusCoordinator extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _digitTimer?.cancel();
-    _holdTimer?.cancel();
     channelsFocusNode.dispose();
     categoriesFocusNode.dispose();
     searchCellFocusNode.dispose();

@@ -38,6 +38,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
@@ -86,6 +88,7 @@ class PlayerCallbacks(
     val onSetSpeed: (Float) -> Unit,
     val onCycleAspect: () -> Unit,
     val onGoLive: () -> Unit,
+    val onToggleFavorite: () -> Unit,
     val onBack: () -> Unit,
     val onEnterPip: () -> Unit,
 )
@@ -164,10 +167,18 @@ fun PlayerScreen(
         else -> false
     }
 
-    // Phones deliver Back through the dispatcher (gesture / nav bar); TV remotes
-    // deliver it as a key consumed in onPreviewKeyEvent below. They're mutually
-    // exclusive (a consumed key never reaches the dispatcher), so both routing to
-    // handleBack() gives a deterministic single press per step.
+    // Back is delivered two ways, handled in two places that stay mutually
+    // exclusive so each press peels exactly one rung:
+    //  - TV remotes (and 3-button-nav phones) send Back as a *key event*. We
+    //    handle it in the root onPreviewKeyEvent below — the preview phase runs
+    //    ancestor-first, so it fires *before* any focused control (e.g. a slider
+    //    in edit mode) can eat the press just to clear its own highlight. That
+    //    was the "first Back only removes the highlight" bug. Consuming the key
+    //    stops it reaching onBackPressed, so this BackHandler doesn't also fire.
+    //  - Gesture-nav phones send Back through the dispatcher with no key event;
+    //    the onPreviewKeyEvent path never sees it, so this BackHandler catches it.
+    // (Predictive back is not enabled — no manifest opt-in — so a consumed key
+    // reliably never reaches the dispatcher; the two paths can't double-fire.)
     BackHandler(enabled = true) {
         if (!handleBack()) callbacks.onBack()
     }
@@ -179,11 +190,16 @@ fun PlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
+                // Own Back here (preview phase, before focused controls) and
+                // consume every Back event — key-up too — so it never bubbles to
+                // onBackPressed after we've handled key-down.
+                if (event.key == Key.Back) {
+                    if (event.type == KeyEventType.KeyDown && !handleBack()) {
+                        callbacks.onBack()
+                    }
+                    return@onPreviewKeyEvent true
+                }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                // Leave Back entirely to BackHandler (the dispatcher): modern
-                // predictive back fires it independently of key consumption, so
-                // handling Back here too made the first press both hide AND exit.
-                if (event.key == Key.Back) return@onPreviewKeyEvent false
                 val wasHidden = !state.controlsVisible
                 poke()
                 wasHidden // consume the first key only to reveal controls
@@ -497,6 +513,13 @@ private fun RowScope.RightCluster(
         TextControlButton("LIVE", "Go to live") {
             onInteract(); callbacks.onGoLive()
         }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
+    if (state.canFavorite) {
+        IconControlButton(
+            icon = if (state.isFavorite) Icons.Filled.Star else Icons.Filled.StarBorder,
+            contentDescription = if (state.isFavorite) "Remove from favorites" else "Add to favorites",
+        ) { onInteract(); callbacks.onToggleFavorite() }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
     if (state.showSpeedButton) {

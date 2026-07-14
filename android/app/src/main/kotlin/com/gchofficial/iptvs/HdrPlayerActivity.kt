@@ -113,6 +113,10 @@ class HdrPlayerActivity : ComponentActivity() {
         // unused/absent for our purposes on most TVs. That's a platform limitation, not a bug:
         // the button below simply won't show on devices that report the feature missing.
         uiState.supportsPip = supportsPip()
+        // Favorite toggle (live only): seeded from the Dart store, read back on
+        // exit (see finish) so the channel list reflects it on return.
+        uiState.canFavorite = intent.getBooleanExtra(EXTRA_CAN_FAVORITE, false)
+        uiState.isFavorite = intent.getBooleanExtra(EXTRA_IS_FAVORITE, false)
 
         if (shared != null) {
             val sharedEngine = shared.first
@@ -246,6 +250,9 @@ class HdrPlayerActivity : ComponentActivity() {
                 uiState.liveSynced = true
             }
         },
+        // Toggle locally; the final state is returned to Dart on finish, which
+        // persists it (no live channel exists from this Activity to Dart).
+        onToggleFavorite = { uiState.isFavorite = !uiState.isFavorite },
         onBack = { finish() },
         onEnterPip = { enterPip() },
     )
@@ -364,13 +371,21 @@ class HdrPlayerActivity : ComponentActivity() {
      * `nativeClosed`.
      */
     override fun finish() {
-        if (::uiState.isInitialized && !uiState.isLive) {
-            setResult(
-                RESULT_OK,
-                Intent()
-                    .putExtra(RESULT_POSITION_MS, uiState.positionMs)
-                    .putExtra(RESULT_DURATION_MS, uiState.durationMs),
-            )
+        if (::uiState.isInitialized) {
+            val result = Intent()
+            var hasResult = false
+            if (!uiState.isLive) {
+                result.putExtra(RESULT_POSITION_MS, uiState.positionMs)
+                result.putExtra(RESULT_DURATION_MS, uiState.durationMs)
+                hasResult = true
+            }
+            // Report the final favorite state (live or VOD) so Dart can persist
+            // it — this is the only channel back to the store from this Activity.
+            if (uiState.canFavorite) {
+                result.putExtra(RESULT_FAVORITE, uiState.isFavorite)
+                hasResult = true
+            }
+            if (hasResult) setResult(RESULT_OK, result)
         }
         super.finish()
     }
@@ -473,9 +488,14 @@ class HdrPlayerActivity : ComponentActivity() {
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
 
-        /** Result extras: final position/duration, for the Dart resume store. */
+        /** Favorite toggle (live channels): whether to show the star + its seed state. */
+        const val EXTRA_CAN_FAVORITE = "can_favorite"
+        const val EXTRA_IS_FAVORITE = "is_favorite"
+
+        /** Result extras: final position/duration + favorite, for the Dart stores. */
         const val RESULT_POSITION_MS = "position_ms"
         const val RESULT_DURATION_MS = "duration_ms"
+        const val RESULT_FAVORITE = "favorite"
         private const val TAG = "iptvs.hdr"
 
         // Live reconnect watchdog thresholds.

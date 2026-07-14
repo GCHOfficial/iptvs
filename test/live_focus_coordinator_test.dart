@@ -9,6 +9,9 @@
 //     search box; channels → the preview controls, or the search box on a phone).
 //     The old design wrapped Up too, which is what left users "stuck in the
 //     categories" with no way out but Right or Back.
+//   * The channel cursor has an **intra-row favorite column**: Right enters the
+//     row's star, Left peels back to the body before crossing panes, OK acts on
+//     the column, and vertical moves always land back on the body.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -29,6 +32,7 @@ void main() {
   ({
     LiveFocusCoordinator focus,
     List<String> played,
+    List<String> toggled,
     List<String?> activated,
     int Function() tabsFocused,
   })
@@ -38,6 +42,7 @@ void main() {
     bool wide = true,
   }) {
     final played = <String>[];
+    final toggled = <String>[];
     final activated = <String?>[];
     var tabs = 0;
     final focus = LiveFocusCoordinator(
@@ -52,12 +57,13 @@ void main() {
       onChannelSelectionChanged: (_, _) {},
       onCategoryActivated: activated.add,
       onPlayChannel: (c) => played.add(c.id),
-      onContextMenuChannel: (_) {},
+      onToggleFavorite: (c) => toggled.add(c.id),
       onFocusTabs: () => tabs++,
     );
     return (
       focus: focus,
       played: played,
+      toggled: toggled,
       activated: activated,
       tabsFocused: () => tabs,
     );
@@ -188,6 +194,158 @@ void main() {
       );
       await tester.pump();
       expect(h.focus.region, LiveFocusRegion.categories);
+    });
+  });
+
+  // The per-row favorite star: the channel cursor has two intra-row columns
+  // (body / favorite). Right enters the star, Left peels back before crossing
+  // panes, OK acts on whichever column holds the cursor, and every vertical
+  // move resets to the body so the star column is never sticky across rows.
+  group('intra-row favorite column', () {
+    testWidgets('Right moves body → favorite; a second Right is consumed '
+        'without change', (tester) async {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.focusChannels();
+      await tester.pump();
+      expect(h.focus.channelColumn, ChannelRowColumn.body);
+
+      final first = h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(first, KeyEventResult.handled);
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+
+      // Already on the star: still consumed (geometry traversal must never
+      // run in the live body), but nothing changes.
+      final second = h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(second, KeyEventResult.handled);
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+      expect(h.focus.region, LiveFocusRegion.channels);
+    });
+
+    testWidgets('Left peels favorite → body, and only then crosses to the '
+        'categories (two-stage)', (tester) async {
+      final h = make(visible: channels(['a']), categories: [null, 'news']);
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.focusChannels();
+      await tester.pump();
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+
+      // First Left: back onto the row body, still in the channel pane.
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowLeft),
+      );
+      await tester.pump();
+      expect(h.focus.channelColumn, ChannelRowColumn.body);
+      expect(h.focus.region, LiveFocusRegion.channels);
+
+      // Second Left: crosses into the sidebar.
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowLeft),
+      );
+      await tester.pump();
+      expect(h.focus.region, LiveFocusRegion.categories);
+    });
+
+    testWidgets('OK plays on the body and toggles on the favorite column',
+        (tester) async {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.focusChannels();
+      await tester.pump();
+
+      // Body: OK plays.
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.select),
+      );
+      expect(h.played, ['a']);
+      expect(h.toggled, isEmpty);
+
+      // Favorite column: OK toggles instead of playing.
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.select),
+      );
+      expect(h.toggled, ['a']);
+      expect(h.played, ['a'], reason: 'the star press must not also play');
+    });
+
+    testWidgets('vertical moves reset the column to the body', (tester) async {
+      final h = make(visible: channels(['a', 'b', 'c']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.selectChannel(1);
+      h.focus.focusChannels();
+      await tester.pump();
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowDown),
+      );
+      expect(h.focus.selectedChannelIndex, 2);
+      expect(h.focus.channelColumn, ChannelRowColumn.body);
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowUp),
+      );
+      expect(h.focus.selectedChannelIndex, 1);
+      expect(h.focus.channelColumn, ChannelRowColumn.body);
+    });
+
+    testWidgets('Up-escape at the first row also resets the column',
+        (tester) async {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.focusChannels();
+      await tester.pump();
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      expect(h.focus.channelColumn, ChannelRowColumn.favorite);
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowUp),
+      );
+      await tester.pump();
+      expect(h.focus.region, LiveFocusRegion.previewControls);
+      expect(h.focus.channelColumn, ChannelRowColumn.body);
     });
   });
 
@@ -330,7 +488,7 @@ void main() {
         onChannelSelectionChanged: (_, _) {},
         onCategoryActivated: (_) {},
         onPlayChannel: (_) {},
-        onContextMenuChannel: (_) {},
+        onToggleFavorite: (_) {},
         onFocusTabs: () {},
       );
       addTearDown(focus.dispose);

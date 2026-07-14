@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/net.dart';
+import 'expiry.dart';
 import 'source.dart';
 import 'xmltv.dart';
 
@@ -124,7 +125,8 @@ class M3uSource implements Source {
       throw UnsupportedError('M3U source only exposes playlist channels');
 
   @override
-  Future<DateTime?> subscriptionExpiry() async => null;
+  Future<DateTime?> subscriptionExpiry() async =>
+      expiryFromPlaylistUrl(playlistUrl);
 
   @override
   Future<void> dispose() async => _http.close(force: true);

@@ -93,6 +93,14 @@ class PlayerUiState(
     // (and thus fallen behind). Drives the grey LIVE badge + the go-to-live button.
     var liveSynced by mutableStateOf(true)
 
+    // Favorite toggle (live channels only). `canFavorite` gates the overlay star
+    // button; `isFavorite` is its current state. The Dart host owns the store —
+    // it seeds the initial value via an Intent extra and reads the final value
+    // back on exit (see HdrPlayerActivity.finish), so the channel list reflects
+    // the toggle on return without a live method channel from this Activity.
+    var canFavorite by mutableStateOf(false)
+    var isFavorite by mutableStateOf(false)
+
     var audioTracks by mutableStateOf<List<TrackOption>>(emptyList())
     var selectedAudioId by mutableStateOf<String?>(null)
     var subtitleTracks by mutableStateOf<List<TrackOption>>(emptyList())

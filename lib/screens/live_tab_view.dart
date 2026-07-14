@@ -8,6 +8,7 @@ import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
+import 'live_focus_coordinator.dart' show ChannelRowColumn;
 import 'live_preview_controller.dart';
 
 // ── Shared EPG wording ───────────────────────────────────────────────────────
@@ -82,6 +83,10 @@ class LiveTabView extends StatelessWidget {
   final int selectedChannelIndex;
   final KeyEventResult Function(FocusNode, KeyEvent) onChannelsKey;
 
+  /// The intra-row column the channel cursor sits on: the row body or the
+  /// trailing favorite star (see [ChannelRowColumn]).
+  final ChannelRowColumn channelColumn;
+
   /// Uniform channel row height (see [channelRowExtentFor]) — must match what
   /// the coordinator uses for its scroll math.
   final double channelRowExtent;
@@ -93,11 +98,10 @@ class LiveTabView extends StatelessWidget {
   final ValueChanged<String> onToggleFavorite;
   final ValueChanged<Channel> onPlayChannel;
 
-  /// Opens the per-channel context menu (Play / Favorite / Catch-up, plus
-  /// Preview on phones) for the focused channel — the path to favorite a channel
-  /// *in place*, without scrolling up to the preview panel. Triggered by OK-hold
-  /// (D-pad, wide layout) or a touch long-press (wide layout or Android phone).
-  final ValueChanged<Channel> onContextMenuChannel;
+  /// Phone-only: opens the audible preview sheet for a long-pressed channel
+  /// row (the sheet carries Play, favorite and catch-up). Wide layouts have
+  /// the preview panel instead, so long-press does nothing there.
+  final ValueChanged<Channel> onPreviewChannel;
 
   /// Touch/mouse: move the D-pad cursor onto a tapped row before acting on it,
   /// so the cursor and the pointer never disagree.
@@ -152,13 +156,14 @@ class LiveTabView extends StatelessWidget {
     required this.channelsFocusNode,
     required this.selectedChannelIndex,
     required this.onChannelsKey,
+    required this.channelColumn,
     required this.channelRowExtent,
     required this.lastPlayedChannelId,
     required this.previewChannelId,
     required this.isFavorite,
     required this.onToggleFavorite,
     required this.onPlayChannel,
-    required this.onContextMenuChannel,
+    required this.onPreviewChannel,
     required this.onSelectChannelIndex,
     required this.onCatchup,
     required this.categories,
@@ -185,11 +190,6 @@ class LiveTabView extends StatelessWidget {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
     final wide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
-    // The channel context menu is the in-place favorite path (Play / Favorite /
-    // Catch-up, plus Preview on phones). Touch long-press opens it on the wide
-    // layout (TV/desktop) and on Android phones; the D-pad OK-hold equivalent
-    // lives in the coordinator's key handler.
-    final allowMenuLongPress = wide || deliberate;
     return Focus(
       focusNode: channelsFocusNode,
       autofocus: true,
@@ -212,18 +212,27 @@ class LiveTabView extends StatelessWidget {
             // land when you come back, while the *accent* clearly marks which
             // pane the D-pad is actually in.
             cursor: i == selectedChannelIndex,
+            favoriteCursor: i == selectedChannelIndex &&
+                channelColumn == ChannelRowColumn.favorite,
             listFocused: channelsFocusNode.hasFocus,
             previewing: c.id == previewChannelId,
             onTap: () {
               onSelectChannelIndex(i);
               onPlayChannel(c);
             },
-            onLongPress: allowMenuLongPress
-                ? () {
+            onToggleFavorite: () {
+              onSelectChannelIndex(i);
+              onToggleFavorite(c.id);
+            },
+            // Phone: long-press opens the audible preview sheet (it carries
+            // Play, favorite and catch-up). Wide layouts already have the
+            // preview panel, so long-press does nothing there.
+            onLongPress: wide
+                ? null
+                : () {
                     onSelectChannelIndex(i);
-                    onContextMenuChannel(c);
-                  }
-                : null,
+                    onPreviewChannel(c);
+                  },
           );
         },
       ),
@@ -1192,6 +1201,11 @@ class _ChannelTile extends StatelessWidget {
   /// The D-pad selection cursor is on this row.
   final bool cursor;
 
+  /// The D-pad cursor is on this row's *favorite star* column
+  /// ([ChannelRowColumn.favorite]) rather than the row body. The star cell
+  /// then carries the accent ring and the row body drops its own.
+  final bool favoriteCursor;
+
   /// The channel list currently owns the D-pad. A cursor in an *unfocused* list
   /// still shows, but subdued — the accent always marks the active pane.
   final bool listFocused;
@@ -1199,6 +1213,9 @@ class _ChannelTile extends StatelessWidget {
   /// This channel is the one currently being previewed.
   final bool previewing;
   final VoidCallback onTap;
+
+  /// Tap on the star cell (touch/mouse) — toggles this channel's favorite.
+  final VoidCallback onToggleFavorite;
   final VoidCallback? onLongPress;
 
   const _ChannelTile({
@@ -1208,9 +1225,11 @@ class _ChannelTile extends StatelessWidget {
     required this.favorite,
     required this.enabled,
     required this.cursor,
+    required this.favoriteCursor,
     required this.listFocused,
     required this.previewing,
     required this.onTap,
+    required this.onToggleFavorite,
     this.onLongPress,
   });
 
@@ -1225,7 +1244,10 @@ class _ChannelTile extends StatelessWidget {
       progress = total <= 0 ? null : (elapsed / total).clamp(0.0, 1.0);
     }
 
-    final active = cursor && listFocused;
+    // The row body carries the accent only while the intra-row cursor is on
+    // the *body* column; on the favorite column the star cell takes it over.
+    // The panelHi fill stays either way, so the selected row remains visible.
+    final active = cursor && listFocused && !favoriteCursor;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Material(
@@ -1323,10 +1345,36 @@ class _ChannelTile extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (favorite) ...[
-                  const SizedBox(width: 8),
-                  const FavoriteBadge(),
-                ],
+                const SizedBox(width: 8),
+                // Always-visible favorite star: a touch target on every row,
+                // and the D-pad's intra-row favorite column when
+                // [favoriteCursor] holds the cursor. Sized well inside the
+                // fixed itemExtents (72 / 112), so the row never overflows.
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onToggleFavorite,
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: favoriteCursor && listFocused
+                          ? AppColors.panelHi
+                          : null,
+                      borderRadius: BorderRadius.circular(AppRadius.tile),
+                      border: favoriteCursor && listFocused
+                          ? Border.all(color: AppColors.accent, width: 2)
+                          : null,
+                    ),
+                    child: Icon(
+                      favorite
+                          ? Icons.star_rounded
+                          : Icons.star_outline_rounded,
+                      size: 20,
+                      color: favorite
+                          ? AppColors.accent
+                          : AppColors.textLo.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 8),
                 Icon(
                   previewing

@@ -36,9 +36,27 @@ back to the embedded `media_kit` surface if unavailable. The native player is a 
 Both engines drive the same engine-agnostic `PlayerUiState` and respond to the same
 `PlayerCallbacks`; the overlay (`PlayerControls`, `ListMenu`, `InfoPanel`, `PlayerTheme`,
 `PlayerUiState`) is at parity with the Windows overlay — play/pause, ±10s, mute/volume, scrubber,
-audio/subtitle/speed list-menus, aspect cycle, info panel, contextual hiding, and **D-pad nav**
-(single-press Back peels menu→info→hide→exit via the root `onPreviewKeyEvent`/`BackHandler`;
+audio/subtitle/speed list-menus, aspect cycle, info panel, contextual hiding, a **live-channel
+favorite star** (see below), and **D-pad nav** (single-press Back peels menu→info→hide→exit;
 sliders are custom "OK to edit" controls, not Material `Slider`, so the D-pad isn't trapped).
+
+**Back is owned by the root `onPreviewKeyEvent`, not the `BackHandler`.** The preview phase runs
+ancestor-first, so handling Back there fires *before* any focused control can consume the press
+merely to clear its own highlight / exit a slider's edit mode — the "first Back only removes the
+highlight, then another to hide, then another to exit" bug. Consuming the key stops it reaching
+`onBackPressed`, so the `BackHandler` (kept for gesture-nav phones, which deliver Back through the
+dispatcher with *no* key event) can't double-fire. This is safe only because **predictive back is
+not enabled** (no `enableOnBackInvokedCallback` in the manifest) — under predictive back the
+dispatcher fires independently of key consumption, so Back would have to move to a single handler.
+
+**Live favorite star** (`PlayerUiState.canFavorite`/`isFavorite`, shown only for live channels):
+the Dart host owns the favorites store, so it seeds the initial state via an Intent extra
+(`EXTRA_CAN_FAVORITE`/`EXTRA_IS_FAVORITE`) and reads the final state back on exit
+(`RESULT_FAVORITE`, relayed by `MainActivity` in the `nativeClosed` args) — the Activity toggles
+its own `uiState.isFavorite` locally, since it has no live method channel to Dart. Dart applies the
+returned value through the same `FavoritesController.toggle` the channel list uses, so an in-player
+toggle shows up in the list on return. The embedded media_kit overlay carries the same star in its
+top bar, toggling the store directly.
 Top-right **badges**: resolution, HDR, FPS, source name, and a clock (clock on TV only —
 `UiModeManager`). **Live extras**: an EPG now/next + programme-progress strip where the VOD
 scrubber sits, and a **"Go to live"** control (shown once behind the edge) that reloads the source
@@ -133,6 +151,17 @@ The Android handoff is made visually seamless twice over: `HdrPlayerTheme` sets
 black frame), and the adopted case pushes `PlayerScreen` as a **non-opaque zero-transition route**
 that stays transparent (`_transparentHandoff`) so the channel list — with the preview
 TextureView's frozen last frame — remains visible until the Activity's first frame.
+
+**Only a *seamless adopted* handoff leaves the preview playing.** Any *other* fullscreen open
+launches its own pipeline (a fresh native Activity / media_kit / Windows surface), so a preview
+left running would double the audio behind it — and that includes a preview of a **different**
+channel. The classic trap is the top-bar "last channel" zap (`swap_horiz`) and EPG-grid play:
+they resolve fresh with `reusePreview: false`, so they never adopt the engine that's previewing
+whatever else. `_openLivePlayer` handles both non-seamless shapes: a **same-channel** preview
+(media_kit fallback going native-fullscreen) is *paused* and resumed on return (`pausedPreview`,
+matching catch-up); a **different-channel** preview is *stopped* outright (`stoppedPreview`) — not
+just paused — so it neither doubles the audio nor holds a second provider connection open (a
+single-connection account would refuse the zap's new stream). A stopped preview isn't restarted.
 
 On a TV remote the preview is **deliberate and locked**: it starts only on an explicit OK press
 and stays on that channel — moving D-pad focus never starts, stops, or retargets it (only OK on a

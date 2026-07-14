@@ -173,15 +173,13 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                     autofocus: true,
                     textInputAction: TextInputAction.search,
                     prefixIcon: const Icon(Icons.search, size: 20),
-                    suffixIcon: _query.isEmpty
-                        ? null
-                        : IconButton(
-                            icon: const Icon(Icons.clear, size: 18),
-                            onPressed: () {
-                              _searchController.clear();
-                              setState(() => _query = '');
-                            },
-                          ),
+                    // The built-in clear button is a real D-pad stop (a
+                    // suffixIcon sits behind the edit barrier) — TvTextField.
+                    showClear: _query.isNotEmpty,
+                    onClear: () {
+                      _searchController.clear();
+                      setState(() => _query = '');
+                    },
                     onChanged: (v) => setState(() => _query = v),
                   ),
                 ),

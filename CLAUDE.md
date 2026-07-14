@@ -77,8 +77,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/sources/*_source.dart`** — provider implementations: `stalker_source.dart` (MAG portal,
   the largest/most intricate), `xtream_source.dart`, `m3u_source.dart`, `demo_source.dart` (used
   by tests). `Source.subscriptionExpiry()` feeds the sources screen's expiry badge; shared parsing
-  in `expiry.dart` (MAG portals stuff the end date into odd fields — classically `phone` — or only
-  expose it on `get_profile`, which `StalkerSource` also consults).
+  in `expiry.dart`. Stalker tries `account_info`/`get_main_info` first (the canonical action,
+  wrapped so a portal that doesn't support it falls through rather than aborting the chain), then
+  `get_profile` — MAG portals stuff the end date into odd fields on either, classically `phone`.
+  M3U playlists carry no expiry metadata themselves, so `expiryFromPlaylistUrl` best-effort-reads
+  it off a provider query param (`exp`/`expiry`/`expire`/`expires`) on the playlist URL.
 - **`lib/data/library_repository.dart`** — orchestration between a `Source` and the cache: serves
   from SQLite when fresh, refreshes EPG on its own schedule, handles paging (`loadMore*`), runs
   metadata enrichment. The most logic-dense file; treat its cache/refresh/merge paths carefully.
@@ -149,8 +152,10 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 44 in `live_tab_view.dart`) — uniform rows
   make index→offset exact; the tallest EPG row must fit the extent.
 - **Movement is deliberately asymmetric: Down wraps; Up never wraps — it escapes upward.**
-  Left/Right cross panes; every arrow is consumed (geometry traversal never runs in the live
-  body).
+  Right first enters the selected channel row's **favorite star** (the intra-row
+  `ChannelRowColumn`; OK there toggles the favorite in place) and Left peels it back before
+  crossing panes; beyond that Left/Right cross panes, and every arrow is consumed (geometry
+  traversal never runs in the live body).
 - **The Back ladder** (`channel_list_screen` `_handleRootBack`): Back never changes data or
   filters — it peels exactly one rung per press toward the exit (rung list in
   docs/tv-navigation.md); chrome (AppBar/toolbar buttons, route key `''`) sits above the ladder;
@@ -203,9 +208,18 @@ HWND surface, mpv d3d11). Other platforms: embedded `media_kit_video`, HDR tone-
   top-level window.
 - **Android preview and fullscreen share one engine** (`SharedEngine` adoption) — only one
   provider connection ever exists (single-connection accounts); the Activity never releases an
-  adopted engine, and the preview is never paused around the handoff.
+  adopted engine, and the preview is never paused around the *adopted* handoff. But **any
+  *non*-adopted fullscreen (last-channel zap, EPG-grid play) must silence the running preview** in
+  `_openLivePlayer` — even one previewing a *different* channel — or its audio doubles up behind the
+  new pipeline: a same-channel preview is *paused* (resumed on return, `pausedPreview`), a
+  different-channel one is *stopped* (`stoppedPreview`, releases the 2nd connection; not restarted).
 - On a TV remote the preview is **deliberate and locked**: only OK starts/switches it; D-pad
   focus movement never does. The preview engine is stopped when the app backgrounds or exits.
+- **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
+  control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
+  Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
+  **favorite star** in both overlays; the native one round-trips state via Intent extra + a
+  `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. Two independent watchdogs (Kotlin for Android native,
   Dart for Windows/embedded).

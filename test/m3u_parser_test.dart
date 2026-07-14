@@ -39,4 +39,20 @@ http://server/live/3.ts
       expect(parsed.channels.single.categoryId, 'News');
     });
   });
+
+  group('M3uSource.subscriptionExpiry', () {
+    test('reads an expiry param embedded in the playlist URL', () async {
+      final source = M3uSource(
+        playlistUrl: 'http://host/get.php?username=u&password=p&exp=2026-09-01',
+      );
+      expect(await source.subscriptionExpiry(), DateTime(2026, 9, 1));
+    });
+
+    test('returns null when the playlist URL carries no expiry param', () async {
+      final source = M3uSource(
+        playlistUrl: 'http://host/get.php?username=u&password=p',
+      );
+      expect(await source.subscriptionExpiry(), isNull);
+    });
+  });
 }
