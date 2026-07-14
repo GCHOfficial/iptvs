@@ -707,11 +707,23 @@ class StalkerSource implements Source {
 
   @override
   Future<DateTime?> subscriptionExpiry() async {
-    final r = await _call({'type': 'account_info', 'action': 'get_main_info'});
-    final js = r['js'];
-    if (js is Map) {
-      final parsed = expiryFromStalkerFields(js);
-      if (parsed != null) return parsed;
+    // account_info/get_main_info is the canonical action, so it's tried
+    // first — but not every portal supports it, and a failure here must fall
+    // through to the profile-based fallbacks below rather than aborting the
+    // whole chain (the badge would otherwise show "Expiry unknown" even when
+    // the profile carries a usable date).
+    try {
+      final r = await _call({
+        'type': 'account_info',
+        'action': 'get_main_info',
+      });
+      final js = r['js'];
+      if (js is Map) {
+        final parsed = expiryFromStalkerFields(js);
+        if (parsed != null) return parsed;
+      }
+    } on Exception catch (e) {
+      _debug('account_info:get_main_info unavailable: $e');
     }
     // Some portals omit the expiry from account_info and only carry it on the
     // STB profile.

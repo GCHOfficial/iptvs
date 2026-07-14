@@ -100,4 +100,53 @@ void main() {
       expect(expiryFromStalkerFields(const {}), isNull);
     });
   });
+
+  group('expiryFromPlaylistUrl', () {
+    test('parses a Unix timestamp from `exp`', () {
+      final secs = DateTime.utc(2026, 6, 19).millisecondsSinceEpoch ~/ 1000;
+      final dt = expiryFromPlaylistUrl(
+        'http://host/get.php?username=u&password=p&type=m3u_plus&exp=$secs',
+      );
+      expect(dt, isNotNull);
+      expect(dt!.toUtc().year, 2026);
+      expect(dt.toUtc().month, 6);
+    });
+
+    test('parses a date string from `expiry`, `expire`, `expires`', () {
+      expect(
+        expiryFromPlaylistUrl('http://host/list.m3u?expiry=2026-09-01'),
+        DateTime(2026, 9, 1),
+      );
+      expect(
+        expiryFromPlaylistUrl('http://host/list.m3u?expire=2026-09-01'),
+        DateTime(2026, 9, 1),
+      );
+      expect(
+        expiryFromPlaylistUrl('http://host/list.m3u?expires=2026-09-01'),
+        DateTime(2026, 9, 1),
+      );
+    });
+
+    test('matches the param name case-insensitively', () {
+      expect(
+        expiryFromPlaylistUrl('http://host/list.m3u?EXP=2026-09-01'),
+        DateTime(2026, 9, 1),
+      );
+    });
+
+    test('returns null when no recognised param is present', () {
+      expect(
+        expiryFromPlaylistUrl(
+          'http://host/get.php?username=u&password=p&type=m3u_plus',
+        ),
+        isNull,
+      );
+    });
+
+    test('returns null for an unparseable URL or value', () {
+      expect(expiryFromPlaylistUrl(''), isNull);
+      expect(expiryFromPlaylistUrl('http://host/list.m3u?exp=not-a-date'), isNull);
+      expect(expiryFromPlaylistUrl('http://host/list.m3u?exp=0'), isNull);
+    });
+  });
 }

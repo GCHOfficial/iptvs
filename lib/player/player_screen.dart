@@ -75,6 +75,14 @@ class PlayerScreen extends StatefulWidget {
   /// start. Null for live streams (never persisted) and untracked playback.
   final PlaybackContext? playback;
 
+  /// Live-channel favorite integration. [favoriteInitial] seeds the overlay's
+  /// star; [onSetFavorite] persists an absolute new state (the host reuses its
+  /// existing favorites store, so a toggle here shows up in the channel list on
+  /// return). Both are only wired for live channels; when [onSetFavorite] is
+  /// null the star isn't shown.
+  final bool favoriteInitial;
+  final Future<void> Function(bool favorite)? onSetFavorite;
+
   const PlayerScreen({
     super.key,
     required this.title,
@@ -86,6 +94,8 @@ class PlayerScreen extends StatefulWidget {
     this.existingController,
     this.adoptNativePreview = false,
     this.playback,
+    this.favoriteInitial = false,
+    this.onSetFavorite,
   });
 
   @override
@@ -135,6 +145,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
   late final bool _isLive = widget.stream.isLive;
+  // Live-channel favorite state for the overlay star (embedded path); the
+  // Android native overlay tracks its own copy and reports back on close.
+  late bool _favorite = widget.favoriteInitial;
+  bool get _canFavorite => _isLive && widget.onSetFavorite != null;
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
@@ -448,6 +462,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'isLive': widget.stream.isLive,
             'adoptShared': widget.adoptNativePreview,
             'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
+            'canFavorite': _canFavorite,
+            'isFavorite': _favorite,
             ..._epgPayload(),
             'subtitles': widget.stream.subtitles
                 .map(
@@ -590,19 +606,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
       // as the resume point (live playback sends no args).
       final args = call.arguments;
       final playback = widget.playback;
-      if (playback != null && args is Map) {
-        final positionMs = (args['positionMs'] as num?)?.toInt();
-        final durationMs = (args['durationMs'] as num?)?.toInt();
-        if (positionMs != null && durationMs != null && durationMs > 0) {
-          // Awaited — the caller (_playMedia) reloads "Continue watching"
-          // right after this route pops, so the write must land first.
-          await playback.db.savePlaybackPosition(
-            playback.sourceId,
-            playback.kind,
-            playback.itemId,
-            position: Duration(milliseconds: positionMs),
-            duration: Duration(milliseconds: durationMs),
-          );
+      if (args is Map) {
+        if (playback != null) {
+          final positionMs = (args['positionMs'] as num?)?.toInt();
+          final durationMs = (args['durationMs'] as num?)?.toInt();
+          if (positionMs != null && durationMs != null && durationMs > 0) {
+            // Awaited — the caller (_playMedia) reloads "Continue watching"
+            // right after this route pops, so the write must land first.
+            await playback.db.savePlaybackPosition(
+              playback.sourceId,
+              playback.kind,
+              playback.itemId,
+              position: Duration(milliseconds: positionMs),
+              duration: Duration(milliseconds: durationMs),
+            );
+          }
+        }
+        // The native overlay's final favorite state — persist it (awaited, like
+        // the position, so the channel list re-read after the pop sees it).
+        final favorite = args['favorite'];
+        if (favorite is bool && favorite != _favorite) {
+          _favorite = favorite;
+          await widget.onSetFavorite?.call(favorite);
         }
       }
       await _finishAndroidNativePlayback();
@@ -1412,6 +1437,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  void _toggleFavorite() {
+    if (!_canFavorite) return;
+    final next = !_favorite;
+    setState(() => _favorite = next);
+    unawaited(widget.onSetFavorite?.call(next));
+  }
+
   void _seekBy(int seconds) {
     if (_isLive) return; // live has no meaningful timeline to seek
     final pos = _player.state.position + Duration(seconds: seconds);
@@ -1482,6 +1514,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _title(),
     if (_isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
     const Spacer(),
+    if (_canFavorite) ...[
+      const SizedBox(width: 8),
+      desktop
+          ? MaterialDesktopCustomButton(
+              onPressed: _toggleFavorite,
+              icon: Icon(
+                _favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+                color: _favorite ? AppColors.accent : Colors.white,
+              ),
+            )
+          : MaterialCustomButton(
+              onPressed: _toggleFavorite,
+              icon: Icon(
+                _favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+                color: _favorite ? AppColors.accent : Colors.white,
+              ),
+            ),
+    ],
   ];
 
   @override

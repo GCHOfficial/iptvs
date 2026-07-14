@@ -3,9 +3,11 @@
 // BackButtonListener, which threw "context does not include a Router").
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/theme.dart';
+import 'package:iptvs/widgets/routed_focus_node.dart';
 import 'package:iptvs/widgets/tv_text_field.dart';
 
 void main() {
@@ -166,5 +168,90 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('TMDB API credential'), findsOneWidget);
+  });
+
+  // The clear (×) button is a sibling always-focusable stop *outside* the edit
+  // barrier (the same pattern as the password show/hide toggle) — a suffixIcon
+  // inside the barrier can never be reached by D-pad, which left the search
+  // box's clear unusable on TV.
+  testWidgets('clear button is a focusable D-pad stop and clears on OK', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'bbc');
+    addTearDown(controller.dispose);
+    var cleared = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TvTextField(
+            controller: controller,
+            hintText: 'Search channels',
+            showClear: true,
+            onClear: () {
+              cleared++;
+              controller.clear();
+            },
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.clear), findsOneWidget);
+
+    // It's a real focus stop, reachable outside edit mode.
+    final detector = tester.widget<FocusableActionDetector>(
+      find
+          .ancestor(
+            of: find.byIcon(Icons.clear),
+            matching: find.byType(FocusableActionDetector),
+          )
+          .first,
+    );
+    final clearNode = detector.focusNode!;
+    // Pin the release-safe route key the Back ladder branches on.
+    expect(focusRouteKey(clearNode), 'TvTextField.clear');
+
+    clearNode.requestFocus();
+    await tester.pump();
+    expect(clearNode.hasPrimaryFocus, isTrue,
+        reason: 'the clear button must be focusable without entering edit mode');
+
+    // OK activates it: the field is cleared and focus is parked back on the
+    // cell (the button disappears once the text empties).
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+
+    expect(cleared, 1);
+    expect(controller.text, isEmpty);
+    expect(
+      focusRouteKey(FocusManager.instance.primaryFocus),
+      'TvTextField.cell',
+      reason: 'after clearing, focus returns to the cell',
+    );
+  });
+
+  testWidgets('a suffixIcon still renders when the clear button is off', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TvTextField(
+            controller: controller,
+            hintText: 'hint',
+            suffixIcon: const Icon(Icons.tune, size: 18),
+            onClear: () {},
+            // showClear defaults to false → the suffix slot falls back.
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.tune), findsOneWidget);
+    expect(find.byIcon(Icons.clear), findsNothing);
   });
 }

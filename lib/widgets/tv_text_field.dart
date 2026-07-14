@@ -39,6 +39,15 @@ class TvTextField extends StatefulWidget {
   /// floating label for credential forms (it stays visible once text is entered).
   final String? label;
 
+  /// Built-in clear (×) button. Unlike a [suffixIcon] — which sits *inside*
+  /// the edit barrier and can never be a D-pad target — this renders as its
+  /// own always-focusable sibling stop (the same pattern as the password
+  /// show/hide toggle). Shown only while [showClear] is true (callers pass
+  /// `text.isNotEmpty`); activation runs [onClear] and parks focus back on
+  /// the cell, since the button disappears once the text empties.
+  final VoidCallback? onClear;
+  final bool showClear;
+
   const TvTextField({
     super.key,
     required this.controller,
@@ -53,6 +62,8 @@ class TvTextField extends StatefulWidget {
     this.height,
     this.label,
     this.cellFocusNode,
+    this.onClear,
+    this.showClear = false,
   });
 
   @override
@@ -63,9 +74,11 @@ class _TvTextFieldState extends State<TvTextField> {
   final FocusNode _cellFocus = RoutedFocusNode('TvTextField.cell');
   final FocusNode _fieldFocus = RoutedFocusNode('TvTextField.field');
   final FocusNode _toggleFocus = RoutedFocusNode('TvTextField.toggle');
+  final FocusNode _clearFocus = RoutedFocusNode('TvTextField.clear');
   bool _editing = false;
   bool _cellFocused = false;
   bool _toggleFocused = false;
+  bool _clearFocused = false;
   late bool _obscured = widget.obscureText;
 
   FocusNode get _effectiveCellFocus => widget.cellFocusNode ?? _cellFocus;
@@ -84,6 +97,7 @@ class _TvTextFieldState extends State<TvTextField> {
     }
     _fieldFocus.dispose();
     _toggleFocus.dispose();
+    _clearFocus.dispose();
     super.dispose();
   }
 
@@ -169,7 +183,9 @@ class _TvTextFieldState extends State<TvTextField> {
             // so a sibling icon inside the same barrier could never be
             // navigated to on a TV remote.
             if (widget.obscureText) _buildVisibilityToggle(),
-            if (widget.suffixIcon != null)
+            if (widget.onClear != null && widget.showClear)
+              _buildClearButton()
+            else if (widget.suffixIcon != null)
               Padding(
                 padding: const EdgeInsets.only(right: 4),
                 child: IgnorePointer(
@@ -281,6 +297,59 @@ class _TvTextFieldState extends State<TvTextField> {
                   ),
                 ),
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleClear() {
+    widget.onClear!();
+    // The button unmounts when the text empties (showClear goes false) —
+    // park focus on the cell so the D-pad never dangles on a gone node.
+    _effectiveCellFocus.requestFocus();
+  }
+
+  /// The clear (×) button, mirroring [_buildVisibilityToggle]'s structure: a
+  /// sibling stop *outside* the entry cell's edit barrier, always focusable
+  /// (not gated on edit mode), with the app's standard accent focus ring.
+  Widget _buildClearButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: FocusableActionDetector(
+        focusNode: _clearFocus,
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (mounted) setState(() => _clearFocused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              _handleClear();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: _handleClear,
+          child: Tooltip(
+            message: 'Clear',
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _clearFocused ? AppColors.panelHi : null,
+                border: _clearFocused
+                    ? Border.all(color: AppColors.accent, width: 2)
+                    : null,
+              ),
+              child: Icon(
+                Icons.clear,
+                size: 18,
+                color: _clearFocused ? AppColors.accent : AppColors.textLo,
+              ),
             ),
           ),
         ),

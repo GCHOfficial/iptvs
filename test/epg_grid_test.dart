@@ -13,6 +13,7 @@
 // The two channels are seeded with deliberately *offset* boundaries so
 // "holds the time column" is distinguishable from "nearest cell".
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -369,6 +370,107 @@ void main() {
     expect(descFinder, findsOneWidget);
     final text = tester.widget<Text>(descFinder);
     expect(text.maxLines, 3);
+
+    await unmount(tester);
+  });
+
+  testWidgets(
+      'focus restoration after playback is route-scoped: a covered '
+      'channel-list restore must not steal the grid\'s D-pad', (tester) async {
+    // Regression for "the EPG screen stops responding to the remote after
+    // watching a channel": launching playback from the pushed grid route left
+    // the main screen's post-player focus restore running while the grid was
+    // still on top — FocusManager has no notion of routes, so the covered
+    // channel-list node stole primaryFocus and the grid's onKeyEvent went
+    // dead. This pins the *guard pattern* used by _restoreListFocusAfterPlayback
+    // (bail unless the restoring route is current), not the full production
+    // wiring — the real player route / native Activity path needs on-device
+    // verification.
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.runAsync(() => db.replaceEpg('epg', programmes));
+    final repo = LibraryRepository(source: _FakeSource(), db: db);
+
+    // The host stands in for the main screen: it owns the channel list's
+    // focus node and pushes the grid on top (as _openEpgGrid does).
+    final bgChannels = FocusNode(debugLabel: 'live.channels');
+    addTearDown(bgChannels.dispose);
+    late BuildContext hostContext;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(
+          useMaterial3: true,
+        ).copyWith(textButtonTheme: AppTheme.textButtonTheme),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              hostContext = context;
+              return Focus(
+                focusNode: bgChannels,
+                child: const SizedBox.expand(),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    final navigator = Navigator.of(hostContext);
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => EpgGridScreen(
+            repo: repo,
+            channels: channels,
+            onPlayChannel: (_) {},
+            onPlayArchive: (_, _) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await pumpUntil(tester, detailTitle('A-now'));
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'epg.grid');
+
+    // "Playback": an opaque route pushed over the grid. Its pop continuation
+    // runs the guarded restore post-frame — the exact shape of the production
+    // code path after the player pops.
+    unawaited(
+      navigator
+          .push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: SizedBox.expand()),
+        ),
+      )
+          .then((_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          // The guard under test: the host (main screen) route is NOT the
+          // visible top route — the grid still is — so the restore must bail
+          // instead of stealing primaryFocus cross-route.
+          if (ModalRoute.of(hostContext)?.isCurrent == false) return;
+          bgChannels.requestFocus();
+        });
+      }),
+    );
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+
+    expect(
+      FocusManager.instance.primaryFocus?.debugLabel,
+      'epg.grid',
+      reason: 'route focus restoration must hand the D-pad back to the grid — '
+          'the covered channel-list node must not steal it',
+    );
+
+    // And the grid still navigates: Right advances the detail bar.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(detailTitle('A-next'), findsOneWidget);
 
     await unmount(tester);
   });

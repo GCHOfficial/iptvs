@@ -1,6 +1,7 @@
 /// Parses a subscription-expiry value as emitted by IPTV panels: Xtream sends a
-/// Unix `exp_date` (seconds), Stalker sends ISO-style date strings. Handles Unix
-/// timestamps (seconds or milliseconds) and ISO-8601 / `YYYY-MM-DD[ HH:MM:SS]`.
+/// Unix `exp_date` (seconds, possibly null/empty/"0"/"null" for an unlimited
+/// account), Stalker sends ISO-style date strings. Handles Unix timestamps
+/// (seconds or milliseconds) and ISO-8601 / `YYYY-MM-DD[ HH:MM:SS]`.
 /// Returns null when the value is empty, zero, or unparseable.
 DateTime? parseExpiryValue(Object? value) {
   if (value == null) return null;
@@ -83,6 +84,24 @@ DateTime? extractExpiryFromText(Object? value) {
     }
   }
 
+  return null;
+}
+
+/// Finds the subscription expiry embedded in an M3U provider's playlist URL.
+/// Plain M3U playlists carry no expiry metadata, but some providers stuff it
+/// into a query param (`exp`, `expiry`, `expire`, `expires`) as a Unix
+/// timestamp or a date string — matched case-insensitively since providers
+/// aren't consistent. Returns null when the URL is unparseable or no
+/// recognised param carries a usable value.
+DateTime? expiryFromPlaylistUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null || uri.queryParameters.isEmpty) return null;
+  const keys = {'exp', 'expiry', 'expire', 'expires'};
+  for (final entry in uri.queryParameters.entries) {
+    if (!keys.contains(entry.key.toLowerCase())) continue;
+    final parsed = parseExpiryValue(entry.value);
+    if (parsed != null) return parsed;
+  }
   return null;
 }
 

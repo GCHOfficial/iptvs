@@ -12,7 +12,6 @@ import '../data/net.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
-import '../widgets/focusable_card.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
 import '../widgets/tv_text_field.dart';
@@ -161,7 +160,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onChannelSelectionChanged: _onChannelSelectionChanged,
       onCategoryActivated: _selectCategory,
       onPlayChannel: _play,
-      onContextMenuChannel: _showChannelMenu,
+      onToggleFavorite: (channel) =>
+          unawaited(_toggleFavorite(ContentKind.live, channel.id)),
       onFocusTabs: _focusTabs,
     );
     _dataListenable = Listenable.merge([
@@ -312,6 +312,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   void _restoreListFocusAfterPlayback() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // Only the visible top route may own the D-pad. When playback was
+      // launched from a *pushed* route (e.g. the EPG grid), that route is
+      // still on top after the player pops — requesting focus on the covered
+      // channel list here would steal primaryFocus cross-route (FocusManager
+      // has no notion of routes) and leave the visible screen's D-pad dead.
+      // Flutter's own route focus restoration re-focuses that route's node.
+      if (ModalRoute.of(context)?.isCurrent == false) return;
       if (_tab == ContentKind.live) {
         _focus.restoreSelectionToChannel(_lastPlayedLiveChannelId);
         return;
@@ -355,6 +362,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _favorites.isFavorite(kind, id);
 
   Future<void> _loadFavorites(ContentKind kind) => _favorites.load(kind);
+
+  /// Set an absolute favorite state (used by the fullscreen player's overlay
+  /// star, which reports the desired final state rather than a toggle). Reuses
+  /// [_toggleFavorite] so the empty-Favorites-view fallback still applies.
+  Future<void> _setLiveFavorite(String id, bool favorite) async {
+    if (_isFavorite(ContentKind.live, id) == favorite) return;
+    await _toggleFavorite(ContentKind.live, id);
+  }
 
   Future<void> _toggleFavorite(ContentKind kind, String id) async {
     final nowEmpty = await _favorites.toggle(kind, id);
@@ -491,6 +506,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               sourceName: widget.repo.source.name,
               epgNow: _live.now[channel.id],
               epgNext: _live.next[channel.id],
+              favoriteInitial: _isFavorite(ContentKind.live, channel.id),
+              onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
             ),
           ),
         );
@@ -551,11 +568,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       );
       _notePlayedChannel(channel.id);
       // An adopted engine keeps playing straight through the handoff (that's
-      // the seamless part). Only pause when the fullscreen player will open its
-      // own pipeline — i.e. Android's native player over a media_kit-fallback
-      // preview — so the preview's audio doesn't double up behind it.
+      // the seamless part). Any *non*-seamless fullscreen opens its own playback
+      // pipeline, so a preview left running would double the audio behind it.
       final seamless = adoptPreview && (adoptNative || !Platform.isAndroid);
-      if (_preview.channelId == channel.id && !seamless) {
+      final previewPlaying =
+          _preview.channelId != null || _preview.nativeActive;
+      final sameChannelPreview = _preview.channelId == channel.id;
+      // Same channel (a media_kit-fallback preview going native-fullscreen):
+      // pause and resume on return. A *different* channel (the "last channel"
+      // zap / EPG-grid play, which resolve fresh with reusePreview: false and so
+      // never adopt the engine previewing whatever else): stop it outright — not
+      // just pause — so we neither double the audio nor hold a second provider
+      // connection open (single-connection accounts would refuse the new stream).
+      final pausedPreview = !seamless && previewPlaying && sameChannelPreview;
+      final stoppedPreview = !seamless && previewPlaying && !sameChannelPreview;
+      if (stoppedPreview) {
+        await _preview.stop();
+      } else if (pausedPreview) {
         await _preview.pause();
       }
       // Context-independent on purpose — nothing in the player derives from
@@ -573,6 +602,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             ? _preview.controller
             : null,
         adoptNativePreview: adoptNative,
+        favoriteInitial: _isFavorite(ContentKind.live, channel.id),
+        onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
       );
       // The adopted native handoff pushes a *transparent, non-animated* route:
       // PlayerScreen stays see-through while the native Activity launches, so
@@ -602,6 +633,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // Fullscreen always plays at full volume; restore a muted (desktop
         // auto-hover) preview instead of leaving it blaring once we return.
         if (previewWasMuted) await _preview.setMuted(true);
+      } else if (pausedPreview && _preview.stream != null) {
+        // A same-channel non-adopted fullscreen paused the preview above; resume
+        // it now that we're back (matches the catch-up path). A stopped preview
+        // (different channel) is intentionally not restarted.
+        await _preview.play();
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
@@ -702,111 +738,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       ),
     );
     if (!handedOff) await _preview.stop(clearSelection: true);
-  }
-
-  /// Per-channel context menu: favorite the focused channel *in place* — no
-  /// scrolling up to the preview panel and losing your row — plus Play and
-  /// Catch-up so favoriting isn't the only option. On phones it also carries a
-  /// **Preview** entry (the audible preview sheet), since long-press opens this
-  /// menu there instead of the sheet directly. Opened by an OK-hold / long-press
-  /// on the channel tile; the first action autofocuses and Up/Down move between
-  /// them, so it's fully D-pad navigable. `showDialog` restores focus to the same
-  /// tile on dismiss, so the scroll position is preserved.
-  Future<void> _showChannelMenu(Channel channel) async {
-    if (_resolving) return;
-    final favorite = _isFavorite(ContentKind.live, channel.id);
-    final narrow =
-        MediaQuery.of(context).size.width < kWideLayoutMinWidth;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        Widget action({
-          required IconData icon,
-          required String label,
-          required VoidCallback onSelected,
-          bool autofocus = false,
-        }) {
-          return FocusableCard(
-            autofocus: autofocus,
-            scrollOnFocus: false,
-            debugLabel: 'channel.menu.$label',
-            onTap: () {
-              Navigator.of(dialogContext).pop();
-              onSelected();
-            },
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              child: Row(
-                children: [
-                  Icon(icon, color: AppColors.textLo, size: 20),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textHi,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
-
-        return AlertDialog(
-          backgroundColor: AppColors.panel,
-          contentPadding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
-          title: Text(
-            channel.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: AppColors.textHi),
-          ),
-          content: SizedBox(
-            width: 320,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                action(
-                  icon: Icons.play_arrow_rounded,
-                  label: 'Play',
-                  autofocus: true,
-                  onSelected: () => unawaited(_playChannelFullscreen(channel)),
-                ),
-                if (narrow)
-                  action(
-                    icon: Icons.smart_display_outlined,
-                    label: 'Preview',
-                    onSelected: () => unawaited(_showPreviewSheet(channel)),
-                  ),
-                action(
-                  icon: favorite
-                      ? Icons.star_rounded
-                      : Icons.star_outline_rounded,
-                  label: favorite
-                      ? 'Remove from favorites'
-                      : 'Add to favorites',
-                  onSelected: () =>
-                      unawaited(_toggleFavorite(ContentKind.live, channel.id)),
-                ),
-                if (channel.hasArchive)
-                  action(
-                    icon: Icons.history_rounded,
-                    label: 'Catch-up',
-                    onSelected: () => unawaited(_showCatchupSheet(channel)),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
   }
 
   /// Open the catch-up picker for an archive-capable [channel]: list its cached
@@ -1145,6 +1076,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (_tab == ContentKind.live) {
       switch (_focus.region) {
         case LiveFocusRegion.channels:
+          // Rung 0: with the intra-row cursor on the favorite star, Back
+          // mirrors Left — it peels the cursor back onto the row body.
+          if (_focus.channelColumn == ChannelRowColumn.favorite) {
+            _focus.resetChannelColumn();
+            return;
+          }
           // Rung 1: climbing out of the list starts from its top.
           if (!_focus.onFirstChannel) {
             _focus.selectChannel(0);
@@ -1215,6 +1152,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // handled by the region ladder above).
     if (label == 'TvTextField.cell') {
       _focusTabs();
+      return;
+    }
+    // The search field's clear (×) button is its own focusable stop beside the
+    // cell (see TvTextField); Back peels it to the search cell (live) / the
+    // tabs (media) instead of falling through to the exit prompt.
+    if (label == 'TvTextField.clear') {
+      if (_tab == ContentKind.live) {
+        _focus.focusSearch();
+      } else {
+        _focusTabs();
+      }
       return;
     }
     // Un-routed focus (route key '') is the app **chrome** — the AppBar actions
@@ -1543,13 +1491,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       channelsFocusNode: _focus.channelsFocusNode,
       selectedChannelIndex: _focus.selectedChannelIndex,
       onChannelsKey: _focus.handleChannelsKey,
+      channelColumn: _focus.channelColumn,
       channelRowExtent: channelRowExtentFor(_live.now.isNotEmpty),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
       isFavorite: (id) => _isFavorite(ContentKind.live, id),
       onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
       onPlayChannel: _play,
-      onContextMenuChannel: _showChannelMenu,
+      onPreviewChannel: (channel) => unawaited(_showPreviewSheet(channel)),
       onSelectChannelIndex: (i) => _focus.selectChannel(i, reveal: false),
       onCatchup: _showCatchupSheet,
       categories: _liveCategoriesForUi,
@@ -1788,12 +1737,10 @@ class _Toolbar extends StatelessWidget {
           onChanged: onQueryChanged,
           textInputAction: TextInputAction.search,
           prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: query.isEmpty
-              ? null
-              : IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
-                  onPressed: onClearQuery,
-                ),
+          // The built-in clear button is a real D-pad stop (unlike a
+          // suffixIcon, which sits behind the edit barrier) — see TvTextField.
+          showClear: query.isNotEmpty,
+          onClear: onClearQuery,
         );
         final action = actionControl;
         final category = categoryControl;

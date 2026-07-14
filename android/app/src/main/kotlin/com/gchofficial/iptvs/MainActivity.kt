@@ -174,6 +174,16 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_RESUME_MS,
                             (args["resumeMs"] as? Number)?.toLong() ?: 0L,
                         )
+                        // Favorite toggle (live channels): whether to show the
+                        // star, and its seed state from the Dart favorites store.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_CAN_FAVORITE,
+                            args["canFavorite"] as? Boolean ?: false,
+                        )
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_IS_FAVORITE,
+                            args["isFavorite"] as? Boolean ?: false,
+                        )
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }
@@ -283,15 +293,22 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_NATIVE_PLAYER && ::nativeHdrChannel.isInitialized) {
             // Relay the final VOD position (see HdrPlayerActivity.finish) so the
-            // Dart side can persist the resume point. Null args = live / legacy.
+            // Dart side can persist the resume point, plus the final favorite
+            // state so the channel list reflects an in-player toggle on return.
+            // Null args = live with no favorite change / legacy.
             val positionMs = data?.getLongExtra(HdrPlayerActivity.RESULT_POSITION_MS, -1L) ?: -1L
             val durationMs = data?.getLongExtra(HdrPlayerActivity.RESULT_DURATION_MS, -1L) ?: -1L
-            val args = if (positionMs >= 0L && durationMs > 0L) {
-                mapOf("positionMs" to positionMs, "durationMs" to durationMs)
-            } else {
-                null
+            val hasFavorite = data?.hasExtra(HdrPlayerActivity.RESULT_FAVORITE) ?: false
+            val map = buildMap<String, Any> {
+                if (positionMs >= 0L && durationMs > 0L) {
+                    put("positionMs", positionMs)
+                    put("durationMs", durationMs)
+                }
+                if (hasFavorite && data != null) {
+                    put("favorite", data.getBooleanExtra(HdrPlayerActivity.RESULT_FAVORITE, false))
+                }
             }
-            nativeHdrChannel.invokeMethod("nativeClosed", args)
+            nativeHdrChannel.invokeMethod("nativeClosed", if (map.isEmpty()) null else map)
         }
     }
 

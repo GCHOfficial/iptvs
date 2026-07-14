@@ -30,6 +30,13 @@ navigation code.
   and the no-inner-border invariant are pinned by platform-parameterized tests
   (`test/tv_text_field_test.dart`, which also guards that it builds under a plain `Navigator` —
   the regression that caught the `BackButtonListener`/`Router` crash).
+  A **clear (×) affordance** (`showClear` + `onClear`) renders as its own **always-focusable
+  sibling stop** outside the edit barrier — the same pattern as the password show/hide toggle,
+  and for the same reason: anything inside the barrier (a `suffixIcon`) can never be a D-pad
+  target, because entering edit mode hands focus to the editor which eats the arrows. Right from
+  the cell reaches it while text is present; OK runs `onClear` and parks focus back on the cell
+  (the button disappears once the text empties); Back from it peels to the search cell (live) /
+  the tabs (media) via the Back ladder's `TvTextField.clear` route-key branch.
 - **The same "OK to edit" model** governs the player's sliders (see docs/player.md) — focus
   passes them freely; OK enters adjust mode.
 - **Content-kind selector** (`channel_list_screen` `_ContentTabs`) is a focusable chip strip (not
@@ -60,9 +67,11 @@ race.
   row it **escapes upward** — categories → the search box; channels → the preview controls
   (`live.preview.favorite`/`catchup`), or the search box on a phone (no preview panel). The old
   design wrapped Up in the sidebar too, so the only ways out were Right or Back — that is what
-  left users **"stuck in the categories"**. Left/Right cross between the panes, and every arrow is
-  consumed, so Flutter's geometry traversal never runs inside the live body. Pinned by
-  `test/live_focus_coordinator_test.dart` (pure index logic) and
+  left users **"stuck in the categories"**. **Right** first enters the selected channel row's
+  favorite star (the intra-row action cursor, below) before being consumed; **Left** peels the
+  star column back to the row body before crossing to the sidebar. Beyond that Left/Right cross
+  between the panes, and every arrow is consumed, so Flutter's geometry traversal never runs
+  inside the live body. Pinned by `test/live_focus_coordinator_test.dart` (pure index logic) and
   `test/channel_list_focus_test.dart` (real key events).
 - **Drawing the cursor.** Each list draws its cursor row accented **only while it owns the D-pad**
   (`listFocused`), and subdued (a panel-lift, no accent) when it doesn't — so the accent always
@@ -74,19 +83,33 @@ race.
   `kChannelRowExtentWithEpg`, or it overflows. Every source in the tests except `_EpgSource`
   returns an empty EPG, so that one test is the only thing guarding it — keep it.
 
-## Channel context menu
+## Per-row favorite button + intra-row action cursor
 
-`channel_list_screen` `_showChannelMenu`, wired through `LiveTabView.onContextMenuChannel`: the
-in-place way to favorite the *focused* channel without scrolling up to the preview panel — a small
-**D-pad-navigable** dialog (Play / Add-Remove favorite / Catch-up-when-archive; the first action
-autofocuses and Up/Down move between them; `showDialog` restores focus to the same tile on
-dismiss, preserving the scroll spot). Opened by an **OK-hold** (D-pad, wide layout) or a **touch
-long-press** (wide layout *or* Android phone). On phones the menu also carries a **Preview** entry
-(the audible `PhonePreviewSheet`), since long-press opens this menu instead of the sheet directly
-— nothing is lost. The OK gesture is owned by the coordinator's `handleChannelsKey` (rows aren't
-focusable, so there's no `ActivateIntent` to fight): on the wide layout a quick press plays on
-key-**up** while a 500 ms hold opens the menu on the *selected* row; elsewhere OK just plays on
-key-down.
+Every channel row carries an **always-visible star cell** (`_ChannelTile` in `live_tab_view.dart`):
+filled accent when favorited, low-contrast outline when not. It replaced the old OK-hold context
+menu dialog — favoriting the focused channel is now one **Right + OK** away, entirely in place,
+with no dialog to route focus through and no hold-timing gesture to discover.
+
+- **The channel cursor has two intra-row columns** (`ChannelRowColumn` in
+  `live_focus_coordinator.dart`): `body` (default; OK plays on key-down) and `favorite` (OK
+  toggles). **Right** moves body → favorite and is consumed even when already on the star (or the
+  list is empty); **Left** peels favorite → body first — only a second Left crosses to the
+  category pane. **Up/Down**, and every (re)entry into the channel pane (`selectChannel`,
+  `focusChannels`, `focusChannelsFromCategory`, the Up-escape at row 0), reset the column to
+  `body`, so the star column is never sticky across rows.
+- **Back mirrors Left**: with the cursor on the star, Back peels it back onto the row body before
+  the ladder's first-row rung runs (rung 0 in the Back ladder below).
+- **Drawing**: the row body carries the accent border only while the `body` column holds the
+  cursor; on the `favorite` column the star cell draws its own accent ring + panel lift instead.
+  The selected row's `panelHi` fill stays either way, so the row remains visible. The star cell
+  fits well inside the fixed `itemExtent`s (72 / 112) — the extents are unchanged.
+- **Touch**: tapping the star toggles directly (selecting the row first, so cursor and pointer
+  never disagree); tapping the row body plays. On a **phone**, long-press opens the audible
+  preview sheet (`PhonePreviewSheet` — Play / favorite / catch-up); on wide layouts long-press
+  does nothing (the preview panel is always on screen).
+- **Deliberately dropped**: the menu's per-row **Catch-up** entry on TV. Catch-up stays reachable
+  from the preview panel's catch-up button (`live.preview.catchup`) and from the EPG grid's past
+  programmes.
 
 ## The Back ladder
 
@@ -95,13 +118,16 @@ key-down.
 rung is a plain check on the coordinator's `region` + selected index (no focus-label
 archaeology). Live:
 
+0. channel list, cursor on the **favorite star** (`ChannelRowColumn.favorite`) → the **row body**
+   (Back mirrors Left; the row cursor and scroll position don't move);
 1. channel list, cursor **not** on the first row → **first channel**;
 2. first channel → **categories** (wide) / the **search box** (phone, no sidebar);
 3. preview controls (`live.preview.*`) → same as (2);
 4. categories, cursor **not** on the first row → **first category** ("All channels") — this moves
    the *highlight only*, it does **not** change the active filter (OK does that);
 5. first category → the **search box**;
-6. search → the **section tabs**;
+6. search → the **section tabs**; the search field's **clear button**
+   (`TvTextField.clear`) peels to the search cell on live / the tabs on media;
 7. tabs → **exit**, behind a double-Back inside a 2s window (first press shows a "Press Back
    again to exit" snackbar), stopping the preview engine on the actual exit.
 
@@ -127,6 +153,15 @@ column** (re-deriving `_selectedCol` on the new row via `_selectedIndexIn`, whic
 drives the pan/scroll itself, so navigation never depends on a lazy/async cell being built; the
 vertical reveal **centers** the selected row in the viewport (a bottom-aligned row was covered by
 the detail bar).
+
+**Focus restoration after playback is route-scoped.** The main screen's
+`_restoreListFocusAfterPlayback` (channel_list_screen.dart) bails when its route isn't the
+visible top route (`ModalRoute.isCurrent == false`): when playback was launched *from* the pushed
+EPG grid, the grid is still on top after the player pops, and Flutter's own route focus
+restoration re-focuses `epg.grid`. Without the guard, the covered channel-list node stole
+`primaryFocus` cross-route (FocusManager has no notion of routes) and the grid's `onKeyEvent`
+never fired again — the "guide is dead after watching a channel" report. The guard pattern is
+pinned by the route-scoped test in `test/epg_grid_test.dart`.
 
 Overlong guide entries (a programme whose bad runtime overlaps the next one) are **visually
 clamped at the next programme's start** in `_cellWidth`, and the selected cell is appended last to

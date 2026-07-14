@@ -549,53 +549,111 @@ void main() {
     await unmount(tester);
   });
 
-  // ── OK / OK-hold on the selected channel ───────────────────────────────────
+  // ── The per-row favorite star (intra-row action cursor) ────────────────────
 
   focusTestWidgets(
-      'OK-hold opens the channel menu on the selected row; a quick OK does not',
+      'Right highlights the row\'s favorite star and OK toggles it',
       (tester) async {
     await pumpWideScreenWith(tester, _ManySource());
     await settle(tester);
     expect(focusLabel(), 'live.channels');
 
-    // A quick OK (down→up well under the hold threshold) must NOT open the menu
-    // — it plays, exactly as before, so the TV play/preview gesture is intact.
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
-    await tester.pump(const Duration(milliseconds: 80));
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
-    await tester.pump(const Duration(milliseconds: 600)); // past the hold window
+    // Row 0's name also appears in the preview panel, so drive the cursor to
+    // row 1 to keep the finders unambiguous.
+    await press(tester, LogicalKeyboardKey.arrowDown);
+    await settle(tester);
+
+    Finder rowOf(String name) => find
+        .ancestor(of: find.text(name), matching: find.byType(AnimatedContainer))
+        .first;
+    Finder starIconIn(String name) => find.descendant(
+          of: rowOf(name),
+          matching: find.byWidgetPredicate((w) =>
+              w is Icon &&
+              (w.icon == Icons.star_rounded ||
+                  w.icon == Icons.star_outline_rounded)),
+        );
+    // The star cell is the icon's nearest enclosing Container; its border is
+    // the intra-row cursor's accent ring.
+    Color? starBorderOf(String name) {
+      final container = tester.widget<Container>(
+        find
+            .ancestor(of: starIconIn(name), matching: find.byType(Container))
+            .first,
+      );
+      final border = (container.decoration as BoxDecoration?)?.border;
+      return (border as Border?)?.top.color;
+    }
+
+    // Every row carries a visible star; the cursor starts on the row body, so
+    // no accent ring on the star yet.
+    expect(starIconIn('Channel 1'), findsOneWidget);
+    expect(starBorderOf('Channel 1'), isNull);
+
+    // Right enters the row's favorite column — the star gets the accent ring
+    // and the D-pad stays in the channel list (no pane change).
+    await press(tester, LogicalKeyboardKey.arrowRight);
+    expect(focusLabel(), 'live.channels');
+    expect(starBorderOf('Channel 1'), AppColors.accent);
+
+    // OK toggles the favorite in place: the outline star fills in.
+    await press(tester, LogicalKeyboardKey.select);
+    await pumpUntil(
+      tester,
+      find.descendant(
+        of: rowOf('Channel 1'),
+        matching: find.byIcon(Icons.star_rounded),
+      ),
+    );
+    expect(
+      tester.widget<Icon>(starIconIn('Channel 1')).icon,
+      Icons.star_rounded,
+    );
     expect(
       find.text('Add to favorites'),
       findsNothing,
-      reason: 'a quick OK press must not open the context menu',
+      reason: 'no dialog: favoriting is in place now',
     );
 
-    // Hold OK past the threshold → the menu opens on the selected channel.
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
-    await tester.pump(const Duration(milliseconds: 550)); // hold fires the timer
-    await tester.pump(const Duration(milliseconds: 250)); // dialog transition
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
-    await tester.pump();
+    // Left peels the cursor back onto the row body before crossing panes.
+    await press(tester, LogicalKeyboardKey.arrowLeft);
+    expect(starBorderOf('Channel 1'), isNull);
+    expect(focusLabel(), 'live.channels');
+    await press(tester, LogicalKeyboardKey.arrowLeft);
+    await settle(tester);
+    expect(focusLabel(), 'live.categories');
 
-    expect(find.text('Play'), findsOneWidget);
-    expect(find.text('Add to favorites'), findsOneWidget);
+    await unmount(tester);
+  });
+
+  focusTestWidgets(
+      'Back mirrors Left: it peels the favorite column before the first-row rung',
+      (tester) async {
+    await pumpWideScreenWith(tester, _ManySource());
+    await settle(tester);
+    expect(focusLabel(), 'live.channels');
+
+    // Walk the cursor down the list, then onto row 10's star, so both peels
+    // are observable (the row cursor must survive the first Back).
+    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
+    expect(find.text('Channel 1'), findsNothing);
+    await press(tester, LogicalKeyboardKey.arrowRight);
+    await settle(tester);
+
+    // Back #1: off the star, back onto the row body — the row cursor (and the
+    // scroll position) must not move.
+    await back(tester);
+    expect(focusLabel(), 'live.channels');
     expect(
-      find.text('Catch-up'),
+      find.text('Channel 1'),
       findsNothing,
-      reason: 'this channel has no archive → no Catch-up entry',
+      reason: 'peeling the star column must not reset the row cursor',
     );
 
-    // The menu is itself D-pad navigable.
-    expect(focusLabel(), 'channel.menu.Play');
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
-    await tester.pump();
-    expect(focusLabel(), 'channel.menu.Add to favorites');
-
-    // Back closes the menu.
-    await tester.binding.handlePopRoute();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Add to favorites'), findsNothing);
+    // Back #2: now the normal first-channel rung runs.
+    await back(tester);
+    expect(focusLabel(), 'live.channels');
+    expect(find.text('Channel 1'), findsOneWidget);
 
     await unmount(tester);
   });
