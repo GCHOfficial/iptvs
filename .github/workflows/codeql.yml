@@ -49,13 +49,13 @@ jobs:
             build-mode: none
             runner: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # The Android build links the libdovi libmpv AAR, which lives in Git LFS
           # (android/app/libs/libmpv-dovi.aar); other languages don't need it.
           lfs: ${{ matrix.language == 'java-kotlin' }}
 
-      - uses: github/codeql-action/init@v4
+      - uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -64,7 +64,7 @@ jobs:
       # them — run the real Flutter build under build-mode manual so the tracer
       # sees the compiler.
       - if: matrix.build-mode == 'manual'
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -72,7 +72,7 @@ jobs:
 
       - name: Set up JDK
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
           java-version: '17'
@@ -88,8 +88,8 @@ jobs:
         if: matrix.language == 'java-kotlin'
         run: |
           flutter pub get
-          flutter build apk --debug
+          flutter build apk --debug --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4
         with:
           category: "/language:${{ matrix.language }}"

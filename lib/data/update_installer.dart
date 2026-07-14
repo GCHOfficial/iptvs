@@ -1,12 +1,15 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'diagnostics_log.dart';
+import 'distribution_channel.dart';
 import 'net.dart';
+import 'update_manifest.dart';
 import 'update_service.dart';
 
 /// Outcome of kicking off a platform install.
@@ -39,37 +42,68 @@ class UpdateInstaller {
 
   /// Whether an in-app download+install is supported here (the two release
   /// targets). Elsewhere the flow degrades to opening the release page.
-  static bool get isSupported => Platform.isAndroid || Platform.isWindows;
+  static bool get isSupported =>
+      DistributionConfig.directUpdaterEnabled &&
+      (Platform.isAndroid || Platform.isWindows);
 
   /// Streams [url] to a file in the temp dir, reporting fractional progress
   /// (0..1) as chunks arrive. Returns the written file. GitHub asset URLs 302
-  /// to a CDN; `HttpClient` follows redirects by default.
+  /// to a CDN; each destination is approved before it is followed.
   Future<File> download(
     Uri url,
-    String filename, {
+    ReleaseArtifact artifact, {
     void Function(double progress)? onProgress,
   }) async {
+    if (!isApprovedUpdateUri(url)) {
+      throw const FormatException('Unapproved update host');
+    }
     final dir = await getTemporaryDirectory();
-    final file = File(p.join(dir.path, filename));
-    final request = await _http.getUrl(url);
-    request.headers.set(HttpHeaders.userAgentHeader, 'iptvs-updater');
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final file = File(p.join(dir.path, artifact.filename));
+    final partial = File('${file.path}.partial');
+    if (await partial.exists()) await partial.delete();
+    final response = await openApprovedUpdateGet(
+      _http,
+      url,
+      headers: const {HttpHeaders.userAgentHeader: 'iptvs-updater'},
+    );
     if (response.statusCode != 200) {
+      await response.drain<void>();
       throw StateError('Download HTTP ${response.statusCode}');
     }
-    final total = response.contentLength; // -1 when unknown
-    final sink = file.openWrite();
+    if (response.contentLength >= 0 &&
+        response.contentLength != artifact.byteSize) {
+      await response.drain<void>();
+      throw const FormatException('Update Content-Length mismatch');
+    }
+    final sink = partial.openWrite();
+    final digestSink = _DigestSink();
+    final hashSink = sha256.startChunkedConversion(digestSink);
     var received = 0;
     try {
       await for (final chunk in response.timeout(kHttpReadTimeout)) {
-        sink.add(chunk);
         received += chunk.length;
-        if (total > 0) onProgress?.call(received / total);
+        if (received > artifact.byteSize) {
+          throw const FormatException('Update exceeds signed byte size');
+        }
+        sink.add(chunk);
+        hashSink.add(chunk);
+        onProgress?.call(received / artifact.byteSize);
       }
-    } finally {
+      await sink.flush();
       await sink.close();
+      hashSink.close();
+      validateDownloadedArtifact(
+        artifact: artifact,
+        receivedBytes: received,
+        sha256Digest: digestSink.value.toString(),
+      );
+      if (await file.exists()) await file.delete();
+      return partial.rename(file.path);
+    } catch (_) {
+      await sink.close();
+      if (await partial.exists()) await partial.delete();
+      rethrow;
     }
-    return file;
   }
 
   /// Installs a downloaded [file] for the running platform. On failure or an
@@ -109,7 +143,10 @@ class UpdateInstaller {
     try {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } catch (e) {
-      DiagnosticsLog.instance.add('update', 'Open browser failed: ${redactUrl(url)}');
+      DiagnosticsLog.instance.add(
+        'update',
+        'Open browser failed: ${redactUrl(url)}',
+      );
     }
   }
 
@@ -130,24 +167,54 @@ class UpdateInstaller {
         exeName: exeName,
       ),
     );
-    await Process.start('powershell.exe', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-WindowStyle',
-      'Hidden',
-      '-File',
-      script.path,
-    ], mode: ProcessStartMode.detached);
+    await Process.start(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        script.path,
+      ],
+      mode: ProcessStartMode.detached,
+      workingDirectory: dir.path,
+    );
   }
 
   void close() => _http.close(force: true);
 }
 
-/// The Windows self-update helper script. Waits for the running app (by [pid])
-/// to exit so its files unlock, extracts [zipPath] over [installDir] (the zip
-/// holds the Release folder *contents*, so it overlays in place), and relaunches
-/// [exeName]. Split out as a pure string builder for readability/testability.
+void validateDownloadedArtifact({
+  required ReleaseArtifact artifact,
+  required int receivedBytes,
+  required String sha256Digest,
+}) {
+  if (receivedBytes != artifact.byteSize) {
+    throw const FormatException('Update byte size mismatch');
+  }
+  if (sha256Digest != artifact.sha256) {
+    throw const FormatException('Update SHA-256 mismatch');
+  }
+}
+
+class _DigestSink implements Sink<Digest> {
+  Digest? _value;
+
+  Digest get value => _value ?? (throw StateError('Digest is not complete'));
+
+  @override
+  void add(Digest data) => _value = data;
+
+  @override
+  void close() {}
+}
+
+/// The Windows self-update helper script. It validates every archive path,
+/// extracts into a new sibling staging directory, verifies the expected
+/// executable, swaps whole directories, and restores the backup when launch
+/// fails. Split out as a pure string builder for readability/testability.
 String windowsUpdateScript({
   required int pid,
   required String zipPath,
@@ -158,9 +225,81 @@ String windowsUpdateScript({
   String q(String s) => "'${s.replaceAll("'", "''")}'";
   return '''
 \$ErrorActionPreference = 'Stop'
+\$zipPath = ${q(zipPath)}
+\$installDir = ${q(installDir)}
+\$exeName = ${q(exeName)}
+\$parentDir = [System.IO.Directory]::GetParent(\$installDir).FullName
+\$token = [Guid]::NewGuid().ToString('N')
+\$stageDir = Join-Path \$parentDir ('.iptvs-update-stage-' + \$token)
+\$backupDir = Join-Path \$parentDir ('.iptvs-update-backup-' + \$token)
+\$backupCreated = \$false
+\$swapped = \$false
+
 try { Wait-Process -Id $pid -Timeout 60 } catch {}
 Start-Sleep -Milliseconds 800
-Expand-Archive -Path ${q(zipPath)} -DestinationPath ${q(installDir)} -Force
-Start-Process -FilePath (Join-Path ${q(installDir)} ${q(exeName)})
+try {
+  New-Item -ItemType Directory -Path \$stageDir -ErrorAction Stop | Out-Null
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  \$separator = [System.IO.Path]::DirectorySeparatorChar
+  \$stageRoot = [System.IO.Path]::GetFullPath(\$stageDir + \$separator)
+  \$archive = [System.IO.Compression.ZipFile]::OpenRead(\$zipPath)
+  try {
+    foreach (\$entry in \$archive.Entries) {
+      \$entryName = \$entry.FullName.Replace('/', \$separator)
+      if ([string]::IsNullOrWhiteSpace(\$entryName)) { continue }
+      if ([System.IO.Path]::IsPathRooted(\$entryName) -or
+          \$entryName.StartsWith('/') -or \$entryName.StartsWith('\\')) {
+        throw 'Update archive contains an absolute path.'
+      }
+      \$unixMode = (\$entry.ExternalAttributes -shr 16) -band 0xF000
+      if (\$unixMode -eq 0xA000) {
+        throw 'Update archive contains a symbolic link.'
+      }
+      \$target = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine(\$stageDir, \$entryName)
+      )
+      if (-not \$target.StartsWith(
+          \$stageRoot,
+          [System.StringComparison]::OrdinalIgnoreCase
+      )) {
+        throw 'Update archive path escapes the staging directory.'
+      }
+    }
+  } finally {
+    \$archive.Dispose()
+  }
+
+  Expand-Archive -LiteralPath \$zipPath -DestinationPath \$stageDir -Force
+  \$stagedExe = Join-Path \$stageDir \$exeName
+  if (-not (Test-Path -LiteralPath \$stagedExe -PathType Leaf)) {
+    throw 'Update archive is missing the expected executable.'
+  }
+
+  Move-Item -LiteralPath \$installDir -Destination \$backupDir
+  \$backupCreated = \$true
+  Move-Item -LiteralPath \$stageDir -Destination \$installDir
+  \$swapped = \$true
+  \$newExe = Join-Path \$installDir \$exeName
+  \$newProcess = Start-Process -FilePath \$newExe -WorkingDirectory \$installDir -PassThru
+  Start-Sleep -Seconds 5
+  \$newProcess.Refresh()
+  if (\$newProcess.HasExited -and \$newProcess.ExitCode -ne 0) {
+    throw 'Updated application exited during startup.'
+  }
+  Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  if (\$backupCreated) {
+    if (\$swapped) {
+      Remove-Item -LiteralPath \$installDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath \$backupDir -PathType Container) {
+      Move-Item -LiteralPath \$backupDir -Destination \$installDir
+      \$oldExe = Join-Path \$installDir \$exeName
+      Start-Process -FilePath \$oldExe -WorkingDirectory \$installDir
+    }
+  }
+  Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  throw
+}
 ''';
 }

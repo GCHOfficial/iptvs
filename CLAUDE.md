@@ -5,6 +5,10 @@ changes. This file is the compact, always-loaded layer: the map, the invariants,
 Deep detail (mechanisms, rationale, failure history) lives in `docs/*.md` — **read the relevant
 doc before working in its area**, and update doc + this file together when behavior changes:
 
+- [docs/implementation-plan.md](docs/implementation-plan.md) — temporary audit-remediation ledger; update its checklist, evidence, decisions, and progress entry in every related PR.
+- [docs/validation-baseline.md](docs/validation-baseline.md) — reproducible large-ingestion workloads, public schema history, performance evidence, and native-device validation matrix.
+- [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
+- [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and certification gates.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -31,17 +35,20 @@ and public metadata APIs. The one *optional* backend is a Supabase-backed cloud 
 ```bash
 flutter analyze        # must be clean before committing
 flutter test           # unit tests live under test/
-flutter run -d windows # or -d android, etc.
+flutter run -d windows
+flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
 Lints: `package:flutter_lints`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
 analyze + test, then Windows and a universal Android APK. The Windows libmpv DLL is fetched at
 configure time by `windows/CMakeLists.txt`; the Android libdovi AAR comes from **Git LFS**
 (`android/app/libs/libmpv-dovi.aar`), so a clone needs LFS to build Android. The Windows runner
-compiles `/utf-8` (non-ASCII literals trip C4066 under `/WX`). A **debug keystore is committed**
-(`android/app/debug.keystore`, standard public android debug creds) and signs both debug and
-release, so every CI APK shares one signature and installs in place over the previous one —
-without it, per-runner keystores made updates silently fail to install.
+compiles `/utf-8` (non-ASCII literals trip C4066 under `/WX`). A fixed public debug keystore is
+committed for non-distributable debug builds. Release builds fail closed unless protected signing
+environment variables are present, and the release workflow verifies the resulting certificate;
+see `docs/android-signing.md` before touching package identity or signing.
+Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
+exact platform filename, size, and SHA-256; see `docs/updates.md` before changing release assets.
 
 ## Orchestration workflow
 
@@ -204,9 +211,10 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 10` (v9: `favorites` table, deliberately separate from
+`AppDatabase` is at `schemaVersion = 11` (v9: `favorites` table, deliberately separate from
 `channels`/`media_items` so a refresh never drops favorites; v10: `channels.archive_days` →
-`Channel.hasArchive` / catch-up). When changing the schema: bump `schemaVersion`, add an
+`Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching). When
+changing the schema: bump `schemaVersion`, add an
 `onUpgrade` branch, make new tables/columns idempotent (`CREATE TABLE IF NOT EXISTS`, the
 `_isDuplicateColumn` guard). **Design trap:** upgrading from before v3 calls `_createMediaTables`,
 which builds the *current* media schema, so later `oldV >= 3` ALTER branches are intentionally

@@ -9,6 +9,26 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseSigningEnvironment = mapOf(
+    "IPTVS_ANDROID_KEYSTORE_PATH" to System.getenv("IPTVS_ANDROID_KEYSTORE_PATH"),
+    "IPTVS_ANDROID_KEYSTORE_PASSWORD" to System.getenv("IPTVS_ANDROID_KEYSTORE_PASSWORD"),
+    "IPTVS_ANDROID_KEY_ALIAS" to System.getenv("IPTVS_ANDROID_KEY_ALIAS"),
+    "IPTVS_ANDROID_KEY_PASSWORD" to System.getenv("IPTVS_ANDROID_KEY_PASSWORD"),
+)
+val releaseTaskRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+val missingReleaseSigningValues = releaseSigningEnvironment
+    .filterValues { it.isNullOrBlank() }
+    .keys
+if (releaseTaskRequested && missingReleaseSigningValues.isNotEmpty()) {
+    throw GradleException(
+        "Release signing is not configured. Missing environment variables: " +
+            missingReleaseSigningValues.sorted().joinToString(", "),
+    )
+}
+val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
+
 android {
     namespace = "com.gchofficial.iptvs"
     compileSdk = flutter.compileSdkVersion
@@ -23,7 +43,7 @@ android {
         // The application ID is the app's stable public identity (and what the
         // system reports as the package name, e.g. in an HDMI-info overlay). It
         // matches the Kotlin `namespace`/package.
-        applicationId = "com.gchofficial.iptvs"
+        applicationId = "com.gchofficial.iptvs.player"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         // libmpv (dev.jdtech.mpv:libmpv) requires API 26+; this also matches the
@@ -34,26 +54,45 @@ android {
         versionName = flutter.versionName
     }
 
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("development") {
+            dimension = "distribution"
+            applicationIdSuffix = ".dev"
+        }
+        create("githubDirect") {
+            dimension = "distribution"
+            applicationIdSuffix = ".direct"
+        }
+        create("googlePlay") {
+            dimension = "distribution"
+        }
+    }
+
     signingConfigs {
-        // Point the auto-created `debug` config at a fixed, committed keystore
-        // instead of each machine's/CI runner's ephemeral ~/.android/debug.keystore.
-        // That keeps the signing key identical across every CI build, so a new APK
-        // installs over the previous one on a test device without an uninstall
-        // (a per-run ephemeral key changes the signature → Android refuses the
-        // update silently, leaving the old app running). Standard debug creds.
+        // This fixed public key is for explicitly non-distributable debug builds.
+        // Release builds never fall back to it.
         getByName("debug") {
             storeFile = file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEYSTORE_PATH")!!)
+                storePassword = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEY_ALIAS")
+                keyPassword = releaseSigningEnvironment.getValue("IPTVS_ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
-            // No release keystore yet: sign release with the (now fixed) debug key
-            // so CI `--release` builds need no secrets and update in place on devices.
-            signingConfig = signingConfigs.getByName("debug")
+            // A release task fails during configuration when any required value
+            // is absent, so no distributable APK can silently use the debug key.
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

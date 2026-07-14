@@ -29,8 +29,8 @@ Future<void> runUpdateCheck(
   UpdateService? service,
   UpdateStore? store,
 }) async {
-  final svc = service ?? UpdateService();
   final prefs = store ?? const UpdateStore();
+  final svc = service ?? UpdateService(track: await prefs.track());
 
   ReleaseInfo? release;
   String current;
@@ -51,7 +51,7 @@ Future<void> runUpdateCheck(
   await prefs.setLastCheck(DateTime.now());
   if (!context.mounted) return;
 
-  if (release == null || !isNewer(release, current)) {
+  if (release == null || !isUpdateAllowed(release, current)) {
     if (manual) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("You're on the latest version")),
@@ -72,7 +72,7 @@ Future<void> runUpdateCheck(
     case UpdateChoice.skip:
       await prefs.setSkippedVersion(release.version);
     case UpdateChoice.update:
-      if (context.mounted) await _downloadAndInstall(context, release);
+      if (context.mounted) await _downloadAndInstall(context, release, current);
     case UpdateChoice.later:
     case null:
       break;
@@ -88,11 +88,16 @@ Future<UpdateChoice?> showUpdateDialog(
   String current,
 ) {
   final canInstall =
-      UpdateInstaller.isSupported && release.assetForCurrentPlatform() != null;
+      UpdateInstaller.isSupported &&
+      release.assetForCurrentPlatform() != null &&
+      release.artifactForCurrentPlatform() != null;
   return showDialog<UpdateChoice>(
     context: context,
-    builder: (_) =>
-        _UpdateDialog(release: release, current: current, canInstall: canInstall),
+    builder: (_) => _UpdateDialog(
+      release: release,
+      current: current,
+      canInstall: canInstall,
+    ),
   );
 }
 
@@ -276,13 +281,18 @@ class _UpdateDialogState extends State<_UpdateDialog> {
 Future<void> _downloadAndInstall(
   BuildContext context,
   ReleaseInfo release,
+  String current,
 ) async {
+  if (!isUpdateAllowed(release, current)) {
+    throw StateError('Refusing to install a non-upgrade release');
+  }
   final installer = UpdateInstaller();
   final asset = release.assetForCurrentPlatform();
+  final artifact = release.artifactForCurrentPlatform();
 
   // Nothing to install in-app (macOS/Linux, or a release missing this
   // platform's asset) — just open the release page.
-  if (!UpdateInstaller.isSupported || asset == null) {
+  if (!UpdateInstaller.isSupported || asset == null || artifact == null) {
     await installer.openReleasePage(release.htmlUrl);
     installer.close();
     return;
@@ -324,7 +334,7 @@ Future<void> _downloadAndInstall(
   try {
     final file = await installer.download(
       asset,
-      _filenameFor(asset, release),
+      artifact,
       onProgress: (p) {
         if (!canceled) progress.value = p;
       },
@@ -397,14 +407,6 @@ Future<void> _promptInstallPermission(
   } else if (go == false) {
     await installer.openReleasePage(release.htmlUrl);
   }
-}
-
-String _filenameFor(Uri asset, ReleaseInfo release) {
-  final last = asset.pathSegments.isNotEmpty ? asset.pathSegments.last : '';
-  if (last.isNotEmpty) return last;
-  return Platform.isAndroid
-      ? 'iptvs-${release.version}.apk'
-      : 'iptvs-${release.version}.zip';
 }
 
 class _ProgressDialog extends StatelessWidget {

@@ -1,7 +1,11 @@
 package com.gchofficial.iptvs
 
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -12,6 +16,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
+import java.security.MessageDigest
 
 @UnstableApi
 class MainActivity : FlutterActivity() {
@@ -244,6 +249,13 @@ class MainActivity : FlutterActivity() {
                         result.error("bad_args", "Missing APK path", null)
                         return@setMethodCallHandler
                     }
+                    val apk = File(path)
+                    try {
+                        verifyUpdateApk(apk)
+                    } catch (e: SecurityException) {
+                        result.error("invalid_update", e.message, null)
+                        return@setMethodCallHandler
+                    }
                     // minSdk 26 → canRequestPackageInstalls() always applies.
                     if (!packageManager.canRequestPackageInstalls()) {
                         result.success("needs_permission")
@@ -253,7 +265,7 @@ class MainActivity : FlutterActivity() {
                         val uri = FileProvider.getUriForFile(
                             this,
                             "$packageName.fileprovider",
-                            File(path),
+                            apk,
                         )
                         val intent = Intent(Intent.ACTION_VIEW).apply {
                             setDataAndType(uri, "application/vnd.android.package-archive")
@@ -285,6 +297,53 @@ class MainActivity : FlutterActivity() {
 
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    /**
+     * Fails closed unless [apk] is a cache-owned APK for this exact application
+     * and is signed by the same certificate as the installed build. Dart has
+     * already verified the signed release-manifest digest; this native check
+     * prevents a wrong-package or wrong-signer APK reaching Package Installer.
+     */
+    @Suppress("DEPRECATION")
+    private fun verifyUpdateApk(apk: File) {
+        val cachePath = cacheDir.canonicalFile.toPath()
+        val apkPath = apk.canonicalFile.toPath()
+        if (!apk.isFile || !apkPath.startsWith(cachePath)) {
+            throw SecurityException("Update APK is outside the application cache")
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            PackageManager.GET_SIGNATURES
+        }
+        val candidate = packageManager.getPackageArchiveInfo(apkPath.toString(), flags)
+            ?: throw SecurityException("Update APK package metadata is unreadable")
+        if (candidate.packageName != packageName) {
+            throw SecurityException("Update APK package identity does not match")
+        }
+        val installed = packageManager.getPackageInfo(packageName, flags)
+        val candidateSigners = signerDigests(candidate)
+        val installedSigners = signerDigests(installed)
+        if (candidateSigners.isEmpty() || candidateSigners != installedSigners) {
+            throw SecurityException("Update APK signing certificate does not match")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun signerDigests(info: PackageInfo): Set<String> {
+        val signatures: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners ?: emptyArray()
+        } else {
+            info.signatures ?: emptyArray()
+        }
+        return signatures.mapTo(mutableSetOf()) { signature ->
+            MessageDigest.getInstance("SHA-256")
+                .digest(signature.toByteArray())
+                .joinToString(separator = "") { byte ->
+                    (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+                }
         }
     }
 

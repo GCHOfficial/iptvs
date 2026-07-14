@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
 import '../data/app_database.dart';
+import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
 import '../data/source_store.dart';
 import '../data/update_service.dart';
+import '../data/update_store.dart';
 import '../sources/source_config.dart';
 import '../sources/xtream_source.dart';
 import '../theme.dart';
@@ -96,9 +98,11 @@ class _SourcesScreenState extends State<SourcesScreen> {
     final added = _sources
         .map((s) => s.id)
         .firstWhere((id) => !before.contains(id), orElse: () => '');
-    _focusCard(added.isNotEmpty
-        ? added
-        : (_sources.isNotEmpty ? _sources.first.id : null));
+    _focusCard(
+      added.isNotEmpty
+          ? added
+          : (_sources.isNotEmpty ? _sources.first.id : null),
+    );
   }
 
   Future<void> _edit(SourceConfig c) async {
@@ -115,11 +119,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
   Future<void> _openSettings(SourceConfig c) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => SourceSettingsScreen(
-          store: widget.store,
-          db: widget.db,
-          config: c,
-        ),
+        builder: (_) =>
+            SourceSettingsScreen(store: widget.store, db: widget.db, config: c),
       ),
     );
     // Settings are saved as they're toggled; refresh so the card reflects them.
@@ -238,10 +239,16 @@ class _SourcesScreenState extends State<SourcesScreen> {
                   padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
                   child: _PickerStartupCard(),
                 ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: _UpdateCard(),
-                ),
+                if (DistributionConfig.directUpdaterEnabled) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: _UpdateTrackCard(),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: _UpdateCard(),
+                  ),
+                ],
                 Expanded(
                   child: _sources.isEmpty
                       ? const Center(
@@ -259,28 +266,28 @@ class _SourcesScreenState extends State<SourcesScreen> {
 
   Widget _buildSourceList() {
     return ListView.builder(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
-              scrollCacheExtent: const ScrollCacheExtent.pixels(800),
-              itemCount: _sources.length,
-              itemBuilder: (context, i) {
-                final c = _sources[i];
-                return _SourceCard(
-                  key: ValueKey(c.id),
-                  config: c,
-                  active: c.id == _activeId,
-                  autofocus: i == 0,
-                  focusNode: _focusNodeFor(c.id),
-                  canMoveUp: i > 0,
-                  canMoveDown: i < _sources.length - 1,
-                  onActivate: () => _activate(c),
-                  onMoveUp: () => _move(c, -1),
-                  onMoveDown: () => _move(c, 1),
-                  onSettings: () => _openSettings(c),
-                  onEdit: () => _edit(c),
-                  onDelete: () => _delete(c),
-                );
-              },
-            );
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
+      scrollCacheExtent: const ScrollCacheExtent.pixels(800),
+      itemCount: _sources.length,
+      itemBuilder: (context, i) {
+        final c = _sources[i];
+        return _SourceCard(
+          key: ValueKey(c.id),
+          config: c,
+          active: c.id == _activeId,
+          autofocus: i == 0,
+          focusNode: _focusNodeFor(c.id),
+          canMoveUp: i > 0,
+          canMoveDown: i < _sources.length - 1,
+          onActivate: () => _activate(c),
+          onMoveUp: () => _move(c, -1),
+          onMoveDown: () => _move(c, 1),
+          onSettings: () => _openSettings(c),
+          onEdit: () => _edit(c),
+          onDelete: () => _delete(c),
+        );
+      },
+    );
   }
 }
 
@@ -400,13 +407,13 @@ class _SourceCardState extends State<_SourceCard> {
   // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
   // skip-traversal, so vertical movement only finds adjacent row cards).
   List<FocusNode?> get _chain => [
-        widget.focusNode,
-        _upNode,
-        _downNode,
-        _settingsNode,
-        _editNode,
-        _deleteNode,
-      ];
+    widget.focusNode,
+    _upNode,
+    _downNode,
+    _settingsNode,
+    _editNode,
+    _deleteNode,
+  ];
 
   Object? _handleDirectional(DirectionalFocusIntent intent) {
     final focused = FocusManager.instance.primaryFocus;
@@ -519,18 +526,16 @@ class _SourceCardState extends State<_SourceCard> {
                   focusNode: _downNode,
                   icon: Icon(
                     Icons.keyboard_arrow_down,
-                    color:
-                        widget.canMoveDown ? AppColors.textLo : AppColors.line,
+                    color: widget.canMoveDown
+                        ? AppColors.textLo
+                        : AppColors.line,
                   ),
                   tooltip: 'Move down',
                   onPressed: widget.onMoveDown,
                 ),
                 IconButton(
                   focusNode: _settingsNode,
-                  icon: const Icon(
-                    Icons.tune,
-                    color: AppColors.textLo,
-                  ),
+                  icon: const Icon(Icons.tune, color: AppColors.textLo),
                   tooltip: 'Settings',
                   onPressed: widget.onSettings,
                 ),
@@ -618,19 +623,19 @@ class _ExpiryBadge extends StatelessWidget {
   }
 
   Widget _chip(IconData icon, String label, Color color) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Flexible(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: color, fontSize: 12),
-            ),
-          ),
-        ],
-      );
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 13, color: color),
+      const SizedBox(width: 4),
+      Flexible(
+        child: Text(
+          label,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(color: color, fontSize: 12),
+        ),
+      ),
+    ],
+  );
 }
 
 class _ActivePill extends StatelessWidget {
@@ -1131,16 +1136,16 @@ class _PickerStartupCardState extends State<_PickerStartupCard> {
   }
 
   String get _valueLabel => switch (_mode) {
-        ProfilePickerStartup.always => 'Always',
-        ProfilePickerStartup.off => 'Never',
-        _ => 'Auto',
-      };
+    ProfilePickerStartup.always => 'Always',
+    ProfilePickerStartup.off => 'Never',
+    _ => 'Auto',
+  };
 
   String get _hint => switch (_mode) {
-        ProfilePickerStartup.always => 'Shown on every launch',
-        ProfilePickerStartup.off => 'Never shown at startup',
-        _ => 'Shown when more than one profile exists',
-      };
+    ProfilePickerStartup.always => 'Shown on every launch',
+    ProfilePickerStartup.off => 'Never shown at startup',
+    _ => 'Shown when more than one profile exists',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -1180,6 +1185,96 @@ class _PickerStartupCardState extends State<_PickerStartupCard> {
                 fontWeight: FontWeight.w600,
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdateTrackCard extends StatefulWidget {
+  const _UpdateTrackCard();
+
+  @override
+  State<_UpdateTrackCard> createState() => _UpdateTrackCardState();
+}
+
+class _UpdateTrackCardState extends State<_UpdateTrackCard> {
+  UpdateTrack _track = UpdateTrack.stable;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final track = await const UpdateStore().track();
+    if (mounted) setState(() => _track = track);
+  }
+
+  Future<void> _choose() async {
+    final selected = await showDialog<UpdateTrack>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.panelHi,
+        title: const Text('GitHub update track'),
+        content: const Text(
+          'Stable receives normal releases. Beta also receives signed GitHub '
+          'prereleases intended for testing. Switching back to Stable never '
+          'downgrades the app; it waits for a newer stable release.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: _track == UpdateTrack.stable,
+            onPressed: () => Navigator.pop(context, UpdateTrack.stable),
+            child: const Text('Stable'),
+          ),
+          FilledButton(
+            autofocus: _track == UpdateTrack.beta,
+            onPressed: () => Navigator.pop(context, UpdateTrack.beta),
+            child: const Text('Beta'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || selected == _track) return;
+    await const UpdateStore().setTrack(selected);
+    if (mounted) setState(() => _track = selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _choose,
+      scrollOnFocus: false,
+      debugLabel: 'sources.updateTrack',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.science_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('GitHub update track'),
+                  Text(
+                    _track.displayName,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, size: 20, color: AppColors.textLo),
           ],
         ),
       ),

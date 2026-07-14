@@ -1,5 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'distribution_channel.dart';
+
 /// Persists the updater's small preferences — the version the user chose to
 /// skip, and when we last checked GitHub — in the OS keychain. Mirrors
 /// [LocalProfileStore]'s single-preference idiom (the app has no
@@ -7,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 class UpdateStore {
   static const _kSkipped = 'update_skipped_version';
   static const _kLastCheck = 'update_last_check';
+  static const _kTrack = 'update_track';
 
   final FlutterSecureStorage _storage;
 
@@ -33,4 +36,10 @@ class UpdateStore {
 
   Future<void> setLastCheck(DateTime time) =>
       _storage.write(key: _kLastCheck, value: time.toIso8601String());
+
+  Future<UpdateTrack> track() async =>
+      parseUpdateTrack(await _storage.read(key: _kTrack));
+
+  Future<void> setTrack(UpdateTrack track) =>
+      _storage.write(key: _kTrack, value: track.storageValue);
 }
