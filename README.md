@@ -54,11 +54,13 @@ on both phones and Android TV.
 
 ## Build from source
 
-Requires the **Flutter `3.44.2`** stable toolchain (the version CI pins).
+Requires the **Flutter `3.44.5`** stable toolchain (the version CI pins).
 
 ```bash
 flutter pub get
-flutter run -d windows   # or: -d android
+flutter run -d windows
+flutter run -d android --flavor development \
+  --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
 Platform notes:

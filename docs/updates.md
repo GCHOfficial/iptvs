@@ -1,7 +1,8 @@
 # In-app updates — full detail
 
 The app self-updates from its own **GitHub Releases** (`GCHOfficial/iptvs`; the `release.yml`
-pipeline attaches `iptvs-<ver>-android.apk` and `iptvs-<ver>-windows-x64.zip` to a `v<ver>` tag).
+pipeline attaches `iptvs-<ver>-android.apk`, `iptvs-<ver>-windows-x64.zip`, and a detached
+Ed25519-signed manifest to a `v<ver>` tag).
 The compact rules live in CLAUDE.md; read this before changing the update flow, the release
 pipeline, or the update dialog.
 
@@ -15,14 +16,24 @@ primary 503s under load, which cut v0.1.29 without a changelog). The step is fai
 no previous tag / API error just yields the auto notes — and the body is what the in-app update
 dialog renders.
 
+GitHub-direct builds expose a Stable/Beta selector. Stable uses GitHub's latest
+normal release; Beta selects the highest signed, non-draft release including
+prereleases. Development, Google Play, and Microsoft Store builds do not run or
+show the GitHub updater. Store test tracks/flights are reserved for submission
+validation; ongoing beta users install the separate GitHub-direct distribution.
+
 ## Layering
 
 Layered like everything else — a shared Dart service does the network check + version compare;
 the final install step is the only platform-specific part.
 
-- **`lib/data/update_service.dart`** — `ReleaseInfo` (+ the pure `ReleaseInfo.fromJson` that
-  picks the per-platform asset by filename), `UpdateService.fetchLatest()` (GETs
-  `releases/latest` with the `net.dart` `HttpClient` idiom; **GitHub 403s without a
+- **`lib/data/update_manifest.dart`** — strict signed-manifest schema and Ed25519 verification.
+  The exact signed bytes bind version, minimum version, platform, exact filename, byte size,
+  and SHA-256. Unknown or duplicate platforms, malformed hashes, and values beyond the platform
+  ceilings fail closed.
+- **`lib/data/update_service.dart`** — `ReleaseInfo` and `UpdateService.fetchLatest()` (GETs
+  `releases/latest`, locates only the exact manifest/signature assets, verifies the signature,
+  and derives artifact URLs on the approved GitHub host; **GitHub 403s without a
   `User-Agent`**; 404 = "no releases yet" = up to date, not an error), `appVersion()` (via
   `package_info_plus` — returns the CI build-name, which is the tag minus `v`, so a release build
   reports `1.2.3` and compares equal to tag `v1.2.3`; local `flutter run` builds report the
@@ -30,17 +41,23 @@ the final install step is the only platform-specific part.
   in `test/update_service_test.dart`).
 - **`lib/data/update_store.dart`** — `skippedVersion` + `lastCheck` prefs in the keychain
   (mirrors `LocalProfileStore`; the app has no SharedPreferences).
-- **`lib/data/update_installer.dart`** — `download()` (streams the asset to the temp dir with
-  progress; **first file-writing code in the app**), then per platform: **Android** fires the
-  system package-installer over the **`iptvs/updates`** MethodChannel (`installApk`), needing the
+- **`lib/data/update_installer.dart`** — `download()` permits only HTTPS GitHub release hosts and
+  approved redirect hosts, streams to a `.partial` temp file with a signed-size ceiling, verifies
+  exact received length and SHA-256, and only then renames it to the install filename. Failure
+  deletes the partial file. It then hands the verified file to the platform: **Android** fires the
+  system package-installer over the **`iptvs/updates`** MethodChannel (`installApk`) only after
+  native code confirms the APK is inside this app's cache, has the same package name, and has the
+  same signing-certificate set as the installed app. Installation needs the
   `REQUEST_INSTALL_PACKAGES` permission + a **FileProvider** (`${applicationId}.fileprovider`,
   `@xml/file_paths` → `<cache-path>`, since `getTemporaryDirectory()` = the Android cache dir) —
   falls back to `requestInstallPermission` (unknown-sources settings) or the browser; **Windows**
-  (no native C++) writes a detached PowerShell helper (`windowsUpdateScript`) that
-  `Wait-Process`es our PID, `Expand-Archive -Force`s the zip over the install folder, and
-  relaunches — then the app `exit(0)`s so `iptvs.exe` unlocks (the Windows swap can only be
-  verified against a **packaged Release folder**, not `flutter run`; needs a user-writable,
-  unelevated install dir).
+  (no native C++) writes a detached PowerShell helper (`windowsUpdateScript`) that waits for our
+  PID, rejects absolute/escaping/link archive entries, extracts into a new sibling staging
+  directory, checks the expected executable, moves the old installation to a backup, swaps the
+  staged directory into place, and restores/relaunches the backup when the replacement cannot
+  start. The app then `exit(0)`s so `iptvs.exe` unlocks. This can only be executed end to end
+  against a **packaged Release folder** on Windows, not `flutter run`; it requires a user-writable,
+  unelevated install directory.
 - **`lib/screens/update_flow.dart`** — `runUpdateCheck(context, manual:)` drives prompt →
   download → install (the "Update available" dialog with **Skip this version / Later / Update**,
   and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on
@@ -58,3 +75,31 @@ behind it on a TV) and cycles them between the actions and a focusable, scrollab
 rendered by `ReleaseNotesView` (formatted, not raw markdown). The public `showUpdateDialog` /
 `UpdateChoice` exist so `test/update_dialog_test.dart` can pin the autofocus + focus-trap
 behaviour.
+
+## Release-manifest signing
+
+The update-manifest key is separate from Android app signing. Generate it outside the repository:
+
+```bash
+./tool/setup_update_signing.sh
+```
+
+The helper creates an Ed25519 private key, prints its raw 32-byte public key as Base64, and can
+configure:
+
+- protected `release` environment secrets `UPDATE_MANIFEST_PRIVATE_KEY_BASE64`
+  and `UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD`;
+- repository variable `UPDATE_MANIFEST_PUBLIC_KEY`.
+
+Permanent public verification key configured on 2026-07-14:
+
+```text
+JhwZvQIF8fgBgQoXkc+u3qcckiT94BEE6N4JRhcabLI=
+```
+
+Release builds embed only the public key through `--dart-define`. The publish job reconstructs
+the manifest from the completed APK and ZIP, checks that the protected private key matches the
+configured public key, signs the exact compact JSON bytes, and uploads the manifest plus detached
+signature. Missing or mismatched keys fail the release. Keep two encrypted offline backups of the
+private key; never commit it or its Base64 encoding. The owner confirmed both
+private signing keys have two encrypted backups on 2026-07-14.

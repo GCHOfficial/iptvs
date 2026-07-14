@@ -1,0 +1,636 @@
+# Implementation Plan
+
+> Temporary execution ledger for the technical-audit remediation programme.
+>
+> Remove this file after every required release gate is complete and the lasting
+> architecture, security, database, playback, and navigation documentation has
+> been updated in its canonical location.
+
+## How to use this document
+
+- Keep this file on `main` and update it in every related pull request.
+- Check an item only when its stated verification has passed.
+- Put evidence beside completed items: PR number, test name, benchmark, or device.
+- Record scope or design changes in the decision log before implementing them.
+- Do not mark device-dependent work complete from code inspection alone.
+- Keep permanent design details in the relevant document under `docs/`; this file
+  records execution state rather than replacing those documents.
+
+Status convention:
+
+- `[ ]` Not started or not verified
+- `[x]` Implemented and verified
+- `BLOCKED:` Cannot proceed until the stated dependency is resolved
+- `DEFERRED:` Explicitly moved out of the current release, with a reason
+
+## Current status
+
+- Last updated: 2026-07-14
+- Active phase: Phase 0 — Release and security blockers
+- Active PR: PRs 0–2 — Validation and trusted distribution
+- Next planned PR: PR 3 — Bound HTTP and decompression workloads
+- Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
+- Baseline branch: `main`
+- Baseline working tree: clean
+- CI Flutter version: 3.44.5
+- Declared Dart SDK constraint: `^3.12.2`
+- Documentation Flutter version: README and CI declare 3.44.5
+- Baseline `flutter analyze`: passed
+- Baseline `flutter test`: passed, 204 tests
+- Current PR 0 `flutter analyze`: passed on 2026-07-14
+- Current implementation `flutter test`: passed, 236 tests with 7 opt-in
+  baselines and 3 Windows-only updater integration tests skipped on Linux
+- Android native builds: development, GitHub-direct, and Google Play debug APKs
+  plus a disposable-key Play release AAB pass locally; device validation pending
+- Windows native build/device validation: not performed during the audit
+
+## Non-negotiable sequencing
+
+- [ ] Do not publish another normal release before Android signing recovery is
+  decided and update artifacts are authenticated.
+- [ ] Do not migrate credential-derived channel/source IDs without an atomic
+  preservation path for favorites, EPG, and playback positions.
+- [ ] Do not split the large player or browsing widgets before async-race and
+  MethodChannel ownership regression tests exist.
+- [ ] Do not describe Android or Windows lifecycle work as fixed until the relevant
+  native build and device tests pass.
+- [ ] Do not begin optional feature work while a Phase 0 release blocker remains.
+
+## Pull-request overview
+
+| PR | Phase | Outcome | Effort | Dependencies | Status |
+|---|---|---|---:|---|---|
+| 0 | Foundation | Fixtures, benchmarks, and device matrix | M | None | In progress |
+| 1 | Phase 0 | Recover Android signing trust | L | PR 0 | In progress |
+| 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | In progress |
+| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | [ ] |
+| 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | [ ] |
+| 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
+| 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
+| 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
+| 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | [ ] |
+| 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | [ ] |
+| 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
+| 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
+| 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | [ ] |
+| 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | [ ] |
+| 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | [ ] |
+| 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | [ ] |
+| 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | [ ] |
+| 17 | Phase 4 | Publish a channel-safe Microsoft Store MSIX | M | PRs 2 and 9 | [ ] |
+
+Effort guide:
+
+- S: approximately 0.5–2 days
+- M: approximately 3–7 days
+- L: approximately 1–3 weeks for one developer
+
+## PR 0 — Reproducible validation baseline
+
+### Implementation
+
+- [x] Add sanitized 10k, 50k, and 250k-entry M3U fixtures. Generated
+  deterministically by `test/support/workload_fixtures.dart`.
+- [x] Add large Xtream live, VOD, and series fixtures. Generated deterministically
+  by `test/support/workload_fixtures.dart`.
+- [x] Add large and malformed Stalker fixtures. Generated deterministically by
+  `test/support/workload_fixtures.dart`.
+- [x] Add plain and gzip XMLTV fixtures, including a hostile compression ratio.
+  Generated deterministically by `test/support/workload_fixtures.dart`.
+- [x] Add fixture databases for every schema version that was publicly released.
+  `test/support/historical_database_fixtures.dart` builds seeded v8–v11 schemas
+  in reviewable SQL and `test/released_schema_fixtures_test.dart` exercises them.
+- [ ] Define the supported device matrix:
+  - [ ] Low-memory Android TV device
+  - [ ] Current Android phone
+  - [ ] Windows x64 SDR display
+  - [ ] Windows x64 HDR display
+- [x] Add reproducible host-side measurements for fixture size, parse/decode time,
+  and process RSS change in `test/performance_baseline_test.dart`.
+- [ ] Add application-profile measurements for import time, longest main-isolate
+  stall, peak memory, SQLite query duration, time to first channel, and time to
+  first EPG.
+- [x] Correct permanent documentation to Flutter 3.44.5.
+
+### Verification
+
+- [x] Fixtures have been checked for real URLs, usernames, passwords, MAC addresses,
+  API keys, tokens, and programme-viewing history. They use reserved `.invalid`
+  hosts and generated identifiers.
+- [x] Baselines can be reproduced from commands in `docs/validation-baseline.md`.
+- [ ] Performance thresholds are based on measured representative workloads.
+- [x] `flutter analyze` passes on 2026-07-14.
+- [x] `flutter test` passes on 2026-07-14 (236 passed, 10 platform/opt-in
+  skips on Linux).
+
+## PR 1 — Recover Android signing trust
+
+### Decision checkpoint
+
+- [x] Inspect the signing certificate of a genuinely distributed APK. GitHub
+  release v0.1.30 uses certificate SHA-256 `CF:3C:C3:53:...:3E:EC`.
+- [x] Compare it with the committed debug certificate. It is an exact match.
+- [x] Document every current distribution channel. The owner confirmed GitHub
+  direct distribution only; Google Play is planned but has never shipped.
+- [x] Determine whether Play App Signing controls any installed population. It does not.
+- [x] Choose and record one transition:
+  - [ ] Play-managed signing-key upgrade
+  - [x] New application IDs installed side-by-side: Play
+    `com.gchofficial.iptvs.player`, GitHub direct `.player.direct`, development
+    `.player.dev`
+  - [ ] Explicit manual migration with documented data consequences
+
+Do not rely on signing lineage alone to recover trust if the installed APK was
+signed with a publicly available private key. Anyone with that key could create
+their own lineage.
+
+### Implementation
+
+- [x] Generate a private release key outside the repository. Permanent
+  certificate SHA-256 is
+  `6E:36:3B:97:B8:5A:D9:99:20:CC:56:0D:5D:BF:6E:CD:94:80:9E:3D:84:F4:F1:3A:65:5A:15:00:4A:50:D5:3B`.
+- [x] Add `tool/setup_android_signing.sh` to generate the permanent key outside
+  the repository and optionally configure protected GitHub values without
+  writing base64/plaintext secret files.
+- [x] Configure the workflow to read keystore material and passwords only from a
+  protected GitHub `release` environment.
+- [x] Make release builds fail when signing material is missing.
+- [x] Preserve normal local debug signing for non-distributable debug builds only.
+- [x] Remove committed release use of `android/app/debug.keystore`.
+- [x] Publish the permanent SHA-256 release-certificate fingerprint in
+  `docs/android-signing.md` and configure the expected GitHub environment value.
+- [x] Add a separate Play upload-key helper and protected manual AAB workflow;
+  neither can access the GitHub-direct signing or update-manifest keys.
+- [x] Make CI verify the Play AAB identity, absence of self-update capabilities,
+  archive signature, and expected upload certificate before artifact upload.
+- [x] Generate the separate Play upload key and configure its protected GitHub
+  secrets. Certificate SHA-256 is
+  `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
+- [ ] Confirm two encrypted backups of the Play upload key, enroll in Play App
+  Signing through the first AAB upload, and run the protected workflow with the
+  permanent upload certificate.
+- [x] Design a safe profile migration for each new application ID using the
+  existing authenticated cloud push/pull path; exact steps and exclusions are
+  recorded in `docs/android-signing.md`.
+- [x] Avoid plaintext source exports during migration. Users who decline cloud
+  sync re-enter sources manually; no credential-bearing export was added.
+
+### Verification
+
+- [x] A release build without signing secrets fails. Verified locally on
+  2026-07-14 with an explicit missing-variable error.
+- [x] A debug build still succeeds. Verified locally on 2026-07-14.
+- [ ] CI verifies the permanent APK certificate fingerprint. Workflow logic and
+  protected environment configuration are present, but a protected run using
+  the permanent key has not yet supplied the verification evidence.
+- [ ] Old-to-new installation behavior is tested on every supported Android API.
+- [x] Profile/source/favorite retention or loss is explicitly documented in
+  `docs/android-signing.md`; device execution remains pending.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-14.
+
+## PR 2 — Authenticate update artifacts
+
+### Implementation
+
+- [x] Define a canonical signed release manifest containing version, minimum
+  version, platform, exact filename, byte size, and SHA-256 digest.
+- [x] Sign the exact manifest bytes with an offline or protected CI key. The
+  permanent encrypted private key/password secrets and public repository variable
+  were configured on 2026-07-14; a protected release run remains to verify them
+  end to end.
+- [x] Embed only the public verification key in the application.
+- [x] Verify manifest signature before trusting any artifact metadata.
+- [x] Require HTTPS and an approved artifact host.
+- [x] Verify exact platform, filename, received length, digest, and maximum size.
+- [x] Reject downgrades outside an explicitly labelled, non-product developer
+  override.
+- [x] Android: verify APK package name and signing certificate before installation.
+- [x] Windows: extract into a new staging directory.
+- [x] Windows: reject absolute paths, `..`, links, and escaped paths.
+- [x] Windows: validate the expected executable at the archive top level.
+- [x] Windows: back up, swap, confirm launch, and roll back on failure.
+- [x] Pin all third-party workflow actions to immutable commit SHAs, retaining
+  readable major-version comments.
+- [x] Reduce workflow token permissions to the minimum required per job.
+
+### Verification
+
+- [x] Altered manifest is rejected.
+- [x] Altered APK or ZIP digest is rejected by the shared artifact gate.
+- [x] Wrong byte size is rejected.
+- [x] Wrong platform or filename is rejected.
+- [x] Downgrade is rejected.
+- [x] Redirect to an unapproved host is rejected before connection by
+  `resolveApprovedUpdateRedirect`; regression coverage includes HTTP, lookalike,
+  user-info, and non-default-port destinations.
+- [x] Oversized artifact is rejected before installation.
+- [ ] Zip-slip and unexpected Windows layouts are rejected. Runtime PowerShell
+  tests are included in `test/windows_update_script_test.dart` and the Windows
+  CI job; check this after the first successful PR run.
+- [ ] Failed Windows replacement restores the previous installation. A runtime
+  rollback test is included in the Windows CI job; check this after the first
+  successful PR run.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-14 (236 passed,
+  7 opt-in baselines and 3 Windows-only tests skipped on Linux).
+
+## PR 3 — Bound HTTP and decompression workloads
+
+### Implementation
+
+- [ ] Add a shared response reader with an idle timeout.
+- [ ] Add a separate total operation deadline.
+- [ ] Add maximum compressed and decoded byte limits.
+- [ ] Reject excessive `Content-Length` values early.
+- [ ] Enforce the actual streamed-byte limit when length is missing or false.
+- [ ] Support temporary-file streaming for update and very large provider payloads.
+- [ ] Delete partial files after cancellation or failure.
+- [ ] Decode gzip with an output ceiling.
+- [ ] Move gzip decompression off the UI isolate.
+- [ ] Apply policies to M3U, XMLTV, Xtream, Stalker, metadata, and updates.
+- [ ] Make workload limits named and testable rather than scattered constants.
+
+### Verification
+
+- [ ] Slow-drip response reaches the total deadline.
+- [ ] Missing and false `Content-Length` values cannot bypass the limit.
+- [ ] A response exceeding the limit mid-stream is aborted.
+- [ ] A high-ratio gzip payload is aborted at the decoded-byte limit.
+- [ ] Cancellation removes partial files and closes the HTTP client.
+- [ ] Representative legitimate fixtures remain accepted.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 4 — Stable source and cache identities
+
+### Implementation
+
+- [ ] Use `SourceConfig.id` as the repository/cache source namespace.
+- [ ] Stop deriving source identity from URLs, credentials, or MAC addresses.
+- [ ] Generate deterministic opaque M3U channel IDs from normalized locators.
+- [ ] Retain provider channel IDs when they are already opaque and stable.
+- [ ] Make favorites, positions, EPG, metadata, and cloud records use the same IDs.
+- [ ] Specify normalization rules and collision behavior in tests.
+
+### Verification
+
+- [ ] Credential changes do not create an unrelated cache namespace.
+- [ ] Equivalent normalized M3U locators produce the same channel ID.
+- [ ] Distinct locators do not merge accidentally in the fixture corpus.
+- [ ] Provider-specific ID construction remains inside the owning Source.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 5 — Remove persisted and displayed credentials
+
+### Implementation
+
+- [ ] Add a provider-neutral encrypted secret-locator field where playback requires
+  persistence of a URL or provider secret.
+- [ ] Store its per-install encryption key in `flutter_secure_storage`.
+- [ ] Keep non-secret provider metadata in the normal `extra` field.
+- [ ] If the encryption key is missing, invalidate and re-ingest regenerable cache.
+- [ ] Atomically migrate source IDs, channel IDs, favorites, positions, EPG, and
+  related metadata.
+- [ ] Ensure cloud item IDs contain no raw URLs, MAC addresses, or credentials.
+- [ ] Ensure encrypted playback locators are never uploaded to cloud sync.
+- [ ] Redact URL user-info, paths, queries, and fragments in UI and diagnostics.
+- [ ] Redact source summaries in the Flutter UI and JavaScript panel.
+- [ ] Render credential inputs as password fields with explicit reveal controls.
+
+### Verification
+
+- [ ] Existing M3U favorites survive migration.
+- [ ] Continue Watching survives migration.
+- [ ] Existing EPG links survive migration.
+- [ ] Migration failure rolls back all related tables.
+- [ ] No fixture credential appears in SQLite text values.
+- [ ] No fixture credential appears in cloud payloads.
+- [ ] No fixture credential appears in diagnostics or rendered summaries.
+- [ ] Missing encryption-key behavior is deterministic and recoverable.
+- [ ] Fresh and migrated databases have matching schemas.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 6 — Async generation and disposal guards
+
+### Implementation
+
+- [ ] Add generation tokens to `MediaTabController` category loads and pagination.
+- [ ] Add generation tokens to `LiveController` loads and refreshes.
+- [ ] Guard source/profile loading in `HomeShell`.
+- [ ] Guard asynchronous metadata enrichment.
+- [ ] Publish results only if controller, generation, source, profile, and category
+  still match the request.
+- [ ] Define refresh versus `loadMore` precedence explicitly.
+- [ ] Prevent notification after controller disposal.
+
+### Verification
+
+- [ ] Category A returning after category B cannot replace B.
+- [ ] Old source response cannot replace a new profile/source.
+- [ ] Refresh supersedes an outstanding pagination request.
+- [ ] Dispose during a request causes no notification or exception.
+- [ ] Old metadata enrichment cannot mutate a newer result.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 7 — EPG atomicity, empty results, and indexing
+
+### Implementation
+
+- [ ] Treat a normally completed empty EPG result as a successful replacement.
+- [ ] Clear old programmes and update freshness for success-empty.
+- [ ] Retain the last good cache after exceptions or timeouts.
+- [ ] Replace programmes and refresh timestamp in one transaction.
+- [ ] Add the measured index needed by source/time now-next queries.
+- [ ] Confirm index use with `EXPLAIN QUERY PLAN`.
+- [ ] Avoid constructing duplicate full replacement datasets in memory.
+
+### Verification
+
+- [ ] Success-empty clears stale programmes.
+- [ ] Failure retains old programmes and records refresh failure.
+- [ ] Transaction failure leaves the previous complete EPG intact.
+- [ ] Fresh and upgraded databases contain the new index.
+- [ ] Large now-next lookup selects the intended index.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 8 — MethodChannel handler ownership
+
+### Implementation
+
+- [ ] Add an owner token for each registered static channel handler.
+- [ ] Clear a handler only when the disposing owner is still current.
+- [ ] Ignore callbacks delivered to disposed or superseded owners.
+- [ ] Apply identical cleanup rules to Android and Windows.
+- [ ] Apply the helper to preview and full-screen player ownership.
+
+### Verification
+
+- [ ] Old preview disposal cannot clear a newer preview handler.
+- [ ] A popped player ignores late position, favorite, and error callbacks.
+- [ ] Android handler cleanup matches Windows cleanup.
+- [ ] Repeated route cycles leave exactly one active owner.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 9 — Native player lifecycle
+
+### Android implementation and validation
+
+- [ ] Preview adoption leaves one active player and one audible stream.
+- [ ] ExoPlayer-to-MPV fallback releases the failed engine.
+- [ ] Route pop and Back release or transfer ownership correctly.
+- [ ] Home/background/foreground transitions behave correctly.
+- [ ] PiP entry, exit, Back, and forced close behave correctly.
+- [ ] Activity/process recreation restores or fails safely.
+- [ ] Headers, subtitles, tracks, seek, speed, and volume retain supported parity.
+- [ ] Reconnect cannot revive a superseded source.
+- [ ] PlatformView disposal releases the surface and native references.
+
+### Windows implementation and validation
+
+- [ ] Partial HWND/D3D initialization failure cleans up safely.
+- [ ] Embedded/fullscreen/mini-player transitions do not leak surfaces.
+- [ ] Parent resize, DPI change, and monitor change behave correctly.
+- [ ] Forced close with callbacks pending does not access disposed state.
+- [ ] Overlay commands after Dart route disposal are ignored.
+- [ ] Reconnect works after surface recreation.
+
+### Verification
+
+- [ ] Debug-only counters exist for engines, surfaces, reconnect timers, and owners.
+- [ ] A 100-cycle Android open/close soak returns counters to zero.
+- [ ] A 100-cycle Windows open/close soak returns counters to zero.
+- [ ] Android phone device matrix passes.
+- [ ] Android TV device matrix passes.
+- [ ] Windows SDR device matrix passes.
+- [ ] Windows HDR device matrix passes.
+- [ ] No bridge redesign is made without measured correctness or performance need.
+
+## PR 10 — Bounded one-pass isolate ingestion
+
+### Implementation
+
+- [ ] Xtream: decode and map large responses within one worker job.
+- [ ] Stalker: join, decode, and map large channel responses in one worker job.
+- [ ] XMLTV: decompress, parse, and return compact programme batches.
+- [ ] M3U: decode and parse with bounded batches.
+- [ ] Avoid returning both a giant dynamic graph and a typed graph.
+- [ ] Prevent cancelled or stale batches from reaching the repository.
+- [ ] Retain measured inline paths for genuinely small payloads.
+
+### Verification
+
+- [ ] Main-isolate stalls meet the PR 0 budget on the low-memory TV device.
+- [ ] Peak memory remains within the agreed regression allowance.
+- [ ] Cancellation stops publication of subsequent batches.
+- [ ] Malformed data has deterministic partial-failure behavior.
+- [ ] Results match the existing parser fixture corpus.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 11 — Cloud, RLS, RPC, and panel hardening
+
+### Implementation
+
+- [ ] Set a fixed `search_path` in every `SECURITY DEFINER` function.
+- [ ] Enforce ownership in every profile/snapshot RPC.
+- [ ] Validate JSON shape, field lengths, array counts, and total payload size.
+- [ ] Make pairing completion single-use and transactionally safe.
+- [ ] Apply rate limits at the API/edge boundary.
+- [ ] Validate source schemes and field lengths in the panel.
+- [ ] Prevent panel errors from echoing credential-bearing input.
+- [ ] Document last-write-wins behavior and timestamp authority.
+
+### Verification
+
+- [ ] Cross-user profile read/write attempts fail.
+- [ ] Expired pairing codes fail.
+- [ ] Completed pairing codes cannot be replayed.
+- [ ] Concurrent profile creation cannot exceed the profile cap.
+- [ ] Invalid or excessive push payloads fail before mutation.
+- [ ] Clock-skew and equal-timestamp conflict cases are deterministic.
+- [ ] Panel rendering and validation tests pass.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 12 — Historical migration coverage
+
+- [ ] List schema versions that shipped publicly.
+- [ ] Remove unsupported intermediate versions from the compatibility claim.
+- [ ] Add a sanitized database fixture for each supported historical version.
+- [ ] Open and migrate every fixture.
+- [ ] Compare tables, columns, indexes, constraints, and foreign keys with fresh DB.
+- [ ] Validate representative favorites, positions, EPG, and metadata after upgrade.
+- [ ] Open every migrated fixture a second time to prove stable startup.
+- [ ] Update `AppDatabase.schemaVersion` documentation after migrations land.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 13 — Split oversized UI files
+
+- [ ] Keep `channel_list_screen.dart` responsible for shell, routes, and dialogs.
+- [ ] Extract live pane widgets without moving their state ownership.
+- [ ] Extract media grid/details widgets without moving controller state.
+- [ ] Separate player lifecycle coordination from platform presentation widgets.
+- [ ] Preserve the current `ChangeNotifier`/`Listenable` design.
+- [ ] Preserve focus-node ownership and disposal exactly.
+- [ ] Avoid abstractions without at least two concrete consumers.
+- [ ] Run focused widget tests after each extraction.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 14 — Catch-up capability and timezone model
+
+- [ ] Model provider catch-up URL mode.
+- [ ] Model provider timezone or explicit fixed offset.
+- [ ] Model maximum archive window and duration.
+- [ ] Model required start/end formatting.
+- [ ] Keep URL construction inside the owning Source implementation.
+- [ ] Prefer provider-reported timezone when available.
+- [ ] Add an advanced per-source override.
+- [ ] Parse applicable M3U catch-up attributes into the shared capability model.
+- [ ] Test device/provider timezone disagreement.
+- [ ] Test DST boundaries.
+- [ ] Test unsupported catch-up as an explicit capability, not a failed URL guess.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 15 — TV focus, accessibility, and input parity
+
+### Automated behavior
+
+- [ ] Category/channel/EPG pane boundaries match documented navigation.
+- [ ] Up/down wrapping rules match documented navigation.
+- [ ] Search open/close restores the intended focus target.
+- [ ] Back ladder does not clear or change data prematurely.
+- [ ] Dialog and sheet dismissal restores focus.
+- [ ] In-row favorite activation preserves logical selection.
+- [ ] Return from native playback restores focus.
+- [ ] Async rebuild retains logical selection and usable focus.
+- [ ] Held-key repeat cannot issue duplicate activation.
+
+### Semantics
+
+- [ ] Custom rows expose selected state.
+- [ ] Rows expose useful channel/programme labels.
+- [ ] Lists/grids expose position information where practical.
+- [ ] Favorite state and actions are exposed.
+- [ ] Custom controls expose an activation action.
+
+### Device matrix
+
+| Flow | Android TV D-pad | Android touch | Windows keyboard | Windows mouse |
+|---|---|---|---|---|
+| Live browsing | [ ] | [ ] | [ ] | [ ] |
+| Search/text fields | [ ] | [ ] | [ ] | [ ] |
+| Player overlay | [ ] | [ ] | [ ] | [ ] |
+| EPG grid | [ ] | [ ] | [ ] | [ ] |
+| PiP/mini-player | [ ] | [ ] | [ ] | [ ] |
+| Screen reader | [ ] TalkBack | [ ] TalkBack | [ ] Narrator | [ ] Narrator |
+
+## PR 16 — Diagnostics and conflict/capability UX
+
+- [ ] Report redacted compressed and decoded byte counts.
+- [ ] Report parse and database-write duration.
+- [ ] Report rejected-row counts without sensitive row contents.
+- [ ] Show cloud revision/timestamp and warn before destructive overwrite.
+- [ ] Preview snapshot restore effects.
+- [ ] Show provider EPG/catch-up/resolution capabilities.
+- [ ] Show cache size and last successful refresh by source.
+- [ ] Offer a safe cache re-ingestion action.
+- [ ] Ensure exported diagnostics remain credential-safe.
+- [ ] `flutter analyze` and `flutter test` pass.
+
+## PR 17 — Microsoft Store MSIX distribution
+
+- [x] Reserve the public product name `IPTVS Player` as an MSIX app in Partner
+  Center.
+- [x] Record the exact Package Identity Name, Publisher, publisher display name,
+  product name, PFN, Package SID, and Store ID in `docs/store-publishing.md`.
+- [ ] Add deterministic x64 MSIX packaging using those identity values.
+- [x] Add explicit `development`, `githubDirect`, `googlePlay`, and
+  `microsoftStore` build-time distribution channels.
+- [x] Disable GitHub update checks and PowerShell replacement in Store builds.
+- [ ] Keep Store and GitHub-direct Windows artifacts in separate workflow jobs.
+- [ ] Use four-part MSIX versions with the fourth component set to `0`.
+- [ ] Validate the packaged app writes only to supported app-data/cache locations.
+- [ ] Run Windows App Certification Kit against the packaged Release build.
+- [ ] Test Store flighting install, upgrade, rollback, uninstall, secure storage,
+  HDR/SDR playback, libmpv loading, and firewall behavior.
+- [ ] Provide privacy/support URLs, listing assets, age rating, and a credential-free
+  demo path for certification.
+- [ ] Confirm Store signing on the downloaded certified package.
+
+## Release-candidate gate
+
+### Security
+
+- [ ] Release builds use no committed or debug signing material.
+- [ ] Expected Android signing fingerprint is verified by CI.
+- [ ] Update manifest signature and artifact digest are verified end to end.
+- [ ] Downgrades, invalid archives, and unapproved redirects are rejected.
+- [ ] No raw provider credentials exist in SQLite, cloud payloads, diagnostics, or
+  source summaries.
+
+### Correctness and persistence
+
+- [ ] Fresh-install and upgraded schemas match.
+- [ ] Every supported historical migration passes.
+- [ ] EPG success-empty, failure retention, and atomic replacement pass.
+- [ ] Source/profile/category race tests pass.
+- [ ] No tested controller or channel handler notifies a disposed owner.
+
+### Performance
+
+- [ ] Large M3U, Xtream, Stalker, and XMLTV fixtures meet agreed budgets.
+- [ ] Network and decompression limits reject hostile fixtures.
+- [ ] Now-next EPG lookup uses the intended index.
+- [ ] Peak memory remains within the agreed regression allowance.
+
+### Native platforms
+
+- [ ] Android release build succeeds and certificate is verified.
+- [ ] Android phone lifecycle matrix passes on a device.
+- [ ] Android TV lifecycle and focus matrices pass on a device.
+- [ ] Windows x64 release build succeeds.
+- [ ] Windows SDR and HDR lifecycle matrices pass on hardware.
+- [ ] Android and Windows 100-cycle playback soaks return resource counters to zero.
+
+### General quality
+
+- [ ] `flutter analyze` passes.
+- [ ] `flutter test` passes.
+- [ ] CI workflows pass from a clean checkout.
+- [ ] README toolchain versions match CI.
+- [ ] `CLAUDE.md` schema and architecture claims match implementation.
+- [ ] `docs/player.md`, `docs/tv-navigation.md`, `docs/cloud-sync.md`, and
+  `docs/updates.md` describe the released behavior.
+
+## Decision log
+
+Add an entry before implementing any choice that materially changes compatibility,
+security, persisted data, or provider behavior.
+
+| Date | Decision | Reason | Consequences | PR |
+|---|---|---|---|---|
+| 2026-07-14 | Use a staged PR programme rather than a state-management rewrite | Existing ChangeNotifier/Listenable boundaries are workable; findings are local correctness and lifecycle problems | Keep current state-management approach | Planning |
+| 2026-07-14 | Treat Android signing and updater trust as release blockers | The committed release signing key and unsigned update flow undermine update authenticity | No normal release before PRs 1–2 | Planning |
+| 2026-07-14 | Use `IPTVS Player` as the customer-facing Microsoft Store and Google Play title | `iptvs` was unavailable in Partner Center; Store titles are presentation metadata and need not match package/application IDs | Use the reserved name consistently while keeping technical identities channel-specific | Store setup |
+| 2026-07-14 | Store builds use Store-managed updates; only GitHub-direct builds may switch between signed GitHub stable/beta releases | Play prohibits self-update package installation and packaged MSIX updates are Store-owned | Use Store test tracks/flights only for submission validation; ongoing public betas use GitHub direct | PR 2 / Store setup |
+| 2026-07-14 | Keep Store and GitHub-direct installations on separate identities | The owner prefers low-overhead GitHub beta distribution without Store signing, policy, or version conflicts | Play uses `com.gchofficial.iptvs.player`; GitHub direct uses `.player.direct`; Store builds never self-update | PR 1 / Store setup |
+
+## Progress log
+
+Add one short entry when a PR starts, changes scope, becomes blocked, or completes.
+
+| Date | PR | State | Evidence or next action |
+|---|---|---|---|
+| 2026-07-14 | Planning | Created | Begin PR 0 fixture and benchmark inventory |
+| 2026-07-14 | PR 0 | In progress | Added deterministic provider workloads, opt-in host/SQLite baseline, seeded public v8–v11 schema fixtures, and validation documentation; application-profile and native-device evidence remain |
+| 2026-07-14 | PR 1 | In progress | Selected side-by-side Play/GitHub-direct/development package IDs, configured permanent GitHub signing, and documented the authenticated cloud migration with exact retained/reset state; protected workflow and old/new device evidence remain |
+| 2026-07-14 | PR 2 | In progress | Added signed manifests, pre-connection redirect approval, exact artifact gates, Android package/signer verification, staged Windows rollback, immutable Action pins, downgrade rejection, and signed GitHub stable/beta selection; Windows CI, protected release, and device evidence remain |
+| 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow; upload-key backup confirmation, Play enrollment, and Store packages remain |
+
+## Removal checklist
+
+This document can be deleted when all of the following are true:
+
+- [ ] Every required release-candidate gate above is complete.
+- [ ] Deferred items have their own issue with scope and acceptance criteria.
+- [ ] Lasting architecture decisions are recorded in canonical documentation.
+- [ ] Schema/version/toolchain documentation matches the released tree.
+- [ ] Device-test evidence is retained outside this temporary ledger.
+- [ ] No active PR depends on context that exists only in this file.
+- [ ] The temporary implementation-plan link is removed from `CLAUDE.md`.
