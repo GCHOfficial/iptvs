@@ -166,9 +166,10 @@ their own lineage.
 - [x] Generate the separate Play upload key and configure its protected GitHub
   secrets. Certificate SHA-256 is
   `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
-- [ ] Confirm two encrypted backups of the Play upload key, enroll in Play App
-  Signing through the first AAB upload, and run the protected workflow with the
-  permanent upload certificate.
+- [x] Confirm two AES-256 password-protected backups of the Play upload key and
+  password in separate local and personal-cloud locations.
+- [ ] Enroll in Play App Signing through the first AAB upload and run the
+  protected workflow with the permanent upload certificate.
 - [x] Design a safe profile migration for each new application ID using the
   existing authenticated cloud push/pull path; exact steps and exclusions are
   recorded in `docs/android-signing.md`.
@@ -224,12 +225,11 @@ their own lineage.
   `resolveApprovedUpdateRedirect`; regression coverage includes HTTP, lookalike,
   user-info, and non-default-port destinations.
 - [x] Oversized artifact is rejected before installation.
-- [ ] Zip-slip and unexpected Windows layouts are rejected. Runtime PowerShell
-  tests are included in `test/windows_update_script_test.dart` and the Windows
-  CI job; check this after the first successful PR run.
-- [ ] Failed Windows replacement restores the previous installation. A runtime
-  rollback test is included in the Windows CI job; check this after the first
-  successful PR run.
+- [x] Zip-slip and unexpected Windows layouts are rejected. Runtime PowerShell
+  tests in `test/windows_update_script_test.dart` passed in PR #98's Windows CI
+  job on 2026-07-14.
+- [x] Failed Windows replacement restores the previous installation. The
+  runtime rollback test passed in PR #98's Windows CI job on 2026-07-14.
 - [x] `flutter analyze` and `flutter test` pass on 2026-07-14 (236 passed,
   7 opt-in baselines and 3 Windows-only tests skipped on Linux).
 
@@ -584,16 +584,17 @@ their own lineage.
 - [ ] Android release build succeeds and certificate is verified.
 - [ ] Android phone lifecycle matrix passes on a device.
 - [ ] Android TV lifecycle and focus matrices pass on a device.
-- [ ] Windows x64 release build succeeds.
+- [x] Windows x64 release build succeeds in PR #98 CI on 2026-07-14.
 - [ ] Windows SDR and HDR lifecycle matrices pass on hardware.
 - [ ] Android and Windows 100-cycle playback soaks return resource counters to zero.
 
 ### General quality
 
-- [ ] `flutter analyze` passes.
-- [ ] `flutter test` passes.
-- [ ] CI workflows pass from a clean checkout.
-- [ ] README toolchain versions match CI.
+- [x] `flutter analyze` passes locally and in PR #98 CI on 2026-07-14.
+- [x] `flutter test` passes locally and in PR #98 CI on 2026-07-14.
+- [x] PR #98 build, Android, Windows, CodeQL, and secret-scanning workflows pass
+  from a clean checkout on 2026-07-14.
+- [x] README and CI both declare Flutter 3.44.5.
 - [ ] `CLAUDE.md` schema and architecture claims match implementation.
 - [ ] `docs/player.md`, `docs/tv-navigation.md`, `docs/cloud-sync.md`, and
   `docs/updates.md` describe the released behavior.
@@ -620,8 +621,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | Planning | Created | Begin PR 0 fixture and benchmark inventory |
 | 2026-07-14 | PR 0 | In progress | Added deterministic provider workloads, opt-in host/SQLite baseline, seeded public v8–v11 schema fixtures, and validation documentation; application-profile and native-device evidence remain |
 | 2026-07-14 | PR 1 | In progress | Selected side-by-side Play/GitHub-direct/development package IDs, configured permanent GitHub signing, and documented the authenticated cloud migration with exact retained/reset state; protected workflow and old/new device evidence remain |
-| 2026-07-14 | PR 2 | In progress | Added signed manifests, pre-connection redirect approval, exact artifact gates, Android package/signer verification, staged Windows rollback, immutable Action pins, downgrade rejection, and signed GitHub stable/beta selection; Windows CI, protected release, and device evidence remain |
-| 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow; upload-key backup confirmation, Play enrollment, and Store packages remain |
+| 2026-07-14 | PR 2 | In progress | Added signed manifests, pre-connection redirect approval, exact artifact gates, Android package/signer verification, staged Windows rollback, immutable Action pins, downgrade rejection, and signed GitHub stable/beta selection; PR #98 Windows rejection/rollback CI passed, while protected release and device evidence remain |
+| 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow, with two encrypted backups confirmed; Play enrollment and Store packages remain |
 
 ## Removal checklist
 

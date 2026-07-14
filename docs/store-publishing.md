@@ -107,8 +107,8 @@ Play Console identity verification and application creation completed on
   the first signed AAB using Google's recommended default.
 - [x] Generate and configure a separate Play upload key. Permanent upload
   certificate SHA-256 is `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
-- [ ] Confirm two encrypted offline backups of the Play upload keystore and
-  password.
+- [x] Confirm two AES-256 password-protected backups of the Play upload
+  keystore and password in separate local and personal-cloud locations.
 - [x] Add a protected App Bundle build using the upload key.
 - [x] Verify the AAB package name, updater exclusions, archive signature, and
   expected upload certificate in CI.
