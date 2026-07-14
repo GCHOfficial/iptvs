@@ -44,7 +44,6 @@ dependencies:
   path_provider: ^2.1.6
   xml: ^7.0.1
   flutter_secure_storage: ^10.3.1
-  google_fonts: ^8.1.0
   crypto: ^3.0.7
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
@@ -101,6 +100,19 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Bundled for deterministic offline rendering. These same files are used by
+  # the native Android player controls, so Flutter must not fetch fonts at
+  # runtime from a third-party host.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: android/app/src/main/res/font/inter_regular.ttf
+          weight: 400
+        - asset: android/app/src/main/res/font/inter_semibold.ttf
+          weight: 600
+        - asset: android/app/src/main/res/font/inter_bold.ttf
+          weight: 700
 
   # To add assets to your application, add an assets section, like this:
   # assets:

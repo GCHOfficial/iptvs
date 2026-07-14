@@ -15,6 +15,7 @@ import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
+import 'legal_screen.dart';
 import 'profile_pick_screen.dart';
 import 'source_settings_screen.dart';
 import 'update_flow.dart';
@@ -220,6 +221,13 @@ class _SourcesScreenState extends State<SourcesScreen> {
                     MetadataSettingsScreen(store: widget.store, db: widget.db),
               ),
             ),
+          ),
+          IconButton(
+            tooltip: 'Privacy & support',
+            icon: const Icon(Icons.info_outline),
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),
           ),
           const SizedBox(width: 4),
         ],

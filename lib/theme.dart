@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 /// Design tokens.
 class AppColors {
@@ -24,8 +23,7 @@ class AppRadius {
 const double kWideLayoutMinWidth = 950;
 
 class AppTheme {
-  /// Text-button styling, exposed separately from [dark] (which pulls
-  /// GoogleFonts and so can't be built in fake-clock widget tests). The
+  /// Text-button styling, exposed separately from [dark]. The
   /// focused state carries an accent ring + fill — the default overlay tint
   /// alone is invisible on dark dialog panels (the EPG programme dialog's
   /// "Close" looked unfocused on TV).
@@ -65,13 +63,14 @@ class AppTheme {
       brightness: Brightness.dark,
     ).copyWith(surface: AppColors.ink, primary: AppColors.accent);
 
-    final text = GoogleFonts.interTextTheme(
-      base.textTheme,
-    ).apply(bodyColor: AppColors.textHi, displayColor: AppColors.textHi);
+    final text = base.textTheme.apply(
+      fontFamily: 'Inter',
+      bodyColor: AppColors.textHi,
+      displayColor: AppColors.textHi,
+    );
 
-    // Space Grotesk for titles gives the type a little personality.
     TextStyle? display(TextStyle? s) =>
-        GoogleFonts.spaceGrotesk(textStyle: s, fontWeight: FontWeight.w600);
+        s?.copyWith(fontFamily: 'Inter', fontWeight: FontWeight.w600);
 
     return base.copyWith(
       scaffoldBackgroundColor: AppColors.ink,

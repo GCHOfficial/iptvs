@@ -59,6 +59,7 @@ async function render() {
         ${navButton('metadata', 'Metadata')}
         ${navButton('profiles', 'Profiles')}
         ${navButton('devices', 'Devices')}
+        ${navButton('account', 'Account')}
       </nav>
       <select id="profile" class="profile-select" title="Active profile">
         ${(profiles ?? []).map((p) =>
@@ -79,7 +80,8 @@ async function render() {
   if (tab === 'sources') renderSources();
   else if (tab === 'metadata') renderMetadata();
   else if (tab === 'profiles') renderProfiles();
-  else renderDevices();
+  else if (tab === 'devices') renderDevices();
+  else renderAccount();
 }
 
 const navButton = (id, label) =>
@@ -113,6 +115,11 @@ function renderLogin() {
         <button type="submit">Email me a sign-in link</button>
       </form>
       <p id="msg" class="muted"></p>
+      <p class="legal-links">
+        <a href="${import.meta.env.BASE_URL}privacy.html">Privacy</a>
+        <span aria-hidden="true"> · </span>
+        <a href="${import.meta.env.BASE_URL}support.html">Support</a>
+      </p>
     </div>`;
   const redirectTo = window.location.origin + import.meta.env.BASE_URL;
   document.getElementById('magic').onsubmit = async (e) => {
@@ -478,4 +485,58 @@ async function revokeDevice(id) {
   const { error } = await supabase.from('devices').delete().eq('device_uid', id);
   if (error) return toast(error.message, true);
   renderDevices();
+}
+
+// --------------------------------------------------------------- account
+
+function renderAccount() {
+  view().innerHTML = `
+    <section class="account-section">
+      <h2>Account</h2>
+      <p class="muted">Signed in as ${esc(session.user.email || 'this account')}.</p>
+      <p>
+        <a href="${import.meta.env.BASE_URL}privacy.html">Privacy policy</a>
+        <span aria-hidden="true"> · </span>
+        <a href="${import.meta.env.BASE_URL}support.html">Support</a>
+      </p>
+      <div class="danger-zone">
+        <h3>Delete cloud account</h3>
+        <p>
+          Permanently deletes this account, its profiles, source configurations,
+          metadata settings, favorites, and device pairings. Local data already
+          stored on a device is not deleted.
+        </p>
+        <button id="delete-account" class="danger-solid">Delete cloud account</button>
+      </div>
+    </section>`;
+  document.getElementById('delete-account').onclick = deleteAccount;
+}
+
+async function deleteAccount() {
+  const confirmation = prompt(
+    'This cannot be undone. Type DELETE to permanently delete your cloud account.',
+    '',
+  );
+  if (confirmation !== 'DELETE') {
+    if (confirmation !== null) toast('Account deletion cancelled.', true);
+    return;
+  }
+
+  const button = document.getElementById('delete-account');
+  button.disabled = true;
+  button.textContent = 'Deleting…';
+  const { error } = await supabase.rpc('delete_account');
+  if (error) {
+    button.disabled = false;
+    button.textContent = 'Delete cloud account';
+    return toast(error.message, true);
+  }
+
+  localStorage.removeItem('iptvs_profile');
+  currentProfileId = null;
+  profiles = null;
+  await supabase.auth.signOut({ scope: 'local' });
+  session = null;
+  renderLogin();
+  toast('Cloud account deleted.');
 }
