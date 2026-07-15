@@ -17,6 +17,27 @@ The generated PowerShell updater integration tests deliberately skip on Linux
 and execute in the Windows CI job, where they can exercise archive rejection and
 rollback against the actual Windows PowerShell/runtime semantics.
 
+## Network workload limits
+
+All Dart HTTP clients use the named policies in `lib/data/net.dart`. Each
+operation has both a non-resetting total deadline and an idle chunk timeout;
+the reader checks the declared `Content-Length` before subscribing and checks
+the actual byte count while streaming, so a missing or false length cannot
+bypass the ceiling. Clients disable automatic gzip handling so compressed bytes
+are bounded before `gzip` decoding. Gzip output is bounded and decoded in an
+isolate for large/provider-controlled responses.
+
+The policies are intentionally workload-specific: metadata and Stalker JSON are
+small, while playlists, EPG, and Xtream catalogs allow the larger PR 0 fixtures.
+Update artifacts stream to a temporary partial file, hash as they arrive, and
+delete that file on cancellation, timeout, or validation failure. Provider
+parsers still receive a bounded byte buffer; PR 10 will replace that final buffer
+with one-pass isolate/file ingestion once the parser boundaries are tested.
+
+The regression contract is in `test/net_workload_test.dart`: slow-drip total
+deadlines, idle stalls, early/streamed size enforcement, hostile gzip expansion,
+legitimate gzip, and partial-file cleanup.
+
 Run the opt-in large-ingestion baseline separately so normal CI does not allocate
 hundreds of megabytes for the 250,000-channel workload:
 

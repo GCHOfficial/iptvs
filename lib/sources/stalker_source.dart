@@ -150,7 +150,8 @@ class StalkerSource implements Source {
   final bool diagnostics;
 
   final HttpClient _http = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 10);
+    ..connectionTimeout = const Duration(seconds: 10)
+    ..autoUncompress = false;
 
   String? _endpoint;
   String? _referer;
@@ -177,8 +178,9 @@ class StalkerSource implements Source {
   String get id => 'stalker:$portal|$mac';
 
   @override
-  String get name =>
-      displayName?.trim().isNotEmpty == true ? displayName!.trim() : 'Stalker · $mac';
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'Stalker · $mac';
 
   @override
   Future<void> connect() async {
@@ -937,7 +939,8 @@ class StalkerSource implements Source {
     final raw = ch['tv_archive_duration'] ?? ch['archive_duration'];
     final days = raw is int ? raw : (int.tryParse('${raw ?? ''}') ?? 0);
     if (days > 0) return days;
-    final on = ch['archive'] == 1 ||
+    final on =
+        ch['archive'] == 1 ||
         ch['archive'] == '1' ||
         ch['allow_archive'] == 1 ||
         ch['allow_archive'] == '1';
@@ -1903,7 +1906,8 @@ class StalkerSource implements Source {
       endpoint,
     ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
-      final req = await _http.getUrl(uri);
+      final operation = HttpOperation(kStalkerJsonWorkload);
+      final req = await operation.wait(_http.getUrl(uri));
       req.followRedirects = true;
       req.headers
         ..set(HttpHeaders.userAgentHeader, profile.userAgent)
@@ -1915,11 +1919,9 @@ class StalkerSource implements Source {
         req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
       }
 
-      final resp = await req.close().timeout(kHttpReadTimeout);
-      final body = await resp
-          .transform(utf8.decoder)
-          .join()
-          .timeout(kHttpReadTimeout);
+      final resp = await operation.wait(req.close());
+      final bytes = await operation.readBytes(resp);
+      final body = utf8.decode(bytes, allowMalformed: true);
       _debug(
         '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
         'body=${body.length}B',

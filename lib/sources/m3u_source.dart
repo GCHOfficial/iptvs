@@ -20,7 +20,8 @@ class M3uSource implements Source {
   final String? userAgent;
 
   final HttpClient _http = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 15);
+    ..connectionTimeout = const Duration(seconds: 15)
+    ..autoUncompress = false;
 
   List<Channel>? _channels;
   List<Category>? _categories;
@@ -73,8 +74,10 @@ class M3uSource implements Source {
   }
 
   @override
-  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
-      throw UnsupportedError('M3U playlists do not support catch-up');
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => throw UnsupportedError('M3U playlists do not support catch-up');
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
@@ -86,7 +89,7 @@ class M3uSource implements Source {
       if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
     }
     if (map.isEmpty) return const [];
-    final bytes = await _download(Uri.parse(url));
+    final bytes = await _download(Uri.parse(url), kEpgWorkload);
     return parseXmltv(bytes, map);
   }
 
@@ -135,7 +138,7 @@ class M3uSource implements Source {
 
   Future<void> _ensureParsed() async {
     if (_channels != null) return;
-    final bytes = await _download(Uri.parse(playlistUrl));
+    final bytes = await _download(Uri.parse(playlistUrl), kPlaylistWorkload);
     // Decode + parse on a background isolate: a large playlist (tens of MB,
     // tens of thousands of channels) would otherwise stall the UI thread for
     // hundreds of ms while building Channel objects.
@@ -145,17 +148,18 @@ class M3uSource implements Source {
     _headerEpgUrl = parsed.headerEpgUrl;
   }
 
-  Future<Uint8List> _download(Uri uri) async {
-    final req = await _http.getUrl(uri);
+  Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
+    final operation = HttpOperation(policy);
+    final req = await operation.wait(_http.getUrl(uri));
     if (userAgent != null) {
       req.headers.set(HttpHeaders.userAgentHeader, userAgent!);
     }
-    final resp = await req.close().timeout(kHttpReadTimeout);
+    final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
       // redactUrl strips credentials some providers embed in the playlist URL.
       throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
     }
-    return resp.readBytes();
+    return operation.readBytes(resp);
   }
 }
 

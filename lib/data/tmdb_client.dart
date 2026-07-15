@@ -13,7 +13,11 @@ class TmdbClient implements MetadataProvider {
 
   TmdbClient({required String apiKey, HttpClient? http})
     : apiKey = MetadataConfig.normalizeTmdbCredential(apiKey),
-      _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+      _http =
+          http ??
+          (HttpClient()
+            ..connectionTimeout = _connectTimeout
+            ..autoUncompress = false);
 
   static const _connectTimeout = Duration(seconds: 15);
 
@@ -114,15 +118,16 @@ class TmdbClient implements MetadataProvider {
   }
 
   Future<Uint8List> _download(Uri uri) async {
-    final request = await _http.getUrl(uri);
+    final operation = HttpOperation(kMetadataJsonWorkload);
+    final request = await operation.wait(_http.getUrl(uri));
     if (usesBearerToken) {
       request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $apiKey');
     }
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final response = await operation.wait(request.close());
     if (response.statusCode != 200) {
       throw StateError('TMDB HTTP ${response.statusCode} auth=$authMode');
     }
-    return response.readBytes();
+    return operation.readBytes(response);
   }
 
   ExternalMetadata _mapDetails(

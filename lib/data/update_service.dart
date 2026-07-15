@@ -97,7 +97,11 @@ class UpdateService {
     this.track = UpdateTrack.stable,
     this.manifestPublicKey = kUpdateManifestPublicKey,
     ReleaseManifestVerifier manifestVerifier = const ReleaseManifestVerifier(),
-  }) : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout),
+  }) : _http =
+           http ??
+           (HttpClient()
+             ..connectionTimeout = _connectTimeout
+             ..autoUncompress = false),
        _verifier = manifestVerifier;
 
   final HttpClient _http;
@@ -109,8 +113,6 @@ class UpdateService {
 
   static const _connectTimeout = Duration(seconds: 15);
   static const _userAgent = 'iptvs-updater';
-  static const _maxDiscoveryBytes = 1024 * 1024;
-
   Uri get _latestUrl => track == UpdateTrack.beta
       ? Uri.parse(
           'https://api.github.com/repos/$owner/$repo/releases?per_page=20',
@@ -121,26 +123,26 @@ class UpdateService {
   /// excludes drafts and pre-releases). A 404 means no releases exist yet and
   /// is treated as "up to date" (null), not an error.
   Future<ReleaseInfo?> fetchLatest() async {
+    final operation = HttpOperation(kUpdateDiscoveryWorkload);
     final response = await openApprovedUpdateGet(
       _http,
       _latestUrl,
+      operation: operation,
       headers: const {
         HttpHeaders.acceptHeader: 'application/vnd.github+json',
         HttpHeaders.userAgentHeader: _userAgent,
       },
     );
     if (response.statusCode == 404) {
-      await response.drain<void>();
+      await operation.readBytes(response);
       DiagnosticsLog.instance.add('update', 'No releases published yet');
       return null;
     }
     if (response.statusCode != 200) {
-      await response.drain<void>();
+      await operation.readBytes(response);
       throw StateError('GitHub HTTP ${response.statusCode}');
     }
-    final data = jsonDecode(
-      utf8.decode(await _readLimited(response, _maxDiscoveryBytes)),
-    );
+    final data = jsonDecode(utf8.decode(await operation.readBytes(response)));
     final releaseJson = selectReleasePayload(data, track);
     if (releaseJson == null) return null;
     final discovery = _ReleaseDiscovery.fromJson(
@@ -196,16 +198,24 @@ class UpdateService {
     if (!isApprovedUpdateUri(url)) {
       throw const FormatException('Unapproved update host');
     }
+    final operation = HttpOperation(
+      kUpdateDiscoveryWorkload.copyWith(
+        name: 'update metadata',
+        maximumBodyBytes: maximumBytes,
+        maximumDecodedBytes: maximumBytes,
+      ),
+    );
     final response = await openApprovedUpdateGet(
       _http,
       url,
+      operation: operation,
       headers: const {HttpHeaders.userAgentHeader: _userAgent},
     );
     if (response.statusCode != 200) {
-      await response.drain<void>();
+      await operation.readBytes(response);
       throw StateError('Update metadata HTTP ${response.statusCode}');
     }
-    return _readLimited(response, maximumBytes);
+    return operation.readBytes(response);
   }
 
   Future<String> currentVersion() => appVersion();
@@ -233,25 +243,6 @@ Map<String, dynamic>? selectReleasePayload(Object? data, UpdateTrack track) {
     }
   }
   return selected;
-}
-
-Future<Uint8List> _readLimited(
-  HttpClientResponse response,
-  int maximumBytes,
-) async {
-  if (response.contentLength > maximumBytes) {
-    throw const FormatException('Update metadata exceeds size limit');
-  }
-  final builder = BytesBuilder(copy: false);
-  var received = 0;
-  await for (final chunk in response.timeout(kHttpReadTimeout)) {
-    received += chunk.length;
-    if (received > maximumBytes) {
-      throw const FormatException('Update metadata exceeds size limit');
-    }
-    builder.add(chunk);
-  }
-  return builder.takeBytes();
 }
 
 bool isApprovedUpdateUri(Uri uri) =>
@@ -286,6 +277,7 @@ Uri resolveApprovedUpdateRedirect(Uri current, String location) {
 Future<HttpClientResponse> openApprovedUpdateGet(
   HttpClient http,
   Uri initial, {
+  required HttpOperation operation,
   Map<String, String> headers = const {},
   int maximumRedirects = 5,
 }) async {
@@ -294,16 +286,16 @@ Future<HttpClientResponse> openApprovedUpdateGet(
   }
   var current = initial;
   for (var redirects = 0; redirects <= maximumRedirects; redirects++) {
-    final request = await http.getUrl(current);
+    final request = await operation.wait(http.getUrl(current));
     request.followRedirects = false;
     for (final entry in headers.entries) {
       request.headers.set(entry.key, entry.value);
     }
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final response = await operation.wait(request.close());
     if (!response.isRedirect) return response;
 
     final location = response.headers.value(HttpHeaders.locationHeader);
-    await response.timeout(kHttpReadTimeout).drain<void>();
+    await operation.readBytes(response);
     if (location == null || location.trim().isEmpty) {
       throw const FormatException('Update redirect has no destination');
     }
