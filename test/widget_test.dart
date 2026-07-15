@@ -204,6 +204,7 @@ void main() {
     () async {
       final requestedPages = <String>[];
       final source = StalkerSource(
+        sourceId: 'stalker-test',
         portal: 'http://example.invalid/c/',
         mac: '00:1A:79:12:34:56',
         debugApi: (params) async {
@@ -248,6 +249,7 @@ void main() {
 
   group('Stalker series detail fallback', () {
     final source = StalkerSource(
+      sourceId: 'stalker-test',
       portal: 'http://example.invalid/c/',
       mac: '00:1A:79:12:34:56',
     );
@@ -439,6 +441,7 @@ void main() {
   group('Xtream live channels', () {
     test('maps the catch-up window from tv_archive fields', () async {
       final source = XtreamSource(
+        sourceId: 'xtream-test',
         host: 'http://example.invalid',
         username: 'user',
         password: 'pass',
@@ -472,6 +475,7 @@ void main() {
     test('oversized live catalog falls back to category partitions', () async {
       var unfilteredCalls = 0;
       final source = XtreamSource(
+        sourceId: 'xtream-test',
         host: 'http://example.invalid',
         username: 'user',
         password: 'pass',
@@ -514,6 +518,7 @@ void main() {
 
     test('resolveArchive builds a timeshift URL for a past programme', () async {
       final source = XtreamSource(
+        sourceId: 'xtream-test',
         host: 'http://example.invalid',
         username: 'user',
         password: 'pass',
@@ -551,6 +556,7 @@ void main() {
 
   group('Xtream series mapping', () {
     final source = XtreamSource(
+      sourceId: 'xtream-test',
       host: 'http://example.invalid',
       username: 'user',
       password: 'pass',
@@ -588,6 +594,7 @@ void main() {
 
     test('returns bounded category pages for large VOD lists', () async {
       final source = XtreamSource(
+        sourceId: 'xtream-test',
         host: 'http://example.invalid',
         username: 'user',
         password: 'pass',
@@ -626,6 +633,7 @@ void main() {
       () async {
         var unfilteredVodCalls = 0;
         final source = XtreamSource(
+          sourceId: 'xtream-test',
           host: 'http://example.invalid',
           username: 'user',
           password: 'pass',
@@ -665,6 +673,7 @@ void main() {
       () async {
         var unfilteredVodCalls = 0;
         final source = XtreamSource(
+          sourceId: 'xtream-test',
           host: 'http://example.invalid',
           username: 'user',
           password: 'pass',

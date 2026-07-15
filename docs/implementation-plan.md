@@ -26,9 +26,9 @@ Status convention:
 ## Current status
 
 - Last updated: 2026-07-15
-- Active phase: Phase 0 — Release and security blockers
-- Active PR: PR 3 follow-up — transient source-load recovery
-- Previous PR: PR 3 — Bound HTTP and decompression workloads (merged as #101)
+- Active phase: Phase 0 — Stable identities and credential removal
+- Active PR: PR 4 — Stable source and cache identities
+- Previous PR: PR 3 follow-up — merged as #102 and released as v0.1.32
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 262 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 269 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -49,10 +49,12 @@ Status convention:
 
 ## Non-negotiable sequencing
 
-- [ ] Do not publish another normal release before Android signing recovery is
-  decided and update artifacts are authenticated.
-- [ ] Do not migrate credential-derived channel/source IDs without an atomic
-  preservation path for favorites, EPG, and playback positions.
+- [x] Do not publish another normal release before Android signing recovery is
+  decided and update artifacts are authenticated. v0.1.32 was published only
+  after PRs 1–3 merged and the protected signing/artifact gates passed.
+- [x] Do not migrate credential-derived channel/source IDs without an atomic
+  preservation path for favorites, EPG, and playback positions. PR 4 migrates
+  every related table in one SQLite transaction before the stable IDs are used.
 - [ ] Do not split the large player or browsing widgets before async-race and
   MethodChannel ownership regression tests exist.
 - [ ] Do not describe Android or Windows lifecycle work as fixed until the relevant
@@ -64,10 +66,10 @@ Status convention:
 | PR | Phase | Outcome | Effort | Dependencies | Status |
 |---|---|---|---:|---|---|
 | 0 | Foundation | Fixtures, benchmarks, and device matrix | M | None | Complete; deeper profiling deferred |
-| 1 | Phase 0 | Recover Android signing trust | L | PR 0 | In progress |
-| 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | In progress |
-| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Merged as #101 |
-| 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | [ ] |
+| 1 | Phase 0 | Recover Android signing trust | L | PR 0 | Complete; v0.1.32 verified |
+| 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | Complete; v0.1.32 verified |
+| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Complete; #101/#102 |
+| 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Ready for PR |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
@@ -191,12 +193,13 @@ their own lineage.
 - [x] A release build without signing secrets fails. Verified locally on
   2026-07-14 with an explicit missing-variable error.
 - [x] A debug build still succeeds. Verified locally on 2026-07-14.
-- [ ] CI verifies the permanent APK certificate fingerprint. Workflow logic and
-  protected environment configuration are present, but a protected run using
-  the permanent key has not yet supplied the verification evidence.
-- [ ] Run a minimum-SDK (API 26) install/start smoke test. Current API 36 phone
-  and TV paths, including the Play internal update, are verified; exhaustive
-  testing of every intermediate API is not a useful early-testing gate.
+- [x] CI verifies the permanent APK certificate fingerprint. The protected
+  v0.1.32 release workflow verified the signed GitHub-direct APK on 2026-07-15.
+- [x] Run a minimum-SDK (API 26) install/start smoke test. A 1 GiB, four-core
+  x86_64 phone emulator loaded the large Stalker source, played SDR/HDR/4K via
+  the supported fallback paths, and exercised PiP on 2026-07-15; the resulting
+  PiP return-stack defect was fixed in #102. The signed v0.1.32 APK also
+  installed and started successfully on the owner's phone.
 - [x] Profile/source/favorite retention or loss is explicitly documented and
   the authenticated cloud migration was exercised with the Play internal build
   on 2026-07-15. Sources/favorites restored and documented device-local
@@ -211,8 +214,8 @@ their own lineage.
   version, platform, exact filename, byte size, and SHA-256 digest.
 - [x] Sign the exact manifest bytes with an offline or protected CI key. The
   permanent encrypted private key/password secrets and public repository variable
-  were configured on 2026-07-14; a protected release run remains to verify them
-  end to end.
+  were configured on 2026-07-14; the protected v0.1.32 release run verified the
+  signed metadata and artifacts end to end on 2026-07-15.
 - [x] Embed only the public verification key in the application.
 - [x] Verify manifest signature before trusting any artifact metadata.
 - [x] Require HTTPS and an approved artifact host.
@@ -230,6 +233,9 @@ their own lineage.
 
 ### Verification
 
+- [x] Protected v0.1.32 CI generated and verified the signed manifest plus exact
+  Android/Windows artifacts before publishing the GitHub release; the signed
+  APK installed successfully on owner hardware on 2026-07-15.
 - [x] Altered manifest is rejected.
 - [x] Altered APK or ZIP digest is rejected by the shared artifact gate.
 - [x] Wrong byte size is rejected.
@@ -284,20 +290,22 @@ their own lineage.
 
 ### Implementation
 
-- [ ] Use `SourceConfig.id` as the repository/cache source namespace.
-- [ ] Stop deriving source identity from URLs, credentials, or MAC addresses.
-- [ ] Generate deterministic opaque M3U channel IDs from normalized locators.
-- [ ] Retain provider channel IDs when they are already opaque and stable.
-- [ ] Make favorites, positions, EPG, metadata, and cloud records use the same IDs.
-- [ ] Specify normalization rules and collision behavior in tests.
+- [x] Use `SourceConfig.id` as the repository/cache source namespace.
+- [x] Stop deriving source identity from URLs, credentials, or MAC addresses.
+- [x] Generate deterministic opaque M3U channel IDs from normalized locators.
+- [x] Retain provider channel IDs when they are already opaque and stable.
+- [x] Make favorites, positions, EPG, metadata, and cloud records use the same IDs.
+- [x] Specify normalization rules and collision behavior in tests and
+  `docs/source-identities.md`.
 
 ### Verification
 
-- [ ] Credential changes do not create an unrelated cache namespace.
-- [ ] Equivalent normalized M3U locators produce the same channel ID.
-- [ ] Distinct locators do not merge accidentally in the fixture corpus.
-- [ ] Provider-specific ID construction remains inside the owning Source.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Credential changes do not create an unrelated cache namespace.
+- [x] Equivalent normalized M3U locators produce the same channel ID.
+- [x] Distinct locators do not merge accidentally in the 1,000-locator corpus.
+- [x] Provider-specific ID construction remains inside the owning Source.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (269 passed,
+  10 platform/opt-in skips); Android development Kotlin compilation also passes.
 
 ## PR 5 — Remove persisted and displayed credentials
 
@@ -585,10 +593,15 @@ their own lineage.
 
 ### Security
 
-- [ ] Release builds use no committed or debug signing material.
-- [ ] Expected Android signing fingerprint is verified by CI.
-- [ ] Update manifest signature and artifact digest are verified end to end.
-- [ ] Downgrades, invalid archives, and unapproved redirects are rejected.
+- [x] Release builds use no committed or debug signing material. Verified by
+  the protected v0.1.32 release workflow.
+- [x] Expected Android signing fingerprint is verified by CI. Verified for the
+  v0.1.32 GitHub-direct APK.
+- [x] Update manifest signature and artifact digest are verified end to end by
+  the v0.1.32 protected release workflow; in-app GitHub-direct update remains a
+  PR4 follow-up tag/device check rather than a signing blocker.
+- [x] Downgrades, invalid archives, and unapproved redirects are rejected by the
+  PR2 regression suite.
 - [ ] No raw provider credentials exist in SQLite, cloud payloads, diagnostics, or
   source summaries.
 
@@ -603,13 +616,15 @@ their own lineage.
 ### Performance
 
 - [ ] Large M3U, Xtream, Stalker, and XMLTV fixtures meet agreed budgets.
-- [ ] Network and decompression limits reject hostile fixtures.
+- [x] Network and decompression limits reject hostile fixtures in
+  `test/net_workload_test.dart`.
 - [ ] Now-next EPG lookup uses the intended index.
 - [ ] Peak memory remains within the agreed regression allowance.
 
 ### Native platforms
 
-- [ ] Android release build succeeds and certificate is verified.
+- [x] Android release build succeeds and certificate is verified by the
+  protected v0.1.32 workflow; the APK installed successfully on owner hardware.
 - [ ] Android phone lifecycle matrix passes on a device.
 - [ ] Android TV lifecycle and focus matrices pass on a device.
 - [x] Windows x64 release build succeeds in PR #98 CI on 2026-07-14.
@@ -658,6 +673,10 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 0 | Complete | Android phone/TV profile baselines and longstanding Windows x64 SDR/HDR validation are sufficient for early testing. Deeper import/RSS/SQLite budgets are deferred until closed-testing feedback supplies representative problems. |
 | 2026-07-15 | PR 1 | Verification | Play accepted an initial internal AAB and its update; authenticated cloud migration restored sources/favorites and documented local exclusions began fresh. API 26 smoke and permanent GitHub-direct certificate evidence remain. |
 | 2026-07-15 | PR 2 | Verification | Tag `v0.1.31` exposed an Android build-tools output-format bug in certificate parsing after the signed APK built; parser accepts both legacy and current labels in the follow-up, then a new tag will provide end-to-end evidence. |
+| 2026-07-15 | PR 1 | Complete | Protected v0.1.32 CI verified the permanent GitHub-direct APK certificate; the signed APK installed on owner hardware, and API-26 x86_64 smoke passed on a 1 GiB/four-core emulator. |
+| 2026-07-15 | PR 2 | Complete | Protected v0.1.32 release produced signed manifests/artifacts, verified the exact APK identity/certificate, and installed successfully; the next tag will exercise the in-app GitHub-direct update path. |
+| 2026-07-15 | PR 3 follow-up | Complete | PR #102 merged transient retry/error sanitization, mobile SQLite-factory correction, signing-parser compatibility, and the API-26 PiP return-stack fix as `a909738`. |
+| 2026-07-15 | PR 4 | Ready for PR | SourceConfig UUID namespaces and opaque normalized M3U channel IDs are implemented with atomic cache/favorites/EPG/position/cloud migration; analyze, all 269 tests, and Android Kotlin compilation pass. Merge and tag next so v0.1.32 can exercise the GitHub-direct updater. |
 
 ## Removal checklist
 

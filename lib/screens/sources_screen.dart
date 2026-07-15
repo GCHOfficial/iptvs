@@ -786,6 +786,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     final creds = xtreamCredentialsFromUrl(uri);
     if (creds == null) return null;
     final probe = XtreamSource(
+      sourceId: m3u.id,
       host: creds.host,
       username: creds.username,
       password: creds.password,

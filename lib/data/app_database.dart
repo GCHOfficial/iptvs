@@ -9,6 +9,7 @@ import 'package:sqflite/sqflite.dart' as mobile_sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
+import '../sources/source_identity.dart';
 
 /// A saved VOD resume point (see `playback_positions`).
 class PlaybackPosition {
@@ -425,6 +426,129 @@ class AppDatabase {
       'CREATE INDEX IF NOT EXISTS idx_positions_source_updated '
       'ON playback_positions(source_id, updated_at)',
     );
+  }
+
+  /// Atomically moves every cache and user-state row from the pre-PR4
+  /// credential-derived namespace to the stable [SourceConfig.id] namespace.
+  ///
+  /// A destination collision aborts and rolls back the complete transaction;
+  /// callers must run this before publishing or caching rows under [toSourceId].
+  Future<void> migrateSourceNamespace(
+    String fromSourceId,
+    String toSourceId,
+  ) async {
+    if (fromSourceId == toSourceId) return;
+    await _db.transaction((txn) async {
+      for (final table in const [
+        'categories',
+        'channels',
+        'programmes',
+        'media_sync',
+        'media_categories',
+        'media_items',
+        'media_enrichment',
+        'media_page_state',
+        'external_metadata',
+        'favorites',
+        'playback_positions',
+      ]) {
+        await txn.update(
+          table,
+          {'source_id': toSourceId},
+          where: 'source_id = ?',
+          whereArgs: [fromSourceId],
+        );
+      }
+      await txn.update(
+        'sources',
+        {'id': toSourceId},
+        where: 'id = ?',
+        whereArgs: [fromSourceId],
+      );
+    });
+  }
+
+  /// Rewrites legacy raw-URL M3U channel keys to opaque normalized hashes while
+  /// preserving cached channels, EPG references, and live favorites in one
+  /// transaction. Equivalent locators intentionally collapse to one channel;
+  /// their EPG rows and favorite state are retained under the shared identity.
+  Future<void> migrateM3uChannelIds(String sourceId) async {
+    await _db.transaction((txn) async {
+      final mappings = <String, String>{};
+      final channelRows = await txn.query(
+        'channels',
+        columns: ['id', 'extra'],
+        where: 'source_id = ?',
+        whereArgs: [sourceId],
+      );
+      for (final row in channelRows) {
+        final oldId = row['id'] as String;
+        if (isStableM3uChannelId(oldId)) continue;
+        final extra = row['extra'] as String?;
+        final decoded = extra == null
+            ? const <String, dynamic>{}
+            : Map<String, dynamic>.from(jsonDecode(extra) as Map);
+        final locator = decoded['url']?.toString() ?? oldId;
+        mappings[oldId] = stableM3uChannelId(locator);
+      }
+
+      // Favorites/EPG can outlive a replaced channel cache. Their legacy M3U
+      // keys were the raw locator itself, so migrate any remaining references.
+      final favoriteRows = await txn.query(
+        'favorites',
+        columns: ['item_id'],
+        where: 'source_id = ? AND kind = ? AND item_id NOT LIKE ?',
+        whereArgs: [sourceId, ContentKind.live.name, 'm3u-channel:%'],
+      );
+      for (final row in favoriteRows) {
+        final oldId = row['item_id'] as String;
+        mappings.putIfAbsent(oldId, () => stableM3uChannelId(oldId));
+      }
+      final programmeRows = await txn.rawQuery(
+        'SELECT DISTINCT channel_id FROM programmes '
+        'WHERE source_id = ? AND channel_id NOT LIKE ?',
+        [sourceId, 'm3u-channel:%'],
+      );
+      for (final row in programmeRows) {
+        final oldId = row['channel_id'] as String;
+        mappings.putIfAbsent(oldId, () => stableM3uChannelId(oldId));
+      }
+
+      for (final entry in mappings.entries) {
+        final oldId = entry.key;
+        final newId = entry.value;
+        if (oldId == newId) continue;
+        await txn.rawInsert(
+          'INSERT OR IGNORE INTO channels '
+          '(source_id, id, name, number, logo, category_id, extra, archive_days) '
+          'SELECT source_id, ?, name, number, logo, category_id, extra, archive_days '
+          'FROM channels WHERE source_id = ? AND id = ?',
+          [newId, sourceId, oldId],
+        );
+        await txn.delete(
+          'channels',
+          where: 'source_id = ? AND id = ?',
+          whereArgs: [sourceId, oldId],
+        );
+        await txn.update(
+          'programmes',
+          {'channel_id': newId},
+          where: 'source_id = ? AND channel_id = ?',
+          whereArgs: [sourceId, oldId],
+        );
+        await txn.rawInsert(
+          'INSERT OR IGNORE INTO favorites (source_id, kind, item_id, created_at) '
+          'SELECT source_id, kind, ?, created_at FROM favorites '
+          'WHERE source_id = ? AND kind = ? AND item_id = ?',
+          [newId, sourceId, ContentKind.live.name, oldId],
+        );
+        await txn.delete(
+          'favorites',
+          where: 'source_id = ? AND kind = ? AND item_id = ?',
+          whereArgs: [sourceId, ContentKind.live.name, oldId],
+        );
+      }
+    });
   }
 
   // ── playback positions (VOD resume) ───────────────────────────────────────
