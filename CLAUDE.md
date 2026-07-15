@@ -112,6 +112,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/data/library_repository.dart`** — orchestration between a `Source` and the cache: serves
   from SQLite when fresh, refreshes EPG on its own schedule, handles paging (`loadMore*`), runs
   metadata enrichment. The most logic-dense file; treat its cache/refresh/merge paths carefully.
+  EPG contract: a normally completed empty `Source.epg` result is **success** and atomically
+  replaces the cache (clears stale rows, advances `epg_synced_at`); a thrown error retains the
+  last good guide with the un-advanced timestamp as the failure record. Don't reintroduce an
+  `isNotEmpty` guard before `replaceEpg`, and don't write the `sources` row with
+  `INSERT OR REPLACE` (it destroys columns the writer doesn't own — see `replaceLibrary`).
 - **`lib/data/app_database.dart`** — local SQLite cache keyed by `Source.id`, versioned schema
   with hand-rolled `onUpgrade`. See "Database migrations" below.
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider`s enriching
@@ -219,9 +224,11 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 11` (v9: `favorites` table, deliberately separate from
+`AppDatabase` is at `schemaVersion = 12` (v9: `favorites` table, deliberately separate from
 `channels`/`media_items` so a refresh never drops favorites; v10: `channels.archive_days` →
-`Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching). When
+`Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching; v12:
+`idx_prog_source_start(source_id, start)` on `programmes` for the source+time now/next lookup —
+channel-scoped guide/catch-up queries keep using `idx_prog_lookup`). When
 changing the schema: bump `schemaVersion`, add an
 `onUpgrade` branch, make new tables/columns idempotent (`CREATE TABLE IF NOT EXISTS`, the
 `_isDuplicateColumn` guard). **Design trap:** upgrading from before v3 calls `_createMediaTables`,

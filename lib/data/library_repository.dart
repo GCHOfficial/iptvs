@@ -6,6 +6,7 @@ import '../sources/source.dart';
 import 'app_database.dart';
 import 'diagnostics_log.dart';
 import 'metadata_provider.dart';
+import 'net.dart' show redactText;
 
 class LibrarySnapshot {
   final List<Category> categories;
@@ -96,8 +97,13 @@ class LibraryRepository {
     // never let an EPG failure break the channel list.
     try {
       await _ensureEpg(snapshot.channels, forceRefresh: forceRefresh);
-    } catch (_) {
-      // Source may not provide EPG, or the call failed — ignore.
+    } catch (error) {
+      // Source may not provide EPG, or the call failed — keep the cached
+      // guide and just note the failure; retry happens on the next load.
+      DiagnosticsLog.instance.add(
+        'epg',
+        'EPG refresh failed; retaining cached guide: ${redactText(error.toString())}',
+      );
     }
 
     return snapshot;
@@ -139,9 +145,10 @@ class LibraryRepository {
     if (!forceRefresh && !stale) return;
 
     final programmes = await source.epg(channels);
-    if (programmes.isNotEmpty) {
-      await db.replaceEpg(source.id, programmes);
-    }
+    // Always replace — a success-empty result (a source with no EPG data)
+    // must still clear any stale cached programmes and advance
+    // epg_synced_at, or a no-EPG source gets re-fetched on every load.
+    await db.replaceEpg(source.id, programmes);
   }
 
   Future<({Map<String, Programme> now, Map<String, Programme> next})>
