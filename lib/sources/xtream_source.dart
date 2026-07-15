@@ -15,6 +15,7 @@ import 'xmltv.dart';
 /// Implements live TV; VOD and series can be layered on the same interface
 /// later. Stream URLs follow `/live/USER/PASS/STREAM_ID.ext`.
 class XtreamSource implements Source {
+  final String sourceId;
   final String host; // e.g. http://host:port
   final String username;
   final String password;
@@ -34,6 +35,7 @@ class XtreamSource implements Source {
   static const _searchResultLimit = 120;
 
   XtreamSource({
+    required this.sourceId,
     required this.host,
     required this.username,
     required this.password,
@@ -53,7 +55,7 @@ class XtreamSource implements Source {
   }
 
   @override
-  String get id => 'xtream:$_base|$username';
+  String get id => sourceId;
 
   @override
   String get name => displayName?.trim().isNotEmpty == true

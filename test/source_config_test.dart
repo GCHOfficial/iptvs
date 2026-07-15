@@ -10,6 +10,36 @@ void main() {
     fields: {'host': 'http://h:80', 'username': 'u', 'password': 'p'},
   );
 
+  group('stable source identity', () {
+    test('build uses SourceConfig.id instead of provider credentials', () {
+      expect(base.build().id, base.id);
+      final changedCredentials = base.copyWith(
+        fields: const {
+          'host': 'https://different.invalid',
+          'username': 'other',
+          'password': 'new-secret',
+        },
+      );
+      expect(changedCredentials.build().id, base.id);
+    });
+
+    test('legacy namespace exactly matches pre-PR4 derivation', () {
+      expect(base.legacyCacheId, 'xtream:http://h:80|u');
+      expect(
+        base
+            .copyWith(
+              fields: const {
+                'host': 'provider.invalid/',
+                'username': 'alice',
+                'password': 'secret',
+              },
+            )
+            .legacyCacheId,
+        'xtream:http://provider.invalid|alice',
+      );
+    });
+  });
+
   group('settings serialization', () {
     test('omits settings from JSON when empty (legacy-compatible)', () {
       expect(base.toJson().containsKey('settings'), isFalse);

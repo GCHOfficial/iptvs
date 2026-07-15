@@ -142,6 +142,7 @@ class _OrderedListPage {
 /// standard Stalker schema; if a particular panel names a field differently,
 /// adjust [_mapChannel].
 class StalkerSource implements Source {
+  final String sourceId;
   final String portal; // e.g. http://host:port/c/
   final String mac;
   final MagProfile profile;
@@ -165,6 +166,7 @@ class StalkerSource implements Source {
   bool _profileLoaded = false;
 
   StalkerSource({
+    required this.sourceId,
     required this.portal,
     required this.mac,
     this.profile = MagProfile.mag250,
@@ -179,7 +181,7 @@ class StalkerSource implements Source {
   final String? displayName;
 
   @override
-  String get id => 'stalker:$portal|$mac';
+  String get id => sourceId;
 
   @override
   String get name => displayName?.trim().isNotEmpty == true

@@ -11,6 +11,7 @@ import '../data/mdblist_client.dart';
 import '../data/metadata_config.dart';
 import '../data/metadata_provider.dart';
 import '../data/source_store.dart';
+import '../data/source_identity_migration.dart';
 import '../data/tmdb_client.dart';
 import '../data/tvdb_client.dart';
 import '../data/update_installer.dart';
@@ -111,6 +112,7 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _loadActive() async {
     if (mounted) setState(() => _loading = true);
     final cfg = await widget.store.activeConfig();
+    if (cfg != null) await migrateSourceIdentity(widget.db, cfg);
     await _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();

@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'data/app_database.dart';
 import 'data/cloud_config.dart';
 import 'data/secure_local_storage.dart';
+import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
 import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
@@ -18,13 +19,12 @@ Future<void> main() async {
     await Supabase.initialize(
       url: CloudConfig.url,
       publishableKey: CloudConfig.anonKey,
-      authOptions: FlutterAuthClientOptions(
-        localStorage: SecureLocalStorage(),
-      ),
+      authOptions: FlutterAuthClientOptions(localStorage: SecureLocalStorage()),
     );
   }
   final db = await AppDatabase.open();
   final store = SourceStore();
+  await migrateAllSourceIdentities(db, await store.list());
   runApp(IptvApp(db: db, store: store));
 }
 

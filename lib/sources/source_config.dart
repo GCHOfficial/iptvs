@@ -59,12 +59,14 @@ class SourceConfig {
     switch (kind) {
       case SourceKind.stalker:
         return StalkerSource(
+          sourceId: id,
           portal: fields['portal']!,
           mac: fields['mac']!,
           displayName: name,
         );
       case SourceKind.xtream:
         return XtreamSource(
+          sourceId: id,
           host: fields['host']!,
           username: fields['username']!,
           password: fields['password']!,
@@ -72,15 +74,26 @@ class SourceConfig {
         );
       case SourceKind.m3u:
         return M3uSource(
+          sourceId: id,
           playlistUrl: fields['playlistUrl']!,
           epgUrl: _opt('epgUrl'),
           userAgent: _opt('userAgent'),
           displayName: name,
         );
       case SourceKind.demo:
-        return DemoSource(displayName: name);
+        return DemoSource(sourceId: id, displayName: name);
     }
   }
+
+  /// Cache namespace used by releases before PR4. Read only during the atomic
+  /// migration to [id]; never use this as a new persisted identity.
+  String get legacyCacheId => switch (kind) {
+    SourceKind.stalker => 'stalker:${fields['portal']}|${fields['mac']}',
+    SourceKind.xtream =>
+      'xtream:${_legacyXtreamBase(fields['host'] ?? '')}|${fields['username']}',
+    SourceKind.m3u => 'm3u:${fields['playlistUrl']}',
+    SourceKind.demo => 'demo',
+  };
 
   String? _opt(String key) {
     final v = fields[key];
@@ -93,14 +106,13 @@ class SourceConfig {
     String? label,
     Map<String, String>? fields,
     Map<String, dynamic>? settings,
-  }) =>
-      SourceConfig(
-        id: id ?? this.id,
-        kind: kind ?? this.kind,
-        label: label ?? this.label,
-        fields: fields ?? this.fields,
-        settings: settings ?? this.settings,
-      );
+  }) => SourceConfig(
+    id: id ?? this.id,
+    kind: kind ?? this.kind,
+    label: label ?? this.label,
+    fields: fields ?? this.fields,
+    settings: settings ?? this.settings,
+  );
 
   /// Category ids the user has hidden for [kind] (live channels / movies /
   /// series). Empty when nothing is hidden. Reads the JSON-shaped
@@ -137,20 +149,28 @@ class SourceConfig {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'kind': kind.name,
-        'label': label,
-        'fields': fields,
-        // Omit when empty so legacy/preference-free configs serialize unchanged.
-        if (settings.isNotEmpty) 'settings': settings,
-      };
+    'id': id,
+    'kind': kind.name,
+    'label': label,
+    'fields': fields,
+    // Omit when empty so legacy/preference-free configs serialize unchanged.
+    if (settings.isNotEmpty) 'settings': settings,
+  };
 
   factory SourceConfig.fromJson(Map<String, dynamic> j) => SourceConfig(
-        id: j['id'] as String,
-        kind: SourceKind.values.byName(j['kind'] as String),
-        label: j['label'] as String,
-        fields: Map<String, String>.from(j['fields'] as Map),
-        settings:
-            (j['settings'] as Map?)?.cast<String, dynamic>() ?? const {},
-      );
+    id: j['id'] as String,
+    kind: SourceKind.values.byName(j['kind'] as String),
+    label: j['label'] as String,
+    fields: Map<String, String>.from(j['fields'] as Map),
+    settings: (j['settings'] as Map?)?.cast<String, dynamic>() ?? const {},
+  );
+}
+
+String _legacyXtreamBase(String host) {
+  var value = host.trim();
+  if (!value.startsWith('http://') && !value.startsWith('https://')) {
+    value = 'http://$value';
+  }
+  if (value.endsWith('/')) value = value.substring(0, value.length - 1);
+  return value;
 }

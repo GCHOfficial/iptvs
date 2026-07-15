@@ -10,6 +10,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/sources/source_identity.dart';
 
 void main() {
   late Directory tempDir;
@@ -201,10 +202,10 @@ void main() {
       await db.setFavorite('src1', ContentKind.live, 'ch2', true);
       await db.setFavorite('src1', ContentKind.movie, 'm1', true);
 
-      expect(
-        await db.readFavoriteIds('src1', ContentKind.live),
-        {'ch1', 'ch2'},
-      );
+      expect(await db.readFavoriteIds('src1', ContentKind.live), {
+        'ch1',
+        'ch2',
+      });
       // Kinds are independent.
       expect(await db.readFavoriteIds('src1', ContentKind.movie), {'m1'});
       expect(await db.readFavoriteIds('src1', ContentKind.series), isEmpty);
@@ -260,7 +261,12 @@ void main() {
         'Src',
         const [Category(id: 'c1', title: 'News')],
         const [
-          Channel(id: 'arch', name: 'Archive', categoryId: 'c1', archiveDays: 5),
+          Channel(
+            id: 'arch',
+            name: 'Archive',
+            categoryId: 'c1',
+            archiveDays: 5,
+          ),
           Channel(id: 'plain', name: 'Plain', categoryId: 'c1'),
         ],
       );
@@ -276,197 +282,349 @@ void main() {
   });
 
   group('AppDatabase playback positions', () {
-    test('round-trips a resume position and lists recents newest-first', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-        position: const Duration(minutes: 12),
-        duration: const Duration(minutes: 90),
-      );
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.episode,
-        'e1',
-        position: const Duration(minutes: 3),
-        duration: const Duration(minutes: 42),
-      );
+    test(
+      'round-trips a resume position and lists recents newest-first',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.episode,
+          'e1',
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 42),
+        );
 
-      final read = await db.readPlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-      );
-      expect(read, isNotNull);
-      expect(read!.position, const Duration(minutes: 12));
-      expect(read.duration, const Duration(minutes: 90));
-      expect(read.progress, closeTo(12 / 90, 0.001));
+        final read = await db.readPlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+        );
+        expect(read, isNotNull);
+        expect(read!.position, const Duration(minutes: 12));
+        expect(read.duration, const Duration(minutes: 90));
+        expect(read.progress, closeTo(12 / 90, 0.001));
 
-      final recents = await db.readRecentPositions('src');
-      expect(recents.map((p) => p.itemId).toList(), ['e1', 'm1']);
-      // Other sources see nothing.
-      expect(await db.readRecentPositions('other'), isEmpty);
-      await db.close();
-    });
+        final recents = await db.readRecentPositions('src');
+        expect(recents.map((p) => p.itemId).toList(), ['e1', 'm1']);
+        // Other sources see nothing.
+        expect(await db.readRecentPositions('other'), isEmpty);
+        await db.close();
+      },
+    );
 
-    test('finishing a title clears its row; early positions are ignored', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-        position: const Duration(minutes: 30),
-        duration: const Duration(minutes: 90),
-      );
-      // Past the finished threshold -> row removed.
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-        position: const Duration(minutes: 88),
-        duration: const Duration(minutes: 90),
-      );
-      expect(
-        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
-        isNull,
-      );
-      // Under 10s in -> not worth a row.
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm2',
-        position: const Duration(seconds: 5),
-        duration: const Duration(minutes: 90),
-      );
-      expect(
-        await db.readPlaybackPosition('src', ContentKind.movie, 'm2'),
-        isNull,
-      );
-      await db.close();
-    });
+    test(
+      'finishing a title clears its row; early positions are ignored',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 30),
+          duration: const Duration(minutes: 90),
+        );
+        // Past the finished threshold -> row removed.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 88),
+          duration: const Duration(minutes: 90),
+        );
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+          isNull,
+        );
+        // Under 10s in -> not worth a row.
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm2',
+          position: const Duration(seconds: 5),
+          duration: const Duration(minutes: 90),
+        );
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm2'),
+          isNull,
+        );
+        await db.close();
+      },
+    );
 
-    test('v10 database gains the playback_positions table on upgrade', () async {
-      // Simulate a pre-v11 install: open at v10 (no positions table), then
-      // reopen through AppDatabase so the oldV < 11 repair branch runs.
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-      final raw = await openDatabase(dbPath(), version: 10,
+    test(
+      'v10 database gains the playback_positions table on upgrade',
+      () async {
+        // Simulate a pre-v11 install: open at v10 (no positions table), then
+        // reopen through AppDatabase so the oldV < 11 repair branch runs.
+        sqfliteFfiInit();
+        databaseFactory = databaseFactoryFfi;
+        final raw = await openDatabase(
+          dbPath(),
+          version: 10,
           onCreate: (db, _) async {
-        await db.execute('CREATE TABLE sources (id TEXT PRIMARY KEY, '
-            'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)');
-      });
-      await raw.close();
+            await db.execute(
+              'CREATE TABLE sources (id TEXT PRIMARY KEY, '
+              'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
+            );
+          },
+        );
+        await raw.close();
 
-      final db = await AppDatabase.openAt(dbPath());
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-        position: const Duration(minutes: 12),
-        duration: const Duration(minutes: 90),
-      );
-      expect(
-        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
-        isNotNull,
-      );
-      await db.close();
-    });
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+          isNotNull,
+        );
+        await db.close();
+      },
+    );
   });
 
   group('AppDatabase programmes', () {
-    test('programmesForChannels batches the window query per channel', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      DateTime t(int h) => DateTime.utc(2024, 1, 1, h);
-      await db.replaceEpg('src1', [
-        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
-        Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
-        Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'C'),
-        Programme(channelId: 'ch3', start: t(1), stop: t(2), title: 'OutOfWindow'),
-      ]);
+    test(
+      'programmesForChannels batches the window query per channel',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        DateTime t(int h) => DateTime.utc(2024, 1, 1, h);
+        await db.replaceEpg('src1', [
+          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+          Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+          Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'C'),
+          Programme(
+            channelId: 'ch3',
+            start: t(1),
+            stop: t(2),
+            title: 'OutOfWindow',
+          ),
+        ]);
 
-      final byChannel = await db.programmesForChannels(
-        'src1',
-        ['ch1', 'ch2', 'ch3'],
-        from: t(10),
-        to: t(12),
+        final byChannel = await db.programmesForChannels(
+          'src1',
+          ['ch1', 'ch2', 'ch3'],
+          from: t(10),
+          to: t(12),
+        );
+
+        expect(byChannel['ch1']!.map((p) => p.title), ['A', 'B']);
+        expect(byChannel['ch2']!.map((p) => p.title), ['C']);
+        expect(byChannel.containsKey('ch3'), isFalse);
+        expect(
+          await db.programmesForChannels(
+            'src1',
+            const [],
+            from: t(0),
+            to: t(23),
+          ),
+          isEmpty,
+        );
+        await db.close();
+      },
+    );
+
+    test(
+      'returns a channel\'s programmes overlapping a window, ordered',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+        await db.replaceEpg('src1', [
+          Programme(channelId: 'ch1', start: t(8), stop: t(9), title: 'Early'),
+          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+          Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+          Programme(channelId: 'ch1', start: t(13), stop: t(14), title: 'Late'),
+          Programme(
+            channelId: 'ch2',
+            start: t(10),
+            stop: t(11),
+            title: 'Other',
+          ),
+        ]);
+
+        final progs = await db.programmesForChannel(
+          'src1',
+          'ch1',
+          from: t(10),
+          to: t(12),
+        );
+        // Ordered by start; other channels excluded; out-of-window dropped.
+        expect(progs.map((p) => p.title), ['A', 'B']);
+
+        // Overlap, not containment: a window edge that cuts through A and B still
+        // includes both (A ends after `from`, B starts before `to`).
+        final overlap = await db.programmesForChannel(
+          'src1',
+          'ch1',
+          from: t(10, 30),
+          to: t(11, 30),
+        );
+        expect(overlap.map((p) => p.title), ['A', 'B']);
+
+        // A window before any cached programme is empty.
+        final empty = await db.programmesForChannel(
+          'src1',
+          'ch1',
+          from: t(0),
+          to: t(1),
+        );
+        expect(empty, isEmpty);
+        await db.close();
+      },
+    );
+  });
+
+  group('stable identity migration', () {
+    test('moves cache, favorites, EPG, and positions atomically', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final now = DateTime.now();
+      await db.replaceLibrary(
+        'xtream:http://provider.invalid|old-user',
+        'Provider',
+        const [Category(id: 'news', title: 'News')],
+        const [Channel(id: '42', name: 'Channel', categoryId: 'news')],
+      );
+      await db.replaceEpg('xtream:http://provider.invalid|old-user', [
+        Programme(
+          channelId: '42',
+          start: now.subtract(const Duration(minutes: 5)),
+          stop: now.add(const Duration(minutes: 25)),
+          title: 'Now',
+        ),
+      ]);
+      await db.setFavorite(
+        'xtream:http://provider.invalid|old-user',
+        ContentKind.live,
+        '42',
+        true,
+      );
+      await db.savePlaybackPosition(
+        'xtream:http://provider.invalid|old-user',
+        ContentKind.movie,
+        'movie-7',
+        position: const Duration(minutes: 12),
+        duration: const Duration(minutes: 90),
       );
 
-      expect(byChannel['ch1']!.map((p) => p.title), ['A', 'B']);
-      expect(byChannel['ch2']!.map((p) => p.title), ['C']);
-      expect(byChannel.containsKey('ch3'), isFalse);
+      await db.migrateSourceNamespace(
+        'xtream:http://provider.invalid|old-user',
+        'stable-source-uuid',
+      );
+
+      expect(await db.readChannels('stable-source-uuid'), hasLength(1));
+      expect(await db.readFavoriteIds('stable-source-uuid', ContentKind.live), {
+        '42',
+      });
       expect(
-        await db.programmesForChannels('src1', const [], from: t(0), to: t(23)),
+        await db.readPlaybackPosition(
+          'stable-source-uuid',
+          ContentKind.movie,
+          'movie-7',
+        ),
+        isNotNull,
+      );
+      expect(
+        (await db.nowNext('stable-source-uuid', now)).now['42']?.title,
+        'Now',
+      );
+      expect(
+        await db.readChannels('xtream:http://provider.invalid|old-user'),
         isEmpty,
       );
       await db.close();
     });
 
-    test('returns a channel\'s programmes overlapping a window, ordered',
-        () async {
-      final db = await AppDatabase.openAt(dbPath());
-      DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
-      await db.replaceEpg('src1', [
-        Programme(channelId: 'ch1', start: t(8), stop: t(9), title: 'Early'),
-        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
-        Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
-        Programme(channelId: 'ch1', start: t(13), stop: t(14), title: 'Late'),
-        Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'Other'),
-      ]);
+    test(
+      'rewrites legacy M3U URL keys without losing favorites or EPG',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        const locator =
+            'HTTP://Example.Invalid:80/a/../live/1.ts?username=u&password=p';
+        final stableId = stableM3uChannelId(locator);
+        final now = DateTime.now();
+        await db.replaceLibrary(
+          'stable-m3u-source',
+          'M3U',
+          const [Category(id: 'news', title: 'News')],
+          const [
+            Channel(
+              id: locator,
+              name: 'Channel',
+              categoryId: 'news',
+              extra: {'url': locator, 'tvgId': 'channel.one'},
+            ),
+          ],
+        );
+        await db.replaceEpg('stable-m3u-source', [
+          Programme(
+            channelId: locator,
+            start: now.subtract(const Duration(minutes: 5)),
+            stop: now.add(const Duration(minutes: 25)),
+            title: 'Now',
+          ),
+        ]);
+        await db.setFavorite(
+          'stable-m3u-source',
+          ContentKind.live,
+          locator,
+          true,
+        );
 
-      final progs = await db.programmesForChannel(
-        'src1',
-        'ch1',
-        from: t(10),
-        to: t(12),
-      );
-      // Ordered by start; other channels excluded; out-of-window dropped.
-      expect(progs.map((p) => p.title), ['A', 'B']);
+        await db.migrateM3uChannelIds('stable-m3u-source');
 
-      // Overlap, not containment: a window edge that cuts through A and B still
-      // includes both (A ends after `from`, B starts before `to`).
-      final overlap = await db.programmesForChannel(
-        'src1',
-        'ch1',
-        from: t(10, 30),
-        to: t(11, 30),
-      );
-      expect(overlap.map((p) => p.title), ['A', 'B']);
-
-      // A window before any cached programme is empty.
-      final empty = await db.programmesForChannel(
-        'src1',
-        'ch1',
-        from: t(0),
-        to: t(1),
-      );
-      expect(empty, isEmpty);
-      await db.close();
-    });
+        expect(
+          (await db.readChannels('stable-m3u-source')).single.id,
+          stableId,
+        );
+        expect(
+          await db.readFavoriteIds('stable-m3u-source', ContentKind.live),
+          {stableId},
+        );
+        expect(
+          (await db.nowNext('stable-m3u-source', now)).now[stableId]?.title,
+          'Now',
+        );
+        await db.close();
+      },
+    );
   });
 
   group('LibraryRepository', () {
-    test('fetches from the source on a cold load, then serves from cache', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      final source = _FakeSource();
-      final repo = LibraryRepository(source: source, db: db);
+    test(
+      'fetches from the source on a cold load, then serves from cache',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource();
+        final repo = LibraryRepository(source: source, db: db);
 
-      final cold = await repo.load();
-      expect(cold.fromCache, isFalse);
-      expect(cold.channels, hasLength(2));
-      expect(source.channelCalls, 1);
+        final cold = await repo.load();
+        expect(cold.fromCache, isFalse);
+        expect(cold.channels, hasLength(2));
+        expect(source.channelCalls, 1);
 
-      final warm = await repo.load();
-      expect(warm.fromCache, isTrue);
-      expect(warm.channels, hasLength(2));
-      // The cache served the second load without touching the provider again.
-      expect(source.channelCalls, 1);
+        final warm = await repo.load();
+        expect(warm.fromCache, isTrue);
+        expect(warm.channels, hasLength(2));
+        // The cache served the second load without touching the provider again.
+        expect(source.channelCalls, 1);
 
-      final forced = await repo.load(forceRefresh: true);
-      expect(forced.fromCache, isFalse);
-      expect(source.channelCalls, 2);
-      await db.close();
-    });
+        final forced = await repo.load(forceRefresh: true);
+        expect(forced.fromCache, isFalse);
+        expect(source.channelCalls, 2);
+        await db.close();
+      },
+    );
 
     test('archiveProgrammes gates on archive and honours the window', () async {
       final db = await AppDatabase.openAt(dbPath());
@@ -538,8 +696,9 @@ class _FakeSource implements Source {
   Future<void> connect() async {}
 
   @override
-  Future<List<Category>> categories() async =>
-      const [Category(id: 'c1', title: 'News')];
+  Future<List<Category>> categories() async => const [
+    Category(id: 'c1', title: 'News'),
+  ];
 
   @override
   Future<List<Channel>> channels({String? categoryId}) async {
@@ -555,14 +714,17 @@ class _FakeSource implements Source {
       const StreamInfo(url: 'http://stream');
 
   @override
-  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
-      throw UnsupportedError('no catch-up');
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => throw UnsupportedError('no catch-up');
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async => const [];
 
   @override
-  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async => const [];
+  Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
+      const [];
 
   @override
   Future<List<MediaItem>> mediaItems(

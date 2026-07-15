@@ -3,9 +3,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'metadata_config.dart';
 import 'source_store.dart';
+import 'source_identity_migration.dart';
 
 /// A pairing code a device shows so a signed-in panel user can claim it.
 class PairingCode {
@@ -29,7 +31,11 @@ class CloudProfile {
 
 /// The content kinds whose favorites are synced (live channels / movies /
 /// series). Seasons/episodes aren't favorited at the top level.
-const _favoriteKinds = [ContentKind.live, ContentKind.movie, ContentKind.series];
+const _favoriteKinds = [
+  ContentKind.live,
+  ContentKind.movie,
+  ContentKind.series,
+];
 
 /// Maps a Supabase `sources` row to a [SourceConfig]. Pure (no network) so it
 /// can be unit-tested directly. `fields` arrives as a JSON object whose values
@@ -46,9 +52,8 @@ SourceConfig cloudRowToConfig(Map<String, dynamic> row) {
     kind: SourceKind.values.byName(row['kind'] as String),
     label: (row['label'] as String?) ?? '',
     fields: fields,
-    settings: rawSettings == null
-        ? const {}
-        : Map<String, dynamic>.from(rawSettings),
+    settings:
+        rawSettings == null ? const {} : Map<String, dynamic>.from(rawSettings),
   );
 }
 
@@ -76,10 +81,10 @@ class CloudSync {
     SupabaseClient? client,
     FlutterSecureStorage? storage,
     AppDatabase? db,
-  })  : _client = client ?? Supabase.instance.client,
-        _storage = storage ?? const FlutterSecureStorage(),
-        // ignore: prefer_initializing_formals -- mirrors _client/_storage style
-        _db = db;
+  }) : _client = client ?? Supabase.instance.client,
+       _storage = storage ?? const FlutterSecureStorage(),
+       // ignore: prefer_initializing_formals -- mirrors _client/_storage style
+       _db = db;
 
   /// The stable anonymous identity of this device, if a session exists.
   String? get deviceId => _client.auth.currentUser?.id;
@@ -95,11 +100,12 @@ class CloudSync {
   Future<bool> isPaired() async {
     final id = deviceId;
     if (id == null) return false;
-    final row = await _client
-        .from('devices')
-        .select('device_uid')
-        .eq('device_uid', id)
-        .maybeSingle();
+    final row =
+        await _client
+            .from('devices')
+            .select('device_uid')
+            .eq('device_uid', id)
+            .maybeSingle();
     return row != null;
   }
 
@@ -144,11 +150,12 @@ class CloudSync {
   Future<String?> activeProfileId() async {
     final id = deviceId;
     if (id != null) {
-      final row = await _client
-          .from('devices')
-          .select('active_profile_id')
-          .eq('device_uid', id)
-          .maybeSingle();
+      final row =
+          await _client
+              .from('devices')
+              .select('active_profile_id')
+              .eq('device_uid', id)
+              .maybeSingle();
       final pid = row?['active_profile_id'] as String?;
       if (pid != null) {
         await _storage.write(key: _kProfileId, value: pid);
@@ -161,7 +168,10 @@ class CloudSync {
   /// Choose which profile this device syncs (persisted server-side via the
   /// `set_device_profile` RPC and cached locally).
   Future<void> setProfile(String profileId) async {
-    await _client.rpc('set_device_profile', params: {'p_profile_id': profileId});
+    await _client.rpc(
+      'set_device_profile',
+      params: {'p_profile_id': profileId},
+    );
     await _storage.write(key: _kProfileId, value: profileId);
   }
 
@@ -198,11 +208,12 @@ class CloudSync {
   /// the local one. Returns true when a config was applied; when the profile has
   /// none, the local config is left untouched and this returns false.
   Future<bool> pullMetadata(SourceStore store, String profileId) async {
-    final row = await _client
-        .from('metadata_configs')
-        .select('config')
-        .eq('profile_id', profileId)
-        .maybeSingle();
+    final row =
+        await _client
+            .from('metadata_configs')
+            .select('config')
+            .eq('profile_id', profileId)
+            .maybeSingle();
     if (row == null) return false;
     final config = Map<String, dynamic>.from(row['config'] as Map);
     await store.saveMetadataConfig(MetadataConfig.fromJson(config));
@@ -210,18 +221,17 @@ class CloudSync {
   }
 
   /// Pull the given profile's favorites into the local cache, replacing those of
-  /// the cloud-managed sources. Cloud favorites reference the `SourceConfig`
-  /// UUID; local favorites are keyed by the credential-derived `Source.id`, so
-  /// we map between them via `config.build().id`. Run after [pullSources] so the
-  /// cloud-managed set and source configs are current. No-op without a database.
+  /// the cloud-managed sources. Cloud and local rows share the `SourceConfig`
+  /// UUID namespace. Run after [pullSources] so the managed set is current.
   Future<void> pullFavorites(SourceStore store, String profileId) async {
     final db = _db;
     if (db == null) return;
-    final row = await _client
-        .from('profiles')
-        .select('favorites')
-        .eq('id', profileId)
-        .maybeSingle();
+    final row =
+        await _client
+            .from('profiles')
+            .select('favorites')
+            .eq('id', profileId)
+            .maybeSingle();
     final favorites = (row?['favorites'] as List?) ?? const [];
 
     final managed = await _readCloudIds();
@@ -232,7 +242,8 @@ class CloudSync {
     for (final uuid in managed) {
       final config = byUuid[uuid];
       if (config == null) continue;
-      final sourceId = config.build().id;
+      await migrateSourceIdentity(db, config);
+      final sourceId = config.id;
       for (final kind in _favoriteKinds) {
         for (final itemId in await db.readFavoriteIds(sourceId, kind)) {
           await db.setFavorite(sourceId, kind, itemId, false);
@@ -248,7 +259,13 @@ class CloudSync {
       if (kindName == null || itemId == null) continue;
       final kind = ContentKind.values.asNameMap()[kindName];
       if (kind == null) continue;
-      await db.setFavorite(config.build().id, kind, itemId, true);
+      final stableItemId =
+          config.kind == SourceKind.m3u &&
+                  kind == ContentKind.live &&
+                  !isStableM3uChannelId(itemId)
+              ? stableM3uChannelId(itemId)
+              : itemId;
+      await db.setFavorite(config.id, kind, stableItemId, true);
     }
   }
 
@@ -296,10 +313,10 @@ class CloudSync {
           'position': i,
         },
     ];
-    await _client.rpc('push_sources', params: {
-      'p_sources': payload,
-      'p_profile_id': profileId,
-    });
+    await _client.rpc(
+      'push_sources',
+      params: {'p_sources': payload, 'p_profile_id': profileId},
+    );
     // Everything we just pushed is now cloud-managed.
     await _writeCloudIds(normalized.map((c) => c.id).toSet());
     return normalized.length;
@@ -309,14 +326,14 @@ class CloudSync {
   /// (last-write-wins, via the `push_metadata` RPC).
   Future<void> pushMetadata(SourceStore store, String profileId) async {
     final config = await store.metadataConfig();
-    await _client.rpc('push_metadata', params: {
-      'p_config': config.toJson(),
-      'p_profile_id': profileId,
-    });
+    await _client.rpc(
+      'push_metadata',
+      params: {'p_config': config.toJson(), 'p_profile_id': profileId},
+    );
   }
 
   /// Push this device's favorites (for the cloud-managed sources) up to the
-  /// given profile, mapping each `Source.id` back to its `SourceConfig` UUID.
+  /// given profile. Local and cloud records share the `SourceConfig` UUID.
   /// Run after [pushSources] so ids are normalized and cloud-managed. No-op
   /// without a database.
   Future<void> pushFavorites(SourceStore store, String profileId) async {
@@ -328,7 +345,8 @@ class CloudSync {
     for (final uuid in managed) {
       final config = byUuid[uuid];
       if (config == null) continue;
-      final sourceId = config.build().id;
+      await migrateSourceIdentity(db, config);
+      final sourceId = config.id;
       for (final kind in _favoriteKinds) {
         for (final itemId in await db.readFavoriteIds(sourceId, kind)) {
           favorites.add({
@@ -339,10 +357,10 @@ class CloudSync {
         }
       }
     }
-    await _client.rpc('push_favorites', params: {
-      'p_favorites': favorites,
-      'p_profile_id': profileId,
-    });
+    await _client.rpc(
+      'push_favorites',
+      params: {'p_favorites': favorites, 'p_profile_id': profileId},
+    );
   }
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this

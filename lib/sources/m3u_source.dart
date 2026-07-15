@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import '../data/net.dart';
 import 'expiry.dart';
 import 'source.dart';
+import 'source_identity.dart';
 import 'xmltv.dart';
 
 /// A [Source] backed by an extended M3U/M3U8 playlist (URL).
@@ -15,6 +16,7 @@ import 'xmltv.dart';
 /// XMLTV guide — either an explicit [epgUrl] or the playlist's own
 /// `url-tvg`/`x-tvg-url` header attribute.
 class M3uSource implements Source {
+  final String sourceId;
   final String playlistUrl;
   final String? epgUrl;
   final String? userAgent;
@@ -28,6 +30,7 @@ class M3uSource implements Source {
   String? _headerEpgUrl;
 
   M3uSource({
+    required this.sourceId,
     required this.playlistUrl,
     this.epgUrl,
     this.userAgent,
@@ -38,7 +41,7 @@ class M3uSource implements Source {
   final String? displayName;
 
   @override
-  String get id => 'm3u:$playlistUrl';
+  String get id => sourceId;
 
   @override
   String get name => displayName?.trim().isNotEmpty == true
@@ -214,7 +217,7 @@ M3uParsed parseM3uPlaylist(String content) {
           // variants (HD/FHD/4K of the same channel), and the SQLite cache's
           // (source_id, id) primary key would silently drop all but one.
           // tvg-id stays in extra for the XMLTV EPG mapping.
-          id: line,
+          id: stableM3uChannelId(line),
           name: name,
           number: channels.length + 1,
           logo: (logo != null && logo.isNotEmpty) ? logo : null,
