@@ -157,6 +157,20 @@ class SourceConfig {
     if (settings.isNotEmpty) 'settings': settings,
   };
 
+  /// Fields safe to send to the account panel. Credentials and complete
+  /// playlist locators remain device-local and are never part of cloud JSON.
+  Map<String, String> get cloudSafeFields => switch (kind) {
+    SourceKind.stalker => {
+      if (fields['portal'] case final value? when value.isNotEmpty)
+        'portal': value,
+    },
+    SourceKind.xtream => {
+      if (fields['host'] case final value? when value.isNotEmpty) 'host': value,
+    },
+    SourceKind.m3u => const {},
+    SourceKind.demo => const {},
+  };
+
   factory SourceConfig.fromJson(Map<String, dynamic> j) => SourceConfig(
     id: j['id'] as String,
     kind: SourceKind.values.byName(j['kind'] as String),

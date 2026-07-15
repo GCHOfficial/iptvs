@@ -934,7 +934,9 @@ class StalkerSource implements Source {
         _firstString(ch, ['id', 'ch_id', 'channel_id', 'stream_id']) ??
         '${ch['name']}';
     final cmd = _firstString(ch, ['cmd', 'url']);
-    final extra = <String, dynamic>{'streamId': id, 'raw': ch};
+    // Keep only the provider metadata needed to render/resolve the item. The
+    // raw portal row can contain MACs, tokens, and credential-bearing URLs.
+    final extra = <String, dynamic>{'streamId': id};
     if (cmd != null) extra['cmd'] = cmd;
     return Channel(
       id: id,

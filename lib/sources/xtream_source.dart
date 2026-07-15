@@ -60,7 +60,7 @@ class XtreamSource implements Source {
   @override
   String get name => displayName?.trim().isNotEmpty == true
       ? displayName!.trim()
-      : 'Xtream · $username';
+      : 'Xtream · ${Uri.tryParse(_base)?.host ?? 'panel'}';
 
   @override
   Future<void> connect() async {

@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
@@ -10,6 +9,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
+import 'secret_locator_vault.dart';
 
 /// A saved VOD resume point (see `playback_positions`).
 class PlaybackPosition {
@@ -37,7 +37,8 @@ class PlaybackPosition {
 /// [Source.id], so launches are instant and search/guide work offline.
 class AppDatabase {
   final Database _db;
-  AppDatabase._(this._db);
+  final SecretLocatorVault _vault;
+  AppDatabase._(this._db, this._vault);
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
@@ -55,7 +56,11 @@ class AppDatabase {
 
     final dir = await getApplicationSupportDirectory();
     final path = p.join(dir.path, 'iptv.db');
-    return _openWithFactory(path, factory);
+    final vault = SecretLocatorVault();
+    await vault.ensureKey();
+    final app = await _openWithFactory(path, factory, vault);
+    if (vault.generatedNewKey) await app._migrateLegacyCacheSecrets();
+    return app;
   }
 
   /// Opens (and migrates) the database at an explicit [path] using the FFI
@@ -64,12 +69,17 @@ class AppDatabase {
   @visibleForTesting
   static Future<AppDatabase> openAt(String path) async {
     sqfliteFfiInit();
-    return _openWithFactory(path, databaseFactoryFfi);
+    final vault = SecretLocatorVault();
+    await vault.ensureKey();
+    final app = await _openWithFactory(path, databaseFactoryFfi, vault);
+    if (vault.generatedNewKey) await app._migrateLegacyCacheSecrets();
+    return app;
   }
 
   static Future<AppDatabase> _openWithFactory(
     String path,
     DatabaseFactory factory,
+    SecretLocatorVault vault,
   ) async {
     final db = await factory.openDatabase(
       path,
@@ -168,7 +178,74 @@ class AppDatabase {
         },
       ),
     );
-    return AppDatabase._(db);
+    return AppDatabase._(db, vault);
+  }
+
+  Future<void> _migrateLegacyCacheSecrets() async {
+    final channelRows = await _db.query(
+      'channels',
+      columns: ['source_id', 'id', 'extra'],
+    );
+    final mediaRows = await _db.query(
+      'media_items',
+      columns: ['source_id', 'kind', 'id', 'extra'],
+    );
+    final hasEncrypted = [...channelRows, ...mediaRows].any(
+      (row) =>
+          (row['extra'] as String?)?.contains('"$secretLocatorKey"') ?? false,
+    );
+    if (hasEncrypted) {
+      await _invalidateRegenerableCache();
+      return;
+    }
+    await _db.transaction((txn) async {
+      for (final row in channelRows) {
+        final raw = row['extra'] as String?;
+        if (raw == null) continue;
+        final protectedExtra = await protectSecretLocators(
+          (jsonDecode(raw) as Map).cast<String, dynamic>(),
+          _vault,
+        );
+        await txn.update(
+          'channels',
+          {'extra': protectedExtra.isEmpty ? null : jsonEncode(protectedExtra)},
+          where: 'source_id = ? AND id = ?',
+          whereArgs: [row['source_id'], row['id']],
+        );
+      }
+      for (final row in mediaRows) {
+        final raw = row['extra'] as String?;
+        if (raw == null) continue;
+        final protectedExtra = await protectSecretLocators(
+          (jsonDecode(raw) as Map).cast<String, dynamic>(),
+          _vault,
+        );
+        await txn.update(
+          'media_items',
+          {'extra': protectedExtra.isEmpty ? null : jsonEncode(protectedExtra)},
+          where: 'source_id = ? AND kind = ? AND id = ?',
+          whereArgs: [row['source_id'], row['kind'], row['id']],
+        );
+      }
+    });
+  }
+
+  Future<void> _invalidateRegenerableCache() async {
+    await _db.transaction((txn) async {
+      for (final table in [
+        'categories',
+        'channels',
+        'programmes',
+        'media_categories',
+        'media_items',
+        'media_sync',
+        'media_page_state',
+        'external_metadata',
+      ]) {
+        await txn.delete(table);
+      }
+      await txn.update('sources', {'synced_at': null, 'epg_synced_at': null});
+    });
   }
 
   static Future<void> _createProgrammes(Database db) async {
@@ -718,12 +795,6 @@ class AppDatabase {
         .toList();
   }
 
-  /// Above this many rows, row→model mapping (a jsonDecode of `extra` per
-  /// row) moves to a background isolate — it's the cache-hit startup path, so
-  /// on a 50k-channel playlist it would otherwise jank every launch. Below it
-  /// the isolate spawn costs more than the mapping.
-  static const _isolateMapThreshold = 500;
-
   Future<List<Channel>> readChannels(String sourceId) async {
     final rows = await _db.query(
       'channels',
@@ -731,10 +802,21 @@ class AppDatabase {
       whereArgs: [sourceId],
       orderBy: 'number, name',
     );
-    if (rows.length < _isolateMapThreshold) {
-      return rows.map(_rowToChannel).toList();
-    }
-    return Isolate.run(() => rows.map(_rowToChannel).toList());
+    return Future.wait(rows.map(_readChannelRow));
+  }
+
+  Future<Channel> _readChannelRow(Map<String, Object?> row) async {
+    final channel = _rowToChannel(row);
+    final extra = await restoreSecretLocators(channel.extra, _vault);
+    return Channel(
+      id: channel.id,
+      name: channel.name,
+      logo: channel.logo,
+      categoryId: channel.categoryId,
+      number: channel.number,
+      archiveDays: channel.archiveDays,
+      extra: extra,
+    );
   }
 
   // ── movies / series / generic media ──────────────────────────────────────
@@ -830,12 +912,7 @@ class AppDatabase {
       whereArgs: args,
       orderBy: 'display_order, title',
     );
-    if (rows.length < _isolateMapThreshold) {
-      return rows.map((r) => _rowToMediaItem(r, kind)).toList();
-    }
-    return Isolate.run(
-      () => rows.map((r) => _rowToMediaItem(r, kind)).toList(),
-    );
+    return Future.wait(rows.map((r) => _readMediaItem(r, kind)));
   }
 
   /// The cached media items among [ids] (any order). Used to materialize the
@@ -852,11 +929,19 @@ class AppDatabase {
       where: 'source_id = ? AND kind = ? AND id IN ($placeholders)',
       whereArgs: [sourceId, kind.name, ...ids],
     );
-    return rows.map((r) => _rowToMediaItem(r, kind)).toList();
+    return Future.wait(rows.map((r) => _readMediaItem(r, kind)));
   }
 
-  // Static (not instance) so the Isolate.run closures above capture only the
-  // rows — capturing `this` would drag the non-sendable Database across.
+  Future<MediaItem> _readMediaItem(
+    Map<String, Object?> row,
+    ContentKind kind,
+  ) async {
+    final item = _rowToMediaItem(row, kind);
+    return item.copyWith(
+      extra: await restoreSecretLocators(item.extra, _vault),
+    );
+  }
+
   static MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
       MediaItem(
         id: r['id'] as String,
@@ -901,6 +986,9 @@ class AppDatabase {
     int loadedPages = 1,
     int totalPages = 1,
   }) async {
+    final protectedExtras = [
+      for (final item in items) await protectSecretLocators(item.extra, _vault),
+    ];
     await _db.transaction((txn) async {
       if (categoryId == null && parentId == null) {
         await txn.delete(
@@ -952,6 +1040,7 @@ class AppDatabase {
             item,
             parentId: parentId,
             displayOrder: i,
+            protectedExtra: protectedExtras[i],
           ),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
@@ -985,6 +1074,9 @@ class AppDatabase {
     required int loadedPages,
     required int totalPages,
   }) async {
+    final protectedExtras = [
+      for (final item in items) await protectSecretLocators(item.extra, _vault),
+    ];
     await _db.transaction((txn) async {
       final startOrder = await _nextMediaDisplayOrder(
         txn,
@@ -1005,6 +1097,7 @@ class AppDatabase {
             item,
             parentId: parentId,
             displayOrder: startOrder + i,
+            protectedExtra: protectedExtras[i],
           ),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
@@ -1062,6 +1155,7 @@ class AppDatabase {
     MediaItem item, {
     String? parentId,
     required int displayOrder,
+    Map<String, dynamic>? protectedExtra,
   }) => {
     'source_id': sourceId,
     'kind': kind.name,
@@ -1078,7 +1172,9 @@ class AppDatabase {
     'season_number': item.seasonNumber,
     'episode_number': item.episodeNumber,
     'provider_id': item.providerId,
-    'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+    'extra': (protectedExtra ?? item.extra).isEmpty
+        ? null
+        : jsonEncode(protectedExtra ?? item.extra),
     'display_order': displayOrder,
   };
 
@@ -1089,6 +1185,7 @@ class AppDatabase {
     if (items.isEmpty) return;
     final batch = _db.batch();
     for (final item in items) {
+      final extra = await protectSecretLocators(item.extra, _vault);
       batch.update(
         'media_items',
         {
@@ -1099,7 +1196,7 @@ class AppDatabase {
           'year': item.year,
           'rating': item.rating,
           'provider_id': item.providerId,
-          'extra': item.extra.isEmpty ? null : jsonEncode(item.extra),
+          'extra': extra.isEmpty ? null : jsonEncode(extra),
         },
         where: 'source_id = ? AND kind = ? AND id = ?',
         whereArgs: [sourceId, item.kind.name, item.id],
@@ -1129,7 +1226,7 @@ class AppDatabase {
     if (rows.isEmpty) return;
     final batch = _db.batch();
     for (final row in rows) {
-      final item = _rowToMediaItem(
+      final item = await _readMediaItem(
         row,
         ContentKind.values.byName(row['kind'] as String),
       );
@@ -1142,6 +1239,7 @@ class AppDatabase {
             'title',
           ]) ??
           item.title;
+      final protectedExtra = await protectSecretLocators(raw, _vault);
       batch.update(
         'media_items',
         {
@@ -1167,7 +1265,7 @@ class AppDatabase {
             'imdb_id',
             'kinopoisk_id',
           ]),
-          'extra': raw.isEmpty ? null : jsonEncode(raw),
+          'extra': protectedExtra.isEmpty ? null : jsonEncode(protectedExtra),
         },
         where: 'source_id = ? AND kind = ? AND id = ?',
         whereArgs: [row['source_id'], row['kind'], row['id']],
@@ -1306,6 +1404,7 @@ class AppDatabase {
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       for (final ch in channels) {
+        final extra = await protectSecretLocators(ch.extra, _vault);
         batch.insert('channels', {
           'source_id': sourceId,
           'id': ch.id,
@@ -1313,7 +1412,7 @@ class AppDatabase {
           'number': ch.number,
           'logo': ch.logo,
           'category_id': ch.categoryId,
-          'extra': ch.extra.isEmpty ? null : jsonEncode(ch.extra),
+          'extra': extra.isEmpty ? null : jsonEncode(extra),
           'archive_days': ch.archiveDays,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }

@@ -5,6 +5,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:iptvs/data/app_database.dart';
@@ -13,6 +14,8 @@ import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  FlutterSecureStorage.setMockInitialValues({});
   late Directory tempDir;
 
   setUp(() {

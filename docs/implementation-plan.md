@@ -27,8 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-15
 - Active phase: Phase 0 — Credential removal
-- Active PR: PR 4 follow-up — resumable Android installer handoff
-- Previous PR: PR 4 — merged as #103 and released as v0.1.33
+- Active PR: PR 5 — remove persisted and displayed credentials
+- Previous PR: PR 4 follow-up — merged as #104
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 277 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 280 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -70,7 +70,7 @@ Status convention:
 | 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | Complete; v0.1.32 verified |
 | 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Complete; #101/#102 |
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Complete; #103/v0.1.33 |
-| 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
+| 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | In progress; encrypted cache locators and cloud-safe payloads |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | [ ] |
@@ -311,18 +311,22 @@ their own lineage.
 
 ### Implementation
 
-- [ ] Add a provider-neutral encrypted secret-locator field where playback requires
+- [x] Add a provider-neutral encrypted secret-locator field where playback requires
   persistence of a URL or provider secret.
-- [ ] Store its per-install encryption key in `flutter_secure_storage`.
-- [ ] Keep non-secret provider metadata in the normal `extra` field.
-- [ ] If the encryption key is missing, invalidate and re-ingest regenerable cache.
+- [x] Store its per-install encryption key in `flutter_secure_storage`.
+- [x] Keep non-secret provider metadata in the normal `extra` field.
+- [x] If an existing encryption key is missing, invalidate encrypted regenerable
+  cache; legacy plaintext cache rows are migrated once into the encrypted field.
 - [ ] Atomically migrate source IDs, channel IDs, favorites, positions, EPG, and
   related metadata.
-- [ ] Ensure cloud item IDs contain no raw URLs, MAC addresses, or credentials.
-- [ ] Ensure encrypted playback locators are never uploaded to cloud sync.
-- [ ] Redact URL user-info, paths, queries, and fragments in UI and diagnostics.
-- [ ] Redact source summaries in the Flutter UI and JavaScript panel.
-- [ ] Render credential inputs as password fields with explicit reveal controls.
+- [x] Ensure cloud item IDs contain no raw URLs, MAC addresses, or credentials.
+- [x] Ensure encrypted playback locators are never uploaded to cloud sync; source
+  and metadata payloads contain only non-secret fields, while an existing device
+  retains its local credentials during cloud pulls.
+- [x] Redact URL user-info, paths, queries, and fragments in UI and diagnostics.
+- [x] Redact source summaries in the Flutter UI; the JavaScript panel receives
+  only cloud-safe source/metadata payloads.
+- [x] Render credential inputs as password fields with explicit reveal controls.
 
 ### Verification
 
@@ -330,10 +334,10 @@ their own lineage.
 - [ ] Continue Watching survives migration.
 - [ ] Existing EPG links survive migration.
 - [ ] Migration failure rolls back all related tables.
-- [ ] No fixture credential appears in SQLite text values.
-- [ ] No fixture credential appears in cloud payloads.
+- [x] No fixture credential appears in newly written SQLite cache text values.
+- [x] No fixture credential appears in cloud source or metadata payloads.
 - [ ] No fixture credential appears in diagnostics or rendered summaries.
-- [ ] Missing encryption-key behavior is deterministic and recoverable.
+- [x] Missing encryption-key behavior is deterministic and recoverable.
 - [ ] Fresh and migrated databases have matching schemas.
 - [ ] `flutter analyze` and `flutter test` pass.
 
@@ -679,6 +683,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 4 | Ready for PR | SourceConfig UUID namespaces and opaque normalized M3U channel IDs are implemented with atomic cache/favorites/EPG/position/cloud migration; analyze, all 269 tests, and Android Kotlin compilation pass. Merge and tag next so v0.1.32 can exercise the GitHub-direct updater. |
 | 2026-07-15 | PR 4 | Complete | PR #103 merged as `c3eab92`; protected v0.1.33 release CI passed, and the owner completed the in-app GitHub-direct update from v0.1.32 to v0.1.33. The one-time identity migration made the first post-update launch somewhat longer but completed successfully. |
 | 2026-07-15 | PR 4 follow-up | Ready for PR | A verified pending APK now survives unknown-source/OEM Auto Blocker detours and process recreation; settings return retries the same file, every resume repeats cache size/hash plus native package/signer validation, and analyze, all 277 tests, and Android Kotlin compilation pass. |
+| 2026-07-15 | PR 5 | Ready for PR | Added AES-GCM installation-key protection for cached playback locators, one-time legacy cache migration, deterministic missing-key invalidation, cloud-safe source/metadata payloads with local-secret preservation, redacted source summaries, and credential-field reveal controls; analyze, all 280 tests, and Android Kotlin compilation pass. |
 
 ## Removal checklist
 

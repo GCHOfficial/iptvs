@@ -24,6 +24,11 @@ class MetadataConfig {
   String get preferredVisualProvider =>
       provider == 'tvdb' || provider == 'tmdb' ? provider : 'tmdb';
 
+  Map<String, dynamic> get cloudSafeJson => {
+    'provider': preferredVisualProvider,
+    'autoEnrich': autoEnrich,
+  };
+
   Map<String, dynamic> toJson() => {
     'provider': preferredVisualProvider,
     'tmdbApiKey': normalizedTmdbCredential,
