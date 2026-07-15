@@ -33,7 +33,11 @@ void main() {
             builder: (context) => Center(
               child: ElevatedButton(
                 onPressed: () async {
-                  final choice = await showUpdateDialog(context, release, '1.4.0');
+                  final choice = await showUpdateDialog(
+                    context,
+                    release,
+                    '1.4.0',
+                  );
                   onResult?.call(choice);
                 },
                 child: const Text('open'),
@@ -121,5 +125,38 @@ void main() {
       isNotNull,
       reason: 'no vertical arrow escapes the dialog',
     );
+  });
+
+  testWidgets('cached update resume defaults to Install', (tester) async {
+    bool? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark,
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => ElevatedButton(
+              onPressed: () async {
+                result = await showPendingUpdateDialog(context, '1.5.0');
+              },
+              child: const Text('resume'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('resume'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Update ready to install — 1.5.0'), findsOneWidget);
+    expect(find.text('Install'), findsOneWidget);
+    expect(
+      FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<FilledButton>(),
+      isNotNull,
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(result, isTrue);
   });
 }

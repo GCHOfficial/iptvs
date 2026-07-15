@@ -23,6 +23,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var nativeHdrChannel: MethodChannel
     private lateinit var previewChannel: MethodChannel
     private lateinit var updatesChannel: MethodChannel
+    private var pendingInstallPermissionResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +44,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         if (instance?.get() === this) instance = null
+        pendingInstallPermissionResult?.success(false)
+        pendingInstallPermissionResult = null
         super.onDestroy()
     }
 
@@ -282,15 +285,21 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "requestInstallPermission" -> {
+                    if (pendingInstallPermissionResult != null) {
+                        result.error("settings_active", "Install settings are already open", null)
+                        return@setMethodCallHandler
+                    }
                     try {
-                        startActivity(
+                        pendingInstallPermissionResult = result
+                        startActivityForResult(
                             Intent(
                                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                                 Uri.parse("package:$packageName"),
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            ),
+                            REQUEST_INSTALL_PERMISSION,
                         )
-                        result.success(true)
                     } catch (e: Exception) {
+                        pendingInstallPermissionResult = null
                         result.error("settings_failed", e.message, null)
                     }
                 }
@@ -350,6 +359,11 @@ class MainActivity : FlutterActivity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_INSTALL_PERMISSION) {
+            pendingInstallPermissionResult?.success(packageManager.canRequestPackageInstalls())
+            pendingInstallPermissionResult = null
+            return
+        }
         if (requestCode == REQUEST_NATIVE_PLAYER && ::nativeHdrChannel.isInitialized) {
             // Relay the final VOD position (see HdrPlayerActivity.finish) so the
             // Dart side can persist the resume point, plus the final favorite
@@ -357,14 +371,13 @@ class MainActivity : FlutterActivity() {
             // Null args = live with no favorite change / legacy.
             val positionMs = data?.getLongExtra(HdrPlayerActivity.RESULT_POSITION_MS, -1L) ?: -1L
             val durationMs = data?.getLongExtra(HdrPlayerActivity.RESULT_DURATION_MS, -1L) ?: -1L
-            val hasFavorite = data?.hasExtra(HdrPlayerActivity.RESULT_FAVORITE) ?: false
             val map = buildMap<String, Any> {
                 if (positionMs >= 0L && durationMs > 0L) {
                     put("positionMs", positionMs)
                     put("durationMs", durationMs)
                 }
-                if (hasFavorite && data != null) {
-                    put("favorite", data.getBooleanExtra(HdrPlayerActivity.RESULT_FAVORITE, false))
+                data?.takeIf { it.hasExtra(HdrPlayerActivity.RESULT_FAVORITE) }?.let { result ->
+                    put("favorite", result.getBooleanExtra(HdrPlayerActivity.RESULT_FAVORITE, false))
                 }
             }
             nativeHdrChannel.invokeMethod("nativeClosed", if (map.isEmpty()) null else map)
@@ -381,5 +394,6 @@ class MainActivity : FlutterActivity() {
             private set
 
         private const val REQUEST_NATIVE_PLAYER = 4120
+        private const val REQUEST_INSTALL_PERMISSION = 4121
     }
 }

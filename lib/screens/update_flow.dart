@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/update_installer.dart';
+import '../data/update_manifest.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../theme.dart';
@@ -13,6 +14,12 @@ import '../widgets/release_notes_view.dart';
 
 /// The user's choice on the "Update available" dialog.
 enum UpdateChoice { update, later, skip }
+
+var _activeInstallFlows = 0;
+
+/// Prevents an app-resume callback from racing the permission flow that caused
+/// that same resume event.
+bool get updateInstallFlowActive => _activeInstallFlows > 0;
 
 /// Runs a full update check → prompt → download → install cycle.
 ///
@@ -72,7 +79,9 @@ Future<void> runUpdateCheck(
     case UpdateChoice.skip:
       await prefs.setSkippedVersion(release.version);
     case UpdateChoice.update:
-      if (context.mounted) await _downloadAndInstall(context, release, current);
+      if (context.mounted) {
+        await _downloadAndInstall(context, release, current, prefs);
+      }
     case UpdateChoice.later:
     case null:
       break;
@@ -100,6 +109,110 @@ Future<UpdateChoice?> showUpdateDialog(
     ),
   );
 }
+
+/// Offers to resume an Android APK that was already downloaded and verified.
+///
+/// Returns true when pending state existed (including when the user chose
+/// Later), allowing startup to avoid presenting a second update prompt. A new
+/// app version clears the stale record; missing or modified cache files fail
+/// closed and will be downloaded again by the normal update check.
+Future<bool> resumePendingUpdate(
+  BuildContext context, {
+  UpdateStore? store,
+  UpdateInstaller? installer,
+  Future<String> Function()? currentVersion,
+}) async {
+  if (updateInstallFlowActive) return true;
+  if (!Platform.isAndroid || !UpdateInstaller.isSupported) return false;
+  final prefs = store ?? const UpdateStore();
+  final pending = await prefs.pendingUpdate();
+  if (pending == null) return false;
+
+  final current = await (currentVersion ?? appVersion)();
+  if (compareVersions(current, pending.version) >= 0) {
+    await prefs.clearPendingUpdate();
+    return false;
+  }
+
+  final file = File(pending.path);
+  try {
+    await validateCachedArtifact(file, pending.artifact);
+  } catch (_) {
+    await prefs.clearPendingUpdate();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'The cached update expired and must be downloaded again',
+          ),
+        ),
+      );
+    }
+    return false;
+  }
+  if (!context.mounted) return true;
+
+  final install = await showPendingUpdateDialog(context, pending.version);
+  if (install != true || !context.mounted) return true;
+
+  final ownedInstaller = installer == null;
+  final activeInstaller = installer ?? UpdateInstaller();
+  final release = ReleaseInfo(
+    version: pending.version,
+    tagName: 'v${pending.version}',
+    name: 'iptvs ${pending.version}',
+    notes: '',
+    htmlUrl: pending.releasePage,
+    androidArtifact: pending.artifact,
+  );
+  try {
+    final outcome = await _installWithPermissionRetry(
+      context,
+      activeInstaller,
+      release,
+      file,
+      pending.artifact,
+    );
+    if (outcome == InstallOutcome.needsPermission && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Update ready — allow app installs to continue'),
+        ),
+      );
+    } else if (outcome == InstallOutcome.openedInBrowser) {
+      await prefs.clearPendingUpdate();
+    }
+  } finally {
+    if (ownedInstaller) activeInstaller.close();
+  }
+  return true;
+}
+
+/// The cached-update prompt is public so its TV focus/default action can be
+/// pinned without requiring an Android host in widget tests.
+Future<bool?> showPendingUpdateDialog(BuildContext context, String version) =>
+    showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.panelHi,
+        title: Text('Update ready to install — $version'),
+        content: const Text(
+          'The verified update is already downloaded. Continue installation '
+          'without downloading it again?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Later'),
+          ),
+          FilledButton(
+            autofocus: true,
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Install'),
+          ),
+        ],
+      ),
+    );
 
 /// The update prompt as a stateful dialog so D-pad focus stays **trapped**: on a
 /// TV, bare Up/Down otherwise fell through the modal barrier onto the channel
@@ -282,6 +395,7 @@ Future<void> _downloadAndInstall(
   BuildContext context,
   ReleaseInfo release,
   String current,
+  UpdateStore store,
 ) async {
   if (!isUpdateAllowed(release, current)) {
     throw StateError('Refusing to install a non-upgrade release');
@@ -331,6 +445,7 @@ Future<void> _downloadAndInstall(
     }),
   );
 
+  _activeInstallFlows += 1;
   try {
     final file = await installer.download(
       asset,
@@ -343,11 +458,33 @@ Future<void> _downloadAndInstall(
     closeDialog();
     if (!context.mounted) return;
 
-    final outcome = await installer.install(release, file);
+    if (Platform.isAndroid) {
+      await store.setPendingUpdate(
+        PendingUpdate(
+          version: release.version,
+          path: file.path,
+          releasePage: release.htmlUrl,
+          artifact: artifact,
+        ),
+      );
+    }
+    if (!context.mounted) return;
+
+    final outcome = await _installWithPermissionRetry(
+      context,
+      installer,
+      release,
+      file,
+      artifact,
+    );
     if (!context.mounted) return;
     switch (outcome) {
       case InstallOutcome.needsPermission:
-        await _promptInstallPermission(context, installer, release);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Update downloaded — installation can be resumed'),
+          ),
+        );
       case InstallOutcome.launched:
         if (Platform.isWindows) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -358,6 +495,7 @@ Future<void> _downloadAndInstall(
           exit(0);
         }
       case InstallOutcome.openedInBrowser:
+        if (Platform.isAndroid) await store.clearPendingUpdate();
         break;
     }
   } catch (e) {
@@ -369,12 +507,37 @@ Future<void> _downloadAndInstall(
       ).showSnackBar(SnackBar(content: Text('Update failed: $e')));
     }
   } finally {
+    _activeInstallFlows -= 1;
     progress.dispose();
     installer.close();
   }
 }
 
-Future<void> _promptInstallPermission(
+enum _InstallPermissionChoice { granted, later, browser }
+
+Future<InstallOutcome> _installWithPermissionRetry(
+  BuildContext context,
+  UpdateInstaller installer,
+  ReleaseInfo release,
+  File file,
+  ReleaseArtifact artifact,
+) async {
+  var outcome = await installer.install(release, file);
+  if (outcome != InstallOutcome.needsPermission || !context.mounted) {
+    return outcome;
+  }
+  final choice = await _promptInstallPermission(context, installer, release);
+  if (choice != _InstallPermissionChoice.granted || !context.mounted) {
+    return choice == _InstallPermissionChoice.browser
+        ? InstallOutcome.openedInBrowser
+        : InstallOutcome.needsPermission;
+  }
+  await validateCachedArtifact(file, artifact);
+  outcome = await installer.install(release, file);
+  return outcome;
+}
+
+Future<_InstallPermissionChoice> _promptInstallPermission(
   BuildContext context,
   UpdateInstaller installer,
   ReleaseInfo release,
@@ -403,10 +566,14 @@ Future<void> _promptInstallPermission(
     ),
   );
   if (go == true) {
-    await installer.requestInstallPermission();
+    return await installer.requestInstallPermission()
+        ? _InstallPermissionChoice.granted
+        : _InstallPermissionChoice.later;
   } else if (go == false) {
     await installer.openReleasePage(release.htmlUrl);
+    return _InstallPermissionChoice.browser;
   }
+  return _InstallPermissionChoice.later;
 }
 
 class _ProgressDialog extends StatelessWidget {

@@ -40,7 +40,9 @@ the final install step is the only platform-specific part.
   pubspec `1.0.0`), and the pure `compareVersions` / `isNewer` / `shouldAutoCheck` (unit-tested
   in `test/update_service_test.dart`).
 - **`lib/data/update_store.dart`** — `skippedVersion` + `lastCheck` prefs in the keychain
-  (mirrors `LocalProfileStore`; the app has no SharedPreferences).
+  (mirrors `LocalProfileStore`; the app has no SharedPreferences), plus the authenticated
+  metadata/path for a fully downloaded Android APK awaiting user installation. The pending
+  record is cleared after the installed version catches up or when cache revalidation fails.
 - **`lib/data/update_installer.dart`** — `download()` permits only HTTPS GitHub release hosts and
   approved redirect hosts, streams to a `.partial` temp file with a signed-size ceiling, verifies
   exact received length and SHA-256, and only then renames it to the install filename. Failure
@@ -50,7 +52,10 @@ the final install step is the only platform-specific part.
   same signing-certificate set as the installed app. Installation needs the
   `REQUEST_INSTALL_PACKAGES` permission + a **FileProvider** (`${applicationId}.fileprovider`,
   `@xml/file_paths` → `<cache-path>`, since `getTemporaryDirectory()` = the Android cache dir) —
-  falls back to `requestInstallPermission` (unknown-sources settings) or the browser; **Windows**
+  falls back to `requestInstallPermission` (unknown-sources settings) or the browser. The
+  permission call completes only when Android returns from settings, allowing the same APK to be
+  retried without a second download. Any later resume rechecks the cache-owned path, exact byte
+  length, and SHA-256 before native package/signer verification runs again; **Windows**
   (no native C++) writes a detached PowerShell helper (`windowsUpdateScript`) that waits for our
   PID, rejects absolute/escaping/link archive entries, extracts into a new sibling staging
   directory, checks the expected executable, moves the old installation to a backup, swaps the
@@ -62,7 +67,10 @@ the final install step is the only platform-specific part.
   download → install (the "Update available" dialog with **Skip this version / Later / Update**,
   and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on
   `sources_screen.dart` (`_UpdateCard`), and a **throttled startup** check in `home_shell.dart`
-  (post-frame, release platforms only, honours the skipped version).
+  (post-frame, release platforms only, honours the skipped version). Android records a verified
+  APK before launching the system installer. Returning after an OEM Auto Blocker/settings detour,
+  or recreating the app process, presents a **ready to install** prompt that reuses the cached APK;
+  an already-upgraded app silently clears the pending record.
 
 ## D-pad behaviour
 
@@ -75,6 +83,8 @@ behind it on a TV) and cycles them between the actions and a focusable, scrollab
 rendered by `ReleaseNotesView` (formatted, not raw markdown). The public `showUpdateDialog` /
 `UpdateChoice` exist so `test/update_dialog_test.dart` can pin the autofocus + focus-trap
 behaviour.
+The cached-update prompt follows the same primary-action rule: **Install** autofocuses, while
+**Later** keeps the verified pending record for the next resume.
 
 ## Release-manifest signing
 

@@ -26,9 +26,9 @@ Status convention:
 ## Current status
 
 - Last updated: 2026-07-15
-- Active phase: Phase 0 — Stable identities and credential removal
-- Active PR: PR 4 — Stable source and cache identities
-- Previous PR: PR 3 follow-up — merged as #102 and released as v0.1.32
+- Active phase: Phase 0 — Credential removal
+- Active PR: PR 4 follow-up — resumable Android installer handoff
+- Previous PR: PR 4 — merged as #103 and released as v0.1.33
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 269 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 277 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -69,7 +69,7 @@ Status convention:
 | 1 | Phase 0 | Recover Android signing trust | L | PR 0 | Complete; v0.1.32 verified |
 | 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | Complete; v0.1.32 verified |
 | 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Complete; #101/#102 |
-| 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Ready for PR |
+| 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Complete; #103/v0.1.33 |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
@@ -596,10 +596,10 @@ their own lineage.
 - [x] Release builds use no committed or debug signing material. Verified by
   the protected v0.1.32 release workflow.
 - [x] Expected Android signing fingerprint is verified by CI. Verified for the
-  v0.1.32 GitHub-direct APK.
+  v0.1.32 and v0.1.33 GitHub-direct APKs.
 - [x] Update manifest signature and artifact digest are verified end to end by
-  the v0.1.32 protected release workflow; in-app GitHub-direct update remains a
-  PR4 follow-up tag/device check rather than a signing blocker.
+  the protected release workflow. On 2026-07-15 the installed v0.1.32 direct
+  build discovered, downloaded, verified, and installed v0.1.33 successfully.
 - [x] Downgrades, invalid archives, and unapproved redirects are rejected by the
   PR2 regression suite.
 - [ ] No raw provider credentials exist in SQLite, cloud payloads, diagnostics, or
@@ -677,6 +677,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 2 | Complete | Protected v0.1.32 release produced signed manifests/artifacts, verified the exact APK identity/certificate, and installed successfully; the next tag will exercise the in-app GitHub-direct update path. |
 | 2026-07-15 | PR 3 follow-up | Complete | PR #102 merged transient retry/error sanitization, mobile SQLite-factory correction, signing-parser compatibility, and the API-26 PiP return-stack fix as `a909738`. |
 | 2026-07-15 | PR 4 | Ready for PR | SourceConfig UUID namespaces and opaque normalized M3U channel IDs are implemented with atomic cache/favorites/EPG/position/cloud migration; analyze, all 269 tests, and Android Kotlin compilation pass. Merge and tag next so v0.1.32 can exercise the GitHub-direct updater. |
+| 2026-07-15 | PR 4 | Complete | PR #103 merged as `c3eab92`; protected v0.1.33 release CI passed, and the owner completed the in-app GitHub-direct update from v0.1.32 to v0.1.33. The one-time identity migration made the first post-update launch somewhat longer but completed successfully. |
+| 2026-07-15 | PR 4 follow-up | Ready for PR | A verified pending APK now survives unknown-source/OEM Auto Blocker detours and process recreation; settings return retries the same file, every resume repeats cache size/hash plus native package/signer validation, and analyze, all 277 tests, and Android Kotlin compilation pass. |
 
 ## Removal checklist
 

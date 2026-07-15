@@ -140,11 +140,13 @@ class UpdateInstaller {
   }
 
   /// Sends the user to Android's per-app "install unknown apps" settings.
-  Future<void> requestInstallPermission() async {
+  Future<bool> requestInstallPermission() async {
     try {
-      await _channel.invokeMethod('requestInstallPermission');
+      return await _channel.invokeMethod<bool>('requestInstallPermission') ??
+          false;
     } catch (e) {
       DiagnosticsLog.instance.add('update', 'Permission request failed: $e');
+      return false;
     }
   }
 
@@ -194,6 +196,35 @@ class UpdateInstaller {
   }
 
   void close() => _http.close(force: true);
+}
+
+/// Revalidates a previously downloaded APK before resuming installation.
+///
+/// The pending record lives in secure storage, but the cache file can disappear
+/// or be replaced while the app is away. Keep the same exact-byte checks used
+/// at download time, and reject paths outside the application temp directory.
+Future<void> validateCachedArtifact(
+  File file,
+  ReleaseArtifact artifact, {
+  Directory? tempDirectory,
+}) async {
+  final temp = tempDirectory ?? await getTemporaryDirectory();
+  final tempPath = await temp.resolveSymbolicLinks();
+  if (!await file.exists()) {
+    throw const FileSystemException('Cached update is missing');
+  }
+  final filePath = await file.resolveSymbolicLinks();
+  if (!p.isWithin(tempPath, filePath) ||
+      p.basename(filePath) != artifact.filename) {
+    throw const FileSystemException('Cached update path is invalid');
+  }
+  final length = await file.length();
+  final digest = await sha256.bind(file.openRead()).first;
+  validateDownloadedArtifact(
+    artifact: artifact,
+    receivedBytes: length,
+    sha256Digest: digest.toString(),
+  );
 }
 
 void validateDownloadedArtifact({
