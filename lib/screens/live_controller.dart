@@ -31,6 +31,7 @@ class LiveController extends ChangeNotifier {
 
   Timer? _epgTimer;
   bool _disposed = false;
+  int _loadGeneration = 0;
 
   void _set(VoidCallback fn) {
     if (_disposed) return;
@@ -47,6 +48,7 @@ class LiveController extends ChangeNotifier {
   }
 
   Future<void> load({bool forceRefresh = false}) async {
+    final gen = ++_loadGeneration;
     _set(() {
       loading = true;
       error = null;
@@ -62,7 +64,7 @@ class LiveController extends ChangeNotifier {
           );
         },
       );
-      if (_disposed) return;
+      if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
         'library',
         'loaded live source=${repo.source.name} channels=${snap.channels.length} force=$forceRefresh cache=${snap.fromCache}',
@@ -76,6 +78,7 @@ class LiveController extends ChangeNotifier {
       });
       await refreshNowNext();
     } catch (e) {
+      if (_disposed || gen != _loadGeneration) return;
       final message = sourceLoadErrorMessage(e);
       DiagnosticsLog.instance.add(
         'library',
@@ -89,9 +92,10 @@ class LiveController extends ChangeNotifier {
   }
 
   Future<void> refreshNowNext() async {
+    final gen = _loadGeneration;
     try {
       final nn = await repo.nowNext();
-      if (_disposed) return;
+      if (_disposed || gen != _loadGeneration) return;
       _set(() {
         now = nn.now;
         next = nn.next;

@@ -74,6 +74,7 @@ class MediaTabController extends ChangeNotifier {
   final ScrollController scrollController;
 
   int _enrichGeneration = 0;
+  int _loadGeneration = 0;
   String? _pendingSearch;
   bool _disposed = false;
 
@@ -141,10 +142,13 @@ class MediaTabController extends ChangeNotifier {
   }
 
   Future<void> load({bool forceRefresh = false}) async {
+    final gen = ++_loadGeneration;
     final categoryToLoad = _loadCategory;
     _set(() {
       _cancelEnrich();
       loading = true;
+      loadingMore = false;
+      searching = false;
       error = null;
     });
     unawaited(loadContinueWatching());
@@ -163,7 +167,7 @@ class MediaTabController extends ChangeNotifier {
           );
         },
       );
-      if (_disposed) return;
+      if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
         'library',
         'loaded ${kind.name} source=${repo.source.name} items=${snap.items.length} category=${categoryToLoad ?? '<all>'} force=$forceRefresh cache=${snap.fromCache} pages=${snap.loadedPages}/${snap.totalPages}',
@@ -177,6 +181,7 @@ class MediaTabController extends ChangeNotifier {
       }
     } catch (e) {
       final message = sourceLoadErrorMessage(e);
+      if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
         'library',
         '${kind.name} source load failed reason=${e.runtimeType} '
@@ -191,6 +196,8 @@ class MediaTabController extends ChangeNotifier {
 
   Future<void> loadMore() async {
     if (loadingMore) return;
+    if (loading) return;
+    final gen = _loadGeneration;
     final categoryToLoad = _loadCategory;
     final existingIds = {
       for (final item in snapshot?.items ?? const <MediaItem>[]) item.id,
@@ -202,7 +209,7 @@ class MediaTabController extends ChangeNotifier {
     });
     try {
       final snap = await repo.loadMoreMedia(kind, categoryId: categoryToLoad);
-      if (_disposed) return;
+      if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
         'library',
         'load more ${kind.name} source=${repo.source.name} items=${snap.items.length} category=${categoryToLoad ?? '<all>'} pages=${snap.loadedPages}/${snap.totalPages}',
@@ -218,6 +225,7 @@ class MediaTabController extends ChangeNotifier {
         unawaited(_enrich(newlyLoaded, maxItems: _autoEnrichLimit));
       }
     } catch (e) {
+      if (_disposed || gen != _loadGeneration) return;
       _set(() {
         error = sourceLoadErrorMessage(e);
         loadingMore = false;
@@ -227,10 +235,12 @@ class MediaTabController extends ChangeNotifier {
 
   Future<void> search(String query) async {
     _pendingSearch = query;
+    final gen = _loadGeneration;
     final categoryToLoad = _loadCategory;
     _set(() {
       _cancelEnrich();
       searching = true;
+      loadingMore = false;
       error = null;
     });
     try {
@@ -240,7 +250,9 @@ class MediaTabController extends ChangeNotifier {
         categoryId: categoryToLoad,
       );
       // A newer keystroke superseded this search — drop the stale result.
-      if (_disposed || _pendingSearch != query) return;
+      if (_disposed || _pendingSearch != query || gen != _loadGeneration) {
+        return;
+      }
       DiagnosticsLog.instance.add(
         'library',
         'search ${kind.name} source=${repo.source.name} query="$query" results=${results.length} category=${categoryToLoad ?? '<all>'}',
@@ -254,7 +266,9 @@ class MediaTabController extends ChangeNotifier {
         unawaited(_enrich(results, maxItems: _autoEnrichLimit));
       }
     } catch (e) {
-      if (_disposed || _pendingSearch != query) return;
+      if (_disposed || _pendingSearch != query || gen != _loadGeneration) {
+        return;
+      }
       _set(() {
         error = sourceLoadErrorMessage(e);
         searching = false;

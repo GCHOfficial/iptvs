@@ -26,9 +26,9 @@ Status convention:
 ## Current status
 
 - Last updated: 2026-07-15
-- Active phase: Phase 0 — Credential removal
-- Active PR: PR 5 — remove persisted and displayed credentials
-- Previous PR: PR 4 follow-up — merged as #104
+- Active phase: Phase 1 — Correctness and lifecycle
+- Active PR: PR 7 — EPG atomicity, empty results, and indexing (next)
+- Previous PR: PR 6 — async generation and disposal guards (ready for PR)
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 280 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 293 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -70,8 +70,8 @@ Status convention:
 | 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | Complete; v0.1.32 verified |
 | 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Complete; #101/#102 |
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Complete; #103/v0.1.33 |
-| 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | In progress; encrypted cache locators and cloud-safe payloads |
-| 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
+| 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | Complete; #105/v0.1.34 |
+| 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Ready for PR |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | [ ] |
 | 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | [ ] |
@@ -317,8 +317,9 @@ their own lineage.
 - [x] Keep non-secret provider metadata in the normal `extra` field.
 - [x] If an existing encryption key is missing, invalidate encrypted regenerable
   cache; legacy plaintext cache rows are migrated once into the encrypted field.
-- [ ] Atomically migrate source IDs, channel IDs, favorites, positions, EPG, and
-  related metadata.
+- [x] Atomically migrate source IDs, channel IDs, favorites, positions, EPG, and
+  related metadata. Covered by PR 4's stable-identity transaction and
+  `stable identity migration` persistence tests.
 - [x] Ensure cloud item IDs contain no raw URLs, MAC addresses, or credentials.
 - [x] Ensure encrypted playback locators are never uploaded to cloud sync; source
   and metadata payloads contain only non-secret fields, while an existing device
@@ -330,38 +331,71 @@ their own lineage.
 
 ### Verification
 
-- [ ] Existing M3U favorites survive migration.
-- [ ] Continue Watching survives migration.
-- [ ] Existing EPG links survive migration.
-- [ ] Migration failure rolls back all related tables.
+- [x] Existing M3U favorites survive migration. The persistence suite rewrites a
+  legacy M3U URL key without losing its favorite, and the owner opened and played
+  a pre-update favorite successfully after installing v0.1.34.
+- [x] Continue Watching survives migration. The stable-identity persistence test
+  migrates and reads the playback-position row in the destination namespace.
+- [x] Existing EPG links survive migration. The stable-identity and M3U migration
+  tests resolve the migrated now/next programme under the new identifiers.
+- DEFERRED: Explicit migration-failure injection and rollback verification belongs
+  to PR 12's supported-historical-migration matrix.
 - [x] No fixture credential appears in newly written SQLite cache text values.
 - [x] No fixture credential appears in cloud source or metadata payloads.
-- [ ] No fixture credential appears in diagnostics or rendered summaries.
+- [x] No fixture credential appears in diagnostics or rendered summaries;
+  `net_test.dart` and `widget_test.dart` cover URL/text and Stalker redaction.
 - [x] Missing encryption-key behavior is deterministic and recoverable.
-- [ ] Fresh and migrated databases have matching schemas.
-- [ ] `flutter analyze` and `flutter test` pass.
+- DEFERRED: Fresh-versus-migrated schema equivalence belongs to PR 12's complete
+  supported-historical-migration matrix.
+- [x] `flutter analyze` and `flutter test` pass (282 tests, 10 expected skips);
+  Android Kotlin compilation and PR #105 Build/CodeQL checks also pass.
 
 ## PR 6 — Async generation and disposal guards
 
 ### Implementation
 
-- [ ] Add generation tokens to `MediaTabController` category loads and pagination.
-- [ ] Add generation tokens to `LiveController` loads and refreshes.
-- [ ] Guard source/profile loading in `HomeShell`.
-- [ ] Guard asynchronous metadata enrichment.
-- [ ] Publish results only if controller, generation, source, profile, and category
-  still match the request.
-- [ ] Define refresh versus `loadMore` precedence explicitly.
-- [ ] Prevent notification after controller disposal.
+- [x] Add generation tokens to `MediaTabController` category loads and pagination.
+  `_loadGeneration` gates `load`, `loadMore`, and `search` publish paths.
+- [x] Add generation tokens to `LiveController` loads and refreshes.
+  `_loadGeneration` gates `load` and `refreshNowNext` publish paths.
+- [x] Guard source/profile loading in `HomeShell`. `_loadActiveGeneration` makes
+  a superseded `_loadActive` dispose its freshly built source/providers and
+  bail; `_loadProfileInfo` drops stale profile info the same way.
+- [x] Guard asynchronous metadata enrichment. The pre-existing
+  `_enrichGeneration` was audited as sufficient and is now pinned by a test.
+- [x] Publish results only if controller, generation, source, profile, and category
+  still match the request. Cross-source/profile staleness is enforced by
+  key-driven controller disposal (`ValueKey(config.id)` on `ChannelListScreen`)
+  plus `_disposed`; generation checks cover same-controller races.
+- [x] Define refresh versus `loadMore` precedence explicitly. Dataset-replacing
+  ops (`load`, `setCategory`) bump the generation and publish only if still
+  current; subordinate ops (`loadMore`, `search`, `clearSearch`,
+  `refreshNowNext`) read it without bumping and abandon superseded results;
+  `loadMore` refuses to start while `loading`. See the decision log.
+- [x] Prevent notification after controller disposal. All `notifyListeners`
+  calls route through `_set`, which early-returns when `_disposed`; dispose
+  tests pin this.
 
 ### Verification
 
-- [ ] Category A returning after category B cannot replace B.
-- [ ] Old source response cannot replace a new profile/source.
-- [ ] Refresh supersedes an outstanding pagination request.
-- [ ] Dispose during a request causes no notification or exception.
-- [ ] Old metadata enrichment cannot mutate a newer result.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Category A returning after category B cannot replace B.
+  `media_tab_controller_test.dart` "a category load returning after a newer one
+  cannot replace it" fails against the pre-fix code and passes now.
+- [x] Old source response cannot replace a new profile/source. Enforced by
+  key-driven controller disposal on source-id change (dispose tests prove
+  dropped publishes) plus the `_loadActive` generation guard; a HomeShell
+  widget test was judged infeasible without production-only test seams.
+- [x] Refresh supersedes an outstanding pagination request.
+  `media_tab_controller_test.dart` "refresh supersedes an outstanding
+  pagination", including the loadMore-refuses-while-loading sub-case.
+- [x] Dispose during a request causes no notification or exception. Dispose
+  tests in both controller suites (load, loadMore path, and `refreshNowNext`).
+- [x] Old metadata enrichment cannot mutate a newer result.
+  `media_tab_controller_test.dart` "old enrichment cannot mutate a newer
+  category's result".
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (293 tests,
+  10 platform/opt-in skips; 11 new race tests across
+  `media_tab_controller_test.dart` and `live_controller_test.dart`).
 
 ## PR 7 — EPG atomicity, empty results, and indexing
 
@@ -495,6 +529,11 @@ their own lineage.
 
 ## PR 13 — Split oversized UI files
 
+- [ ] Fix the adjacent defect found during PR 6: a metadata-config-only change
+  (same active source id) rebuilds the repository while `ChannelListScreen`'s
+  `ValueKey(config.id)` is unchanged, so live controllers keep the old,
+  disposed repository/source. Add `didUpdateWidget` handling or key on
+  repository identity while preserving controller/focus-node ownership.
 - [ ] Keep `channel_list_screen.dart` responsible for shell, routes, and dialogs.
 - [ ] Extract live pane widgets without moving their state ownership.
 - [ ] Extract media grid/details widgets without moving controller state.
@@ -606,15 +645,17 @@ their own lineage.
   build discovered, downloaded, verified, and installed v0.1.33 successfully.
 - [x] Downgrades, invalid archives, and unapproved redirects are rejected by the
   PR2 regression suite.
-- [ ] No raw provider credentials exist in SQLite, cloud payloads, diagnostics, or
-  source summaries.
+- [x] No raw provider credentials exist in SQLite cache text, cloud payloads,
+  diagnostics, or source summaries. PR #105 covers encrypted locators,
+  cloud-safe payloads, and redaction tests; v0.1.34 passed protected release CI.
 
 ### Correctness and persistence
 
 - [ ] Fresh-install and upgraded schemas match.
 - [ ] Every supported historical migration passes.
 - [ ] EPG success-empty, failure retention, and atomic replacement pass.
-- [ ] Source/profile/category race tests pass.
+- [x] Source/profile/category race tests pass. PR 6's
+  `media_tab_controller_test.dart` and `live_controller_test.dart` suites.
 - [ ] No tested controller or channel handler notifies a disposed owner.
 
 ### Performance
@@ -658,6 +699,7 @@ security, persisted data, or provider behavior.
 | 2026-07-14 | Use `IPTVS Player` as the customer-facing Microsoft Store and Google Play title | `iptvs` was unavailable in Partner Center; Store titles are presentation metadata and need not match package/application IDs | Use the reserved name consistently while keeping technical identities channel-specific | Store setup |
 | 2026-07-14 | Store builds use Store-managed updates; only GitHub-direct builds may switch between signed GitHub stable/beta releases | Play prohibits self-update package installation and packaged MSIX updates are Store-owned | Use Store test tracks/flights only for submission validation; ongoing public betas use GitHub direct | PR 2 / Store setup |
 | 2026-07-14 | Keep Store and GitHub-direct installations on separate identities | The owner prefers low-overhead GitHub beta distribution without Store signing, policy, or version conflicts | Play uses `com.gchofficial.iptvs.player`; GitHub direct uses `.player.direct`; Store builds never self-update | PR 1 / Store setup |
+| 2026-07-15 | Per-controller monotonic `_loadGeneration` counters instead of a shared guard helper; only snapshot-writing ops (`load`, `setCategory`) bump the generation, while `loadMore`, `search`, `clearSearch`, and `refreshNowNext` read without bumping and abandon superseded results | Precedence policy is inherently per-controller, so a shared helper adds abstraction without removing duplication; search publishes to `searchResults`, independent of `snapshot`, so bumping there would drop a load's terminal state update (stuck `loading` flag) | Refresh always supersedes pagination, never the reverse; disposal stays expressed solely through `_disposed` checked in `_set`; the invariant is summarized in `CLAUDE.md` key conventions | PR 6 |
 
 ## Progress log
 
@@ -684,6 +726,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 4 | Complete | PR #103 merged as `c3eab92`; protected v0.1.33 release CI passed, and the owner completed the in-app GitHub-direct update from v0.1.32 to v0.1.33. The one-time identity migration made the first post-update launch somewhat longer but completed successfully. |
 | 2026-07-15 | PR 4 follow-up | Ready for PR | A verified pending APK now survives unknown-source/OEM Auto Blocker detours and process recreation; settings return retries the same file, every resume repeats cache size/hash plus native package/signer validation, and analyze, all 277 tests, and Android Kotlin compilation pass. |
 | 2026-07-15 | PR 5 | Ready for PR | Added AES-GCM installation-key protection for cached playback locators, one-time legacy cache migration, deterministic missing-key invalidation, cloud-safe source/metadata payloads with local-secret preservation, redacted source summaries, and credential-field reveal controls; analyze, all 280 tests, and Android Kotlin compilation pass. |
+| 2026-07-15 | PR 5 | Complete | PR #105 merged as `b857be0` and protected v0.1.34 release CI published signed Android and Windows artifacts. The owner installed the update, confirmed favorites persisted, and successfully played a pre-update favorite; all 282 tests pass with 10 expected skips. |
+| 2026-07-15 | PR 6 | Ready for PR | Generation guards landed in `MediaTabController`, `LiveController`, and `HomeShell._loadActive`/`_loadProfileInfo`; 11 new Completer-gated race tests (two proven load-bearing against pre-fix code) cover category clobber, refresh-vs-pagination precedence, dispose-during-request, stale enrichment, stale search, and search-must-not-drop-load; analyze and all 293 tests pass. Known adjacent defect deferred to PR 13: a metadata-config-only change rebuilds the repository without changing `ChannelListScreen`'s `ValueKey`, leaving controllers on a disposed repository. |
 
 ## Removal checklist
 
