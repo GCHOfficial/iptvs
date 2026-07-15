@@ -65,6 +65,12 @@ class HdrPlayerActivity : ComponentActivity() {
     private var lastReconnectMs = 0L
     private var reconnectAttempt = 0
     private val backGuard = PlayerBackGuard()
+    // Entering PiP moves MainActivity's task behind the launcher so the pinned
+    // window is unobstructed.  When the restored player is then closed, the
+    // player task would otherwise finish into the launcher instead of the
+    // Flutter streams route.  Remember that this Activity has used PiP so its
+    // finish path can restore the existing MainActivity task first.
+    private var enteredPip = false
 
     /**
      * TV remotes and three-button navigation arrive as key events. Consume both
@@ -353,6 +359,7 @@ class HdrPlayerActivity : ComponentActivity() {
         newConfig: Configuration,
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) enteredPip = true
         uiState.inPip = isInPictureInPictureMode
         if (isInPictureInPictureMode) {
             // Collapse all chrome so the PiP window is video-only.
@@ -437,7 +444,27 @@ class HdrPlayerActivity : ComponentActivity() {
             }
             if (hasResult) setResult(RESULT_OK, result)
         }
+        if (enteredPip) restoreMainTaskAfterPip()
         super.finish()
+    }
+
+    /**
+     * PiP places this Activity in a pinned task and the Flutter task is moved
+     * behind the launcher on entry.  Reorder the already-running MainActivity
+     * task before finishing so nativeClosed is delivered into the visible
+     * Flutter route rather than leaving the user at the home screen.
+     */
+    private fun restoreMainTaskAfterPip() {
+        if (MainActivity.instance?.get() == null) return
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+                ),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "could not restore Flutter task after PiP", e)
+        }
     }
 
     override fun onDestroy() {
