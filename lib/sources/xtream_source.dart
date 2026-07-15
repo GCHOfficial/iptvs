@@ -20,6 +20,10 @@ class XtreamSource implements Source {
   final String username;
   final String password;
   final String streamExtension; // 'ts' (most compatible) or 'm3u8'
+  /// Expiry carried by an M3U/get.php URL before it was converted to an
+  /// Xtream source. Some panels expose it in the playlist URL but omit it
+  /// from `player_api.php`.
+  final String? playlistExpiryHint;
   @visibleForTesting
   final Future<dynamic> Function(Map<String, String> params)? debugApi;
 
@@ -40,6 +44,7 @@ class XtreamSource implements Source {
     required this.username,
     required this.password,
     this.streamExtension = 'ts',
+    this.playlistExpiryHint,
     this.debugApi,
     this.displayName,
   });
@@ -367,8 +372,11 @@ class XtreamSource implements Source {
   Future<DateTime?> subscriptionExpiry() async {
     final info = await _api({});
     final user = info is Map ? info['user_info'] : null;
-    if (user is! Map) return null;
-    return parseExpiryValue(user['exp_date']);
+    if (user is Map) {
+      final parsed = parseExpiryValue(user['exp_date']);
+      if (parsed != null) return parsed;
+    }
+    return parseExpiryValue(playlistExpiryHint);
   }
 
   @override

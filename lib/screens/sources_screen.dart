@@ -11,6 +11,7 @@ import '../data/source_store.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../sources/source_config.dart';
+import '../sources/expiry.dart';
 import '../sources/xtream_source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -812,6 +813,10 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
         'host': creds.host,
         'username': creds.username,
         'password': creds.password,
+        // Keep URL-only expiry metadata when the panel's player API does not
+        // repeat it. The original playlist URL is deliberately not retained.
+        if (expiryFromPlaylistUrl(uri.toString()) case final expiry?)
+          'playlistExpiryHint': expiry.toIso8601String(),
       },
     );
   }

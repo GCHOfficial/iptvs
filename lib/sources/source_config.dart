@@ -70,6 +70,7 @@ class SourceConfig {
           host: fields['host']!,
           username: fields['username']!,
           password: fields['password']!,
+          playlistExpiryHint: fields['playlistExpiryHint'],
           displayName: name,
         );
       case SourceKind.m3u:

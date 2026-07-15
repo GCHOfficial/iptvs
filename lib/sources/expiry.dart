@@ -96,7 +96,9 @@ DateTime? extractExpiryFromText(Object? value) {
 DateTime? expiryFromPlaylistUrl(String url) {
   final uri = Uri.tryParse(url);
   if (uri == null || uri.queryParameters.isEmpty) return null;
-  const keys = {'exp', 'expiry', 'expire', 'expires'};
+  // Xtream playlist links are commonly labelled `exp`, while some panels
+  // copy the player API field name verbatim as `exp_date`.
+  const keys = {'exp', 'exp_date', 'expiry', 'expire', 'expires'};
   for (final entry in uri.queryParameters.entries) {
     if (!keys.contains(entry.key.toLowerCase())) continue;
     final parsed = parseExpiryValue(entry.value);
