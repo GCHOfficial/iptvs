@@ -36,7 +36,11 @@ class UpdateInstaller {
   final HttpClient _http;
 
   UpdateInstaller({HttpClient? http})
-    : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+    : _http =
+          http ??
+          (HttpClient()
+            ..connectionTimeout = _connectTimeout
+            ..autoUncompress = false);
 
   static const _connectTimeout = Duration(seconds: 20);
 
@@ -61,13 +65,20 @@ class UpdateInstaller {
     final file = File(p.join(dir.path, artifact.filename));
     final partial = File('${file.path}.partial');
     if (await partial.exists()) await partial.delete();
+    final operation = HttpOperation(
+      kUpdateArtifactWorkload.copyWith(
+        maximumBodyBytes: artifact.byteSize,
+        maximumDecodedBytes: artifact.byteSize,
+      ),
+    );
     final response = await openApprovedUpdateGet(
       _http,
       url,
+      operation: operation,
       headers: const {HttpHeaders.userAgentHeader: 'iptvs-updater'},
     );
     if (response.statusCode != 200) {
-      await response.drain<void>();
+      await operation.readBytes(response);
       throw StateError('Download HTTP ${response.statusCode}');
     }
     if (response.contentLength >= 0 &&
@@ -75,23 +86,22 @@ class UpdateInstaller {
       await response.drain<void>();
       throw const FormatException('Update Content-Length mismatch');
     }
-    final sink = partial.openWrite();
     final digestSink = _DigestSink();
     final hashSink = sha256.startChunkedConversion(digestSink);
     var received = 0;
+    var hashClosed = false;
     try {
-      await for (final chunk in response.timeout(kHttpReadTimeout)) {
-        received += chunk.length;
-        if (received > artifact.byteSize) {
-          throw const FormatException('Update exceeds signed byte size');
-        }
-        sink.add(chunk);
-        hashSink.add(chunk);
-        onProgress?.call(received / artifact.byteSize);
-      }
-      await sink.flush();
-      await sink.close();
+      received = await operation.readToFile(
+        response,
+        partial,
+        maximumBytes: artifact.byteSize,
+        onChunk: (chunk, total) {
+          hashSink.add(chunk);
+          onProgress?.call(total / artifact.byteSize);
+        },
+      );
       hashSink.close();
+      hashClosed = true;
       validateDownloadedArtifact(
         artifact: artifact,
         receivedBytes: received,
@@ -100,7 +110,7 @@ class UpdateInstaller {
       if (await file.exists()) await file.delete();
       return partial.rename(file.path);
     } catch (_) {
-      await sink.close();
+      if (!hashClosed) hashSink.close();
       if (await partial.exists()) await partial.delete();
       rethrow;
     }

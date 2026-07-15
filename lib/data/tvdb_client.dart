@@ -12,7 +12,11 @@ class TvdbClient implements MetadataProvider {
   String? _token;
 
   TvdbClient({required this.apiKey, this.pin = '', HttpClient? http})
-    : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+    : _http =
+          http ??
+          (HttpClient()
+            ..connectionTimeout = _connectTimeout
+            ..autoUncompress = false);
 
   static const _connectTimeout = Duration(seconds: 15);
 
@@ -126,17 +130,18 @@ class TvdbClient implements MetadataProvider {
     final existing = _token;
     if (existing != null) return existing;
     final uri = Uri.parse('$_base/login');
-    final request = await _http.postUrl(uri);
+    final operation = HttpOperation(kMetadataJsonWorkload);
+    final request = await operation.wait(_http.postUrl(uri));
     request.headers.contentType = ContentType.json;
     request.write(
       jsonEncode({'apikey': apiKey, if (pin.isNotEmpty) 'pin': pin}),
     );
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final response = await operation.wait(request.close());
     if (response.statusCode != 200) {
       throw StateError('TVDB HTTP ${response.statusCode} auth=login');
     }
     final body = jsonDecode(
-      utf8.decode(await response.readBytes(), allowMalformed: true),
+      utf8.decode(await operation.readBytes(response), allowMalformed: true),
     );
     final token = body is Map && body['data'] is Map
         ? (body['data'] as Map)['token']?.toString()
@@ -153,17 +158,18 @@ class TvdbClient implements MetadataProvider {
     Map<String, String> query = const {},
   ]) async {
     final uri = Uri.parse('$_base$path').replace(queryParameters: query);
-    final request = await _http.getUrl(uri);
+    final operation = HttpOperation(kMetadataJsonWorkload);
+    final request = await operation.wait(_http.getUrl(uri));
     request.headers.set(
       HttpHeaders.authorizationHeader,
       'Bearer ${await _bearerToken()}',
     );
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final response = await operation.wait(request.close());
     if (response.statusCode != 200) {
       throw StateError('TVDB HTTP ${response.statusCode} path=$path');
     }
     return jsonDecode(
-      utf8.decode(await response.readBytes(), allowMalformed: true),
+      utf8.decode(await operation.readBytes(response), allowMalformed: true),
     );
   }
 

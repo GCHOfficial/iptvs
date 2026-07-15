@@ -23,7 +23,8 @@ class XtreamSource implements Source {
   final Future<dynamic> Function(Map<String, String> params)? debugApi;
 
   final HttpClient _http = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 15);
+    ..connectionTimeout = const Duration(seconds: 15)
+    ..autoUncompress = false;
   final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
 
   // Stalker portals usually return compact provider pages, often around
@@ -55,8 +56,9 @@ class XtreamSource implements Source {
   String get id => 'xtream:$_base|$username';
 
   @override
-  String get name =>
-      displayName?.trim().isNotEmpty == true ? displayName!.trim() : 'Xtream · $username';
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'Xtream · $username';
 
   @override
   Future<void> connect() async {
@@ -86,7 +88,17 @@ class XtreamSource implements Source {
   Future<List<Channel>> channels({String? categoryId}) async {
     final params = {'action': 'get_live_streams'};
     if (categoryId != null) params['category_id'] = categoryId;
-    final r = await _api(params);
+    dynamic r;
+    try {
+      r = await _api(params);
+    } on HttpWorkloadException {
+      if (categoryId != null) rethrow;
+      return _channelsPartitionedByCategory();
+    }
+    return _mapLiveChannels(r);
+  }
+
+  List<Channel> _mapLiveChannels(dynamic r) {
     if (r is! List) return const [];
     return r.whereType<Map>().map((s) {
       final m = Map<String, dynamic>.from(s);
@@ -109,6 +121,30 @@ class XtreamSource implements Source {
         },
       );
     }).toList();
+  }
+
+  /// Xtream's common API has no formal pagination for live streams, but most
+  /// panels honor category_id. If the monolithic catalog crosses the bounded
+  /// response limit, partition it by category and merge stable stream IDs.
+  Future<List<Channel>> _channelsPartitionedByCategory() async {
+    final available = await categories();
+    if (available.isEmpty) {
+      throw const HttpWorkloadException(
+        'Xtream live catalog is too large and exposes no categories',
+      );
+    }
+    final out = <Channel>[];
+    final seen = <String>{};
+    for (final category in available) {
+      final response = await _api({
+        'action': 'get_live_streams',
+        'category_id': category.id,
+      });
+      for (final channel in _mapLiveChannels(response)) {
+        if (seen.add(channel.id)) out.add(channel);
+      }
+    }
+    return out;
   }
 
   @override
@@ -159,7 +195,7 @@ class XtreamSource implements Source {
     final uri = Uri.parse(
       '$_base/xmltv.php?username=$username&password=$password',
     );
-    final bytes = await _download(uri);
+    final bytes = await _download(uri, kEpgWorkload);
     return parseXmltv(bytes, map);
   }
 
@@ -344,7 +380,7 @@ class XtreamSource implements Source {
     final uri = Uri.parse('$_base/player_api.php').replace(
       queryParameters: {'username': username, 'password': password, ...params},
     );
-    final bytes = await _download(uri);
+    final bytes = await _download(uri, kProviderJsonWorkload);
     return _decodeJson(bytes);
   }
 
@@ -361,14 +397,15 @@ class XtreamSource implements Source {
     return compute(_decodeJsonBytes, bytes);
   }
 
-  Future<Uint8List> _download(Uri uri) async {
-    final req = await _http.getUrl(uri);
-    final resp = await req.close().timeout(kHttpReadTimeout);
+  Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
+    final operation = HttpOperation(policy);
+    final req = await operation.wait(_http.getUrl(uri));
+    final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
       // redactUrl strips the username/password query params from the panel URL.
       throw StateError('HTTP ${resp.statusCode} from ${redactUrl(uri)}');
     }
-    return resp.readBytes();
+    return operation.readBytes(resp);
   }
 
   Future<MediaPage> _aggregateMediaPage(

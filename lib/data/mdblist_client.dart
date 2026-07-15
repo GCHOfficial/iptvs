@@ -10,7 +10,11 @@ class MdblistClient implements MetadataProvider {
   final HttpClient _http;
 
   MdblistClient({required this.apiKey, HttpClient? http})
-    : _http = http ?? (HttpClient()..connectionTimeout = _connectTimeout);
+    : _http =
+          http ??
+          (HttpClient()
+            ..connectionTimeout = _connectTimeout
+            ..autoUncompress = false);
 
   static const _connectTimeout = Duration(seconds: 15);
 
@@ -59,13 +63,14 @@ class MdblistClient implements MetadataProvider {
   ) async => null;
 
   Future<dynamic> _get(Uri uri) async {
-    final request = await _http.getUrl(uri);
-    final response = await request.close().timeout(kHttpReadTimeout);
+    final operation = HttpOperation(kMetadataJsonWorkload);
+    final request = await operation.wait(_http.getUrl(uri));
+    final response = await operation.wait(request.close());
     if (response.statusCode != 200) {
       throw StateError('MDBList HTTP ${response.statusCode}');
     }
     return jsonDecode(
-      utf8.decode(await response.readBytes(), allowMalformed: true),
+      utf8.decode(await operation.readBytes(response), allowMalformed: true),
     );
   }
 

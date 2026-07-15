@@ -25,10 +25,10 @@ Status convention:
 
 ## Current status
 
-- Last updated: 2026-07-14
+- Last updated: 2026-07-15
 - Active phase: Phase 0 — Release and security blockers
-- Active PR: PR 15 subset — Android TV Back, density, and category activation
-- Next planned PR: PR 3 — Bound HTTP and decompression workloads
+- Active PR: PR 3 — Bound HTTP and decompression workloads
+- Previous PR: PR 15 subset — Android TV Back, density, and category activation (merged as #100)
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 244 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 258 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -65,7 +65,7 @@ Status convention:
 | 0 | Foundation | Fixtures, benchmarks, and device matrix | M | None | In progress |
 | 1 | Phase 0 | Recover Android signing trust | L | PR 0 | In progress |
 | 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | In progress |
-| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | [ ] |
+| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | In progress |
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | [ ] |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
@@ -239,27 +239,32 @@ their own lineage.
 
 ### Implementation
 
-- [ ] Add a shared response reader with an idle timeout.
-- [ ] Add a separate total operation deadline.
-- [ ] Add maximum compressed and decoded byte limits.
-- [ ] Reject excessive `Content-Length` values early.
-- [ ] Enforce the actual streamed-byte limit when length is missing or false.
-- [ ] Support temporary-file streaming for update and very large provider payloads.
-- [ ] Delete partial files after cancellation or failure.
-- [ ] Decode gzip with an output ceiling.
-- [ ] Move gzip decompression off the UI isolate.
-- [ ] Apply policies to M3U, XMLTV, Xtream, Stalker, metadata, and updates.
-- [ ] Make workload limits named and testable rather than scattered constants.
+- [x] Add a shared response reader with idle and cancellation-safe timeouts.
+- [x] Add a separate total operation deadline.
+- [x] Add maximum compressed and decoded byte limits.
+- [x] Reject excessive `Content-Length` values early.
+- [x] Enforce the actual streamed-byte limit when length is missing or false.
+- [x] Add reusable temporary-file streaming and use it for update artifacts;
+  provider ingestion remains byte-based until PR 10's one-pass parser boundary.
+- [x] Delete partial files after cancellation or failure.
+- [x] Decode gzip with an output ceiling.
+- [x] Move gzip decompression off the UI isolate.
+- [x] Apply policies to M3U, XMLTV, Xtream, Stalker, metadata, and updates.
+- [x] Fall back from oversized monolithic Stalker/Xtream live catalogs to
+  paginated ordered lists or category-scoped retrieval with ID deduplication.
+- [x] Make workload limits named and testable rather than scattered constants.
 
 ### Verification
 
-- [ ] Slow-drip response reaches the total deadline.
-- [ ] Missing and false `Content-Length` values cannot bypass the limit.
-- [ ] A response exceeding the limit mid-stream is aborted.
-- [ ] A high-ratio gzip payload is aborted at the decoded-byte limit.
-- [ ] Cancellation removes partial files and closes the HTTP client.
-- [ ] Representative legitimate fixtures remain accepted.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Slow-drip response reaches the total deadline (`test/net_workload_test.dart`).
+- [x] Missing and false `Content-Length` values cannot bypass the limit.
+- [x] A response exceeding the limit mid-stream is aborted.
+- [x] A high-ratio gzip payload is aborted at the decoded-byte limit.
+- [x] Cancellation/failure removes partial files; clients remain explicitly
+  closeable by each owning source/service.
+- [x] Representative legitimate fixtures remain accepted.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (258 passed,
+  10 platform/opt-in skips).
 
 ## PR 4 — Stable source and cache identities
 
@@ -633,6 +638,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | PR 2 | In progress | Added signed manifests, pre-connection redirect approval, exact artifact gates, Android package/signer verification, staged Windows rollback, immutable Action pins, downgrade rejection, and signed GitHub stable/beta selection; PR #98 Windows rejection/rollback CI passed, while protected release and device evidence remain |
 | 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow, with two encrypted backups confirmed; Play enrollment and Store packages remain |
 | 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
+| 2026-07-15 | PR 15 subset | Merged | PR #100 merged as `912392f`; Android TV Back, density, category focus, tests, and store screenshots are on `main`. |
+| 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Phone/TV profiling also exposed and fixed non-finite media-card image cache sizing. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
 
 ## Removal checklist
 

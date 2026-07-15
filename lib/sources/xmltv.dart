@@ -1,11 +1,11 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
 import 'package:xml/xml.dart';
 import 'package:xml/xml_events.dart';
 
+import '../data/net.dart';
 import 'source.dart';
 
 /// Below this payload size, parse inline; above it, decode + parse on a
@@ -23,7 +23,9 @@ Future<List<Programme>> parseXmltv(
   Uint8List bytes,
   Map<String, String> tvgIdToChannelId,
 ) {
-  if (bytes.length < _isolateXmltvThreshold) {
+  // A tiny gzip can expand into hundreds of MB, so compressed input always
+  // goes to the worker even when it is below the ordinary isolate threshold.
+  if (!isGzipBytes(bytes) && bytes.length < _isolateXmltvThreshold) {
     return _parseXmltvBytes((bytes, tvgIdToChannelId));
   }
   return compute(_parseXmltvBytes, (bytes, tvgIdToChannelId));
@@ -38,8 +40,8 @@ Future<List<Programme>> _parseXmltvBytes(
   final (bytes, tvgIdToChannelId) = args;
   // A .xml.gz file arrives as raw gzip (magic 0x1f 0x8b) with no transfer
   // encoding, so decompress it ourselves.
-  final data = (bytes.length > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
-      ? gzip.decode(bytes)
+  final data = isGzipBytes(bytes)
+      ? decodeGzipBounded(bytes, kEpgWorkload.maximumDecodedBytes)
       : bytes;
   final xmlString = utf8.decode(data, allowMalformed: true);
 
@@ -51,22 +53,24 @@ Future<List<Programme>> _parseXmltvBytes(
       .toXmlNodes()
       .expand((nodes) => nodes)
       .forEach((node) {
-    if (node is! XmlElement) return;
-    final tvgId = node.getAttribute('channel');
-    if (tvgId == null) return;
-    final channelId = tvgIdToChannelId[tvgId];
-    if (channelId == null) return; // not one of our channels
-    final start = parseXmltvTime(node.getAttribute('start'));
-    final stop = parseXmltvTime(node.getAttribute('stop'));
-    if (start == null || stop == null) return;
-    out.add(Programme(
-      channelId: channelId,
-      start: start,
-      stop: stop,
-      title: node.getElement('title')?.innerText.trim() ?? '',
-      description: node.getElement('desc')?.innerText.trim(),
-    ));
-  });
+        if (node is! XmlElement) return;
+        final tvgId = node.getAttribute('channel');
+        if (tvgId == null) return;
+        final channelId = tvgIdToChannelId[tvgId];
+        if (channelId == null) return; // not one of our channels
+        final start = parseXmltvTime(node.getAttribute('start'));
+        final stop = parseXmltvTime(node.getAttribute('stop'));
+        if (start == null || stop == null) return;
+        out.add(
+          Programme(
+            channelId: channelId,
+            start: start,
+            stop: stop,
+            title: node.getElement('title')?.innerText.trim() ?? '',
+            description: node.getElement('desc')?.innerText.trim(),
+          ),
+        );
+      });
   return out;
 }
 

@@ -961,35 +961,45 @@ class _Poster extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fallback = Container(
-      width: width,
-      height: height,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: AppColors.panelHi,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Icon(
-        item.kind == ContentKind.movie
-            ? Icons.movie_outlined
-            : Icons.tv_outlined,
-        color: AppColors.textLo,
-      ),
-    );
-    final poster = item.poster;
-    if (poster == null || poster.isEmpty) return fallback;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: CachedNetworkImage(
-        imageUrl: poster,
-        width: width,
-        height: height,
-        fit: BoxFit.cover,
-        memCacheWidth: imageCacheSize(context, width),
-        memCacheHeight: imageCacheSize(context, height),
-        errorWidget: (_, _, _) => fallback,
-        placeholder: (_, _) => fallback,
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final renderedWidth = width.isFinite && width > 0
+            ? width
+            : constraints.maxWidth;
+        final renderedHeight = height.isFinite && height > 0
+            ? height
+            : constraints.maxHeight;
+        final fallback = Container(
+          width: renderedWidth,
+          height: renderedHeight,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: AppColors.panelHi,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            item.kind == ContentKind.movie
+                ? Icons.movie_outlined
+                : Icons.tv_outlined,
+            color: AppColors.textLo,
+          ),
+        );
+        final poster = item.poster;
+        if (poster == null || poster.isEmpty) return fallback;
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: CachedNetworkImage(
+            imageUrl: poster,
+            width: renderedWidth,
+            height: renderedHeight,
+            fit: BoxFit.cover,
+            memCacheWidth: imageCacheSize(context, renderedWidth),
+            memCacheHeight: imageCacheSize(context, renderedHeight),
+            errorWidget: (_, _, _) => fallback,
+            placeholder: (_, _) => fallback,
+          ),
+        );
+      },
     );
   }
 }

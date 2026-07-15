@@ -9,6 +9,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/data/metadata_config.dart';
+import 'package:iptvs/data/net.dart';
 import 'package:iptvs/data/source_hint_parser.dart';
 import 'package:iptvs/data/tmdb_client.dart';
 import 'package:iptvs/sources/demo_source.dart';
@@ -61,8 +62,8 @@ void main() {
 
   group('parseXmltv', () {
     Uint8List xmltv(String programmes) => Uint8List.fromList(
-          utf8.encode('<?xml version="1.0"?><tv>$programmes</tv>'),
-        );
+      utf8.encode('<?xml version="1.0"?><tv>$programmes</tv>'),
+    );
 
     String programme(String channel, {String title = 'Show'}) =>
         '<programme channel="$channel" start="20240101120000 +0000" '
@@ -186,11 +187,64 @@ void main() {
     });
 
     test('appends with & when the URL already has a query', () {
-      final url =
-          StalkerSource.archiveUrl('http://host/stream.ts?token=x', start, now);
-      expect(url, 'http://host/stream.ts?token=x&utc=1709670600&lutc=1709672400');
+      final url = StalkerSource.archiveUrl(
+        'http://host/stream.ts?token=x',
+        start,
+        now,
+      );
+      expect(
+        url,
+        'http://host/stream.ts?token=x&utc=1709670600&lutc=1709672400',
+      );
     });
   });
+
+  test(
+    'Stalker oversized catalog falls back to paginated ordered lists',
+    () async {
+      final requestedPages = <String>[];
+      final source = StalkerSource(
+        portal: 'http://example.invalid/c/',
+        mac: '00:1A:79:12:34:56',
+        debugApi: (params) async {
+          switch (params['action']) {
+            case 'get_all_channels':
+              throw const HttpWorkloadException('fixture exceeds limit');
+            case 'get_genres':
+              return {
+                'js': [
+                  {'id': 'news', 'title': 'News'},
+                ],
+              };
+            case 'get_ordered_list':
+              requestedPages.add(params['p']!);
+              final page = int.parse(params['p']!);
+              return {
+                'js': {
+                  'total_items': 2,
+                  'max_page_items': 1,
+                  'data': [
+                    {
+                      'id': '$page',
+                      'name': 'Channel $page',
+                      'number': page,
+                      'cmd': 'ffmpeg http://stream.example.invalid/$page',
+                    },
+                  ],
+                },
+              };
+          }
+          return const {'js': null};
+        },
+      );
+
+      final channels = await source.channels();
+
+      expect(channels.map((channel) => channel.id), ['1', '2']);
+      expect(channels.every((channel) => channel.categoryId == 'news'), isTrue);
+      expect(requestedPages, ['1', '2']);
+    },
+  );
 
   group('Stalker series detail fallback', () {
     final source = StalkerSource(
@@ -413,6 +467,49 @@ void main() {
       expect(chans[2].archiveDays, 0);
       expect(chans[2].hasArchive, isFalse);
       expect(chans[3].archiveDays, 0);
+    });
+
+    test('oversized live catalog falls back to category partitions', () async {
+      var unfilteredCalls = 0;
+      final source = XtreamSource(
+        host: 'http://example.invalid',
+        username: 'user',
+        password: 'pass',
+        debugApi: (params) async {
+          if (params['action'] == 'get_live_categories') {
+            return [
+              {'category_id': 'a', 'category_name': 'A'},
+              {'category_id': 'b', 'category_name': 'B'},
+            ];
+          }
+          if (params['action'] == 'get_live_streams') {
+            final category = params['category_id'];
+            if (category == null) {
+              unfilteredCalls++;
+              throw const HttpWorkloadException('fixture exceeds limit');
+            }
+            return [
+              {
+                'stream_id': category == 'a' ? 'shared' : 'b-only',
+                'name': 'Channel $category',
+                'category_id': category,
+              },
+              if (category == 'b')
+                {
+                  'stream_id': 'shared',
+                  'name': 'Duplicate shared channel',
+                  'category_id': category,
+                },
+            ];
+          }
+          return const [];
+        },
+      );
+
+      final channels = await source.channels();
+
+      expect(unfilteredCalls, 1);
+      expect(channels.map((channel) => channel.id), ['shared', 'b-only']);
     });
 
     test('resolveArchive builds a timeshift URL for a past programme', () async {

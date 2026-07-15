@@ -1,23 +1,347 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
-/// Ceiling for waiting on response headers and for the gap between body
-/// chunks. [HttpClient.connectionTimeout] only covers the TCP handshake, so a
-/// server that connects then stalls would otherwise hang a request forever —
-/// a real risk against flaky IPTV panels and third-party metadata APIs.
+/// Named limits for one HTTP workload. The wire/body ceiling is separate from
+/// the decoded ceiling so compressed responses cannot become decompression
+/// bombs. [totalTimeout] never resets; [idleTimeout] resets for each chunk.
+class HttpWorkloadPolicy {
+  const HttpWorkloadPolicy({
+    required this.name,
+    required this.maximumBodyBytes,
+    required this.maximumDecodedBytes,
+    required this.totalTimeout,
+    this.idleTimeout = const Duration(seconds: 20),
+  });
+
+  final String name;
+  final int maximumBodyBytes;
+  final int maximumDecodedBytes;
+  final Duration idleTimeout;
+  final Duration totalTimeout;
+
+  HttpWorkloadPolicy copyWith({
+    String? name,
+    int? maximumBodyBytes,
+    int? maximumDecodedBytes,
+    Duration? idleTimeout,
+    Duration? totalTimeout,
+  }) => HttpWorkloadPolicy(
+    name: name ?? this.name,
+    maximumBodyBytes: maximumBodyBytes ?? this.maximumBodyBytes,
+    maximumDecodedBytes: maximumDecodedBytes ?? this.maximumDecodedBytes,
+    idleTimeout: idleTimeout ?? this.idleTimeout,
+    totalTimeout: totalTimeout ?? this.totalTimeout,
+  );
+}
+
+const int _mib = 1024 * 1024;
+
+/// Provider payload limits are deliberately generous relative to normal API
+/// responses. They stop hostile/unconfigured endpoints without rejecting the
+/// large catalogs represented by the PR 0 fixtures.
+const kPlaylistWorkload = HttpWorkloadPolicy(
+  name: 'playlist',
+  maximumBodyBytes: 128 * _mib,
+  maximumDecodedBytes: 256 * _mib,
+  totalTimeout: Duration(minutes: 5),
+);
+const kEpgWorkload = HttpWorkloadPolicy(
+  name: 'epg',
+  maximumBodyBytes: 128 * _mib,
+  maximumDecodedBytes: 512 * _mib,
+  totalTimeout: Duration(minutes: 8),
+);
+const kProviderJsonWorkload = HttpWorkloadPolicy(
+  name: 'provider JSON',
+  maximumBodyBytes: 128 * _mib,
+  maximumDecodedBytes: 256 * _mib,
+  totalTimeout: Duration(minutes: 3),
+);
+const kStalkerJsonWorkload = HttpWorkloadPolicy(
+  name: 'Stalker JSON',
+  // Real portals can return the entire live catalog from get_all_channels in
+  // one response. The PR 0 50k-row fixture is ~11 MiB and a user-validated
+  // portal exceeds 16 MiB, so retain a meaningful ceiling without rejecting
+  // legitimate large catalogs.
+  maximumBodyBytes: 64 * _mib,
+  maximumDecodedBytes: 128 * _mib,
+  totalTimeout: Duration(minutes: 1),
+);
+const kMetadataJsonWorkload = HttpWorkloadPolicy(
+  name: 'metadata JSON',
+  maximumBodyBytes: 4 * _mib,
+  maximumDecodedBytes: 8 * _mib,
+  totalTimeout: Duration(seconds: 45),
+);
+const kUpdateDiscoveryWorkload = HttpWorkloadPolicy(
+  name: 'update discovery',
+  maximumBodyBytes: 1024 * 1024,
+  maximumDecodedBytes: 2 * 1024 * 1024,
+  totalTimeout: Duration(seconds: 45),
+);
+const kUpdateArtifactWorkload = HttpWorkloadPolicy(
+  name: 'update artifact',
+  maximumBodyBytes: 1024 * _mib,
+  maximumDecodedBytes: 1024 * _mib,
+  totalTimeout: Duration(minutes: 30),
+);
+
+/// Retained for native/update call sites that only need an idle timeout.
 const Duration kHttpReadTimeout = Duration(seconds: 20);
 
-extension HttpResponseRead on HttpClientResponse {
-  /// Drains the body to bytes, throwing [TimeoutException] if no chunk arrives
-  /// within [timeout]. The timer resets on each chunk, so it caps stalls
-  /// rather than total transfer time.
-  Future<Uint8List> readBytes({Duration timeout = kHttpReadTimeout}) async {
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in this.timeout(timeout)) {
-      builder.add(chunk);
+class HttpWorkloadException implements Exception {
+  const HttpWorkloadException(this.message);
+  final String message;
+
+  @override
+  String toString() => 'HttpWorkloadException: $message';
+}
+
+/// One non-resetting deadline spanning request creation, headers, redirects,
+/// body transfer, and optional decoding.
+class HttpOperation {
+  HttpOperation(this.policy) : _stopwatch = Stopwatch()..start();
+
+  final HttpWorkloadPolicy policy;
+  final Stopwatch _stopwatch;
+
+  Duration get remaining {
+    final value = policy.totalTimeout - _stopwatch.elapsed;
+    if (value <= Duration.zero) {
+      throw TimeoutException('${policy.name} exceeded total deadline');
     }
-    return builder.takeBytes();
+    return value;
   }
+
+  Future<T> wait<T>(Future<T> future) => future.timeout(
+    remaining,
+    onTimeout: () => throw TimeoutException(
+      '${policy.name} exceeded total deadline',
+      policy.totalTimeout,
+    ),
+  );
+
+  Future<Uint8List> readBytes(HttpClientResponse response) async {
+    final encoded = await readBoundedBytes(
+      response,
+      contentLength: response.contentLength,
+      maximumBytes: policy.maximumBodyBytes,
+      idleTimeout: policy.idleTimeout,
+      totalTimeout: remaining,
+      workloadName: policy.name,
+    );
+    if (!_isGzip(response, encoded)) {
+      _checkLimit(encoded.length, policy.maximumDecodedBytes, policy.name);
+      return encoded;
+    }
+    return wait(
+      Isolate.run(() => decodeGzipBounded(encoded, policy.maximumDecodedBytes)),
+    );
+  }
+
+  /// Streams a response directly to [destination], bounding both a declared
+  /// Content-Length and actual chunks. The partial file is deleted on every
+  /// failure, including idle/total timeout and a consumer callback exception.
+  Future<int> readToFile(
+    HttpClientResponse response,
+    File destination, {
+    int? maximumBytes,
+    void Function(List<int> chunk, int received)? onChunk,
+  }) async {
+    final ceiling = maximumBytes ?? policy.maximumBodyBytes;
+    return writeBoundedStreamToFile(
+      response,
+      destination,
+      contentLength: response.contentLength,
+      maximumBytes: ceiling,
+      idleTimeout: policy.idleTimeout,
+      totalTimeout: remaining,
+      workloadName: policy.name,
+      onChunk: onChunk,
+    );
+  }
+}
+
+Future<Uint8List> readBoundedBytes(
+  Stream<List<int>> stream, {
+  required int contentLength,
+  required int maximumBytes,
+  required Duration idleTimeout,
+  Duration? totalTimeout,
+  required String workloadName,
+}) async {
+  _checkContentLength(contentLength, maximumBytes, workloadName);
+  final builder = BytesBuilder(copy: false);
+  var received = 0;
+  await _consumeWithTimeouts(
+    stream,
+    idleTimeout: idleTimeout,
+    totalTimeout: totalTimeout,
+    workloadName: workloadName,
+    onChunk: (chunk) {
+      received += chunk.length;
+      _checkLimit(received, maximumBytes, workloadName);
+      builder.add(chunk);
+    },
+  );
+  return builder.takeBytes();
+}
+
+Future<int> writeBoundedStreamToFile(
+  Stream<List<int>> stream,
+  File destination, {
+  required int contentLength,
+  required int maximumBytes,
+  required Duration idleTimeout,
+  Duration? totalTimeout,
+  required String workloadName,
+  void Function(List<int> chunk, int received)? onChunk,
+}) async {
+  _checkContentLength(contentLength, maximumBytes, workloadName);
+  if (await destination.exists()) await destination.delete();
+  final sink = destination.openWrite();
+  var received = 0;
+  try {
+    await _consumeWithTimeouts(
+      stream,
+      idleTimeout: idleTimeout,
+      totalTimeout: totalTimeout,
+      workloadName: workloadName,
+      onChunk: (chunk) {
+        received += chunk.length;
+        _checkLimit(received, maximumBytes, workloadName);
+        sink.add(chunk);
+        onChunk?.call(chunk, received);
+      },
+    );
+    await sink.flush();
+    await sink.close();
+    return received;
+  } catch (_) {
+    await sink.close();
+    if (await destination.exists()) await destination.delete();
+    rethrow;
+  }
+}
+
+Future<void> _consumeWithTimeouts(
+  Stream<List<int>> stream, {
+  required Duration idleTimeout,
+  required Duration? totalTimeout,
+  required String workloadName,
+  required void Function(List<int>) onChunk,
+}) {
+  final completer = Completer<void>();
+  StreamSubscription<List<int>>? subscription;
+  Timer? idleTimer;
+  Timer? totalTimer;
+  var finished = false;
+
+  Future<void> fail(Object error, [StackTrace? stackTrace]) async {
+    if (finished) return;
+    finished = true;
+    idleTimer?.cancel();
+    totalTimer?.cancel();
+    await subscription?.cancel();
+    if (!completer.isCompleted) {
+      completer.completeError(error, stackTrace ?? StackTrace.current);
+    }
+  }
+
+  void armIdleTimer() {
+    idleTimer?.cancel();
+    idleTimer = Timer(
+      idleTimeout,
+      () => fail(
+        TimeoutException('$workloadName stalled while reading response'),
+      ),
+    );
+  }
+
+  if (totalTimeout != null) {
+    totalTimer = Timer(
+      totalTimeout,
+      () => fail(TimeoutException('$workloadName exceeded total deadline')),
+    );
+  }
+  armIdleTimer();
+  subscription = stream.listen(
+    (chunk) {
+      if (finished) return;
+      try {
+        onChunk(chunk);
+        armIdleTimer();
+      } catch (error, stackTrace) {
+        fail(error, stackTrace);
+      }
+    },
+    onError: (Object error, StackTrace stackTrace) => fail(error, stackTrace),
+    onDone: () {
+      if (finished) return;
+      finished = true;
+      idleTimer?.cancel();
+      totalTimer?.cancel();
+      completer.complete();
+    },
+    cancelOnError: true,
+  );
+  return completer.future;
+}
+
+void _checkContentLength(int contentLength, int maximum, String name) {
+  if (contentLength >= 0 && contentLength > maximum) {
+    throw HttpWorkloadException('$name Content-Length exceeds $maximum bytes');
+  }
+}
+
+void _checkLimit(int actual, int maximum, String name) {
+  if (actual > maximum) {
+    throw HttpWorkloadException('$name exceeds $maximum bytes');
+  }
+}
+
+bool _isGzip(HttpClientResponse response, Uint8List bytes) {
+  final encoding = response.headers
+      .value(HttpHeaders.contentEncodingHeader)
+      ?.toLowerCase();
+  return encoding?.split(',').any((value) => value.trim() == 'gzip') == true ||
+      isGzipBytes(bytes);
+}
+
+bool isGzipBytes(List<int> bytes) =>
+    bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
+
+/// Synchronous bounded gzip decoding. Call this inside an isolate for large or
+/// attacker-controlled input; [HttpOperation.readBytes] already does so.
+Uint8List decodeGzipBounded(Uint8List encoded, int maximumDecodedBytes) {
+  final sink = _BoundedByteSink(maximumDecodedBytes, 'decoded gzip');
+  final decoder = gzip.decoder.startChunkedConversion(sink);
+  decoder.add(encoded);
+  decoder.close();
+  return sink.takeBytes();
+}
+
+class _BoundedByteSink implements Sink<List<int>> {
+  _BoundedByteSink(this.maximumBytes, this.workloadName);
+
+  final int maximumBytes;
+  final String workloadName;
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+  var _length = 0;
+
+  @override
+  void add(List<int> data) {
+    _length += data.length;
+    _checkLimit(_length, maximumBytes, workloadName);
+    _builder.add(data);
+  }
+
+  @override
+  void close() {}
+
+  Uint8List takeBytes() => _builder.takeBytes();
 }
 
 /// Redacts secret-looking material from free-form [text] (an exception
@@ -44,7 +368,8 @@ String _redactUrlPath(String value) {
   if (!uri.hasAuthority && !value.contains('/')) return value;
   final cleanSegments = uri.pathSegments.map((segment) {
     final looksSecret =
-        segment.length > 18 || RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
+        segment.length > 18 ||
+        RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
     return looksSecret ? '<redacted>' : segment;
   }).toList();
   final path = cleanSegments.join('/');
@@ -56,9 +381,7 @@ String _redactUrlPath(String value) {
 }
 
 /// Removes credentials from [url] so it is safe to surface in error messages,
-/// logs, and exported diagnostics. Drops any userinfo (`user:pass@`) and
-/// replaces the query string — IPTV panels carry username/password as query
-/// params — while keeping scheme/host/port/path for debugging.
+/// logs, and exported diagnostics.
 String redactUrl(Object url) {
   final text = url.toString();
   final uri = Uri.tryParse(text);

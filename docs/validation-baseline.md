@@ -17,6 +17,34 @@ The generated PowerShell updater integration tests deliberately skip on Linux
 and execute in the Windows CI job, where they can exercise archive rejection and
 rollback against the actual Windows PowerShell/runtime semantics.
 
+## Network workload limits
+
+All Dart HTTP clients use the named policies in `lib/data/net.dart`. Each
+operation has both a non-resetting total deadline and an idle chunk timeout;
+the reader checks the declared `Content-Length` before subscribing and checks
+the actual byte count while streaming, so a missing or false length cannot
+bypass the ceiling. Clients disable automatic gzip handling so compressed bytes
+are bounded before `gzip` decoding. Gzip output is bounded and decoded in an
+isolate for large/provider-controlled responses.
+
+The policies are intentionally workload-specific: metadata and Stalker JSON are
+small, while playlists, EPG, and Xtream catalogs allow the larger PR 0 fixtures.
+Update artifacts stream to a temporary partial file, hash as they arrive, and
+delete that file on cancellation, timeout, or validation failure. Provider
+parsers still receive a bounded byte buffer; PR 10 will replace that final buffer
+with one-pass isolate/file ingestion once the parser boundaries are tested.
+
+An oversized monolithic live catalog is not automatically a source failure.
+Stalker retries through its paginated `get_ordered_list` endpoint; Xtream merges
+category-scoped `get_live_streams` responses and deduplicates stable stream IDs.
+If one page/category still exceeds its individual bound, the request is rejected.
+M3U has no server pagination, so larger-than-memory playlists remain bounded
+until PR 10 supplies disk-backed incremental line parsing.
+
+The regression contract is in `test/net_workload_test.dart`: slow-drip total
+deadlines, idle stalls, early/streamed size enforcement, hostile gzip expansion,
+legitimate gzip, and partial-file cleanup.
+
 Run the opt-in large-ingestion baseline separately so normal CI does not allocate
 hundreds of megabytes for the 250,000-channel workload:
 
@@ -60,8 +88,8 @@ from a Linux unit-test run.
 |---|---|---|---:|---|---|
 | CI-Linux | Analyze/unit tests | GitHub-hosted Ubuntu | Runner-dependent | None | Existing |
 | DEV-Linux-1 | Host ingestion baseline | Linux 7.1.3, Ryzen 7 7840HS | 14 GiB | None | Captured 2026-07-14 |
-| TV-Low | Android TV | TBD | TBD | Physical D-pad | Pending |
-| Phone | Android phone | TBD | TBD | Touch + system Back | Pending |
+| TV-Low-AVD-1 | Android TV API 36 emulator | 2 virtual cores | 2 GiB | 1920×1080, 320 dpi, D-pad | Captured 2026-07-15 |
+| Phone-AVD-1 | Android phone | Pixel-class emulator, 4 virtual cores | 2 GiB | Touch + system Back | Captured 2026-07-15 |
 | Win-SDR | Windows x64 | TBD | TBD | SDR, keyboard, mouse | Pending |
 | Win-HDR | Windows x64 | TBD | TBD | HDR, keyboard, mouse | Pending |
 
@@ -132,3 +160,48 @@ SQLite baseline with 50,000 channels and 100,000 programmes:
 These are comparison values, not release budgets. In particular, the parser
 tests call synchronous parsing functions directly and therefore do not measure
 the production isolate handoff, frame scheduling, or isolate data-copy cost.
+
+## Recorded Android profile baseline
+
+`Phone-AVD-1` ran a Flutter 3.44.5 profile build on a Pixel-class emulator with
+2 GiB RAM and four virtual CPU cores. The exported DevTools performance capture
+contained 1,375 frames at 60 Hz. Excluding the first 100 startup frames:
+
+| Metric | Result |
+|---|---:|
+| Median frame time | 9.7 ms |
+| p95 frame time | 19.9 ms |
+| p99 frame time | 63.3 ms |
+| Frames over 33.3 ms | 37 / 1,275 (2.9%) |
+| Frames over 100 ms | 8 / 1,275 (0.6%) |
+| Maximum build time | 39.7 ms |
+| Maximum raster time | 90.4 ms |
+
+The interaction felt responsive, but a real Stalker portal exposed that the
+initial 16 MiB Stalker response ceiling was too low. PR 3 raises only that named
+policy to 64 MiB encoded / 128 MiB decoded and retains a generated 80,000-row
+catalog regression above the old limit. This capture does not include a
+successful completion of that catalog load, so time-to-first-channel, peak RSS,
+and ingestion stall evidence remain pending for the follow-up run.
+
+`TV-Low-AVD-1` ran the same Flutter profile build on an API 36 Android TV
+emulator configured with 2 GiB RAM, two virtual cores, and a 1920×1080 display
+at 320 dpi. Excluding the first 100 startup frames from 3,675 captured frames:
+
+| Metric | Result |
+|---|---:|
+| Median frame time | 3.9 ms |
+| p95 frame time | 19.1 ms |
+| p99 frame time | 31.5 ms |
+| Frames over 33.3 ms | 33 / 3,575 (0.9%) |
+| Frames over 100 ms | 6 / 3,575 (0.2%) |
+| Maximum build time | 157.8 ms |
+| Maximum raster time | 70.9 ms |
+
+The run felt responsive and loaded the 28.6 MB Stalker live catalog plus a
+10.2 MB EPG response. Movie/series cards initially failed before image loading:
+the grid intentionally passed `double.infinity` to `_Poster`, which forwarded
+it to `imageCacheSize` and threw while converting infinity to an integer.
+The card now derives finite cache dimensions from its layout constraints, and
+the shared helper defensively handles non-finite/invalid metrics. Peak RSS was
+not captured before the profile process exited and remains pending.
