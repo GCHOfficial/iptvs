@@ -148,6 +148,9 @@ class StalkerSource implements Source {
   final String lang;
   final String timezone;
   final bool diagnostics;
+  @visibleForTesting
+  final Future<Map<String, dynamic>> Function(Map<String, String> params)?
+  debugApi;
 
   final HttpClient _http = HttpClient()
     ..connectionTimeout = const Duration(seconds: 10)
@@ -169,6 +172,7 @@ class StalkerSource implements Source {
     this.timezone = 'Europe/Bucharest',
     this.diagnostics = true,
     this.displayName,
+    this.debugApi,
   });
 
   /// User-assigned label (from SourceConfig); preferred over the derived name.
@@ -766,6 +770,14 @@ class StalkerSource implements Source {
       // Some portals only expose ITV through paginated get_ordered_list.
       _debug(
         'get_all_channels failed; falling back to ordered list: ${e.message}',
+      );
+    } on HttpWorkloadException catch (e) {
+      // Large portals often provide both a monolithic endpoint and the older
+      // paginated ordered-list endpoint. A bounded-response rejection should
+      // change strategy, not reject an otherwise usable source.
+      _debug(
+        'get_all_channels exceeded bounded response; falling back to ordered '
+        'list: ${e.message}',
       );
     }
     return _fetchChannelsWithOrderedList();
@@ -1876,6 +1888,8 @@ class StalkerSource implements Source {
     Map<String, String> params, {
     bool retry = true,
   }) async {
+    final override = debugApi;
+    if (override != null) return override(params);
     final ep = await _resolveEndpoint();
     final r = await _request(ep, params);
     if (retry && _looksTokenInvalid(r)) {

@@ -34,6 +34,13 @@ delete that file on cancellation, timeout, or validation failure. Provider
 parsers still receive a bounded byte buffer; PR 10 will replace that final buffer
 with one-pass isolate/file ingestion once the parser boundaries are tested.
 
+An oversized monolithic live catalog is not automatically a source failure.
+Stalker retries through its paginated `get_ordered_list` endpoint; Xtream merges
+category-scoped `get_live_streams` responses and deduplicates stable stream IDs.
+If one page/category still exceeds its individual bound, the request is rejected.
+M3U has no server pagination, so larger-than-memory playlists remain bounded
+until PR 10 supplies disk-backed incremental line parsing.
+
 The regression contract is in `test/net_workload_test.dart`: slow-drip total
 deadlines, idle stalls, early/streamed size enforcement, hostile gzip expansion,
 legitimate gzip, and partial-file cleanup.
