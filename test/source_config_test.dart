@@ -67,6 +67,20 @@ void main() {
     });
   });
 
+  test(
+    'cloud-safe fields exclude provider credentials and playlist locators',
+    () {
+      expect(base.cloudSafeFields, {'host': 'http://h:80'});
+      final m3u = base.copyWith(
+        kind: SourceKind.m3u,
+        fields: const {
+          'playlistUrl': 'https://example.invalid/get.php?token=secret',
+        },
+      );
+      expect(m3u.cloudSafeFields, isEmpty);
+    },
+  );
+
   group('hiddenCategoryIds / withHiddenCategories', () {
     test('defaults to an empty set per kind', () {
       expect(base.hiddenCategoryIds(ContentKind.live), isEmpty);

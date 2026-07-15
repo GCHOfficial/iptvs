@@ -70,6 +70,7 @@ class SourceConfig {
           host: fields['host']!,
           username: fields['username']!,
           password: fields['password']!,
+          playlistExpiryHint: fields['playlistExpiryHint'],
           displayName: name,
         );
       case SourceKind.m3u:
@@ -155,6 +156,20 @@ class SourceConfig {
     'fields': fields,
     // Omit when empty so legacy/preference-free configs serialize unchanged.
     if (settings.isNotEmpty) 'settings': settings,
+  };
+
+  /// Fields safe to send to the account panel. Credentials and complete
+  /// playlist locators remain device-local and are never part of cloud JSON.
+  Map<String, String> get cloudSafeFields => switch (kind) {
+    SourceKind.stalker => {
+      if (fields['portal'] case final value? when value.isNotEmpty)
+        'portal': value,
+    },
+    SourceKind.xtream => {
+      if (fields['host'] case final value? when value.isNotEmpty) 'host': value,
+    },
+    SourceKind.m3u => const {},
+    SourceKind.demo => const {},
   };
 
   factory SourceConfig.fromJson(Map<String, dynamic> j) => SourceConfig(

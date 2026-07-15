@@ -43,3 +43,14 @@ collision is treated as the same identity without falling back to a raw locator.
 Legacy M3U URL keys are atomically rewritten across channel cache, EPG references,
 and live favorites. Existing cloud M3U favorites are normalized on pull; future
 pushes therefore contain only the opaque ID.
+
+## Cached playback locators
+
+Channel and media `extra` maps keep only provider metadata in SQLite. Values that
+can contain a stream URL, token, or provider command are collected under the
+`secretLocator` field and encrypted with an installation-specific AES-GCM key
+stored in `flutter_secure_storage`. The database restores these values only in
+memory immediately before provider resolution. A missing key invalidates the
+regenerable cache; legacy plaintext rows are migrated once when the new key is
+created. These encrypted values are never included in cloud source or metadata
+payloads.

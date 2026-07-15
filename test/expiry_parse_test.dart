@@ -134,6 +134,13 @@ void main() {
       );
     });
 
+    test('accepts Xtream API-style exp_date in a playlist URL', () {
+      expect(
+        expiryFromPlaylistUrl('http://host/get.php?exp_date=2026-09-01'),
+        DateTime(2026, 9, 1),
+      );
+    });
+
     test('returns null when no recognised param is present', () {
       expect(
         expiryFromPlaylistUrl(

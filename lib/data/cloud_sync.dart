@@ -47,15 +47,25 @@ SourceConfig cloudRowToConfig(Map<String, dynamic> row) {
       e.key.toString(): e.value?.toString() ?? '',
   };
   final rawSettings = row['settings'] as Map?;
-  return SourceConfig(
+  final config = SourceConfig(
     id: row['id'] as String,
     kind: SourceKind.values.byName(row['kind'] as String),
     label: (row['label'] as String?) ?? '',
     fields: fields,
-    settings:
-        rawSettings == null ? const {} : Map<String, dynamic>.from(rawSettings),
+    settings: rawSettings == null
+        ? const {}
+        : Map<String, dynamic>.from(rawSettings),
   );
+  return config;
 }
+
+SourceConfig _mergeLocalSecrets(SourceConfig cloud, SourceConfig? local) {
+  if (local == null || local.kind != cloud.kind) return cloud;
+  return cloud.copyWith(fields: {...cloud.fields, ...local.fields});
+}
+
+SourceConfig _cloudSafeConfig(SourceConfig config) =>
+    config.copyWith(fields: config.cloudSafeFields);
 
 /// Read-only cloud sync: a device pairs with a panel account, then pulls the
 /// account's source list and metadata config into the local [SourceStore]. The
@@ -100,12 +110,11 @@ class CloudSync {
   Future<bool> isPaired() async {
     final id = deviceId;
     if (id == null) return false;
-    final row =
-        await _client
-            .from('devices')
-            .select('device_uid')
-            .eq('device_uid', id)
-            .maybeSingle();
+    final row = await _client
+        .from('devices')
+        .select('device_uid')
+        .eq('device_uid', id)
+        .maybeSingle();
     return row != null;
   }
 
@@ -150,12 +159,11 @@ class CloudSync {
   Future<String?> activeProfileId() async {
     final id = deviceId;
     if (id != null) {
-      final row =
-          await _client
-              .from('devices')
-              .select('active_profile_id')
-              .eq('device_uid', id)
-              .maybeSingle();
+      final row = await _client
+          .from('devices')
+          .select('active_profile_id')
+          .eq('device_uid', id)
+          .maybeSingle();
       final pid = row?['active_profile_id'] as String?;
       if (pid != null) {
         await _storage.write(key: _kProfileId, value: pid);
@@ -185,8 +193,14 @@ class CloudSync {
         .select()
         .eq('profile_id', profileId)
         .order('position');
+    final cloudConfigs = [
+      for (final r in rows)
+        _cloudSafeConfig(cloudRowToConfig(Map<String, dynamic>.from(r))),
+    ];
+    final localById = {for (final c in await store.list()) c.id: c};
     final configs = [
-      for (final r in rows) cloudRowToConfig(Map<String, dynamic>.from(r)),
+      for (final cloud in cloudConfigs)
+        _mergeLocalSecrets(cloud, localById[cloud.id]),
     ];
     final newIds = configs.map((c) => c.id).toSet();
     final prevIds = await _readCloudIds();
@@ -208,15 +222,25 @@ class CloudSync {
   /// the local one. Returns true when a config was applied; when the profile has
   /// none, the local config is left untouched and this returns false.
   Future<bool> pullMetadata(SourceStore store, String profileId) async {
-    final row =
-        await _client
-            .from('metadata_configs')
-            .select('config')
-            .eq('profile_id', profileId)
-            .maybeSingle();
+    final row = await _client
+        .from('metadata_configs')
+        .select('config')
+        .eq('profile_id', profileId)
+        .maybeSingle();
     if (row == null) return false;
     final config = Map<String, dynamic>.from(row['config'] as Map);
-    await store.saveMetadataConfig(MetadataConfig.fromJson(config));
+    final cloud = MetadataConfig.fromJson(config);
+    final local = await store.metadataConfig();
+    await store.saveMetadataConfig(
+      MetadataConfig(
+        provider: cloud.provider,
+        tmdbApiKey: local.tmdbApiKey,
+        tvdbApiKey: local.tvdbApiKey,
+        tvdbPin: local.tvdbPin,
+        mdblistApiKey: local.mdblistApiKey,
+        autoEnrich: cloud.autoEnrich,
+      ),
+    );
     return true;
   }
 
@@ -226,12 +250,11 @@ class CloudSync {
   Future<void> pullFavorites(SourceStore store, String profileId) async {
     final db = _db;
     if (db == null) return;
-    final row =
-        await _client
-            .from('profiles')
-            .select('favorites')
-            .eq('id', profileId)
-            .maybeSingle();
+    final row = await _client
+        .from('profiles')
+        .select('favorites')
+        .eq('id', profileId)
+        .maybeSingle();
     final favorites = (row?['favorites'] as List?) ?? const [];
 
     final managed = await _readCloudIds();
@@ -261,10 +284,10 @@ class CloudSync {
       if (kind == null) continue;
       final stableItemId =
           config.kind == SourceKind.m3u &&
-                  kind == ContentKind.live &&
-                  !isStableM3uChannelId(itemId)
-              ? stableM3uChannelId(itemId)
-              : itemId;
+              kind == ContentKind.live &&
+              !isStableM3uChannelId(itemId)
+          ? stableM3uChannelId(itemId)
+          : itemId;
       await db.setFavorite(config.id, kind, stableItemId, true);
     }
   }
@@ -308,7 +331,7 @@ class CloudSync {
           'id': normalized[i].id,
           'kind': normalized[i].kind.name,
           'label': normalized[i].label,
-          'fields': normalized[i].fields,
+          'fields': normalized[i].cloudSafeFields,
           'settings': normalized[i].settings,
           'position': i,
         },
@@ -328,7 +351,7 @@ class CloudSync {
     final config = await store.metadataConfig();
     await _client.rpc(
       'push_metadata',
-      params: {'p_config': config.toJson(), 'p_profile_id': profileId},
+      params: {'p_config': config.cloudSafeJson, 'p_profile_id': profileId},
     );
   }
 

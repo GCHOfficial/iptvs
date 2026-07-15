@@ -6,10 +6,12 @@ import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
+import '../data/net.dart';
 import '../data/source_store.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../sources/source_config.dart';
+import '../sources/expiry.dart';
 import '../sources/xtream_source.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -402,11 +404,11 @@ class _SourceCardState extends State<_SourceCard> {
   String get _subtitle {
     switch (widget.config.kind) {
       case SourceKind.stalker:
-        return 'Stalker · ${widget.config.fields['portal'] ?? ''}';
+        return 'Stalker · ${redactUrl(widget.config.fields['portal'] ?? '')}';
       case SourceKind.xtream:
-        return 'Xtream · ${widget.config.fields['host'] ?? ''}';
+        return 'Xtream · ${redactUrl(widget.config.fields['host'] ?? '')}';
       case SourceKind.m3u:
-        return 'M3U · ${widget.config.fields['playlistUrl'] ?? ''}';
+        return 'M3U · ${redactText(widget.config.fields['playlistUrl'] ?? '')}';
       case SourceKind.demo:
         return 'Demo streams';
     }
@@ -726,12 +728,17 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       case SourceKind.stalker:
         return const [
           _FieldSpec('portal', 'Portal URL', hint: 'http://host:port/c/'),
-          _FieldSpec('mac', 'MAC address', hint: '00:1A:79:..:..:..'),
+          _FieldSpec(
+            'mac',
+            'MAC address',
+            hint: '00:1A:79:..:..:..',
+            obscure: true,
+          ),
         ];
       case SourceKind.xtream:
         return const [
           _FieldSpec('host', 'Host', hint: 'http://host:port'),
-          _FieldSpec('username', 'Username'),
+          _FieldSpec('username', 'Username', obscure: true),
           _FieldSpec('password', 'Password', obscure: true),
         ];
       case SourceKind.m3u:
@@ -806,6 +813,10 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
         'host': creds.host,
         'username': creds.username,
         'password': creds.password,
+        // Keep URL-only expiry metadata when the panel's player API does not
+        // repeat it. The original playlist URL is deliberately not retained.
+        if (expiryFromPlaylistUrl(uri.toString()) case final expiry?)
+          'playlistExpiryHint': expiry.toIso8601String(),
       },
     );
   }

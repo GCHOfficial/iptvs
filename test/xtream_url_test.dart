@@ -3,6 +3,19 @@ import 'package:iptvs/sources/xtream_source.dart';
 
 void main() {
   group('xtreamCredentialsFromUrl', () {
+    test('uses an M3U expiry hint when player API omits exp_date', () async {
+      final source = XtreamSource(
+        sourceId: 'test',
+        host: 'http://host.tv',
+        username: 'u',
+        password: 'p',
+        playlistExpiryHint: '2026-09-01T00:00:00.000',
+        debugApi: (_) async => {'user_info': {'exp_date': '0'}},
+      );
+      expect(await source.subscriptionExpiry(), DateTime(2026, 9, 1));
+      await source.dispose();
+    });
+
     test('extracts creds from get.php query params', () {
       final c = xtreamCredentialsFromUrl(Uri.parse(
           'http://panel.example.com:8080/get.php?username=u1&password=p1&type=m3u_plus'));
