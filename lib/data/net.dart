@@ -61,8 +61,12 @@ const kProviderJsonWorkload = HttpWorkloadPolicy(
 );
 const kStalkerJsonWorkload = HttpWorkloadPolicy(
   name: 'Stalker JSON',
-  maximumBodyBytes: 16 * _mib,
-  maximumDecodedBytes: 32 * _mib,
+  // Real portals can return the entire live catalog from get_all_channels in
+  // one response. The PR 0 50k-row fixture is ~11 MiB and a user-validated
+  // portal exceeds 16 MiB, so retain a meaningful ceiling without rejecting
+  // legitimate large catalogs.
+  maximumBodyBytes: 64 * _mib,
+  maximumDecodedBytes: 128 * _mib,
   totalTimeout: Duration(minutes: 1),
 );
 const kMetadataJsonWorkload = HttpWorkloadPolicy(

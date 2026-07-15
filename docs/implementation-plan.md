@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 252 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 253 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -261,7 +261,7 @@ their own lineage.
 - [x] Cancellation/failure removes partial files; clients remain explicitly
   closeable by each owning source/service.
 - [x] Representative legitimate fixtures remain accepted.
-- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (252 passed,
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (253 passed,
   10 platform/opt-in skips).
 
 ## PR 4 — Stable source and cache identities

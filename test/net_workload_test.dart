@@ -6,6 +6,8 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/net.dart';
 
+import 'support/workload_fixtures.dart';
+
 void main() {
   group('bounded response reading', () {
     test('rejects an excessive declared Content-Length before listening', () {
@@ -91,6 +93,22 @@ void main() {
         ),
         throwsA(isA<TimeoutException>()),
       );
+    });
+
+    test('accepts a legitimate Stalker catalog larger than 16 MiB', () async {
+      final fixture = WorkloadFixtures.stalkerChannelsJson(80000);
+      expect(fixture.length, greaterThan(16 * 1024 * 1024));
+      expect(fixture.length, lessThan(kStalkerJsonWorkload.maximumBodyBytes));
+
+      final bytes = await readBoundedBytes(
+        Stream.value(fixture),
+        contentLength: fixture.length,
+        maximumBytes: kStalkerJsonWorkload.maximumBodyBytes,
+        idleTimeout: kStalkerJsonWorkload.idleTimeout,
+        totalTimeout: kStalkerJsonWorkload.totalTimeout,
+        workloadName: kStalkerJsonWorkload.name,
+      );
+      expect(bytes.length, fixture.length);
     });
   });
 

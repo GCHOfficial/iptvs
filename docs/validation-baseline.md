@@ -82,7 +82,7 @@ from a Linux unit-test run.
 | CI-Linux | Analyze/unit tests | GitHub-hosted Ubuntu | Runner-dependent | None | Existing |
 | DEV-Linux-1 | Host ingestion baseline | Linux 7.1.3, Ryzen 7 7840HS | 14 GiB | None | Captured 2026-07-14 |
 | TV-Low | Android TV | TBD | TBD | Physical D-pad | Pending |
-| Phone | Android phone | TBD | TBD | Touch + system Back | Pending |
+| Phone-AVD-1 | Android phone | Pixel-class emulator, 4 virtual cores | 2 GiB | Touch + system Back | Captured 2026-07-15 |
 | Win-SDR | Windows x64 | TBD | TBD | SDR, keyboard, mouse | Pending |
 | Win-HDR | Windows x64 | TBD | TBD | HDR, keyboard, mouse | Pending |
 
@@ -153,3 +153,26 @@ SQLite baseline with 50,000 channels and 100,000 programmes:
 These are comparison values, not release budgets. In particular, the parser
 tests call synchronous parsing functions directly and therefore do not measure
 the production isolate handoff, frame scheduling, or isolate data-copy cost.
+
+## Recorded Android profile baseline
+
+`Phone-AVD-1` ran a Flutter 3.44.5 profile build on a Pixel-class emulator with
+2 GiB RAM and four virtual CPU cores. The exported DevTools performance capture
+contained 1,375 frames at 60 Hz. Excluding the first 100 startup frames:
+
+| Metric | Result |
+|---|---:|
+| Median frame time | 9.7 ms |
+| p95 frame time | 19.9 ms |
+| p99 frame time | 63.3 ms |
+| Frames over 33.3 ms | 37 / 1,275 (2.9%) |
+| Frames over 100 ms | 8 / 1,275 (0.6%) |
+| Maximum build time | 39.7 ms |
+| Maximum raster time | 90.4 ms |
+
+The interaction felt responsive, but a real Stalker portal exposed that the
+initial 16 MiB Stalker response ceiling was too low. PR 3 raises only that named
+policy to 64 MiB encoded / 128 MiB decoded and retains a generated 80,000-row
+catalog regression above the old limit. This capture does not include a
+successful completion of that catalog load, so time-to-first-channel, peak RSS,
+and ingestion stall evidence remain pending for the follow-up run.
