@@ -42,7 +42,7 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
-  static const schemaVersion = 11;
+  static const schemaVersion = 12;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -175,6 +175,18 @@ class AppDatabase {
             // upgrade path. Idempotent.
             await _createPlaybackPositions(db);
           }
+          if (oldV < 12) {
+            // `nowNext` scans by (source_id, start) with no channel_id
+            // constraint, so the existing (source_id, channel_id, start) lookup
+            // index doesn't serve it. `programmes` is created by
+            // `_createProgrammes` (called from `onCreate` and the `oldV < 2`
+            // branch), which now creates this index too — `IF NOT EXISTS` makes
+            // this branch a no-op on that path and a real repair everywhere else.
+            await db.execute(
+              'CREATE INDEX IF NOT EXISTS idx_prog_source_start '
+              'ON programmes(source_id, start)',
+            );
+          }
         },
       ),
     );
@@ -261,6 +273,9 @@ class AppDatabase {
     ''');
     await db.execute(
       'CREATE INDEX idx_prog_lookup ON programmes(source_id, channel_id, start)',
+    );
+    await db.execute(
+      'CREATE INDEX idx_prog_source_start ON programmes(source_id, start)',
     );
   }
 
@@ -1416,25 +1431,56 @@ class AppDatabase {
           'archive_days': ch.archiveDays,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
-      batch.insert('sources', {
-        'id': sourceId,
-        'name': name,
-        'synced_at': DateTime.now().millisecondsSinceEpoch,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
+      // Upsert the sources row WITHOUT touching epg_synced_at (or any future
+      // column this method doesn't own). INSERT OR REPLACE deletes the row
+      // first, which nulled EPG freshness on every channel refresh. Explicit
+      // update-else-insert (no UPSERT syntax — Android <API30 ships SQLite
+      // <3.24) preserves every column we don't write.
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final updated = await txn.update(
+        'sources',
+        {'name': name, 'synced_at': now},
+        where: 'id = ?',
+        whereArgs: [sourceId],
+      );
+      if (updated == 0) {
+        await txn.insert('sources', {
+          'id': sourceId,
+          'name': name,
+          'synced_at': now,
+        });
+      }
     });
   }
 
   // ── EPG ───────────────────────────────────────────────────────────────────
 
-  Future<void> replaceEpg(String sourceId, List<Programme> programmes) async {
+  /// Rows are flushed in bounded batches so a very large guide doesn't build
+  /// one giant in-memory batch, but the flushes stay inside the surrounding
+  /// transaction — `batch.commit` here does not COMMIT, it just executes the
+  /// pending statements against the open transaction.
+  static const _epgInsertChunk = 1000;
+
+  /// Replaces every cached programme for [sourceId] with [programmes] and
+  /// advances `epg_synced_at`, all in one transaction — including the
+  /// success-empty case (a source legitimately reporting no programmes),
+  /// which must still clear stale rows and record that the refresh ran. A
+  /// thrown [programmes] iterator or any other failure mid-transaction rolls
+  /// back the delete along with any partial insert, leaving the previous EPG
+  /// and timestamp untouched.
+  Future<void> replaceEpg(
+    String sourceId,
+    Iterable<Programme> programmes,
+  ) async {
     await _db.transaction((txn) async {
       await txn.delete(
         'programmes',
         where: 'source_id = ?',
         whereArgs: [sourceId],
       );
-      final batch = txn.batch();
+      var batch = txn.batch();
+      var n = 0;
       for (final p in programmes) {
         batch.insert('programmes', {
           'source_id': sourceId,
@@ -1444,8 +1490,13 @@ class AppDatabase {
           'title': p.title,
           'description': p.description,
         });
+        if (++n >= _epgInsertChunk) {
+          await batch.commit(noResult: true);
+          batch = txn.batch();
+          n = 0;
+        }
       }
-      await batch.commit(noResult: true);
+      if (n > 0) await batch.commit(noResult: true);
       await txn.update(
         'sources',
         {'epg_synced_at': DateTime.now().millisecondsSinceEpoch},
@@ -1454,6 +1505,16 @@ class AppDatabase {
       );
     });
   }
+
+  /// The "now" half of [nowNext]: every programme airing at a given instant
+  /// across a source's channels. Keyed on `(source_id, start)` with no
+  /// `channel_id` constraint — a per-source scan of all channels' programmes
+  /// at once — so it's served by `idx_prog_source_start`, not the
+  /// `(source_id, channel_id, start)` lookup index used by
+  /// `programmesForChannel(s)`.
+  static const _nowQuery =
+      'SELECT channel_id, title, start, stop, description FROM programmes '
+      'WHERE source_id = ? AND start <= ? AND stop > ?';
 
   /// Current and next programme per channel at time [at].
   Future<({Map<String, Programme> now, Map<String, Programme> next})> nowNext(
@@ -1464,11 +1525,7 @@ class AppDatabase {
     final now = <String, Programme>{};
     final next = <String, Programme>{};
 
-    final currentRows = await _db.rawQuery(
-      'SELECT channel_id, title, start, stop, description FROM programmes '
-      'WHERE source_id = ? AND start <= ? AND stop > ?',
-      [sourceId, t, t],
-    );
+    final currentRows = await _db.rawQuery(_nowQuery, [sourceId, t, t]);
     for (final r in currentRows) {
       now[r['channel_id'] as String] = _rowToProgramme(r);
     }
@@ -1483,6 +1540,20 @@ class AppDatabase {
       next[r['channel_id'] as String] = _rowToProgramme(r);
     }
     return (now: now, next: next);
+  }
+
+  /// Test seam: runs `EXPLAIN QUERY PLAN` for the `nowNext` "now" query with
+  /// the same SQL and args, returning each row's `detail` column — lets a
+  /// test assert the query is served by `idx_prog_source_start` without
+  /// depending on the full plan string shape.
+  @visibleForTesting
+  Future<List<String>> explainNowQueryPlan(String sourceId, DateTime at) async {
+    final t = at.millisecondsSinceEpoch;
+    final rows = await _db.rawQuery(
+      'EXPLAIN QUERY PLAN $_nowQuery',
+      [sourceId, t, t],
+    );
+    return rows.map((r) => r['detail'] as String).toList();
   }
 
   /// Cached programmes for one channel overlapping the `[from, to)` window,

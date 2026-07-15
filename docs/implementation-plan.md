@@ -27,8 +27,9 @@ Status convention:
 
 - Last updated: 2026-07-15
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 7 — EPG atomicity, empty results, and indexing (next)
-- Previous PR: PR 6 — async generation and disposal guards (ready for PR)
+- Active PR: PR 8 — MethodChannel handler ownership (next)
+- Previous PR: PR 7 — EPG atomicity and indexing (ready for PR); PR 6 merged
+  as #106
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +39,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 293 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 300 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -72,7 +73,7 @@ Status convention:
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Complete; #103/v0.1.33 |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | Complete; #105/v0.1.34 |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Ready for PR |
-| 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | [ ] |
+| 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Ready for PR |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | [ ] |
 | 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | [ ] |
 | 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
@@ -401,22 +402,49 @@ their own lineage.
 
 ### Implementation
 
-- [ ] Treat a normally completed empty EPG result as a successful replacement.
-- [ ] Clear old programmes and update freshness for success-empty.
-- [ ] Retain the last good cache after exceptions or timeouts.
-- [ ] Replace programmes and refresh timestamp in one transaction.
-- [ ] Add the measured index needed by source/time now-next queries.
-- [ ] Confirm index use with `EXPLAIN QUERY PLAN`.
-- [ ] Avoid constructing duplicate full replacement datasets in memory.
+- [x] Treat a normally completed empty EPG result as a successful replacement.
+  `_ensureEpg` now always calls `replaceEpg` on normal completion (a returned
+  empty list is success; failures throw and never reach the replacement).
+- [x] Clear old programmes and update freshness for success-empty.
+  `replaceEpg([])` deletes by source and advances `epg_synced_at` in the same
+  transaction, so no-EPG sources stop re-fetching on every load.
+- [x] Retain the last good cache after exceptions or timeouts. A thrown
+  `Source.epg` never reaches `replaceEpg`; the failure is recorded by the
+  un-advanced `epg_synced_at` plus a redacted diagnostics line. This required
+  fixing `replaceLibrary`, whose `INSERT OR REPLACE` on `sources` nulled
+  `epg_synced_at` on every channel refresh — see the decision log.
+- [x] Replace programmes and refresh timestamp in one transaction. Already
+  true of `replaceEpg`; preserved through the empty-path and chunking changes
+  and now pinned by a rollback test.
+- [x] Add the measured index needed by source/time now-next queries.
+  `idx_prog_source_start(source_id, start)` at schema v12, created in both
+  `_createProgrammes` and an idempotent `oldV < 12` branch (v3-trap-safe).
+  Channel-scoped guide/catch-up queries keep using `idx_prog_lookup`.
+- [x] Confirm index use with `EXPLAIN QUERY PLAN`. `explainNowQueryPlan`
+  test seam runs the exact `nowNext` "now" SQL; the plan names the new index
+  against a ~20k-programme/2k-channel corpus.
+- [x] Avoid constructing duplicate full replacement datasets in memory.
+  `replaceEpg` takes `Iterable<Programme>` and flushes inserts in bounded
+  1000-row batch chunks inside the single transaction.
 
 ### Verification
 
-- [ ] Success-empty clears stale programmes.
-- [ ] Failure retains old programmes and records refresh failure.
-- [ ] Transaction failure leaves the previous complete EPG intact.
-- [ ] Fresh and upgraded databases contain the new index.
-- [ ] Large now-next lookup selects the intended index.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Success-empty clears stale programmes. Persistence test: success-empty
+  EPG clears stale programmes and advances `lastEpgSynced`.
+- [x] Failure retains old programmes and records refresh failure. Persistence
+  test asserts the cached programme survives a failed forced refresh and
+  `lastEpgSynced` is unchanged; a DB-level pin proves repeat `replaceLibrary`
+  calls no longer reset `epg_synced_at`.
+- [x] Transaction failure leaves the previous complete EPG intact. A throwing
+  programme iterable mid-`replaceEpg` rolls back delete + partial insert,
+  leaving old EPG and timestamp untouched.
+- [x] Fresh and upgraded databases contain the new index. Fresh-create and a
+  seeded v11 fixture upgraded through `openAt` both contain
+  `idx_prog_source_start`; the seeded programme survives the upgrade.
+- [x] Large now-next lookup selects the intended index. `EXPLAIN QUERY PLAN`
+  over ~20k programmes selects `idx_prog_source_start`.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (300 tests,
+  10 platform/opt-in skips; persistence suite at 26 tests).
 
 ## PR 8 — MethodChannel handler ownership
 
@@ -653,7 +681,8 @@ their own lineage.
 
 - [ ] Fresh-install and upgraded schemas match.
 - [ ] Every supported historical migration passes.
-- [ ] EPG success-empty, failure retention, and atomic replacement pass.
+- [x] EPG success-empty, failure retention, and atomic replacement pass.
+  PR 7's persistence suite (26 tests) covers all three plus rollback.
 - [x] Source/profile/category race tests pass. PR 6's
   `media_tab_controller_test.dart` and `live_controller_test.dart` suites.
 - [ ] No tested controller or channel handler notifies a disposed owner.
@@ -663,7 +692,8 @@ their own lineage.
 - [ ] Large M3U, Xtream, Stalker, and XMLTV fixtures meet agreed budgets.
 - [x] Network and decompression limits reject hostile fixtures in
   `test/net_workload_test.dart`.
-- [ ] Now-next EPG lookup uses the intended index.
+- [x] Now-next EPG lookup uses the intended index. `EXPLAIN QUERY PLAN`
+  selects `idx_prog_source_start` over a ~20k-programme corpus (PR 7).
 - [ ] Peak memory remains within the agreed regression allowance.
 
 ### Native platforms
@@ -700,6 +730,8 @@ security, persisted data, or provider behavior.
 | 2026-07-14 | Store builds use Store-managed updates; only GitHub-direct builds may switch between signed GitHub stable/beta releases | Play prohibits self-update package installation and packaged MSIX updates are Store-owned | Use Store test tracks/flights only for submission validation; ongoing public betas use GitHub direct | PR 2 / Store setup |
 | 2026-07-14 | Keep Store and GitHub-direct installations on separate identities | The owner prefers low-overhead GitHub beta distribution without Store signing, policy, or version conflicts | Play uses `com.gchofficial.iptvs.player`; GitHub direct uses `.player.direct`; Store builds never self-update | PR 1 / Store setup |
 | 2026-07-15 | Per-controller monotonic `_loadGeneration` counters instead of a shared guard helper; only snapshot-writing ops (`load`, `setCategory`) bump the generation, while `loadMore`, `search`, `clearSearch`, and `refreshNowNext` read without bumping and abandon superseded results | Precedence policy is inherently per-controller, so a shared helper adds abstraction without removing duplication; search publishes to `searchResults`, independent of `snapshot`, so bumping there would drop a load's terminal state update (stuck `loading` flag) | Refresh always supersedes pagination, never the reverse; disposal stays expressed solely through `_disposed` checked in `_set`; the invariant is summarized in `CLAUDE.md` key conventions | PR 6 |
+| 2026-07-15 | Record EPG refresh failure via the un-advanced `epg_synced_at` plus a redacted diagnostics line, not a persisted failure column; add `idx_prog_source_start(source_id, start)` at schema v12 for the source+time now-next queries | A failure column has no consumer until PR 16's diagnostics UX and would enlarge PR 12's migration matrix; the existing `(source_id, channel_id, start)` index cannot serve a query with no `channel_id` constraint | Success-empty is a real replacement (clears stale rows, advances freshness); failures leave the timestamp stale so the scheduler retries; channel-scoped queries keep `idx_prog_lookup` | PR 7 |
+| 2026-07-15 | `replaceLibrary` writes the `sources` row via non-destructive update-else-insert instead of `INSERT OR REPLACE` | `INSERT OR REPLACE` deleted the row and nulled `epg_synced_at` on every channel refresh, defeating PR 7's failure-observability design; `ON CONFLICT DO UPDATE` was avoided because Android below API 30 ships SQLite older than 3.24 | Channel refresh now preserves EPG freshness and any future `sources` column; dead programme rows for removed channels persist at most ~3h until the next scheduled `replaceEpg` clears them by source | PR 7 |
 
 ## Progress log
 
@@ -727,7 +759,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 4 follow-up | Ready for PR | A verified pending APK now survives unknown-source/OEM Auto Blocker detours and process recreation; settings return retries the same file, every resume repeats cache size/hash plus native package/signer validation, and analyze, all 277 tests, and Android Kotlin compilation pass. |
 | 2026-07-15 | PR 5 | Ready for PR | Added AES-GCM installation-key protection for cached playback locators, one-time legacy cache migration, deterministic missing-key invalidation, cloud-safe source/metadata payloads with local-secret preservation, redacted source summaries, and credential-field reveal controls; analyze, all 280 tests, and Android Kotlin compilation pass. |
 | 2026-07-15 | PR 5 | Complete | PR #105 merged as `b857be0` and protected v0.1.34 release CI published signed Android and Windows artifacts. The owner installed the update, confirmed favorites persisted, and successfully played a pre-update favorite; all 282 tests pass with 10 expected skips. |
-| 2026-07-15 | PR 6 | Ready for PR | Generation guards landed in `MediaTabController`, `LiveController`, and `HomeShell._loadActive`/`_loadProfileInfo`; 11 new Completer-gated race tests (two proven load-bearing against pre-fix code) cover category clobber, refresh-vs-pagination precedence, dispose-during-request, stale enrichment, stale search, and search-must-not-drop-load; analyze and all 293 tests pass. Known adjacent defect deferred to PR 13: a metadata-config-only change rebuilds the repository without changing `ChannelListScreen`'s `ValueKey`, leaving controllers on a disposed repository. |
+| 2026-07-15 | PR 6 | Complete | Merged as #106 (`78e9a48`) with all CI checks green. Generation guards landed in `MediaTabController`, `LiveController`, and `HomeShell._loadActive`/`_loadProfileInfo`; 11 new Completer-gated race tests (two proven load-bearing against pre-fix code). Known adjacent defect deferred to PR 13: a metadata-config-only change rebuilds the repository without changing `ChannelListScreen`'s `ValueKey`, leaving controllers on a disposed repository. |
+| 2026-07-15 | PR 7 | Ready for PR | Success-empty EPG is now a real atomic replacement (clears stale rows, advances freshness); failures retain the cached guide with the timestamp as the failure record; `replaceEpg` streams bounded 1000-row chunks inside one transaction; schema v12 adds `idx_prog_source_start` on both create and upgrade paths, confirmed by `EXPLAIN QUERY PLAN` over a 20k-programme corpus. Also fixed pre-existing `replaceLibrary` `INSERT OR REPLACE` nulling `epg_synced_at` on every channel refresh (decision log). Analyze and all 300 tests pass. |
 
 ## Removal checklist
 

@@ -13,6 +13,8 @@ import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
+import 'support/historical_database_fixtures.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   FlutterSecureStorage.setMockInitialValues({});
@@ -135,6 +137,13 @@ void main() {
               'CREATE TABLE channels (source_id TEXT NOT NULL, id TEXT NOT NULL, '
               'name TEXT NOT NULL, number INTEGER, logo TEXT, category_id TEXT, '
               'extra TEXT, PRIMARY KEY (source_id, id))',
+            );
+            // `programmes` has existed since onCreate/oldV<2, so a genuine v7
+            // install always has it too — the v11->v12 index-add branch targets it.
+            await db.execute(
+              'CREATE TABLE programmes (source_id TEXT NOT NULL, '
+              'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
+              'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
             );
           },
         ),
@@ -282,6 +291,43 @@ void main() {
       expect(byId['plain']!.hasArchive, isFalse);
       await db.close();
     });
+
+    test(
+      'replaceLibrary does not reset epg_synced_at on a repeat channel refresh',
+      () async {
+        // Regression pin: replaceLibrary used to INSERT OR REPLACE the
+        // sources row, wiping epg_synced_at on every channel refresh
+        // regardless of whether EPG itself was touched.
+        final db = await AppDatabase.openAt(dbPath());
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [Category(id: 'c1', title: 'News')],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+        );
+        await db.replaceEpg('src1', [
+          Programme(
+            channelId: 'ch1',
+            start: DateTime.utc(2024, 1, 1, 10),
+            stop: DateTime.utc(2024, 1, 1, 11),
+            title: 'A',
+          ),
+        ]);
+        final t0 = await db.lastEpgSynced('src1');
+        expect(t0, isNotNull);
+
+        // A second, unrelated channel-library refresh must not touch EPG
+        // freshness.
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [Category(id: 'c1', title: 'News')],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+        );
+        expect(await db.lastEpgSynced('src1'), t0);
+        await db.close();
+      },
+    );
   });
 
   group('AppDatabase playback positions', () {
@@ -375,6 +421,13 @@ void main() {
             await db.execute(
               'CREATE TABLE sources (id TEXT PRIMARY KEY, '
               'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
+            );
+            // `programmes` has existed since onCreate/oldV<2, so a genuine v10
+            // install always has it too — the v11->v12 index-add branch targets it.
+            await db.execute(
+              'CREATE TABLE programmes (source_id TEXT NOT NULL, '
+              'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
+              'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
             );
           },
         );
@@ -483,6 +536,125 @@ void main() {
           to: t(1),
         );
         expect(empty, isEmpty);
+        await db.close();
+      },
+    );
+
+    test(
+      'a failure mid-insert rolls back the whole replaceEpg transaction',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+        // Seed the sources row first — replaceEpg's timestamp update is a
+        // no-op without it, which would make `before` trivially null.
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [Category(id: 'c1', title: 'News')],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+        );
+        final good = Programme(
+          channelId: 'ch1',
+          start: t(10),
+          stop: t(11),
+          title: 'Good',
+        );
+        await db.replaceEpg('src1', [good]);
+        final before = await db.lastEpgSynced('src1');
+        expect(before, isNotNull);
+
+        // The iterable yields one row, then throws mid-loop — proves the
+        // delete + partial insert both roll back together with the timestamp.
+        await expectLater(
+          db.replaceEpg(
+            'src1',
+            _throwingProgrammes(
+              Programme(
+                channelId: 'ch1',
+                start: t(12),
+                stop: t(13),
+                title: 'Partial',
+              ),
+            ),
+          ),
+          throwsA(isA<StateError>()),
+        );
+
+        final result = await db.nowNext('src1', t(10, 30));
+        expect(result.now['ch1']?.title, 'Good');
+        expect(await db.lastEpgSynced('src1'), before);
+        await db.close();
+      },
+    );
+  });
+
+  group('AppDatabase EPG index', () {
+    Future<bool> indexExists(String path) async {
+      // A fresh connection to inspect sqlite_master. `openDatabase` here is
+      // singleInstance by default, so it must run *after* the AppDatabase
+      // connection to the same path has been closed — otherwise it hands
+      // back (and then closes) that very same shared connection.
+      final raw = await databaseFactoryFfi.openDatabase(path);
+      final rows = await raw.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='index' AND "
+        "name='idx_prog_source_start'",
+      );
+      await raw.close();
+      return rows.isNotEmpty;
+    }
+
+    test('idx_prog_source_start exists on a fresh database', () async {
+      final path = dbPath();
+      final db = await AppDatabase.openAt(path);
+      await db.close();
+      expect(await indexExists(path), isTrue);
+    });
+
+    test(
+      'a v11 database gains idx_prog_source_start on upgrade, keeping seeded EPG',
+      () async {
+        final path = dbPath();
+        await createReleasedDatabaseFixture(path, 11);
+
+        final db = await AppDatabase.openAt(path);
+        // The fixture's seeded programme survived the v11->v12 upgrade.
+        final progs = await db.programmesForChannel(
+          'released-source',
+          'channel-1',
+          from: DateTime.fromMillisecondsSinceEpoch(0),
+          to: DateTime.fromMillisecondsSinceEpoch(3000),
+        );
+        expect(progs.map((p) => p.title), ['Fixture Programme']);
+        await db.close();
+
+        expect(await indexExists(path), isTrue);
+      },
+    );
+
+    test(
+      'a large now-next query is served by idx_prog_source_start',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        final firstStart = DateTime.utc(2026, 1, 1);
+        const channelCount = 2000;
+        const perChannel = 10; // ~20k programmes total.
+        final programmes = <Programme>[
+          for (var c = 0; c < channelCount; c++)
+            for (var i = 0; i < perChannel; i++)
+              Programme(
+                channelId: 'channel-$c',
+                start: firstStart.add(Duration(hours: i)),
+                stop: firstStart.add(Duration(hours: i + 1)),
+                title: 'P$c-$i',
+              ),
+        ];
+        await db.replaceEpg('perf-source', programmes);
+
+        final plan = await db.explainNowQueryPlan(
+          'perf-source',
+          firstStart.add(const Duration(minutes: 30)),
+        );
+        expect(plan.any((d) => d.contains('idx_prog_source_start')), isTrue);
         await db.close();
       },
     );
@@ -682,7 +854,93 @@ void main() {
       );
       await db.close();
     });
+
+    test(
+      'a success-empty EPG refresh clears stale programmes and advances the sync time',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource()..epgResult = const [];
+        final repo = LibraryRepository(source: source, db: db);
+        final now = DateTime.now();
+
+        await db.replaceEpg('fake', [
+          Programme(
+            channelId: 'a',
+            start: now.subtract(const Duration(minutes: 30)),
+            stop: now.add(const Duration(minutes: 30)),
+            title: 'Stale',
+          ),
+        ]);
+
+        final beforeLoad = DateTime.now();
+        await repo.load(forceRefresh: true);
+
+        final result = await db.nowNext('fake', now);
+        expect(result.now, isEmpty);
+        final synced = await db.lastEpgSynced('fake');
+        expect(synced, isNotNull);
+        expect(
+          synced!.isAtSameMomentAs(beforeLoad) || synced.isAfter(beforeLoad),
+          isTrue,
+        );
+        await db.close();
+      },
+    );
+
+    test(
+      'a failed EPG refresh retains cached programmes and does not advance the sync time',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        final now = DateTime.now();
+
+        // Seed the sources row first (replaceLibrary), then the good EPG —
+        // replaceEpg's timestamp update is a no-op if the sources row is
+        // absent, so order matters for a meaningful t0.
+        await db.replaceLibrary(
+          'fake',
+          'Fake',
+          const [Category(id: 'c1', title: 'News')],
+          const [
+            Channel(id: 'a', name: 'A', categoryId: 'c1'),
+            Channel(id: 'b', name: 'B', categoryId: 'c1'),
+          ],
+        );
+        await db.replaceEpg('fake', [
+          Programme(
+            channelId: 'a',
+            start: now.subtract(const Duration(minutes: 30)),
+            stop: now.add(const Duration(minutes: 30)),
+            title: 'Good',
+          ),
+        ]);
+        final t0 = await db.lastEpgSynced('fake');
+        expect(t0, isNotNull);
+
+        final source = _FakeSource()..epgThrow = Exception('epg fetch failed');
+        final repo = LibraryRepository(source: source, db: db);
+
+        // Forced refresh: the channel-library replace no longer clobbers
+        // epg_synced_at, and the EPG fetch itself fails; load()'s outer catch
+        // swallows the exception so the channel list still loads.
+        await repo.load(forceRefresh: true);
+
+        // replaceEpg is never reached on a failed fetch, so the earlier
+        // delete-then-insert never ran — the cached programme survives, and
+        // the EPG sync timestamp is untouched.
+        final result = await db.nowNext('fake', now);
+        expect(result.now['a']?.title, 'Good');
+        expect(await db.lastEpgSynced('fake'), t0);
+        await db.close();
+      },
+    );
   });
+}
+
+/// Yields [first], then throws — used to exercise `replaceEpg` rolling back a
+/// partially-inserted batch when the source iterable fails mid-stream.
+Iterable<Programme> _throwingProgrammes(Programme first) sync* {
+  yield first;
+  throw StateError('epg source failed mid-stream');
 }
 
 /// Minimal in-memory [Source] that records how often the heavy fetch runs.
@@ -722,8 +980,16 @@ class _FakeSource implements Source {
     Programme programme,
   ) async => throw UnsupportedError('no catch-up');
 
+  /// Configurable EPG behaviour for tests; defaults preserve prior behaviour
+  /// (a no-EPG source returning success-empty).
+  List<Programme> epgResult = const [];
+  Object? epgThrow;
+
   @override
-  Future<List<Programme>> epg(List<Channel> channels) async => const [];
+  Future<List<Programme>> epg(List<Channel> channels) async {
+    if (epgThrow != null) throw epgThrow!;
+    return epgResult;
+  }
 
   @override
   Future<List<MediaCategory>> mediaCategories(ContentKind kind) async =>
