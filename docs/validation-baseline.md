@@ -90,8 +90,8 @@ from a Linux unit-test run.
 | DEV-Linux-1 | Host ingestion baseline | Linux 7.1.3, Ryzen 7 7840HS | 14 GiB | None | Captured 2026-07-14 |
 | TV-Low-AVD-1 | Android TV API 36 emulator | 2 virtual cores | 2 GiB | 1920×1080, 320 dpi, D-pad | Captured 2026-07-15 |
 | Phone-AVD-1 | Android phone | Pixel-class emulator, 4 virtual cores | 2 GiB | Touch + system Back | Captured 2026-07-15 |
-| Win-SDR | Windows x64 | TBD | TBD | SDR, keyboard, mouse | Pending |
-| Win-HDR | Windows x64 | TBD | TBD | HDR, keyboard, mouse | Pending |
+| Win-SDR | Windows x64 | Owner development devices | Not recorded | SDR, keyboard, mouse | Extensively exercised before PR 0 |
+| Win-HDR | Windows x64 | Owner development devices | Not recorded | HDR, keyboard, mouse | Extensively exercised before PR 0 |
 
 ## Metrics to retain
 
@@ -127,7 +127,9 @@ complete baseline on the low-memory Android TV device, then record explicit
 budgets in this section. A performance PR must report both its before and after
 records and explain any material memory or latency regression.
 
-Current budgets: pending representative-device measurements.
+Current budgets: intentionally unset before closed testing. The recorded values
+are regression comparison points; optimize concrete slow paths without blocking
+early user feedback on emulator-derived limits.
 
 ## Recorded host baseline
 

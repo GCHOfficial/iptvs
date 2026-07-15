@@ -99,6 +99,75 @@ class HttpWorkloadException implements Exception {
   String toString() => 'HttpWorkloadException: $message';
 }
 
+/// Whether a provider operation is worth retrying automatically.
+///
+/// Some provider implementations preserve the original dart:io exception,
+/// while older Stalker endpoint discovery wraps it in a provider exception.
+/// Keep the textual fallback deliberately narrow: size/policy failures and
+/// authentication failures must fail immediately rather than repeating an
+/// expensive catalog request.
+bool isTransientNetworkError(Object error) {
+  if (error is HttpWorkloadException) return false;
+  if (error is TimeoutException ||
+      error is SocketException ||
+      error is HttpException) {
+    return true;
+  }
+  final message = error.toString().toLowerCase();
+  return message.contains('timed out') ||
+      message.contains('timeoutexception') ||
+      message.contains('connection reset') ||
+      message.contains('connection closed') ||
+      message.contains('connection refused') ||
+      message.contains('network is unreachable') ||
+      message.contains('temporary failure in name resolution');
+}
+
+/// Retries one transient provider failure, while leaving policy, parsing, and
+/// authentication failures untouched.
+Future<T> retryTransientNetworkOperation<T>(
+  Future<T> Function() operation, {
+  int maximumAttempts = 2,
+  Duration retryDelay = const Duration(milliseconds: 600),
+  void Function(Object error, int nextAttempt)? onRetry,
+}) async {
+  if (maximumAttempts < 1) {
+    throw ArgumentError.value(maximumAttempts, 'maximumAttempts');
+  }
+  for (var attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= maximumAttempts || !isTransientNetworkError(error)) {
+        rethrow;
+      }
+      onRetry?.call(error, attempt + 1);
+      if (retryDelay > Duration.zero) await Future<void>.delayed(retryDelay);
+    }
+  }
+}
+
+/// Short text suitable for a source-loading page. Provider exceptions can
+/// contain request URLs, response bodies, or nested stack-like messages, so
+/// those details stay in redacted diagnostics rather than the widget tree.
+String sourceLoadErrorMessage(Object error) {
+  if (isTransientNetworkError(error)) {
+    return 'The source did not respond in time. We retried automatically; '
+        'check the connection and try again.';
+  }
+  if (error is HttpWorkloadException) {
+    return 'The source returned more data than the app can safely load.';
+  }
+  final message = error.toString().toLowerCase();
+  if (message.contains('unauthorized') ||
+      message.contains('forbidden') ||
+      message.contains('invalid credential') ||
+      message.contains('authentication')) {
+    return 'The source rejected the saved credentials. Check the source details.';
+  }
+  return 'The source could not be loaded. Check its details and try again.';
+}
+
 /// One non-resetting deadline spanning request creation, headers, redirects,
 /// body transfer, and optional decoding.
 class HttpOperation {

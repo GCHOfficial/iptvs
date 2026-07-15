@@ -115,6 +115,8 @@ jobs:
         run: flutter build apk --debug --flavor githubDirect --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect
       - name: Verify GitHub-direct identity and updater capability
         run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-githubdirect-debug.apk githubDirect
+      - name: Verify Android certificate parser against the debug APK
+        run: ./tool/verify_android_apk_certificate.sh build/app/outputs/flutter-apk/app-githubdirect-debug.apk CF:3C:C3:53:C7:02:B4:D5:48:E7:4C:75:32:25:61:2C:4E:AA:D9:4A:E0:E9:FB:D4:1C:BE:4A:C6:9C:85:3E:EC
       - name: Build non-distributable Google Play APK
         run: flutter build apk --debug --flavor googlePlay --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Verify Google Play identity excludes self-update capability

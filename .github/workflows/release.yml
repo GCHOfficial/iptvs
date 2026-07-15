@@ -105,19 +105,7 @@ jobs:
       - name: Verify Android signing certificate
         env:
           EXPECTED_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
-        run: |
-          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)
-          if [ -z "$apksigner" ]; then
-            echo "::error::apksigner was not found in the Android SDK."
-            exit 1
-          fi
-          actual=$($apksigner verify --print-certs build/app/outputs/flutter-apk/app-githubdirect-release.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)
-          expected=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')
-          if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
-            echo "::error::Android signing certificate mismatch. Expected $expected, received ${actual:-none}."
-            exit 1
-          fi
-          echo "Verified Android release certificate SHA-256: $actual"
+        run: ./tool/verify_android_apk_certificate.sh build/app/outputs/flutter-apk/app-githubdirect-release.apk "$EXPECTED_CERT_SHA256"
       - name: Name artifact
         run: cp build/app/outputs/flutter-apk/app-githubdirect-release.apk iptvs-${{ needs.version.outputs.version }}-android.apk
       - name: Verify GitHub-direct updater manifest capability
