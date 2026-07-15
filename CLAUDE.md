@@ -270,6 +270,13 @@ HWND surface, mpv d3d11). Other platforms: embedded `media_kit_video`, HDR tone-
   all playback logs go through `_logPlayback` (redacted).
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
+- **Inbound native channels are token-owned.** `iptvs/native_hdr_player` and
+  `iptvs/native_preview` are process-static; handler registration goes through
+  `ChannelHandlerOwner` (`lib/player/channel_owner.dart`): claim bumps a monotonic token,
+  release clears only if still current, superseded owners' calls are ignored — so an old
+  route's dispose can't null a newer route's handler. Cleanup is identical on Android and
+  Windows (Dart-side; natives are owner-agnostic). Real handlers keep a `mounted`/`_disposed`
+  second gate. Pinned by `test/channel_owner_test.dart`.
 
 ## In-app updates (essentials)
 

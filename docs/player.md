@@ -196,3 +196,29 @@ IPTV is typically non-seekable.
 Playback headers (e.g. a MAG `User-Agent` / `Referer` for Stalker) are passed both to
 `Media(httpHeaders:)` and set as mpv `user-agent`/`referrer` properties. All playback logs go
 through `_logPlayback`, which redacts URLs via `_redactPlayback`.
+
+## MethodChannel handler ownership
+
+The two inbound native→Dart channels — `iptvs/native_hdr_player` (Android `nativeClosed` with
+position/duration/favorite; Windows `nativeControl`/`nativeInput` from the GDI overlay) and
+`iptvs/native_preview` (`previewEvent`: unsupported/lost/error) — are **process-static**, so two
+widget/controller instances can race over the single handler slot during route transitions
+(Flutter runs a replacement route's `initState` *before* the old route's `dispose`). Ownership is
+guarded by `ChannelHandlerOwner` (`lib/player/channel_owner.dart`), a monotonic owner-token
+registry (the repo's generation-guard idiom):
+
+- `claim(handler)` bumps the token and installs a wrapper that **ignores calls to superseded
+  tokens**; `release(token)` clears the platform handler **only if that token is still current**
+  — so an old route's dispose can never null a newer route's handler, and repeated route cycles
+  leave exactly one active owner (or zero after the sole owner releases).
+- The real handlers keep a second gate for calls already dispatched into the wrapper before a
+  clear: `_handleNativeHdrMethodCall` bails on `!mounted`, `LivePreviewController._handleNativeCall`
+  on `_disposed` — a popped player ignores late position/favorite/error callbacks.
+- Cleanup is **identical on Android and Windows** by construction: both platforms run the same
+  ungated `release(token)` in `dispose` (previously Windows-only cleared, Android never did).
+- The native sides register their channel handlers once per process and are **owner-agnostic**
+  (no per-Dart-owner state in Kotlin or C++) — handler ownership is purely Dart-side.
+
+Pinned by `test/channel_owner_test.dart` (claim/release/supersede semantics via
+`TestDefaultBinaryMessengerBinding`); the `mounted`/`_disposed` gates inside the real handlers are
+verified by inspection (instantiating `PlayerScreen` needs a live media_kit engine).

@@ -12,6 +12,7 @@ import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import '../theme.dart';
+import 'channel_owner.dart';
 import 'mpv_options.dart';
 
 /// Identifies what's playing for the VOD resume store: where to save
@@ -106,6 +107,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const MethodChannel _nativeHdrPlayer = MethodChannel(
     'iptvs/native_hdr_player',
   );
+  // Arbitrates the static channel's handler across successive States — e.g.
+  // navigation replacing an old route's State before it disposes — so a
+  // superseded owner's dispose can never clear a newer owner's handler. See
+  // [ChannelHandlerOwner].
+  static final ChannelHandlerOwner _hdrOwner = ChannelHandlerOwner(
+    _nativeHdrPlayer,
+  );
+  int? _hdrToken;
 
   // Ceilings for the lifecycle-critical native calls. Without these, a native
   // side that connects but never replies (surface creation wedged, engine
@@ -224,7 +233,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // of the native player leaves this route stranded on the black overlay until a
     // second Back press — register it so `nativeClosed` pops us straight to the list.
     if (Platform.isWindows || Platform.isAndroid) {
-      _nativeHdrPlayer.setMethodCallHandler(_handleNativeHdrMethodCall);
+      _hdrToken = _hdrOwner.claim(_handleNativeHdrMethodCall);
     }
 
     // Show errors once as an overlay rather than a stream of snackbars. On a live
@@ -592,6 +601,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<dynamic> _handleNativeHdrMethodCall(MethodCall call) async {
+    if (!mounted) return null;
     if (call.method == 'nativeInput') {
       final ignoreUntil = _ignoreNativeInputUntil;
       if (ignoreUntil != null && DateTime.now().isBefore(ignoreUntil)) {
@@ -1389,8 +1399,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
-    if (Platform.isWindows) {
-      _nativeHdrPlayer.setMethodCallHandler(null);
+    final token = _hdrToken;
+    if (token != null) {
+      _hdrOwner.release(token);
     }
     _positionPersistTimer?.cancel();
     // Last-resort safety net (e.g. dispose without an explicit exit path) —
