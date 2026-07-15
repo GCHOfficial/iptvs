@@ -151,6 +151,14 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   stream id, etc.). Keep provider details out of the shared models and out of the UI.
 - **Resolve streams at play time, never ahead.** Stalker `create_link` URLs are short-lived.
   `Source.resolve` / `resolveMedia` are called right before playback.
+- **Async publishes are generation-guarded.** `MediaTabController`, `LiveController`, and
+  `HomeShell._loadActive` each hold a monotonic `_loadGeneration`: only dataset-replacing ops
+  (`load`, `setCategory`) bump it and publish results only if still current; subordinate ops
+  (`loadMore`, `search`, `clearSearch`, `refreshNowNext`) read it without bumping and abandon
+  superseded results — so a refresh always beats an in-flight pagination, never the reverse.
+  Disposal is expressed solely through `_disposed`, checked in `_set` (the only
+  `notifyListeners` site). Pinned by `test/media_tab_controller_test.dart` and
+  `test/live_controller_test.dart` — keep new async publish paths behind these guards.
 - **Liveness is provider metadata, not inferred.** `StreamInfo.isLive` is set by the `Source`.
   Don't guess from stream duration (an HLS live window looks finite). Live = no seek bar.
 - **Secrets must never reach logs, on-screen errors, or exported diagnostics.** Provider URLs and
