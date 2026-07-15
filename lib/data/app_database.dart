@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart' as mobile_sqflite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
@@ -43,14 +44,17 @@ class AppDatabase {
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
+    final DatabaseFactory factory;
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
+      factory = databaseFactoryFfi;
+    } else {
+      factory = mobile_sqflite.databaseFactory;
     }
 
     final dir = await getApplicationSupportDirectory();
     final path = p.join(dir.path, 'iptv.db');
-    return openAt(path);
+    return _openWithFactory(path, factory);
   }
 
   /// Opens (and migrates) the database at an explicit [path] using the FFI
@@ -59,12 +63,19 @@ class AppDatabase {
   @visibleForTesting
   static Future<AppDatabase> openAt(String path) async {
     sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
-    final db = await openDatabase(
+    return _openWithFactory(path, databaseFactoryFfi);
+  }
+
+  static Future<AppDatabase> _openWithFactory(
+    String path,
+    DatabaseFactory factory,
+  ) async {
+    final db = await factory.openDatabase(
       path,
-      version: schemaVersion,
-      onCreate: (db, _) async {
-        await db.execute('''
+      options: OpenDatabaseOptions(
+        version: schemaVersion,
+        onCreate: (db, _) async {
+          await db.execute('''
           CREATE TABLE sources (
             id           TEXT PRIMARY KEY,
             name         TEXT NOT NULL,
@@ -72,7 +83,7 @@ class AppDatabase {
             epg_synced_at INTEGER
           )
         ''');
-        await db.execute('''
+          await db.execute('''
           CREATE TABLE categories (
             source_id TEXT NOT NULL,
             id        TEXT NOT NULL,
@@ -80,7 +91,7 @@ class AppDatabase {
             PRIMARY KEY (source_id, id)
           )
         ''');
-        await db.execute('''
+          await db.execute('''
           CREATE TABLE channels (
             source_id   TEXT NOT NULL,
             id          TEXT NOT NULL,
@@ -93,67 +104,68 @@ class AppDatabase {
             PRIMARY KEY (source_id, id)
           )
         ''');
-        await _createProgrammes(db);
-        await _createMediaTables(db);
-        await _createFavorites(db);
-        await _createPlaybackPositions(db);
-        await db.execute(
-          'CREATE INDEX idx_channels_source ON channels(source_id)',
-        );
-        await db.execute(
-          'CREATE INDEX idx_channels_source_cat ON channels(source_id, category_id)',
-        );
-      },
-      onUpgrade: (db, oldV, newV) async {
-        if (oldV < 2) {
-          await db.execute(
-            'ALTER TABLE sources ADD COLUMN epg_synced_at INTEGER',
-          );
           await _createProgrammes(db);
-        }
-        if (oldV < 3) {
           await _createMediaTables(db);
-        }
-        if (oldV >= 3 && oldV < 4) {
-          await _addMediaPagingColumns(db);
-          await _createMediaEnrichment(db);
-        }
-        if (oldV < 5) {
-          await _createMediaPageState(db);
-        }
-        if (oldV >= 3 && oldV < 6) {
-          await _addMediaDisplayOrderColumn(db);
-        }
-        if (oldV >= 3 && oldV < 7) {
-          await _addMediaHierarchyColumns(db);
-          await _addMediaPageParentColumn(db);
-          await _createExternalMetadata(db);
-        }
-        if (oldV < 8) {
-          // Repair DBs created fresh at v7 (and pre-v3 upgrades): `onCreate` /
-          // `_createMediaTables` built every media table except external_metadata,
-          // so it was missing until now. Idempotent (CREATE TABLE IF NOT EXISTS).
-          await _createExternalMetadata(db);
-        }
-        if (oldV < 9) {
-          // User favorites. `_createFavorites` lives outside `_createMediaTables`,
-          // so this repair branch covers every upgrade path (incl. pre-v3, which
-          // skips the v3+ media ALTER branches). Idempotent.
           await _createFavorites(db);
-        }
-        if (oldV < 10) {
-          // Catch-up window per channel. The `channels` table is built in
-          // `onCreate` (not `_createMediaTables`), so every upgrade path lands
-          // here; the ALTER is guarded against a pre-existing column.
-          await _addChannelArchiveColumn(db);
-        }
-        if (oldV < 11) {
-          // VOD resume positions. Standalone table (like `favorites`, outside
-          // `_createMediaTables`), so this one repair branch covers every
-          // upgrade path. Idempotent.
           await _createPlaybackPositions(db);
-        }
-      },
+          await db.execute(
+            'CREATE INDEX idx_channels_source ON channels(source_id)',
+          );
+          await db.execute(
+            'CREATE INDEX idx_channels_source_cat ON channels(source_id, category_id)',
+          );
+        },
+        onUpgrade: (db, oldV, newV) async {
+          if (oldV < 2) {
+            await db.execute(
+              'ALTER TABLE sources ADD COLUMN epg_synced_at INTEGER',
+            );
+            await _createProgrammes(db);
+          }
+          if (oldV < 3) {
+            await _createMediaTables(db);
+          }
+          if (oldV >= 3 && oldV < 4) {
+            await _addMediaPagingColumns(db);
+            await _createMediaEnrichment(db);
+          }
+          if (oldV < 5) {
+            await _createMediaPageState(db);
+          }
+          if (oldV >= 3 && oldV < 6) {
+            await _addMediaDisplayOrderColumn(db);
+          }
+          if (oldV >= 3 && oldV < 7) {
+            await _addMediaHierarchyColumns(db);
+            await _addMediaPageParentColumn(db);
+            await _createExternalMetadata(db);
+          }
+          if (oldV < 8) {
+            // Repair DBs created fresh at v7 (and pre-v3 upgrades): `onCreate` /
+            // `_createMediaTables` built every media table except external_metadata,
+            // so it was missing until now. Idempotent (CREATE TABLE IF NOT EXISTS).
+            await _createExternalMetadata(db);
+          }
+          if (oldV < 9) {
+            // User favorites. `_createFavorites` lives outside `_createMediaTables`,
+            // so this repair branch covers every upgrade path (incl. pre-v3, which
+            // skips the v3+ media ALTER branches). Idempotent.
+            await _createFavorites(db);
+          }
+          if (oldV < 10) {
+            // Catch-up window per channel. The `channels` table is built in
+            // `onCreate` (not `_createMediaTables`), so every upgrade path lands
+            // here; the ALTER is guarded against a pre-existing column.
+            await _addChannelArchiveColumn(db);
+          }
+          if (oldV < 11) {
+            // VOD resume positions. Standalone table (like `favorites`, outside
+            // `_createMediaTables`), so this one repair branch covers every
+            // upgrade path. Idempotent.
+            await _createPlaybackPositions(db);
+          }
+        },
+      ),
     );
     return AppDatabase._(db);
   }
@@ -533,16 +545,12 @@ class AppDatabase {
     bool favorite,
   ) async {
     if (favorite) {
-      await _db.insert(
-        'favorites',
-        {
-          'source_id': sourceId,
-          'kind': kind.name,
-          'item_id': itemId,
-          'created_at': DateTime.now().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      await _db.insert('favorites', {
+        'source_id': sourceId,
+        'kind': kind.name,
+        'item_id': itemId,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
     } else {
       await _db.delete(
         'favorites',

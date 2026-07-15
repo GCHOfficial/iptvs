@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' hide Category;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/net.dart';
 import '../sources/source.dart';
 
 /// Owns the live-TV data: the channel/category lists, the now/next EPG, and the
@@ -51,7 +52,16 @@ class LiveController extends ChangeNotifier {
       error = null;
     });
     try {
-      final snap = await repo.load(forceRefresh: forceRefresh);
+      final snap = await retryTransientNetworkOperation(
+        () => repo.load(forceRefresh: forceRefresh),
+        onRetry: (error, nextAttempt) {
+          DiagnosticsLog.instance.add(
+            'library',
+            'retrying live source load attempt=$nextAttempt '
+                'reason=${error.runtimeType}',
+          );
+        },
+      );
       if (_disposed) return;
       DiagnosticsLog.instance.add(
         'library',
@@ -66,8 +76,13 @@ class LiveController extends ChangeNotifier {
       });
       await refreshNowNext();
     } catch (e) {
+      final message = sourceLoadErrorMessage(e);
+      DiagnosticsLog.instance.add(
+        'library',
+        'live source load failed reason=${e.runtimeType} message=$message',
+      );
       _set(() {
-        error = '$e';
+        error = message;
         loading = false;
       });
     }

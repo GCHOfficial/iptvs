@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/net.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
 
@@ -148,10 +149,19 @@ class MediaTabController extends ChangeNotifier {
     });
     unawaited(loadContinueWatching());
     try {
-      final snap = await repo.loadMedia(
-        kind,
-        categoryId: categoryToLoad,
-        forceRefresh: forceRefresh,
+      final snap = await retryTransientNetworkOperation(
+        () => repo.loadMedia(
+          kind,
+          categoryId: categoryToLoad,
+          forceRefresh: forceRefresh,
+        ),
+        onRetry: (error, nextAttempt) {
+          DiagnosticsLog.instance.add(
+            'library',
+            'retrying ${kind.name} source load attempt=$nextAttempt '
+                'reason=${error.runtimeType}',
+          );
+        },
       );
       if (_disposed) return;
       DiagnosticsLog.instance.add(
@@ -166,8 +176,14 @@ class MediaTabController extends ChangeNotifier {
         unawaited(_enrich(snap.items, maxItems: _autoEnrichLimit));
       }
     } catch (e) {
+      final message = sourceLoadErrorMessage(e);
+      DiagnosticsLog.instance.add(
+        'library',
+        '${kind.name} source load failed reason=${e.runtimeType} '
+            'message=$message',
+      );
       _set(() {
-        error = '$e';
+        error = message;
         loading = false;
       });
     }
@@ -203,7 +219,7 @@ class MediaTabController extends ChangeNotifier {
       }
     } catch (e) {
       _set(() {
-        error = '$e';
+        error = sourceLoadErrorMessage(e);
         loadingMore = false;
       });
     }
@@ -240,7 +256,7 @@ class MediaTabController extends ChangeNotifier {
     } catch (e) {
       if (_disposed || _pendingSearch != query) return;
       _set(() {
-        error = '$e';
+        error = sourceLoadErrorMessage(e);
         searching = false;
       });
     }
@@ -336,7 +352,11 @@ class MediaTabController extends ChangeNotifier {
     } catch (e) {
       if (_disposed || _enrichGeneration != generation) return;
       _set(() => enriching = false);
-      if (showErrors) onEnrichError?.call('Metadata enrichment failed: $e');
+      if (showErrors) {
+        onEnrichError?.call(
+          'Metadata enrichment failed. ${sourceLoadErrorMessage(e)}',
+        );
+      }
     }
   }
 

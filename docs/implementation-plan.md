@@ -27,8 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-15
 - Active phase: Phase 0 — Release and security blockers
-- Active PR: PR 3 — Bound HTTP and decompression workloads
-- Previous PR: PR 15 subset — Android TV Back, density, and category activation (merged as #100)
+- Active PR: PR 3 follow-up — transient source-load recovery
+- Previous PR: PR 3 — Bound HTTP and decompression workloads (merged as #101)
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,13 +38,14 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 258 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 262 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
   TV live layout and native player Back behavior passed direct API-36 emulator
-  validation on 2026-07-14, while the wider device matrix remains pending
-- Windows native build/device validation: not performed during the audit
+  validation, and Play accepted two internal builds as an update chain
+- Windows x64 SDR and HDR playback paths: extensively owner-tested before and
+  during development; PR 3 did not change the Windows player/rendering path
 
 ## Non-negotiable sequencing
 
@@ -62,10 +63,10 @@ Status convention:
 
 | PR | Phase | Outcome | Effort | Dependencies | Status |
 |---|---|---|---:|---|---|
-| 0 | Foundation | Fixtures, benchmarks, and device matrix | M | None | In progress |
+| 0 | Foundation | Fixtures, benchmarks, and device matrix | M | None | Complete; deeper profiling deferred |
 | 1 | Phase 0 | Recover Android signing trust | L | PR 0 | In progress |
 | 2 | Phase 0 | Authenticate update artifacts | L | PR 1 | In progress |
-| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | In progress |
+| 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Merged as #101 |
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | [ ] |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | [ ] |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | [ ] |
@@ -102,16 +103,20 @@ Effort guide:
 - [x] Add fixture databases for every schema version that was publicly released.
   `test/support/historical_database_fixtures.dart` builds seeded v8–v11 schemas
   in reviewable SQL and `test/released_schema_fixtures_test.dart` exercises them.
-- [ ] Define the supported device matrix:
-  - [ ] Low-memory Android TV device
-  - [ ] Current Android phone
-  - [ ] Windows x64 SDR display
-  - [ ] Windows x64 HDR display
+- [x] Define and exercise the supported device matrix:
+  - [x] Low-memory Android TV device
+  - [x] Current Android phone
+  - [x] Windows x64 SDR display
+  - [x] Windows x64 HDR display
 - [x] Add reproducible host-side measurements for fixture size, parse/decode time,
   and process RSS change in `test/performance_baseline_test.dart`.
-- [ ] Add application-profile measurements for import time, longest main-isolate
-  stall, peak memory, SQLite query duration, time to first channel, and time to
-  first EPG.
+- [x] Add application-profile responsiveness measurements on 2 GiB Android phone
+  and TV emulators, including frame percentiles and worst captured build/raster
+  times.
+- DEFERRED: Add import phase timings, peak process memory, SQLite timings, and
+  time-to-first-channel/EPG only when closed testing or a reported regression
+  gives a representative workload. Do not delay early testing to manufacture
+  hard budgets from emulators.
 - [x] Correct permanent documentation to Flutter 3.44.5.
 
 ### Verification
@@ -120,7 +125,9 @@ Effort guide:
   API keys, tokens, and programme-viewing history. They use reserved `.invalid`
   hosts and generated identifiers.
 - [x] Baselines can be reproduced from commands in `docs/validation-baseline.md`.
-- [ ] Performance thresholds are based on measured representative workloads.
+- DEFERRED: Treat the recorded host and emulator values as comparison baselines,
+  not release thresholds, until closed-testing devices provide representative
+  data.
 - [x] `flutter analyze` passes on 2026-07-14.
 - [x] `flutter test` passes on 2026-07-14 (236 passed, 10 platform/opt-in
   skips on Linux).
@@ -170,8 +177,9 @@ their own lineage.
   `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
 - [x] Confirm two AES-256 password-protected backups of the Play upload key and
   password in separate local and personal-cloud locations.
-- [ ] Enroll in Play App Signing through the first AAB upload and run the
-  protected workflow with the permanent upload certificate.
+- [x] Enroll in Play App Signing through the first AAB upload and run the
+  protected workflow with the permanent upload certificate. Play accepted the
+  initial internal build and a second build as its update on 2026-07-15.
 - [x] Design a safe profile migration for each new application ID using the
   existing authenticated cloud push/pull path; exact steps and exclusions are
   recorded in `docs/android-signing.md`.
@@ -186,9 +194,13 @@ their own lineage.
 - [ ] CI verifies the permanent APK certificate fingerprint. Workflow logic and
   protected environment configuration are present, but a protected run using
   the permanent key has not yet supplied the verification evidence.
-- [ ] Old-to-new installation behavior is tested on every supported Android API.
-- [x] Profile/source/favorite retention or loss is explicitly documented in
-  `docs/android-signing.md`; device execution remains pending.
+- [ ] Run a minimum-SDK (API 26) install/start smoke test. Current API 36 phone
+  and TV paths, including the Play internal update, are verified; exhaustive
+  testing of every intermediate API is not a useful early-testing gate.
+- [x] Profile/source/favorite retention or loss is explicitly documented and
+  the authenticated cloud migration was exercised with the Play internal build
+  on 2026-07-15. Sources/favorites restored and documented device-local
+  exclusions started fresh.
 - [x] `flutter analyze` and `flutter test` pass on 2026-07-14.
 
 ## PR 2 — Authenticate update artifacts
@@ -265,6 +277,8 @@ their own lineage.
 - [x] Representative legitimate fixtures remain accepted.
 - [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (258 passed,
   10 platform/opt-in skips).
+- [x] A real 28.6 MB Stalker live catalog and 9.7 MB EPG response loaded on the
+  2 GiB Android TV emulator; movie/series posters and tested sources render.
 
 ## PR 4 — Stable source and cache identities
 
@@ -640,6 +654,10 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
 | 2026-07-15 | PR 15 subset | Merged | PR #100 merged as `912392f`; Android TV Back, density, category focus, tests, and store screenshots are on `main`. |
 | 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Phone/TV profiling also exposed and fixed non-finite media-card image cache sizing. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
+| 2026-07-15 | PR 3 | Merged | PR #101 merged as `ec33886`; owner verified large Stalker live/EPG loading, playback, and movie/series posters on the 2 GiB TV emulator. A focused follow-up retries one transient catalog failure and keeps raw provider exceptions out of the UI. |
+| 2026-07-15 | PR 0 | Complete | Android phone/TV profile baselines and longstanding Windows x64 SDR/HDR validation are sufficient for early testing. Deeper import/RSS/SQLite budgets are deferred until closed-testing feedback supplies representative problems. |
+| 2026-07-15 | PR 1 | Verification | Play accepted an initial internal AAB and its update; authenticated cloud migration restored sources/favorites and documented local exclusions began fresh. API 26 smoke and permanent GitHub-direct certificate evidence remain. |
+| 2026-07-15 | PR 2 | Verification | Tag `v0.1.31` exposed an Android build-tools output-format bug in certificate parsing after the signed APK built; parser accepts both legacy and current labels in the follow-up, then a new tag will provide end-to-end evidence. |
 
 ## Removal checklist
 

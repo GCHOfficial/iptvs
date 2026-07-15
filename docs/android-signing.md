@@ -27,17 +27,17 @@ must therefore be treated as signed by a publicly available private key.
 
 ## Recovery decision
 
-Status: **transition selected; migration and device verification pending**.
+Status: **transition selected; Play migration verified, direct release
+verification pending**.
 
 Known distribution:
 
 - GitHub Releases publishes a directly installable universal APK.
 - Existing GitHub APKs use application ID `com.gchofficial.iptvs`.
-- No repository evidence establishes a Play App Signing population.
+- Google Play internal testing now has an enrolled Play App Signing population.
 
-The owner confirmed that no build has been published through Google Play or
-another managed-signing store. Play Console verification is complete and the
-new application exists, but no Play artifact has shipped.
+The first Play internal-testing AAB and a subsequent update were accepted on
+2026-07-15. No public Play artifact has shipped.
 
 The selected recovery uses separate new identities:
 
@@ -170,7 +170,9 @@ future direct-download updates; disclosure allows malicious replacement APKs.
 
 - [x] Store/distribution inventory is complete.
 - [x] Package-ID transition is selected and documented.
-- [ ] User-data migration behavior is tested.
+- [x] User-data migration behavior is tested with the Play internal build;
+  cloud sources/favorites restored and documented device-local exclusions began
+  fresh.
 - [x] Permanent signing key is generated outside the repository.
 - [x] At least two encrypted offline backups of the permanent key and credentials
   are confirmed by the owner.
@@ -184,4 +186,6 @@ future direct-download updates; disclosure allows malicious replacement APKs.
 - [x] `apksigner` reports the disposable validation fingerprint, proving the
   Gradle environment-variable path signs the output.
 - [ ] A protected GitHub release run reports the permanent fingerprint above.
-- [ ] Old-to-new install behavior is tested on every supported Android API.
+- [ ] A minimum-SDK (API 26) install/start smoke test passes. Current API 36
+  phone/TV and Play internal-update paths are verified; every intermediate API
+  is not required as an early-testing gate.
