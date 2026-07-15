@@ -262,7 +262,9 @@ Self-updates from GitHub Releases (`GCHOfficial/iptvs`): shared Dart service
 (`update_service.dart`, pure version compare, unit-tested) + keychain prefs (`update_store.dart`)
 + per-platform installer (`update_installer.dart`: Android system installer via FileProvider;
 Windows detached PowerShell swap + `exit(0)`). `update_flow.dart` drives prompt → download →
-install; dialogs are D-pad-safe (primary action autofocuses; the update dialog traps focus).
+install; Android persists a verified pending APK, retries it after unknown-source settings, and
+offers to resume it after OEM installer/settings detours with repeat cache hash + native
+package/signer checks. Dialogs are D-pad-safe (primary action autofocuses; the update dialog traps focus).
 Release bodies open with an AI-generated changelog (fail-open Gemini step in release.yml),
 rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 

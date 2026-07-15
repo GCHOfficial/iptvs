@@ -37,13 +37,14 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   SourceConfig? _config;
   Source? _source;
   List<MetadataProvider> _metadataProviders = const [];
   LibraryRepository? _repo;
   bool _loading = true;
   bool Function(KeyEvent event)? _keyboardLogger;
+  bool _updateResumeActive = false;
 
   // Active profile info for the avatar — loaded after the main source load.
   // Local profile first (most-recently-selected), cloud profile as fallback.
@@ -53,12 +54,37 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     assert(() {
       _installKeyboardLogger();
       return true;
     }());
     _loadActive();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeCheckForUpdate());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _resumePendingThenCheck(),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _resumePendingUpdate());
+  }
+
+  Future<void> _resumePendingThenCheck() async {
+    final handled = await _resumePendingUpdate();
+    if (!handled && mounted) await _maybeCheckForUpdate();
+  }
+
+  Future<bool> _resumePendingUpdate() async {
+    if (_updateResumeActive) return true;
+    if (!mounted) return false;
+    _updateResumeActive = true;
+    try {
+      return await resumePendingUpdate(context);
+    } finally {
+      _updateResumeActive = false;
+    }
   }
 
   /// Throttled boot-time update check. Runs only on the release platforms
@@ -76,6 +102,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (_keyboardLogger case final logger?) {
       HardwareKeyboard.instance.removeHandler(logger);
       _keyboardLogger = null;
