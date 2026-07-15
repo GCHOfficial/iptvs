@@ -88,7 +88,7 @@ from a Linux unit-test run.
 |---|---|---|---:|---|---|
 | CI-Linux | Analyze/unit tests | GitHub-hosted Ubuntu | Runner-dependent | None | Existing |
 | DEV-Linux-1 | Host ingestion baseline | Linux 7.1.3, Ryzen 7 7840HS | 14 GiB | None | Captured 2026-07-14 |
-| TV-Low | Android TV | TBD | TBD | Physical D-pad | Pending |
+| TV-Low-AVD-1 | Android TV API 36 emulator | 2 virtual cores | 2 GiB | 1920×1080, 320 dpi, D-pad | Captured 2026-07-15 |
 | Phone-AVD-1 | Android phone | Pixel-class emulator, 4 virtual cores | 2 GiB | Touch + system Back | Captured 2026-07-15 |
 | Win-SDR | Windows x64 | TBD | TBD | SDR, keyboard, mouse | Pending |
 | Win-HDR | Windows x64 | TBD | TBD | HDR, keyboard, mouse | Pending |
@@ -183,3 +183,25 @@ policy to 64 MiB encoded / 128 MiB decoded and retains a generated 80,000-row
 catalog regression above the old limit. This capture does not include a
 successful completion of that catalog load, so time-to-first-channel, peak RSS,
 and ingestion stall evidence remain pending for the follow-up run.
+
+`TV-Low-AVD-1` ran the same Flutter profile build on an API 36 Android TV
+emulator configured with 2 GiB RAM, two virtual cores, and a 1920×1080 display
+at 320 dpi. Excluding the first 100 startup frames from 3,675 captured frames:
+
+| Metric | Result |
+|---|---:|
+| Median frame time | 3.9 ms |
+| p95 frame time | 19.1 ms |
+| p99 frame time | 31.5 ms |
+| Frames over 33.3 ms | 33 / 3,575 (0.9%) |
+| Frames over 100 ms | 6 / 3,575 (0.2%) |
+| Maximum build time | 157.8 ms |
+| Maximum raster time | 70.9 ms |
+
+The run felt responsive and loaded the 28.6 MB Stalker live catalog plus a
+10.2 MB EPG response. Movie/series cards initially failed before image loading:
+the grid intentionally passed `double.infinity` to `_Poster`, which forwarded
+it to `imageCacheSize` and threw while converting infinity to an integer.
+The card now derives finite cache dimensions from its layout constraints, and
+the shared helper defensively handles non-finite/invalid metrics. Peak RSS was
+not captured before the profile process exited and remains pending.

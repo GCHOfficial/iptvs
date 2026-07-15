@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 255 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 258 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -263,7 +263,7 @@ their own lineage.
 - [x] Cancellation/failure removes partial files; clients remain explicitly
   closeable by each owning source/service.
 - [x] Representative legitimate fixtures remain accepted.
-- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (255 passed,
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-15 (258 passed,
   10 platform/opt-in skips).
 
 ## PR 4 — Stable source and cache identities
@@ -639,7 +639,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow, with two encrypted backups confirmed; Play enrollment and Store packages remain |
 | 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
 | 2026-07-15 | PR 15 subset | Merged | PR #100 merged as `912392f`; Android TV Back, density, category focus, tests, and store screenshots are on `main`. |
-| 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
+| 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Phone/TV profiling also exposed and fixed non-finite media-card image cache sizing. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
 
 ## Removal checklist
 
