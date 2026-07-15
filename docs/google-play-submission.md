@@ -77,7 +77,10 @@ the publisher lacks promotional rights.
   Prefer screenshots 2, 3, and 5 in that order. Recapture screenshot 1 after
   the phone-specific profile hint fix; screenshot 4 is valid but is a less
   compelling credential-form view.
-- [ ] At least one real Android TV screenshot before opting in to TV.
+- [x] Two real 3840 × 2160 Android TV screenshots in
+  `assets/store/google-play/androidtv*.png`. Screenshot 1 should be recaptured
+  after the compact 960 × 540 live-layout fix; screenshot 2 remains suitable
+  for the native player-controls listing image.
 - [x] 1280 × 720 Android TV banner at
   `assets/store/google-play/tv-banner.png`; editable source is the SVG beside
   it. This is separate from the launcher banner in the Android manifest.

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 
 import '../sources/source.dart';
@@ -50,6 +51,78 @@ const double kCategoryRowExtent = 44;
 double channelRowExtentFor(bool hasEpg) =>
     hasEpg ? kChannelRowExtentWithEpg : kChannelRowExtentPlain;
 
+/// Bounded density for wide browsing layouts.
+///
+/// Android TV can expose either 960×540 or 1920×1080 logical viewports for a 4K
+/// panel. Fixed desktop dimensions make the preview and chrome too large in
+/// both cases, so Android wide layouts request compact geometry explicitly.
+/// Other platforms still scale only when their viewport is short. Minimum
+/// D-pad targets and Flutter's accessibility text scale remain untouched.
+@immutable
+class LiveLayoutMetrics {
+  final double scale;
+  final double previewHeight;
+  final double previewWidth;
+  final double categoryPaneWidth;
+  final double channelRowExtentPlain;
+  final double channelRowExtentWithEpg;
+  final double categoryRowExtent;
+  final double outerPadding;
+  final double paneGap;
+  final double panelPadding;
+  final double titleSize;
+  final double infoSize;
+
+  const LiveLayoutMetrics._({
+    required this.scale,
+    required this.previewHeight,
+    required this.previewWidth,
+    required this.categoryPaneWidth,
+    required this.channelRowExtentPlain,
+    required this.channelRowExtentWithEpg,
+    required this.categoryRowExtent,
+    required this.outerPadding,
+    required this.paneGap,
+    required this.panelPadding,
+    required this.titleSize,
+    required this.infoSize,
+  });
+
+  factory LiveLayoutMetrics.forSize(
+    Size size, {
+    bool compactWideLayout = false,
+  }) {
+    final isWide = size.width >= kWideLayoutMinWidth;
+    final scale = isWide
+        ? compactWideLayout
+              ? 0.75
+              : (size.height / 720).clamp(0.75, 1.0)
+        : 1.0;
+    return LiveLayoutMetrics._(
+      scale: scale,
+      previewHeight: (190 * scale).clamp(140, 190),
+      previewWidth: (250 * scale).clamp(190, 250),
+      categoryPaneWidth: (240 * scale).clamp(190, 240),
+      channelRowExtentPlain: (kChannelRowExtentPlain * scale).clamp(64, 72),
+      channelRowExtentWithEpg: (kChannelRowExtentWithEpg * scale).clamp(
+        108,
+        112,
+      ),
+      categoryRowExtent: (kCategoryRowExtent * scale).clamp(40, 44),
+      outerPadding: (12 * scale).clamp(8, 12),
+      paneGap: (12 * scale).clamp(8, 12),
+      panelPadding: (14 * scale).clamp(10, 14),
+      titleSize: (24 * scale).clamp(20, 24),
+      infoSize: (16 * scale).clamp(13, 16),
+    );
+  }
+
+  double channelRowExtent(bool hasEpg) =>
+      hasEpg ? channelRowExtentWithEpg : channelRowExtentPlain;
+
+  bool get compact => scale < 0.95;
+}
+
 /// The live-TV browsing body: the channel list (with the category side-pane and
 /// preview panel on wide layouts, plain list on phones), plus its D-pad focus
 /// wiring. Extracted from `ChannelListScreen`'s State as a widget with an
@@ -90,6 +163,7 @@ class LiveTabView extends StatelessWidget {
   /// Uniform channel row height (see [channelRowExtentFor]) — must match what
   /// the coordinator uses for its scroll math.
   final double channelRowExtent;
+  final double categoryRowExtent;
 
   final String? lastPlayedChannelId;
   final String? previewChannelId;
@@ -158,6 +232,7 @@ class LiveTabView extends StatelessWidget {
     required this.onChannelsKey,
     required this.channelColumn,
     required this.channelRowExtent,
+    required this.categoryRowExtent,
     required this.lastPlayedChannelId,
     required this.previewChannelId,
     required this.isFavorite,
@@ -212,7 +287,8 @@ class LiveTabView extends StatelessWidget {
             // land when you come back, while the *accent* clearly marks which
             // pane the D-pad is actually in.
             cursor: i == selectedChannelIndex,
-            favoriteCursor: i == selectedChannelIndex &&
+            favoriteCursor:
+                i == selectedChannelIndex &&
                 channelColumn == ChannelRowColumn.favorite,
             listFocused: channelsFocusNode.hasFocus,
             previewing: c.id == previewChannelId,
@@ -275,12 +351,21 @@ class LiveTabView extends StatelessWidget {
         if (constraints.maxWidth < kWideLayoutMinWidth) {
           return _buildChannelList(context);
         }
+        final metrics = LiveLayoutMetrics.forSize(
+          MediaQuery.sizeOf(context),
+          compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+        );
         return Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+          padding: EdgeInsets.fromLTRB(
+            metrics.outerPadding,
+            4,
+            metrics.outerPadding,
+            8,
+          ),
           child: Row(
             children: [
               SizedBox(
-                width: 240,
+                width: metrics.categoryPaneWidth,
                 child: _LiveCategoryPane(
                   categories: categories,
                   selectedCategoryId: selectedCategoryId,
@@ -290,9 +375,10 @@ class LiveTabView extends StatelessWidget {
                   scrollController: categoryScrollController,
                   onSelected: onCategorySelected,
                   onSelectIndex: onSelectCategoryIndex,
+                  rowExtent: categoryRowExtent,
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: metrics.paneGap),
               Expanded(
                 child: Column(
                   children: [
@@ -316,8 +402,9 @@ class LiveTabView extends StatelessWidget {
                       favoriteFocusNode: previewFavoriteFocusNode,
                       catchupFocusNode: previewCatchupFocusNode,
                       onControlKey: onPreviewControlKey,
+                      metrics: metrics,
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: metrics.paneGap),
                     Expanded(
                       child: _buildChannelList(
                         context,
@@ -348,6 +435,7 @@ class _LiveCategoryPane extends StatelessWidget {
   final ScrollController scrollController;
   final ValueChanged<String?> onSelected;
   final ValueChanged<int> onSelectIndex;
+  final double rowExtent;
 
   const _LiveCategoryPane({
     required this.categories,
@@ -358,6 +446,7 @@ class _LiveCategoryPane extends StatelessWidget {
     required this.scrollController,
     required this.onSelected,
     required this.onSelectIndex,
+    required this.rowExtent,
   });
 
   @override
@@ -392,7 +481,7 @@ class _LiveCategoryPane extends StatelessWidget {
               onKeyEvent: onKey,
               child: ListView.builder(
                 controller: scrollController,
-                itemExtent: kCategoryRowExtent,
+                itemExtent: rowExtent,
                 itemCount: items.length,
                 itemBuilder: (context, i) {
                   final item = items[i];
@@ -503,6 +592,7 @@ class _LivePreviewPanel extends StatelessWidget {
   final FocusNode favoriteFocusNode;
   final FocusNode catchupFocusNode;
   final KeyEventResult Function(bool fromCatchup, KeyEvent event) onControlKey;
+  final LiveLayoutMetrics metrics;
 
   const _LivePreviewPanel({
     required this.channel,
@@ -519,6 +609,7 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.favoriteFocusNode,
     required this.catchupFocusNode,
     required this.onControlKey,
+    required this.metrics,
   });
 
   String? get _hint {
@@ -540,7 +631,7 @@ class _LivePreviewPanel extends StatelessWidget {
       progress = total <= 0 ? null : (elapsed / total).clamp(0.0, 1.0);
     }
     return Container(
-      height: 190,
+      height: metrics.previewHeight,
       width: double.infinity,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(AppRadius.tile),
@@ -553,16 +644,13 @@ class _LivePreviewPanel extends StatelessWidget {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final compact = constraints.maxHeight < 182;
-          final titleSize = compact ? 20.0 : 24.0;
-          final infoSize = compact ? 14.0 : 16.0;
-          final previewWidth = compact ? 220.0 : 250.0;
+          final compact = metrics.compact;
           return Padding(
-            padding: const EdgeInsets.all(14),
+            padding: EdgeInsets.all(metrics.panelPadding),
             child: Row(
               children: [
                 Container(
-                  width: previewWidth,
+                  width: metrics.previewWidth,
                   decoration: BoxDecoration(
                     color: AppColors.panel,
                     borderRadius: BorderRadius.circular(10),
@@ -660,7 +748,7 @@ class _LivePreviewPanel extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 16),
+                SizedBox(width: metrics.paneGap),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -674,7 +762,7 @@ class _LivePreviewPanel extends StatelessWidget {
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 color: AppColors.textHi,
-                                fontSize: titleSize,
+                                fontSize: metrics.titleSize,
                                 fontWeight: FontWeight.w800,
                               ),
                             ),
@@ -703,7 +791,7 @@ class _LivePreviewPanel extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: AppColors.textHi,
-                            fontSize: infoSize,
+                            fontSize: metrics.infoSize,
                             fontWeight: FontWeight.w600,
                           ),
                         )
@@ -1237,6 +1325,10 @@ class _ChannelTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final current = now;
     final upcoming = next;
+    final metrics = LiveLayoutMetrics.forSize(
+      MediaQuery.sizeOf(context),
+      compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+    );
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1269,132 +1361,137 @@ class _ChannelTile extends StatelessWidget {
               ),
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: EdgeInsets.symmetric(
+                horizontal: metrics.compact ? 10 : 12,
+                vertical: metrics.compact ? 6 : 8,
+              ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-            _Logo(channel: channel),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    channel.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  if (current != null) ...[
-                    const SizedBox(height: 4),
-                    // Current show on its own emphasized line — leads with the
-                    // title so a long channel name never hides it.
-                    Text(
-                      nowProgrammeLabel(current),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.accent,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    // Time range + progress share a row so the bar reads as
-                    // "where we are between these times".
-                    Row(
+                  _Logo(channel: channel, size: metrics.compact ? 36 : 40),
+                  SizedBox(width: metrics.compact ? 10 : 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          programmeTimeRange(current),
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 11.5,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(3),
-                            child: LinearProgressIndicator(
-                              value: progress,
-                              minHeight: 3,
-                              backgroundColor: AppColors.line,
-                              valueColor: const AlwaysStoppedAnimation<Color>(
-                                AppColors.accent,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (upcoming != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text(
-                          nextProgrammeLabel(upcoming),
+                          channel.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 11.5,
-                          ),
+                          style: Theme.of(context).textTheme.titleMedium,
                         ),
-                      ),
+                        if (current != null) ...[
+                          const SizedBox(height: 4),
+                          // Current show on its own emphasized line — leads with the
+                          // title so a long channel name never hides it.
+                          Text(
+                            nowProgrammeLabel(current),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.accent,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          // Time range + progress share a row so the bar reads as
+                          // "where we are between these times".
+                          Row(
+                            children: [
+                              Text(
+                                programmeTimeRange(current),
+                                style: const TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 11.5,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(3),
+                                  child: LinearProgressIndicator(
+                                    value: progress,
+                                    minHeight: 3,
+                                    backgroundColor: AppColors.line,
+                                    valueColor:
+                                        const AlwaysStoppedAnimation<Color>(
+                                          AppColors.accent,
+                                        ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (upcoming != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(
+                                nextProgrammeLabel(upcoming),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 11.5,
+                                ),
+                              ),
+                            ),
+                        ],
                       ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Always-visible favorite star: a touch target on every row,
-                // and the D-pad's intra-row favorite column when
-                // [favoriteCursor] holds the cursor. Sized well inside the
-                // fixed itemExtents (72 / 112), so the row never overflows.
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onToggleFavorite,
-                  child: Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: favoriteCursor && listFocused
-                          ? AppColors.panelHi
-                          : null,
-                      borderRadius: BorderRadius.circular(AppRadius.tile),
-                      border: favoriteCursor && listFocused
-                          ? Border.all(color: AppColors.accent, width: 2)
-                          : null,
-                    ),
-                    child: Icon(
-                      favorite
-                          ? Icons.star_rounded
-                          : Icons.star_outline_rounded,
-                      size: 20,
-                      color: favorite
-                          ? AppColors.accent
-                          : AppColors.textLo.withValues(alpha: 0.55),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Icon(
-                  previewing
-                      ? Icons.play_circle_fill_rounded
-                      : Icons.play_arrow_rounded,
-                  color: enabled ? AppColors.accent : AppColors.textLo,
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  // Always-visible favorite star: a touch target on every row,
+                  // and the D-pad's intra-row favorite column when
+                  // [favoriteCursor] holds the cursor. Sized well inside the
+                  // fixed itemExtents (72 / 112), so the row never overflows.
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onToggleFavorite,
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: favoriteCursor && listFocused
+                            ? AppColors.panelHi
+                            : null,
+                        borderRadius: BorderRadius.circular(AppRadius.tile),
+                        border: favoriteCursor && listFocused
+                            ? Border.all(color: AppColors.accent, width: 2)
+                            : null,
+                      ),
+                      child: Icon(
+                        favorite
+                            ? Icons.star_rounded
+                            : Icons.star_outline_rounded,
+                        size: 20,
+                        color: favorite
+                            ? AppColors.accent
+                            : AppColors.textLo.withValues(alpha: 0.55),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    previewing
+                        ? Icons.play_circle_fill_rounded
+                        : Icons.play_arrow_rounded,
+                    color: enabled ? AppColors.accent : AppColors.textLo,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
-    ),
     );
   }
 }
 
 class _Logo extends StatefulWidget {
   final Channel channel;
-  const _Logo({required this.channel});
+  final double size;
+  const _Logo({required this.channel, required this.size});
 
   @override
   State<_Logo> createState() => _LogoState();
@@ -1417,7 +1514,7 @@ class _LogoState extends State<_Logo> {
 
   @override
   Widget build(BuildContext context) {
-    const size = 40.0;
+    final size = widget.size;
     final cacheSize = imageCacheSize(context, size);
     final fallback = Container(
       width: size,

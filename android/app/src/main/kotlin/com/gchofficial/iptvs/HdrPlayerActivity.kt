@@ -5,12 +5,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.lifecycleScope
@@ -20,11 +22,14 @@ import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
 import com.gchofficial.iptvs.player.PlayerCallbacks
+import com.gchofficial.iptvs.player.PlayerBackAction
+import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
 import com.gchofficial.iptvs.player.SharedEngine
 import com.gchofficial.iptvs.player.SubtitleSpec
+import com.gchofficial.iptvs.player.nextPlayerBackAction
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -59,9 +64,54 @@ class HdrPlayerActivity : ComponentActivity() {
     private var stalledSinceMs = 0L
     private var lastReconnectMs = 0L
     private var reconnectAttempt = 0
+    private val backGuard = PlayerBackGuard()
+
+    /**
+     * TV remotes and three-button navigation arrive as key events. Consume both
+     * key-down and key-up at the Activity boundary so Compose focus handlers and
+     * the Back dispatcher cannot process the same physical press again.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            handleSystemBack()
+        }
+        return true
+    }
+
+    /** One press closes one layer: menu, info, controls, then Activity. */
+    private fun handleSystemBack() {
+        if (!backGuard.shouldHandle(SystemClock.elapsedRealtime())) return
+        if (!::uiState.isInitialized) {
+            finish()
+            return
+        }
+        when (
+            nextPlayerBackAction(
+                menuOpen = uiState.openMenu != PlayerMenu.None,
+                infoOpen = uiState.infoOpen,
+                controlsVisible = uiState.controlsVisible,
+            )
+        ) {
+            PlayerBackAction.CloseMenu -> uiState.openMenu = PlayerMenu.None
+            PlayerBackAction.CloseInfo -> uiState.infoOpen = false
+            PlayerBackAction.HideControls -> uiState.controlsVisible = false
+            PlayerBackAction.Exit -> finish()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Gesture navigation and Android's system Back dispatcher terminate at
+        // this same Activity boundary as remote key events. Do not register a
+        // second Compose BackHandler: some TV images deliver one press through
+        // both paths.
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() = handleSystemBack()
+            },
+        )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUi()
 
