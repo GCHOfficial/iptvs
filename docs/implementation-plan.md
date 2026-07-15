@@ -27,9 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-15
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 8 — MethodChannel handler ownership (next)
-- Previous PR: PR 7 — EPG atomicity and indexing (ready for PR); PR 6 merged
-  as #106
+- Active PR: PR 8 — MethodChannel handler ownership (ready for PR)
+- Previous PR: PR 7 merged as #107; PR 6 merged as #106
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -39,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 300 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 304 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -56,8 +55,10 @@ Status convention:
 - [x] Do not migrate credential-derived channel/source IDs without an atomic
   preservation path for favorites, EPG, and playback positions. PR 4 migrates
   every related table in one SQLite transaction before the stable IDs are used.
-- [ ] Do not split the large player or browsing widgets before async-race and
-  MethodChannel ownership regression tests exist.
+- [x] Do not split the large player or browsing widgets before async-race and
+  MethodChannel ownership regression tests exist. PR 6's controller race
+  suites and PR 8's `channel_owner_test.dart` now pin both; PR 13 is unblocked
+  on this gate.
 - [ ] Do not describe Android or Windows lifecycle work as fixed until the relevant
   native build and device tests pass.
 - [ ] Do not begin optional feature work while a Phase 0 release blocker remains.
@@ -72,9 +73,9 @@ Status convention:
 | 3 | Phase 0 | Bound HTTP and decompression workloads | M | PR 0 | Complete; #101/#102 |
 | 4 | Phase 0 | Introduce stable source and cache identities | M | PR 0 | Complete; #103/v0.1.33 |
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | Complete; #105/v0.1.34 |
-| 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Ready for PR |
-| 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Ready for PR |
-| 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | [ ] |
+| 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Complete; #106 |
+| 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Complete; #107 |
+| 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Ready for PR |
 | 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | [ ] |
 | 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
 | 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
@@ -450,19 +451,44 @@ their own lineage.
 
 ### Implementation
 
-- [ ] Add an owner token for each registered static channel handler.
-- [ ] Clear a handler only when the disposing owner is still current.
-- [ ] Ignore callbacks delivered to disposed or superseded owners.
-- [ ] Apply identical cleanup rules to Android and Windows.
-- [ ] Apply the helper to preview and full-screen player ownership.
+- [x] Add an owner token for each registered static channel handler.
+  `ChannelHandlerOwner` (`lib/player/channel_owner.dart`): `claim` bumps a
+  monotonic token and installs a wrapper that ignores superseded tokens.
+- [x] Clear a handler only when the disposing owner is still current.
+  `release(token)` clears the platform handler only if `token == _current`.
+- [x] Ignore callbacks delivered to disposed or superseded owners. The
+  wrapper drops superseded-token calls; `_handleNativeHdrMethodCall` gained a
+  `!mounted` bail and `LivePreviewController._handleNativeCall` keeps its
+  `_disposed` bail as the second gate for calls already in flight.
+- [x] Apply identical cleanup rules to Android and Windows. `dispose` now runs
+  the same ungated `release(token)` on both platforms, replacing the previous
+  Windows-only `setMethodCallHandler(null)` (Android never cleared at all).
+  Honest interpretation: the parity is Dart-side — both native sides register
+  once per process and are owner-agnostic, so no Kotlin/C++ edits were needed.
+- [x] Apply the helper to preview and full-screen player ownership.
+  `_PlayerScreenState` (`iptvs/native_hdr_player`) and `LivePreviewController`
+  (`iptvs/native_preview`) both claim/release through their static owner.
+  `iptvs/updates` is outbound-only from Dart (no handler) — out of scope.
 
 ### Verification
 
-- [ ] Old preview disposal cannot clear a newer preview handler.
-- [ ] A popped player ignores late position, favorite, and error callbacks.
-- [ ] Android handler cleanup matches Windows cleanup.
-- [ ] Repeated route cycles leave exactly one active owner.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Old preview disposal cannot clear a newer preview handler.
+  `test/channel_owner_test.dart`: successor claim + predecessor release leaves
+  dispatch reaching the successor with the handler still installed.
+- [x] A popped player ignores late position, favorite, and error callbacks.
+  Sole-owner release drops dispatched calls (unit test); the `mounted` /
+  `_disposed` gates inside the real handlers are verified by inspection —
+  instantiating `PlayerScreen` requires a live media_kit engine (documented
+  infeasibility fallback, as with PR 6's HomeShell widget test).
+- [x] Android handler cleanup matches Windows cleanup. By construction: one
+  shared platform-ungated `release` path; the `Platform.isWindows`-only clear
+  is gone.
+- [x] Repeated route cycles leave exactly one active owner. Unit test runs
+  five claim/release cycles asserting monotonic tokens, latest-claimant-only
+  dispatch, stale-release no-op (with a dispatch proving the handler
+  survived), and a final release that clears the handler entirely.
+- [x] `flutter analyze` and `flutter test` pass. Clean analyze; 304 tests pass
+  with the 10 expected skips (300 baseline + 4 `channel_owner` tests).
 
 ## PR 9 — Native player lifecycle
 
@@ -685,7 +711,9 @@ their own lineage.
   PR 7's persistence suite (26 tests) covers all three plus rollback.
 - [x] Source/profile/category race tests pass. PR 6's
   `media_tab_controller_test.dart` and `live_controller_test.dart` suites.
-- [ ] No tested controller or channel handler notifies a disposed owner.
+- [x] No tested controller or channel handler notifies a disposed owner.
+  PR 6's dispose-during-load/refresh tests plus PR 8's owner-token suite;
+  the in-handler `mounted`/`_disposed` gates are inspection-verified.
 
 ### Performance
 
@@ -732,6 +760,7 @@ security, persisted data, or provider behavior.
 | 2026-07-15 | Per-controller monotonic `_loadGeneration` counters instead of a shared guard helper; only snapshot-writing ops (`load`, `setCategory`) bump the generation, while `loadMore`, `search`, `clearSearch`, and `refreshNowNext` read without bumping and abandon superseded results | Precedence policy is inherently per-controller, so a shared helper adds abstraction without removing duplication; search publishes to `searchResults`, independent of `snapshot`, so bumping there would drop a load's terminal state update (stuck `loading` flag) | Refresh always supersedes pagination, never the reverse; disposal stays expressed solely through `_disposed` checked in `_set`; the invariant is summarized in `CLAUDE.md` key conventions | PR 6 |
 | 2026-07-15 | Record EPG refresh failure via the un-advanced `epg_synced_at` plus a redacted diagnostics line, not a persisted failure column; add `idx_prog_source_start(source_id, start)` at schema v12 for the source+time now-next queries | A failure column has no consumer until PR 16's diagnostics UX and would enlarge PR 12's migration matrix; the existing `(source_id, channel_id, start)` index cannot serve a query with no `channel_id` constraint | Success-empty is a real replacement (clears stale rows, advances freshness); failures leave the timestamp stale so the scheduler retries; channel-scoped queries keep `idx_prog_lookup` | PR 7 |
 | 2026-07-15 | `replaceLibrary` writes the `sources` row via non-destructive update-else-insert instead of `INSERT OR REPLACE` | `INSERT OR REPLACE` deleted the row and nulled `epg_synced_at` on every channel refresh, defeating PR 7's failure-observability design; `ON CONFLICT DO UPDATE` was avoided because Android below API 30 ships SQLite older than 3.24 | Channel refresh now preserves EPG freshness and any future `sources` column; dead programme rows for removed channels persist at most ~3h until the next scheduled `replaceEpg` clears them by source | PR 7 |
+| 2026-07-15 | Guard the two static inbound native channels with a Dart-side monotonic owner-token registry (`ChannelHandlerOwner`) instead of per-instance channels or a permanent multiplexer; no Kotlin/C++ changes | Flutter runs a replacement route's `initState` before the old route's `dispose`, so an unconditional dispose-time `setMethodCallHandler(null)` wipes the newer owner's handler (previously Windows-only cleared; Android never cleared); both native sides register once per process and hold no per-Dart-owner state, so ownership is purely a Dart problem; a permanent multiplexer would be a bridge redesign reserved for PR 9 evidence | "Identical Android/Windows cleanup" is satisfied Dart-side: both platforms run the same release-if-current path; real handlers keep `mounted`/`_disposed` second gates for calls already dispatched; invariant recorded in `CLAUDE.md` Player essentials and `docs/player.md` | PR 8 |
 
 ## Progress log
 
@@ -761,6 +790,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 5 | Complete | PR #105 merged as `b857be0` and protected v0.1.34 release CI published signed Android and Windows artifacts. The owner installed the update, confirmed favorites persisted, and successfully played a pre-update favorite; all 282 tests pass with 10 expected skips. |
 | 2026-07-15 | PR 6 | Complete | Merged as #106 (`78e9a48`) with all CI checks green. Generation guards landed in `MediaTabController`, `LiveController`, and `HomeShell._loadActive`/`_loadProfileInfo`; 11 new Completer-gated race tests (two proven load-bearing against pre-fix code). Known adjacent defect deferred to PR 13: a metadata-config-only change rebuilds the repository without changing `ChannelListScreen`'s `ValueKey`, leaving controllers on a disposed repository. |
 | 2026-07-15 | PR 7 | Ready for PR | Success-empty EPG is now a real atomic replacement (clears stale rows, advances freshness); failures retain the cached guide with the timestamp as the failure record; `replaceEpg` streams bounded 1000-row chunks inside one transaction; schema v12 adds `idx_prog_source_start` on both create and upgrade paths, confirmed by `EXPLAIN QUERY PLAN` over a 20k-programme corpus. Also fixed pre-existing `replaceLibrary` `INSERT OR REPLACE` nulling `epg_synced_at` on every channel refresh (decision log). Analyze and all 300 tests pass. |
+| 2026-07-15 | PR 7 | Complete | Merged as #107 (`5316220`) with all CI checks green. |
+| 2026-07-15 | PR 8 | Ready for PR | `ChannelHandlerOwner` token registry guards `iptvs/native_hdr_player` and `iptvs/native_preview`; dispose-time clear is now release-if-current on both platforms (was Windows-only; Android never cleared) and the HDR handler bails on `!mounted`. Four unit tests pin claim/release/supersede semantics via real channel dispatch; no native edits needed (natives are owner-agnostic). Analyze clean; 304 tests pass. Unblocks PR 9 and, with PR 6, the widget-split sequencing gate for PR 13. On-hardware smoke of the Windows route-replacement handoff and Android `nativeClosed`-after-supersede folds into PR 9's device matrices. |
 
 ## Removal checklist
 

@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
+import '../player/channel_owner.dart';
 import '../player/mpv_options.dart';
 import '../sources/source.dart';
 
@@ -44,13 +45,21 @@ class LivePreviewController extends ChangeNotifier {
     if (Platform.isAndroid) {
       // Last-created controller wins the channel — there's one live preview at
       // a time, and a new source's screen replaces the old controller.
-      _nativeChannel.setMethodCallHandler(_handleNativeCall);
+      _previewToken = _previewOwner.claim(_handleNativeCall);
     }
   }
 
   static const MethodChannel _nativeChannel = MethodChannel(
     'iptvs/native_preview',
   );
+  // Arbitrates the static channel's handler across successive controllers
+  // (a new source's screen replacing the old one) so a superseded
+  // controller's dispose can never clear a newer controller's handler. See
+  // [ChannelHandlerOwner].
+  static final ChannelHandlerOwner _previewOwner = ChannelHandlerOwner(
+    _nativeChannel,
+  );
+  int? _previewToken;
 
   /// Channels whose video the native engine can't decode (e.g. Dolby Vision
   /// P5 on non-DV hardware) — they preview via media_kit for this session.
@@ -370,6 +379,10 @@ class LivePreviewController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    final token = _previewToken;
+    if (token != null) {
+      _previewOwner.release(token);
+    }
     if (nativeActive) {
       nativeActive = false;
       unawaited(_stopNative());
