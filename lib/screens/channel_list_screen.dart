@@ -3,8 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'
-    show KeyEvent, KeyRepeatEvent, SystemNavigator;
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
 import '../data/diagnostics_log.dart';
@@ -15,8 +14,8 @@ import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
-import '../widgets/tv_text_field.dart';
 import '../player/player_screen.dart';
+import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
 import 'epg_grid_screen.dart';
 import 'favorites_controller.dart';
@@ -26,8 +25,6 @@ import 'live_preview_controller.dart';
 import 'live_tab_view.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
-
-const _toolbarControlHeight = 40.0;
 
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
@@ -71,15 +68,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   ContentKind _tab = ContentKind.live;
   // Live channel/category/EPG data + load lifecycle live in a controller; the
   // screen keeps the live focus/D-pad state and preview player (see below).
-  late final LiveController _live;
+  late LiveController _live;
   // Movies/series browsing state + async ops live in a controller per kind;
   // both persist for the screen's lifetime so state survives tab switches.
-  late final Map<ContentKind, MediaTabController> _mediaControllers;
+  late Map<ContentKind, MediaTabController> _mediaControllers;
   MediaTabController _media(ContentKind kind) => _mediaControllers[kind]!;
   // Favorited item ids per content kind (live channels / movies / series) live
   // in a controller; the "last favorite removed → fall back to All" handling
   // stays here (it's tied to _categoryId / the media controllers).
-  late final FavoritesController _favorites;
+  late FavoritesController _favorites;
   String? _categoryId;
   String _query = '';
 
@@ -121,7 +118,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // Live preview player + its state live in a controller; the screen keeps the
   // focus-driven preview trigger (below), fullscreen playback, and the phone
   // preview sheet, which drive it.
-  late final LivePreviewController _preview;
+  late LivePreviewController _preview;
   // Focus-debounce for desktop auto-preview (stays here — it's focus timing).
   Timer? _previewTimer;
 
@@ -129,23 +126,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // ListenableBuilder in build) — never the whole screen. [_dataListenable] is
   // everything except the preview; the preview's frequent loading/error ticks
   // during channel surfing only rebuild the body.
-  late final Listenable _dataListenable;
-  late final Listenable _bodyListenable;
+  late Listenable _dataListenable;
+  late Listenable _bodyListenable;
 
   @override
   void initState() {
     super.initState();
-    _live = LiveController(repo: widget.repo);
-    _preview = LivePreviewController(repo: widget.repo, onError: _showSnack);
-    _favorites = FavoritesController(repo: widget.repo);
-    _mediaControllers = {
-      for (final kind in const [ContentKind.movie, ContentKind.series])
-        kind: MediaTabController(
-          kind: kind,
-          repo: widget.repo,
-          onEnrichError: _showSnack,
-        ),
-    };
+    _createRepositoryControllers();
     _focus = LiveFocusCoordinator(
       scrollController: _scrollController,
       categoryScrollController: _categoryScrollController,
@@ -165,15 +152,38 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           unawaited(_toggleFavorite(ContentKind.live, channel.id)),
       onFocusTabs: _focusTabs,
     );
+    _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
+    WidgetsBinding.instance.addObserver(this);
+    _loadLive();
+    _live.startEpgRefresh();
+  }
+
+  void _createRepositoryControllers() {
+    _live = LiveController(repo: widget.repo);
+    _preview = LivePreviewController(repo: widget.repo, onError: _showSnack);
+    _favorites = FavoritesController(repo: widget.repo);
+    _mediaControllers = {
+      for (final kind in const [ContentKind.movie, ContentKind.series])
+        kind: MediaTabController(
+          kind: kind,
+          repo: widget.repo,
+          onEnrichError: _showSnack,
+        ),
+    };
     _dataListenable = Listenable.merge([
       _live,
       _favorites,
       ..._mediaControllers.values,
     ]);
-    _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
-    WidgetsBinding.instance.addObserver(this);
-    _loadLive();
-    _live.startEpgRefresh();
+  }
+
+  void _disposeRepositoryControllers() {
+    _live.dispose();
+    _preview.dispose();
+    _favorites.dispose();
+    for (final controller in _mediaControllers.values) {
+      controller.dispose();
+    }
   }
 
   /// The app going to the background (home button, back-exit, launcher) must
@@ -204,6 +214,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   @override
   void didUpdateWidget(covariant ChannelListScreen old) {
     super.didUpdateWidget(old);
+    if (!identical(old.repo, widget.repo)) {
+      _previewTimer?.cancel();
+      _previewTimer = null;
+      _disposeRepositoryControllers();
+      _createRepositoryControllers();
+      _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
+      _visibleKey = null;
+      _visibleCache = null;
+      _focus.resetChannelSelection();
+      _loadLive();
+      _live.startEpgRefresh();
+      if (_tab != ContentKind.live) {
+        _loadMediaTab(_tab);
+      }
+    }
     // Source settings may have changed while we were away (the config is a fresh
     // object after a reload). If the category currently selected was just
     // disabled, fall back to "All" so we don't show an empty, unselectable view.
@@ -247,17 +272,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _live.dispose();
-    _preview.dispose();
-    _favorites.dispose();
+    _disposeRepositoryControllers();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
     _focus.dispose();
     for (final node in _tabFocusNodes.values) {
       node.dispose();
-    }
-    for (final controller in _mediaControllers.values) {
-      controller.dispose();
     }
     _searchController.dispose();
     _scrollController.dispose();
@@ -1313,7 +1333,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         body: FocusTraversalGroup(
           child: Column(
             children: [
-              _ContentTabs(
+              ChannelContentTabs(
                 value: _tab,
                 onChanged: _selectTab,
                 focusNodes: _tabFocusNodes,
@@ -1342,7 +1362,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _Toolbar(
+        ChannelToolbar(
           searchController: _searchController,
           query: _query,
           hintText: _tab == ContentKind.live
@@ -1364,12 +1384,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                   MediaQuery.of(context).size.width >= kWideLayoutMinWidth)
               ? null
               : (_tab == ContentKind.live
-                    ? _CategoryDropdown(
+                    ? ChannelCategoryDropdown(
                         categories: _liveCategoriesForUi,
                         value: _categoryId,
                         onChanged: _selectCategory,
                       )
-                    : _MediaCategoryDropdown(
+                    : MediaCategoryDropdown(
                         categories: _mediaCategoriesForUi(_tab),
                         value: _media(_tab).categoryId,
                         onChanged: (v) {
@@ -1390,7 +1410,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                         },
                       )),
           actionControl: _tab == ContentKind.live
-              ? _ToolbarIconButton(
+              ? ChannelToolbarIconButton(
                   tooltip: 'TV guide',
                   busy: false,
                   icon: Icons.calendar_view_day_rounded,
@@ -1398,7 +1418,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                 )
               : !widget.repo.canEnrichMetadata
               ? null
-              : _ToolbarIconButton(
+              : ChannelToolbarIconButton(
                   tooltip: _media(_tab).enriching
                       ? 'Cancel metadata refresh'
                       : 'Refresh displayed metadata',
@@ -1566,478 +1586,5 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     return byId(_preview.channelId) ??
         byId(_lastPlayedLiveChannelId) ??
         visible.first;
-  }
-}
-
-class _ContentTabs extends StatelessWidget {
-  final ContentKind value;
-  final ValueChanged<ContentKind> onChanged;
-
-  /// Stable focus node per tab, owned by the screen so Back can jump focus here
-  /// (see [_ChannelListScreenState._handleRootBack]).
-  final Map<ContentKind, FocusNode> focusNodes;
-
-  const _ContentTabs({
-    required this.value,
-    required this.onChanged,
-    required this.focusNodes,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // A focusable chip strip (not a SegmentedButton): it's the natural top of the
-    // D-pad focus order, left/right moves between Live/Movies/Series, and OK/tap
-    // selects. Grouped so directional traversal stays within the strip.
-    //
-    // The chips deliberately do NOT autofocus: on entry we want focus in the
-    // content (the first channel / grid tile, so OK plays immediately), reaching
-    // the tabs via Up or the Back ladder. Autofocusing the tab here would win the
-    // load-time race and strand focus on the strip.
-    return FocusTraversalGroup(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            _TabChip(
-              icon: Icons.live_tv_rounded,
-              label: 'Live',
-              selected: value == ContentKind.live,
-              autofocus: false,
-              focusNode: focusNodes[ContentKind.live],
-              onTap: () => onChanged(ContentKind.live),
-            ),
-            const SizedBox(width: 8),
-            _TabChip(
-              icon: Icons.movie_outlined,
-              label: 'Movies',
-              selected: value == ContentKind.movie,
-              autofocus: false,
-              focusNode: focusNodes[ContentKind.movie],
-              onTap: () => onChanged(ContentKind.movie),
-            ),
-            const SizedBox(width: 8),
-            _TabChip(
-              icon: Icons.tv_outlined,
-              label: 'Series',
-              selected: value == ContentKind.series,
-              autofocus: false,
-              focusNode: focusNodes[ContentKind.series],
-              onTap: () => onChanged(ContentKind.series),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TabChip extends StatefulWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final bool autofocus;
-  final FocusNode? focusNode;
-  final VoidCallback onTap;
-
-  const _TabChip({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.autofocus,
-    required this.onTap,
-    this.focusNode,
-  });
-
-  @override
-  State<_TabChip> createState() => _TabChipState();
-}
-
-class _TabChipState extends State<_TabChip> {
-  bool _focused = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final active = widget.selected;
-    final bg = active
-        ? AppColors.accent
-        : (_focused ? AppColors.panelHi : AppColors.panel);
-    final fg = active ? Colors.white : AppColors.textHi;
-    return FocusableActionDetector(
-      autofocus: widget.autofocus,
-      focusNode: widget.focusNode,
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (mounted) setState(() => _focused = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onTap();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          height: _toolbarControlHeight,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(AppRadius.tile),
-            // Always show a focus ring under the D-pad — including on the
-            // already-selected tab, where a white ring reads clearly against
-            // the accent fill (an accent ring there would be invisible).
-            border: Border.all(
-              color: _focused
-                  ? (active ? Colors.white : AppColors.accent)
-                  : AppColors.line,
-              width: _focused ? 2 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(widget.icon, size: 18, color: fg),
-              const SizedBox(width: 8),
-              Text(
-                widget.label,
-                style: TextStyle(color: fg, fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _Toolbar extends StatelessWidget {
-  final TextEditingController searchController;
-  final String query;
-  final String hintText;
-  final ValueChanged<String> onQueryChanged;
-  final VoidCallback onClearQuery;
-  final FocusNode? searchCellFocusNode;
-  final KeyEventResult Function(FocusNode, KeyEvent)? onSearchCellKeyEvent;
-  final Widget? categoryControl;
-  final Widget? actionControl;
-
-  const _Toolbar({
-    required this.searchController,
-    required this.query,
-    required this.hintText,
-    required this.onQueryChanged,
-    required this.onClearQuery,
-    this.searchCellFocusNode,
-    this.onSearchCellKeyEvent,
-    this.categoryControl,
-    this.actionControl,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final narrow = constraints.maxWidth < 620;
-        final search = TvTextField(
-          controller: searchController,
-          hintText: hintText,
-          height: _toolbarControlHeight,
-          cellFocusNode: searchCellFocusNode,
-          onChanged: onQueryChanged,
-          textInputAction: TextInputAction.search,
-          prefixIcon: const Icon(Icons.search, size: 20),
-          // The built-in clear button is a real D-pad stop (unlike a
-          // suffixIcon, which sits behind the edit barrier) — see TvTextField.
-          showClear: query.isNotEmpty,
-          onClear: onClearQuery,
-        );
-        final action = actionControl;
-        final category = categoryControl;
-
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-          child: Focus(
-            canRequestFocus: false,
-            skipTraversal: true,
-            onKeyEvent: onSearchCellKeyEvent,
-            child: narrow
-                ? Column(
-                    children: [
-                      search,
-                      if (category != null || action != null) ...[
-                        const SizedBox(height: 8),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: SizedBox(
-                            width: double.infinity,
-                            child: category == null
-                                ? action!
-                                : (action == null
-                                      ? category
-                                      : Row(
-                                          children: [
-                                            Expanded(child: category),
-                                            const SizedBox(width: 8),
-                                            action,
-                                          ],
-                                        )),
-                          ),
-                        ),
-                      ],
-                    ],
-                  )
-                : Row(
-                    children: [
-                      Expanded(child: search),
-                      if (category != null) ...[
-                        const SizedBox(width: 12),
-                        category,
-                      ],
-                      if (action != null) ...[const SizedBox(width: 8), action],
-                    ],
-                  ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ToolbarIconButton extends StatefulWidget {
-  final String tooltip;
-  final IconData icon;
-  final bool busy;
-  final VoidCallback? onPressed;
-
-  const _ToolbarIconButton({
-    required this.tooltip,
-    required this.icon,
-    required this.onPressed,
-    this.busy = false,
-  });
-
-  @override
-  State<_ToolbarIconButton> createState() => _ToolbarIconButtonState();
-}
-
-class _ToolbarIconButtonState extends State<_ToolbarIconButton> {
-  final FocusNode _node = FocusNode();
-  bool _focused = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _node.addListener(_sync);
-  }
-
-  void _sync() {
-    if (mounted && _focused != _node.hasFocus) {
-      setState(() => _focused = _node.hasFocus);
-    }
-  }
-
-  @override
-  void dispose() {
-    _node.removeListener(_sync);
-    _node.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: widget.tooltip,
-      child: SizedBox.square(
-        dimension: _toolbarControlHeight,
-        child: IconButton.filledTonal(
-          focusNode: _node,
-          style: IconButton.styleFrom(
-            backgroundColor: _focused ? AppColors.panelHi : AppColors.panel,
-            foregroundColor: AppColors.textHi,
-            disabledBackgroundColor: AppColors.panel,
-            disabledForegroundColor: AppColors.textLo,
-            // Match the accent ring/lift of the search field and category
-            // dropdown rather than the default focus disc.
-            overlayColor: Colors.transparent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(AppRadius.control),
-              side: BorderSide(
-                color: _focused ? AppColors.accent : AppColors.line,
-                width: _focused ? 2 : 1,
-              ),
-            ),
-          ),
-          onPressed: widget.onPressed,
-          icon: Icon(widget.icon, size: 20),
-        ),
-      ),
-    );
-  }
-}
-
-/// The bordered shell shared by the category dropdowns. Reflects the focus of
-/// the [DropdownButton] it hosts with the same accent ring/lift as
-/// [FocusableCard], so the control is clearly visible under a D-pad.
-class _DropdownFrame extends StatefulWidget {
-  final Widget Function(FocusNode focusNode) builder;
-
-  const _DropdownFrame({required this.builder});
-
-  @override
-  State<_DropdownFrame> createState() => _DropdownFrameState();
-}
-
-class _DropdownFrameState extends State<_DropdownFrame> {
-  final FocusNode _node = FocusNode();
-  bool _focused = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _node.addListener(_sync);
-  }
-
-  void _sync() {
-    if (mounted && _focused != _node.hasFocus) {
-      setState(() => _focused = _node.hasFocus);
-    }
-  }
-
-  @override
-  void dispose() {
-    _node.removeListener(_sync);
-    _node.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: _toolbarControlHeight,
-      constraints: const BoxConstraints(maxWidth: 220),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: _focused ? AppColors.panelHi : AppColors.panel,
-        borderRadius: BorderRadius.circular(AppRadius.control),
-        border: Border.all(
-          color: _focused ? AppColors.accent : AppColors.line,
-          width: _focused ? 2 : 1,
-        ),
-      ),
-      // A held (or rapidly mashed) OK on a TV remote arrives as key-repeat
-      // events; the framework turns each into an ActivateIntent, so the menu
-      // flickers open/closed with a click sound on every repeat. Swallow repeats
-      // here (ancestor of the DropdownButton's focus node, below the app-level
-      // shortcuts) so one discrete press maps to exactly one open.
-      child: Focus(
-        canRequestFocus: false,
-        skipTraversal: true,
-        onKeyEvent: (_, event) => event is KeyRepeatEvent
-            ? KeyEventResult.handled
-            : KeyEventResult.ignored,
-        child: DropdownButtonHideUnderline(child: widget.builder(_node)),
-      ),
-    );
-  }
-}
-
-class _CategoryDropdown extends StatelessWidget {
-  final List<Category> categories;
-  final String? value;
-  final ValueChanged<String?> onChanged;
-
-  const _CategoryDropdown({
-    required this.categories,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _DropdownFrame(
-      builder: (focusNode) => DropdownButton<String?>(
-        focusNode: focusNode,
-        focusColor: Colors.transparent,
-        isDense: true,
-        isExpanded: true,
-        value: value,
-        dropdownColor: AppColors.panelHi,
-        borderRadius: BorderRadius.circular(AppRadius.control),
-        icon: const Icon(Icons.expand_more, color: AppColors.textLo),
-        hint: const Text(
-          'All categories',
-          style: TextStyle(color: AppColors.textLo),
-        ),
-        items: [
-          const DropdownMenuItem<String?>(
-            value: null,
-            child: Text('All categories'),
-          ),
-          ...categories.map(
-            (c) => DropdownMenuItem<String?>(
-              value: c.id,
-              child: Text(
-                c.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-        ],
-        onChanged: onChanged,
-      ),
-    );
-  }
-}
-
-class _MediaCategoryDropdown extends StatelessWidget {
-  final List<MediaCategory> categories;
-  final String? value;
-  final ValueChanged<String?> onChanged;
-
-  const _MediaCategoryDropdown({
-    required this.categories,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _DropdownFrame(
-      builder: (focusNode) => DropdownButton<String?>(
-        focusNode: focusNode,
-        focusColor: Colors.transparent,
-        isDense: true,
-        isExpanded: true,
-        value: value,
-        dropdownColor: AppColors.panelHi,
-        borderRadius: BorderRadius.circular(AppRadius.control),
-        icon: const Icon(Icons.expand_more, color: AppColors.textLo),
-        hint: const Text(
-          'All categories',
-          style: TextStyle(color: AppColors.textLo),
-        ),
-        items: [
-          const DropdownMenuItem<String?>(
-            value: null,
-            child: Text('All categories'),
-          ),
-          ...categories.map(
-            (c) => DropdownMenuItem<String?>(
-              value: c.id,
-              child: Text(
-                c.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-        ],
-        onChanged: onChanged,
-      ),
-    );
   }
 }

@@ -12,9 +12,9 @@ import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
-import '../theme.dart';
 import 'channel_owner.dart';
 import 'mpv_options.dart';
+import 'player_overlay.dart';
 import 'resource_counters.dart';
 
 /// Identifies what's playing for the VOD resume store: where to save
@@ -1234,43 +1234,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return 'Subtitle ${track.id}';
   }
 
-  Widget _reconnectingChip() {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.panel.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-      ),
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: AppColors.accent,
-              ),
-            ),
-            SizedBox(width: 10),
-            Text(
-              'Reconnecting…',
-              style: TextStyle(color: AppColors.textHi, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _playbackSurface() {
     // Transparent while the adopted-handoff Activity launches/plays — the
     // route below (channel list + frozen preview frame) shows through instead
     // of a black flash.
     if (_transparentHandoff) return const SizedBox.expand();
     if (_controller == null) return _nativePlaybackOverlay();
-    return _nativePlaybackLaunched ? _nativePlaybackOverlay() : _video(context);
+    return _nativePlaybackLaunched
+        ? _nativePlaybackOverlay()
+        : PlayerVideoSurface(
+            controller: _controller,
+            title: widget.title,
+            epgNow: widget.epgNow,
+            epgNext: widget.epgNext,
+            isLive: _isLive,
+            canFavorite: _canFavorite,
+            favorite: _favorite,
+            onBack: _back,
+            onToggleFavorite: _toggleFavorite,
+          );
   }
 
   Future<void> _configureNativePlayer(
@@ -1505,90 +1487,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.seek(pos < Duration.zero ? Duration.zero : pos);
   }
 
-  Widget _title() {
-    final now = widget.epgNow;
-    final next = widget.epgNext;
-    return Flexible(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            widget.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          if (now != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
-            ),
-          ],
-          if (next != null)
-            Text(
-              'Next · ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
-            ),
-        ],
-      ),
-    );
-  }
-
-  static String _hm(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-
-  List<Widget> _desktopBottomBar() => [
-    const MaterialDesktopPlayOrPauseButton(),
-    const MaterialDesktopVolumeButton(),
-    if (!_isLive) const MaterialDesktopPositionIndicator(),
-    const Spacer(),
-    const MaterialDesktopFullscreenButton(),
-  ];
-
-  List<Widget> _topBar({required bool desktop}) => [
-    desktop
-        ? MaterialDesktopCustomButton(
-            onPressed: _back,
-            icon: const Icon(Icons.arrow_back),
-          )
-        : MaterialCustomButton(
-            onPressed: _back,
-            icon: const Icon(Icons.arrow_back),
-          ),
-    const SizedBox(width: 8),
-    _title(),
-    if (_isLive) ...[const SizedBox(width: 10), const _LiveBadge()],
-    const Spacer(),
-    if (_canFavorite) ...[
-      const SizedBox(width: 8),
-      desktop
-          ? MaterialDesktopCustomButton(
-              onPressed: _toggleFavorite,
-              icon: Icon(
-                _favorite ? Icons.star_rounded : Icons.star_outline_rounded,
-                color: _favorite ? AppColors.accent : Colors.white,
-              ),
-            )
-          : MaterialCustomButton(
-              onPressed: _toggleFavorite,
-              icon: Icon(
-                _favorite ? Icons.star_rounded : Icons.star_outline_rounded,
-                color: _favorite ? AppColors.accent : Colors.white,
-              ),
-            ),
-    ],
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1649,7 +1547,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
             child: Stack(
               children: [
                 Positioned.fill(child: _playbackSurface()),
-                if (_error != null) Positioned.fill(child: _errorOverlay()),
+                if (_error case final error?)
+                  Positioned.fill(
+                    child: PlayerErrorOverlay(
+                      message: error,
+                      onBack: _back,
+                      onRetry: _open,
+                    ),
+                  ),
                 // Windows draws its own "Reconnecting…" in the native overlay;
                 // this covers the embedded media_kit path.
                 if (_reconnecting && !_usesWindowsNativeSurface)
@@ -1657,93 +1562,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     top: 24,
                     left: 0,
                     right: 0,
-                    child: Center(child: _reconnectingChip()),
+                    child: const Center(child: PlayerReconnectChip()),
                   ),
               ],
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _video(BuildContext context) {
-    return MaterialDesktopVideoControlsTheme(
-      normal: MaterialDesktopVideoControlsThemeData(
-        seekBarThumbColor: AppColors.accent,
-        seekBarPositionColor: AppColors.accent,
-        toggleFullscreenOnDoublePress: true,
-        displaySeekBar: !_isLive,
-        topButtonBar: _topBar(desktop: true),
-        bottomButtonBar: _desktopBottomBar(),
-      ),
-      fullscreen: MaterialDesktopVideoControlsThemeData(
-        seekBarThumbColor: AppColors.accent,
-        seekBarPositionColor: AppColors.accent,
-        toggleFullscreenOnDoublePress: true,
-        displaySeekBar: !_isLive,
-        topButtonBar: _topBar(desktop: true),
-        bottomButtonBar: _desktopBottomBar(),
-      ),
-      child: MaterialVideoControlsTheme(
-        normal: MaterialVideoControlsThemeData(
-          seekBarThumbColor: AppColors.accent,
-          seekBarPositionColor: AppColors.accent,
-          buttonBarButtonColor: Colors.white,
-          backdropColor: Colors.black.withValues(alpha: 0.20),
-          displaySeekBar: !_isLive,
-          automaticallyImplySkipNextButton: false,
-          automaticallyImplySkipPreviousButton: false,
-          topButtonBar: _topBar(desktop: false),
-        ),
-        fullscreen: MaterialVideoControlsThemeData(
-          seekBarThumbColor: AppColors.accent,
-          seekBarPositionColor: AppColors.accent,
-          backdropColor: Colors.black.withValues(alpha: 0.20),
-          displaySeekBar: !_isLive,
-          automaticallyImplySkipNextButton: false,
-          automaticallyImplySkipPreviousButton: false,
-          topButtonBar: _topBar(desktop: false),
-        ),
-        child: Video(controller: _controller!),
-      ),
-    );
-  }
-
-  Widget _errorOverlay() {
-    return Container(
-      color: Colors.black.withValues(alpha: 0.88),
-      alignment: Alignment.center,
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.error_outline, color: AppColors.textLo, size: 48),
-          const SizedBox(height: 12),
-          Text(
-            _error!,
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: AppColors.textLo),
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            alignment: WrapAlignment.center,
-            children: [
-              FilledButton.icon(
-                onPressed: _back,
-                icon: const Icon(Icons.arrow_back),
-                label: const Text('Back'),
-              ),
-              FilledButton.icon(
-                onPressed: _open,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry'),
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -1811,35 +1635,4 @@ class _AspectMode {
   final String panscan;
   final String aspect;
   const _AspectMode(this.label, this.panscan, this.aspect);
-}
-
-class _LiveBadge extends StatelessWidget {
-  const _LiveBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: AppColors.live,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
-          SizedBox(width: 5),
-          Text(
-            'LIVE',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }

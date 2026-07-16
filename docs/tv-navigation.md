@@ -39,7 +39,8 @@ navigation code.
   the tabs (media) via the Back ladder's `TvTextField.clear` route-key branch.
 - **The same "OK to edit" model** governs the player's sliders (see docs/player.md) — focus
   passes them freely; OK enters adjust mode.
-- **Content-kind selector** (`channel_list_screen` `_ContentTabs`) is a focusable chip strip (not
+- **Content-kind selector** (`channel_list_chrome.dart` `ChannelContentTabs`) is a focusable chip
+  strip (not
   `SegmentedButton`), the natural top of the focus order — reached by Up or the Back ladder. The
   chips deliberately **don't** autofocus, so on entry focus lands in the content (the first
   channel / grid tile, so OK plays immediately) rather than being stranded on the strip by the

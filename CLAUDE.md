@@ -133,7 +133,8 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
 - **`lib/data/local_profile_store.dart`** — device profiles: keychain-persisted `LocalProfile`s,
   per-cloud-profile `ProfileSnapshot`s, the picker's startup mode. See docs/cloud-sync.md.
 - **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its
-  repository. The main browsing UI: `channel_list_screen.dart` (screen state, tabs, toolbar —
+  repository. The main browsing UI: `channel_list_screen.dart` (screen state, routes, dialogs,
+  and controller/focus ownership), `channel_list_chrome.dart` (tabs, toolbar, dropdowns —
   controller notifications rebuild scoped `ListenableBuilder` subtrees, never the whole screen),
   `live_tab_view.dart` (live body: channel list, category pane, preview panel, catch-up +
   phone-preview sheets), `media_tab_view.dart` (movies/series grid, details sheet, series
@@ -151,7 +152,9 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `release_notes_view.dart` (dependency-free changelog renderer used by the update dialog), and
   `image_utils.dart` (all network images go through `cached_network_image` with display-sized
   decode — don't add bare `Image.network`).
-- **`lib/player/player_screen.dart`** — playback. See "Player" below + docs/player.md.
+- **`lib/player/player_screen.dart`** — playback lifecycle/native coordination;
+  `player_overlay.dart` contains the embedded presentation widgets. See "Player" below +
+  docs/player.md.
 
 ## Key conventions
 
