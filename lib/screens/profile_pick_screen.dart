@@ -213,20 +213,23 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   /// Save the device state (sources, active source, metadata config, and the
   /// cloud-managed ids) into the profile that owned it, so switching back
   /// restores it exactly.
-  Future<void> _snapshotCurrent() async {
-    final id = _activeProfileId;
-    final source = _activeSource;
-    if (id == null || source == null) return;
+  Future<ProfileSnapshot> _captureCurrentSnapshot() async {
     final sources = await widget.store.list();
-    final snapshot = ProfileSnapshot(
+    return ProfileSnapshot(
       sourcesJson: [for (final c in sources) c.toJson()],
       activeSourceId: await widget.store.activeId(),
       metadataJson: (await widget.store.metadataConfig()).toJson(),
-      // Only a cloud profile can own cloud-managed sources.
-      managedIds: source == _ProfileSource.cloud
+      managedIds: _activeSource == _ProfileSource.cloud
           ? (await _sync?.managedSourceIds())?.toList() ?? const []
           : const [],
     );
+  }
+
+  Future<void> _snapshotCurrent([ProfileSnapshot? captured]) async {
+    final id = _activeProfileId;
+    final source = _activeSource;
+    if (id == null || source == null) return;
+    final snapshot = captured ?? await _captureCurrentSnapshot();
     if (source == _ProfileSource.local) {
       final all = await _localStore.loadAll();
       final idx = all.indexWhere((p) => p.id == id);
@@ -255,6 +258,42 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     await _sync?.setManagedSourceIds(snapshot.managedIds.toSet());
   }
 
+  Future<bool> _confirmSnapshotRestore(
+    _ProfileEntry entry,
+    ProfileSnapshot current,
+    ProfileSnapshot target,
+  ) async {
+    final preview = previewSnapshotRestore(current, target);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.panel,
+        title: Text('Switch to ${entry.name}?'),
+        content: Text(
+          '${preview.sourcesAdded} source${preview.sourcesAdded == 1 ? '' : 's'} '
+          'will be added, ${preview.sourcesRemoved} removed, and '
+          '${preview.sourcesRetained} kept.\n'
+          'Active source: ${preview.activeSourceLabel ?? 'none'}.\n'
+          'Metadata settings: ${preview.metadataChanges ? 'replaced' : 'unchanged'}.\n'
+          'Cloud-managed sources: ${preview.managedSources}.'
+          '${entry.isCloud ? '\nThe latest panel state will then be pulled.' : ''}',
+          style: const TextStyle(fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Switch profile'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
   Future<void> _selectProfile(_ProfileEntry entry) async {
     if (_busy) return;
     // Re-selecting the active profile: the store already holds its state.
@@ -267,10 +306,31 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       _error = null;
     });
     try {
-      await _snapshotCurrent();
+      final current = await _captureCurrentSnapshot();
+      ProfileSnapshot target;
+      if (entry.isCloud) {
+        target =
+            await _localStore.cloudSnapshot(entry.id) ??
+            const ProfileSnapshot();
+      } else {
+        final all = await _localStore.loadAll();
+        target = all
+            .firstWhere(
+              (p) => p.id == entry.id,
+              orElse: () => throw StateError('profile not found'),
+            )
+            .snapshot;
+      }
+      if (!mounted || !await _confirmSnapshotRestore(entry, current, target)) {
+        if (mounted) setState(() => _busy = false);
+        return;
+      }
+      await _snapshotCurrent(current);
       if (entry.isCloud) {
         final sync = _sync!;
-        final snapshot = await _localStore.cloudSnapshot(entry.id);
+        final snapshot = target.sourcesJson.isEmpty
+            ? await _localStore.cloudSnapshot(entry.id)
+            : target;
         if (snapshot != null) {
           // Bring back this profile's device-local extras + managed ids so the
           // pull below prunes/refreshes the right set.

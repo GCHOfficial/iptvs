@@ -34,6 +34,23 @@ class PlaybackPosition {
       : 0.0;
 }
 
+/// Counts and freshness markers for the user-visible cache diagnostics.
+class CacheStats {
+  final int channels;
+  final int programmes;
+  final int mediaItems;
+  final DateTime? lastChannelRefresh;
+  final DateTime? lastEpgRefresh;
+
+  const CacheStats({
+    required this.channels,
+    required this.programmes,
+    required this.mediaItems,
+    required this.lastChannelRefresh,
+    required this.lastEpgRefresh,
+  });
+}
+
 /// Local SQLite cache of a source's categories, channels, and EPG, keyed by
 /// [Source.id], so launches are instant and search/guide work offline.
 class AppDatabase {
@@ -795,6 +812,26 @@ class AppDatabase {
 
   Future<DateTime?> lastEpgSynced(String sourceId) =>
       _readTime('epg_synced_at', sourceId);
+
+  /// Returns aggregate cache size and last-successful-refresh values without
+  /// exposing any provider URLs, credentials, or row contents.
+  Future<CacheStats> cacheStats(String sourceId) async {
+    Future<int> count(String table) async {
+      final rows = await _db.rawQuery(
+        'SELECT COUNT(*) AS n FROM $table WHERE source_id = ?',
+        [sourceId],
+      );
+      return (rows.first['n'] as int?) ?? 0;
+    }
+
+    return CacheStats(
+      channels: await count('channels'),
+      programmes: await count('programmes'),
+      mediaItems: await count('media_items'),
+      lastChannelRefresh: await lastSynced(sourceId),
+      lastEpgRefresh: await lastEpgSynced(sourceId),
+    );
+  }
 
   Future<DateTime?> _readTime(String column, String sourceId) async {
     final rows = await _db.query(

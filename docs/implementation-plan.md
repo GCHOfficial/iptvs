@@ -27,8 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 2 — Performance and maintainability
-- Active PR: PR 13 (split oversized UI files) — implemented on
-  `refactor/split-ui-files`, ready for PR
+- Active PR: PR 16 (diagnostics and conflict/capability UX) — implemented and
+  ready for PR
 - Previous PR: PR 12 complete — merged as #112; PR 11 released as v0.1.36
   with live verification passed 2026-07-16; PR 10's on-device TV-Low stall/RSS
   capture remains outstanding while the closed test gathers data
@@ -86,7 +86,7 @@ Status convention:
 | 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | Ready for PR |
 | 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | [ ] |
 | 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | [ ] |
-| 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | [ ] |
+| 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | Ready for PR |
 | 17 | Phase 4 | Publish a channel-safe Microsoft Store MSIX | M | PRs 2 and 9 | [ ] |
 
 Effort guide:
@@ -860,16 +860,29 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ## PR 16 — Diagnostics and conflict/capability UX
 
-- [ ] Report redacted compressed and decoded byte counts.
-- [ ] Report parse and database-write duration.
-- [ ] Report rejected-row counts without sensitive row contents.
-- [ ] Show cloud revision/timestamp and warn before destructive overwrite.
-- [ ] Preview snapshot restore effects.
-- [ ] Show provider EPG/catch-up/resolution capabilities.
-- [ ] Show cache size and last successful refresh by source.
-- [ ] Offer a safe cache re-ingestion action.
-- [ ] Ensure exported diagnostics remain credential-safe.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Report redacted compressed and decoded byte counts. Bounded HTTP reads
+  publish the encoded and decoded lengths to the local diagnostics log.
+- [x] Report parse and database-write duration. Structured ingestion summaries
+  now record bounded durations at the repository boundary.
+- [x] Report rejected-row counts without sensitive row contents. M3U pending
+  entries and malformed Stalker catalog rows now emit counts only.
+- [x] Show cloud revision/timestamp and warn before destructive overwrite.
+  Profile `updated_at` is fetched server-side and a newer/unknown revision
+  requires an explicit replacement confirmation.
+- [x] Preview snapshot restore effects. Profile switching shows credential-free
+  source add/remove/retain counts, the resulting active source, metadata
+  replacement, cloud-managed count, and whether a panel pull follows.
+- [x] Show provider EPG/catch-up/resolution capabilities. Source cards expose
+  EPG and catch-up mode plus the provider's adaptive-resolution behavior.
+- [x] Show cache size and last successful refresh by source. The diagnostics
+  route now presents credential-free channel/programme/media counts and channel
+  and EPG freshness.
+- [x] Offer a safe cache re-ingestion action. Diagnostics invokes the existing
+  force-refresh path; it never deletes the last-good cache before replacement.
+- [x] Ensure exported diagnostics remain credential-safe. Export applies the
+  shared redactor at the final boundary, including messages added by future
+  callers.
+- [x] `flutter analyze` and `flutter test` pass.
 
 ## PR 17 — Microsoft Store MSIX distribution
 
@@ -1018,6 +1031,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 12 | Complete | Squash-merged as #112 (`c07920e`); the remote topic branch was removed. |
 | 2026-07-16 | PR 13 | Ready for PR | Fixed same-source repository replacement by rebuilding/disposal-scoping the repository-backed live/media/favorites/preview controllers in `didUpdateWidget` while preserving screen-owned focus/scroll nodes; a widget regression proves the new source replaces the old controller data. Moved tabs/search/category/action chrome into `channel_list_chrome.dart` and embedded player controls/error/reconnect presentation into `player_overlay.dart`; route/dialog orchestration and all player/native lifecycle state remain with their existing owners. `channel_list_screen.dart` dropped from 2,043 to 1,590 lines and `player_screen.dart` from 1,845 to 1,638. Focused suites: 54 passed. Analyze clean; all 347 tests pass (14 expected skips). |
 | 2026-07-16 | PR 14 | Ready for PR | Added explicit `CatchupCapability`/URL modes, provider timezone or fixed-offset conversion, archive-window and formatting metadata, Xtream/Stalker source-owned capability reporting, M3U `catchup`/`catchup-days`/`catchup-source` parsing and template resolution, and persisted advanced per-source overrides. Unsupported catch-up remains explicit. Added timezone/device-disagreement, DST-boundary, and capability tests. Analyze clean; all 350 tests pass (14 expected skips). |
+| 2026-07-16 | PR 16 | Ready for PR | Completed structured redacted ingestion summaries (parse/database durations, encoded/decoded HTTP bytes, and parser rejection counts), source cache statistics, final-boundary export redaction, source-card EPG/catch-up/adaptive-resolution summaries, server-revision overwrite confirmation, credential-free profile snapshot restore previews, and safe force-refresh re-ingestion. Analyze clean; full suite passes (360 tests, 14 expected skips). |
 
 ## Removal checklist
 

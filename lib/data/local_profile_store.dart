@@ -58,27 +58,80 @@ class ProfileSnapshot {
   });
 
   factory ProfileSnapshot.fromJson(Map<String, dynamic> j) => ProfileSnapshot(
-        sourcesJson: j['sources'] == null
-            ? const []
-            : [
-                for (final e in j['sources'] as List)
-                  Map<String, dynamic>.from(e as Map),
-              ],
-        activeSourceId: j['activeSourceId'] as String?,
-        metadataJson: j['metadata'] == null
-            ? null
-            : Map<String, dynamic>.from(j['metadata'] as Map),
-        managedIds: j['managedIds'] == null
-            ? const []
-            : [for (final e in j['managedIds'] as List) e.toString()],
-      );
+    sourcesJson: j['sources'] == null
+        ? const []
+        : [
+            for (final e in j['sources'] as List)
+              Map<String, dynamic>.from(e as Map),
+          ],
+    activeSourceId: j['activeSourceId'] as String?,
+    metadataJson: j['metadata'] == null
+        ? null
+        : Map<String, dynamic>.from(j['metadata'] as Map),
+    managedIds: j['managedIds'] == null
+        ? const []
+        : [for (final e in j['managedIds'] as List) e.toString()],
+  );
 
   Map<String, dynamic> toJson() => {
-        'sources': sourcesJson,
-        if (activeSourceId != null) 'activeSourceId': activeSourceId,
-        if (metadataJson != null) 'metadata': metadataJson,
-        if (managedIds.isNotEmpty) 'managedIds': managedIds,
-      };
+    'sources': sourcesJson,
+    if (activeSourceId != null) 'activeSourceId': activeSourceId,
+    if (metadataJson != null) 'metadata': metadataJson,
+    if (managedIds.isNotEmpty) 'managedIds': managedIds,
+  };
+}
+
+class SnapshotRestorePreview {
+  final int sourcesAdded;
+  final int sourcesRemoved;
+  final int sourcesRetained;
+  final String? activeSourceLabel;
+  final bool metadataChanges;
+  final int managedSources;
+
+  const SnapshotRestorePreview({
+    required this.sourcesAdded,
+    required this.sourcesRemoved,
+    required this.sourcesRetained,
+    required this.activeSourceLabel,
+    required this.metadataChanges,
+    required this.managedSources,
+  });
+}
+
+/// Credential-free description of the effects of replacing [current] with
+/// [target]. Only source ids/labels and aggregate counts are inspected; fields
+/// containing provider URLs or credentials are never included in the result.
+SnapshotRestorePreview previewSnapshotRestore(
+  ProfileSnapshot current,
+  ProfileSnapshot target,
+) {
+  String? idOf(Map<String, dynamic> source) => source['id']?.toString();
+  final currentIds = {
+    for (final source in current.sourcesJson)
+      if (idOf(source) case final String id) id,
+  };
+  final targetIds = {
+    for (final source in target.sourcesJson)
+      if (idOf(source) case final String id) id,
+  };
+  String? activeLabel;
+  for (final source in target.sourcesJson) {
+    if (idOf(source) == target.activeSourceId) {
+      final label = source['label']?.toString().trim();
+      activeLabel = label == null || label.isEmpty ? 'Unnamed source' : label;
+      break;
+    }
+  }
+  return SnapshotRestorePreview(
+    sourcesAdded: targetIds.difference(currentIds).length,
+    sourcesRemoved: currentIds.difference(targetIds).length,
+    sourcesRetained: currentIds.intersection(targetIds).length,
+    activeSourceLabel: activeLabel,
+    metadataChanges:
+        json.encode(current.metadataJson) != json.encode(target.metadataJson),
+    managedSources: target.managedIds.length,
+  );
 }
 
 /// A locally-stored profile. No cloud account needed — just a name, a display
@@ -97,29 +150,29 @@ class LocalProfile {
   });
 
   LocalProfile withSnapshot(ProfileSnapshot snapshot) => LocalProfile(
-        id: id,
-        name: name,
-        colorIndex: colorIndex,
-        snapshot: snapshot,
-      );
+    id: id,
+    name: name,
+    colorIndex: colorIndex,
+    snapshot: snapshot,
+  );
 
   factory LocalProfile.fromJson(Map<String, dynamic> j) => LocalProfile(
-        id: j['id'] as String,
-        name: (j['name'] as String?) ?? '',
-        colorIndex: (j['colorIndex'] as int?) ?? 0,
-        snapshot: j['snapshot'] == null
-            ? const ProfileSnapshot()
-            : ProfileSnapshot.fromJson(
-                Map<String, dynamic>.from(j['snapshot'] as Map),
-              ),
-      );
+    id: j['id'] as String,
+    name: (j['name'] as String?) ?? '',
+    colorIndex: (j['colorIndex'] as int?) ?? 0,
+    snapshot: j['snapshot'] == null
+        ? const ProfileSnapshot()
+        : ProfileSnapshot.fromJson(
+            Map<String, dynamic>.from(j['snapshot'] as Map),
+          ),
+  );
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'colorIndex': colorIndex,
-        'snapshot': snapshot.toJson(),
-      };
+    'id': id,
+    'name': name,
+    'colorIndex': colorIndex,
+    'snapshot': snapshot.toJson(),
+  };
 }
 
 /// Persists [LocalProfile]s — plus per-cloud-profile device snapshots and the
@@ -133,7 +186,7 @@ class LocalProfileStore {
   final FlutterSecureStorage _storage;
 
   const LocalProfileStore({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? const FlutterSecureStorage();
 
   Future<List<LocalProfile>> loadAll() async {
     final raw = await _storage.read(key: _kProfiles);

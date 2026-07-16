@@ -840,6 +840,10 @@ class StalkerSource implements Source, CatchupSource {
         '${_actionName(params)} failed: ${redactStalkerDiagnostic(portalError)}',
       );
     }
+    DiagnosticsLog.instance.add(
+      'parse:stalker',
+      'rejected_rows=${result.rejectedRows}',
+    );
     return result.channels;
   }
 
@@ -1000,6 +1004,7 @@ class StalkerSource implements Source, CatchupSource {
     List<Channel> channels,
     bool tokenInvalid,
     String? portalErrorMessage,
+    int rejectedRows,
   })
   debugIngestChannels(Uint8List bytes) => _ingestStalkerChannels(bytes);
 
@@ -1998,7 +2003,13 @@ class StalkerSource implements Source, CatchupSource {
       endpoint,
     ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
-      final operation = HttpOperation(kStalkerJsonWorkload);
+      final operation = HttpOperation(
+        kStalkerJsonWorkload,
+        onReadMetrics: (m) => DiagnosticsLog.instance.add(
+          'http:${kStalkerJsonWorkload.name}',
+          'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+        ),
+      );
       final req = await operation.wait(_http.getUrl(uri));
       req.followRedirects = true;
       req.headers
@@ -2060,7 +2071,13 @@ class StalkerSource implements Source, CatchupSource {
       endpoint,
     ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
-      final operation = HttpOperation(kStalkerJsonWorkload);
+      final operation = HttpOperation(
+        kStalkerJsonWorkload,
+        onReadMetrics: (m) => DiagnosticsLog.instance.add(
+          'http:${kStalkerJsonWorkload.name}',
+          'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+        ),
+      );
       final req = await operation.wait(_http.getUrl(uri));
       req.followRedirects = true;
       req.headers
@@ -2310,7 +2327,12 @@ class StalkerSource implements Source, CatchupSource {
 /// skipped rather than aborting the whole catalog — one bad row must never
 /// take down an otherwise-good portal response
 /// (`WorkloadFixtures.stalkerChannelsJson(malformedEvery:)` exercises this).
-({List<Channel> channels, bool tokenInvalid, String? portalErrorMessage})
+({
+  List<Channel> channels,
+  bool tokenInvalid,
+  String? portalErrorMessage,
+  int rejectedRows,
+})
 _ingestStalkerChannels(Uint8List bytes) {
   final Map<String, dynamic> response;
   try {
@@ -2329,6 +2351,7 @@ _ingestStalkerChannels(Uint8List bytes) {
       channels: const <Channel>[],
       tokenInvalid: true,
       portalErrorMessage: null,
+      rejectedRows: 0,
     );
   }
   final portalError = StalkerSource._portalErrorMessage(response);
@@ -2337,6 +2360,7 @@ _ingestStalkerChannels(Uint8List bytes) {
       channels: const <Channel>[],
       tokenInvalid: false,
       portalErrorMessage: portalError,
+      rejectedRows: 0,
     );
   }
 
@@ -2355,5 +2379,10 @@ _ingestStalkerChannels(Uint8List bytes) {
       continue;
     }
   }
-  return (channels: channels, tokenInvalid: false, portalErrorMessage: null);
+  return (
+    channels: channels,
+    tokenInvalid: false,
+    portalErrorMessage: null,
+    rejectedRows: list.length - channels.length,
+  );
 }

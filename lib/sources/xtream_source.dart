@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/load_token.dart';
+import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import 'expiry.dart';
 import 'source.dart';
@@ -473,7 +474,13 @@ class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
   }
 
   Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
-    final operation = HttpOperation(policy);
+    final operation = HttpOperation(
+      policy,
+      onReadMetrics: (m) => DiagnosticsLog.instance.add(
+        'http:${policy.name}',
+        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+      ),
+    );
     final req = await operation.wait(_http.getUrl(uri));
     final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {

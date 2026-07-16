@@ -2,6 +2,8 @@ import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 
+import 'net.dart';
+
 class DiagnosticsEntry {
   final DateTime time;
   final String scope;
@@ -34,6 +36,26 @@ class DiagnosticsLog extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Records the bounded, non-sensitive summary of one ingestion operation.
+  /// Callers must not pass payloads or individual row contents here.
+  void recordIngestion({
+    required String scope,
+    int compressedBytes = 0,
+    int decodedBytes = 0,
+    required Duration parseDuration,
+    required Duration databaseDuration,
+    int rejectedRows = 0,
+  }) {
+    add(
+      scope,
+      'ingestion compressed_bytes=${compressedBytes.clamp(0, 1 << 30)} '
+      'decoded_bytes=${decodedBytes.clamp(0, 1 << 30)} '
+      'parse_ms=${parseDuration.inMilliseconds.clamp(0, 1 << 31)} '
+      'database_ms=${databaseDuration.inMilliseconds.clamp(0, 1 << 31)} '
+      'rejected_rows=${rejectedRows.clamp(0, 1 << 30)}',
+    );
+  }
+
   void clear() {
     _entries.clear();
     notifyListeners();
@@ -46,7 +68,8 @@ class DiagnosticsLog extends ChangeNotifier {
       '',
       ..._entries.map(
         (entry) =>
-            '${entry.time.toIso8601String()} [${entry.scope}] ${entry.message}',
+            '${entry.time.toIso8601String()} [${entry.scope}] '
+            '${redactText(entry.message)}',
       ),
     ];
     return lines.join('\n');

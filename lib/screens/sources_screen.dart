@@ -11,6 +11,7 @@ import '../data/source_store.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../sources/source_config.dart';
+import '../sources/source.dart';
 import '../sources/expiry.dart';
 import '../sources/xtream_source.dart';
 import '../theme.dart';
@@ -347,6 +348,7 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
   DateTime? _expiry;
+  CatchupCapability _catchup = CatchupCapability.unsupported;
   bool _expiryLoading = true;
   bool _expiryFailed = false;
 
@@ -369,6 +371,7 @@ class _SourceCardState extends State<_SourceCard> {
       if (!mounted) return;
       setState(() {
         _expiry = value;
+        _catchup = source.catchupCapability;
         _expiryLoading = false;
       });
     } catch (_) {
@@ -412,6 +415,21 @@ class _SourceCardState extends State<_SourceCard> {
       case SourceKind.demo:
         return 'Demo streams';
     }
+  }
+
+  String get _capabilitySummary {
+    final catchup = _catchup.supported
+        ? 'Catch-up ${_catchup.mode.name}'
+        : 'Catch-up unavailable';
+    final epg = switch (widget.config.kind) {
+      SourceKind.m3u =>
+        (widget.config.fields['epgUrl']?.trim().isNotEmpty ?? false)
+            ? 'EPG configured'
+            : 'EPG from playlist',
+      SourceKind.demo => 'EPG unavailable',
+      _ => 'EPG supported',
+    };
+    return '$epg · $catchup · Resolution adaptive';
   }
 
   // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
@@ -508,6 +526,16 @@ class _SourceCardState extends State<_SourceCard> {
                       style: const TextStyle(
                         color: AppColors.textLo,
                         fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      _capabilitySummary,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 11,
                       ),
                     ),
                     const SizedBox(height: 6),

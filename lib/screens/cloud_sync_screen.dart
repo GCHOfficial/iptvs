@@ -44,6 +44,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   Timer? _poll;
   List<CloudProfile> _profiles = const [];
   String? _activeProfileId;
+  DateTime? _knownRemoteRevision;
 
   @override
   void initState() {
@@ -90,6 +91,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     setState(() {
       _profiles = profiles;
       _activeProfileId = active;
+      _knownRemoteRevision = profiles
+          .where((p) => p.id == active)
+          .firstOrNull
+          ?.updatedAt;
     });
   }
 
@@ -132,7 +137,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     if (DateTime.now().isAfter(code.expiresAt)) {
       try {
         await _newCode();
-      } catch (_) {/* keep polling on the old code's failure */}
+      } catch (_) {
+        /* keep polling on the old code's failure */
+      }
       return;
     }
     try {
@@ -163,10 +170,16 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pullSources(widget.store, profileId);
       final metadata = await _sync.pullMetadata(widget.store, profileId);
       await _sync.pullFavorites(widget.store, profileId);
+      _knownRemoteRevision = (await _sync.profileRevision(
+        profileId,
+      ))?.updatedAt;
       if (!mounted) return;
       final sources = 'Synced $count source${count == 1 ? '' : 's'}';
-      setState(() => _status = '${initial ? 'Paired — ' : ''}$sources'
-          '${metadata ? ' · metadata updated' : ''}.');
+      setState(
+        () => _status =
+            '${initial ? 'Paired — ' : ''}$sources'
+            '${metadata ? ' · metadata updated' : ''}.',
+      );
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
@@ -180,7 +193,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     await Clipboard.setData(ClipboardData(text: code));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Code copied'), duration: Duration(seconds: 2)),
+      const SnackBar(
+        content: Text('Code copied'),
+        duration: Duration(seconds: 2),
+      ),
     );
   }
 
@@ -196,12 +212,58 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     }
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Couldn\'t open the link — visit it manually')),
+        const SnackBar(
+          content: Text('Couldn\'t open the link — visit it manually'),
+        ),
       );
     }
   }
 
   Future<void> _push() async {
+    final profileId = _activeProfileId;
+    if (profileId == null) {
+      setState(() => _error = 'No profile selected.');
+      return;
+    }
+    CloudRevision? current;
+    try {
+      current = await _sync.profileRevision(profileId);
+    } catch (error) {
+      // A revision read failure must not silently permit an overwrite. Treat
+      // the revision as unknown; the conservative confirmation below remains.
+      if (mounted) {
+        setState(() => _error = friendlyCloudError(error));
+      }
+    }
+    if (!mounted) return;
+    if (shouldWarnBeforeOverwrite(
+      knownRemoteRevision: _knownRemoteRevision,
+      currentRemoteRevision: current?.updatedAt,
+      hasLocalChanges: true,
+    )) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Panel changed'),
+          content: const Text(
+            'This profile changed on the panel since this device last '
+            'synced. Pushing will replace those newer changes.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Replace panel profile'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (proceed != true) return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -225,11 +287,6 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ),
     );
     if (confirmed != true) return;
-    final profileId = _activeProfileId;
-    if (profileId == null) {
-      setState(() => _error = 'No profile selected.');
-      return;
-    }
     setState(() {
       _busy = true;
       _error = null;
@@ -239,10 +296,15 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pushSources(widget.store, profileId);
       await _sync.pushMetadata(widget.store, profileId);
       await _sync.pushFavorites(widget.store, profileId);
+      _knownRemoteRevision = (await _sync.profileRevision(
+        profileId,
+      ))?.updatedAt;
       if (!mounted) return;
-      setState(() => _status =
-          'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
-          'to $_activeProfileName.');
+      setState(
+        () => _status =
+            'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
+            'to $_activeProfileName.',
+      );
     } catch (e) {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
@@ -307,148 +369,145 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   List<Widget> _pairingBody() => [
-        const Text(
-          'Pair this device',
-          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Open the panel on your phone or computer, sign in, and enter this '
-          'code under Devices:',
-          style: const TextStyle(color: AppColors.textLo),
-        ),
-        const SizedBox(height: 20),
-        Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
-            child: InkWell(
-              onTap: _code == null ? null : _copyCode,
+    const Text(
+      'Pair this device',
+      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+    ),
+    const SizedBox(height: 8),
+    Text(
+      'Open the panel on your phone or computer, sign in, and enter this '
+      'code under Devices:',
+      style: const TextStyle(color: AppColors.textLo),
+    ),
+    const SizedBox(height: 20),
+    Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: InkWell(
+          onTap: _code == null ? null : _copyCode,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            decoration: BoxDecoration(
+              color: AppColors.panelHi,
               borderRadius: BorderRadius.circular(12),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 18,
-                ),
-                decoration: BoxDecoration(
-                  color: AppColors.panelHi,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  children: [
-                    // Balances the trailing copy icon so the code stays centered.
-                    const SizedBox(width: 38),
-                    // Scale the code down so any glyph mix fits the box on a
-                    // narrow phone instead of overflowing.
-                    Expanded(
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.center,
-                        child: Text(
-                          _code?.code ?? '········',
-                          maxLines: 1,
-                          style: const TextStyle(
-                            fontSize: 40,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 8,
-                            fontFeatures: [FontFeature.tabularFigures()],
-                          ),
-                        ),
+            ),
+            child: Row(
+              children: [
+                // Balances the trailing copy icon so the code stays centered.
+                const SizedBox(width: 38),
+                // Scale the code down so any glyph mix fits the box on a
+                // narrow phone instead of overflowing.
+                Expanded(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.center,
+                    child: Text(
+                      _code?.code ?? '········',
+                      maxLines: 1,
+                      style: const TextStyle(
+                        fontSize: 40,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 8,
+                        fontFeatures: [FontFeature.tabularFigures()],
                       ),
                     ),
-                    const SizedBox(width: 14),
-                    const Icon(Icons.copy_rounded, color: AppColors.textLo),
-                  ],
+                  ),
+                ),
+                const SizedBox(width: 14),
+                const Icon(Icons.copy_rounded, color: AppColors.textLo),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+    const SizedBox(height: 8),
+    const Center(
+      child: Text(
+        'Tap the code to copy it',
+        style: TextStyle(color: AppColors.textLo, fontSize: 12),
+      ),
+    ),
+    const SizedBox(height: 16),
+    Center(
+      child: InkWell(
+        onTap: _openPanel,
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
+              const SizedBox(width: 6),
+              Text(
+                CloudConfig.panelUrl,
+                style: const TextStyle(
+                  color: AppColors.accent,
+                  decoration: TextDecoration.underline,
+                  decorationColor: AppColors.accent,
                 ),
               ),
-            ),
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        const Center(
-          child: Text(
-            'Tap the code to copy it',
-            style: TextStyle(color: AppColors.textLo, fontSize: 12),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Center(
-          child: InkWell(
-            onTap: _openPanel,
-            borderRadius: BorderRadius.circular(6),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.open_in_new, size: 16, color: AppColors.accent),
-                  const SizedBox(width: 6),
-                  Text(
-                    CloudConfig.panelUrl,
-                    style: const TextStyle(
-                      color: AppColors.accent,
-                      decoration: TextDecoration.underline,
-                      decorationColor: AppColors.accent,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 24),
-        FilledButton.icon(
-          onPressed: _busy ? null : _newCode,
-          icon: const Icon(Icons.refresh),
-          label: const Text('New code'),
-        ),
-      ];
+      ),
+    ),
+    const SizedBox(height: 24),
+    FilledButton.icon(
+      onPressed: _busy ? null : _newCode,
+      icon: const Icon(Icons.refresh),
+      label: const Text('New code'),
+    ),
+  ];
 
   List<Widget> _pairedBody() => [
-        Row(
-          children: const [
-            Icon(Icons.cloud_done_outlined, color: AppColors.accent),
-            SizedBox(width: 10),
-            Text(
-              'This device is paired',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-            ),
-          ],
+    Row(
+      children: const [
+        Icon(Icons.cloud_done_outlined, color: AppColors.accent),
+        SizedBox(width: 10),
+        Text(
+          'This device is paired',
+          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
         ),
-        const SizedBox(height: 8),
-        const Text(
-          'Sync this device with a profile in the panel. Pull replaces the '
-          'cloud-managed sources, metadata, and favorites here with the '
-          'profile\'s (sources you added locally are kept). Push sends this '
-          'device\'s set up, replacing the profile\'s. Newest change wins.',
-          style: TextStyle(color: AppColors.textLo),
-        ),
-        ..._profileSection(),
-        const SizedBox(height: 24),
-        FilledButton.icon(
-          onPressed: _busy ? null : () => _pull(),
-          icon: _busy
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.sync),
-          label: const Text('Pull now'),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : _push,
-          icon: const Icon(Icons.cloud_upload_outlined),
-          label: const Text('Push to panel'),
-        ),
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : _unpair,
-          icon: const Icon(Icons.link_off),
-          label: const Text('Unpair this device'),
-        ),
-      ];
+      ],
+    ),
+    const SizedBox(height: 8),
+    const Text(
+      'Sync this device with a profile in the panel. Pull replaces the '
+      'cloud-managed sources, metadata, and favorites here with the '
+      'profile\'s (sources you added locally are kept). Push sends this '
+      'device\'s set up, replacing the profile\'s. Newest change wins.',
+      style: TextStyle(color: AppColors.textLo),
+    ),
+    ..._profileSection(),
+    const SizedBox(height: 24),
+    FilledButton.icon(
+      onPressed: _busy ? null : () => _pull(),
+      icon: _busy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.sync),
+      label: const Text('Pull now'),
+    ),
+    const SizedBox(height: 12),
+    OutlinedButton.icon(
+      onPressed: _busy ? null : _push,
+      icon: const Icon(Icons.cloud_upload_outlined),
+      label: const Text('Push to panel'),
+    ),
+    const SizedBox(height: 12),
+    OutlinedButton.icon(
+      onPressed: _busy ? null : _unpair,
+      icon: const Icon(Icons.link_off),
+      label: const Text('Unpair this device'),
+    ),
+  ];
 
   /// The profile picker: lists the account's profiles, highlights the active
   /// one, and switches (then re-pulls) on selection. Profiles are created and
@@ -465,10 +524,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     }
     return [
       const SizedBox(height: 20),
-      const Text(
-        'Profile',
-        style: TextStyle(fontWeight: FontWeight.w700),
-      ),
+      const Text('Profile', style: TextStyle(fontWeight: FontWeight.w700)),
       const SizedBox(height: 4),
       const Text(
         'Pick which profile this device syncs.',
