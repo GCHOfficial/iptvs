@@ -62,6 +62,10 @@ class ExoPlayerEngine(
     private val subtitleOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private var volumeBeforeMute = 1f
     private var fellBack = false
+    // Guards release() against a double-decrement of DebugCounters (and a
+    // clearPreviewTexture call landing after release, e.g. a disposing preview
+    // platform view racing the shared engine's own teardown).
+    private var released = false
     private val mainHandler = Handler(Looper.getMainLooper())
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
@@ -196,6 +200,7 @@ class ExoPlayerEngine(
             }
         state.volume = player.volume
         state.muted = player.volume == 0f
+        DebugCounters.incExoEngine()
     }
 
     /** True (and triggers fallback) when the stream's only video track is undecodable. */
@@ -497,6 +502,18 @@ class ExoPlayerEngine(
     }
 
     /**
+     * Detaches [texture] as the video output if it's still the one attached
+     * (ExoPlayer verifies identity itself, so this is a no-op if the surface
+     * already moved elsewhere — e.g. a newer preview texture, or fullscreen's
+     * own [claimViewSurface]). Called when a preview `PlatformView` disposes,
+     * so the engine can't keep a reference to its destroyed `TextureView`.
+     */
+    fun clearPreviewTexture(texture: TextureView) {
+        if (released) return
+        player.clearVideoTextureView(texture)
+    }
+
+    /**
      * (Re)claim the engine's own [view] (SurfaceView-backed [PlayerView]) as the
      * video output — used when the fullscreen Activity adopts a preview-owned
      * engine. The null/reset dance forces [PlayerView] to re-take the surface
@@ -508,9 +525,12 @@ class ExoPlayerEngine(
     }
 
     override fun release() {
+        if (released) return
+        released = true
         playerView.player = null
         player.removeListener(playerListener)
         player.release()
+        DebugCounters.decExoEngine()
     }
 
     /** Snap a noisy measured rate to a nearby standard frame rate for a clean readout. */

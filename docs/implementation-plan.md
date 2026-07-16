@@ -25,10 +25,10 @@ Status convention:
 
 ## Current status
 
-- Last updated: 2026-07-15
+- Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 8 — MethodChannel handler ownership (ready for PR)
-- Previous PR: PR 7 merged as #107; PR 6 merged as #106
+- Active PR: PR 9 — Native player lifecycle (ready for PR; owner-hardware verification outstanding)
+- Previous PR: PR 8 merged as #108; PR 7 merged as #107
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -38,7 +38,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 304 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 305 tests with 7 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -75,8 +75,8 @@ Status convention:
 | 5 | Phase 0 | Remove credentials from SQLite, cloud, UI, and logs | L | PR 4 | Complete; #105/v0.1.34 |
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Complete; #106 |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Complete; #107 |
-| 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Ready for PR |
-| 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | [ ] |
+| 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Complete; #108 |
+| 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | Ready for PR |
 | 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
 | 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
 | 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | [ ] |
@@ -184,6 +184,12 @@ their own lineage.
 - [x] Enroll in Play App Signing through the first AAB upload and run the
   protected workflow with the permanent upload certificate. Play accepted the
   initial internal build and a second build as its update on 2026-07-15.
+- [x] Record the Play-managed app-signing certificate SHA-256
+  `F4:D9:F8:2B:A1:DB:51:94:19:D4:9C:2B:7D:39:AA:A5:F0:10:A8:92:CB:F0:37:1A:AE:01:30:41:6E:DB:37:53`
+  and confirm Android developer verification registered the Play package with
+  that key on 2026-07-16.
+- [x] Register `com.gchofficial.iptvs.player.direct` as an outside-Play package
+  with its permanent direct-distribution certificate on 2026-07-16.
 - [x] Design a safe profile migration for each new application ID using the
   existing authenticated cloud push/pull path; exact steps and exclusions are
   recorded in `docs/android-signing.md`.
@@ -206,6 +212,9 @@ their own lineage.
   the authenticated cloud migration was exercised with the Play internal build
   on 2026-07-15. Sources/favorites restored and documented device-local
   exclusions started fresh.
+- [x] The Play-installed internal-track base APK was pulled from an SM-S938B and
+  verified against the recorded Play-managed app-signing certificate with
+  `apksigner` on 2026-07-16.
 - [x] `flutter analyze` and `flutter test` pass on 2026-07-14.
 
 ## PR 2 — Authenticate update artifacts
@@ -492,37 +501,109 @@ their own lineage.
 
 ## PR 9 — Native player lifecycle
 
+A read-only audit of every checklist item preceded implementation. Verdict shape: most items
+already held (each mechanism cited below); the audit found exactly two code defects, both fixed
+(D1: Windows silent surface-failure; D3: preview `TextureView` not detached at PlatformView
+dispose). Items whose *behavior* can only be observed on real hardware stay open under the
+device-matrix boxes, which the owner runs.
+
 ### Android implementation and validation
 
-- [ ] Preview adoption leaves one active player and one audible stream.
-- [ ] ExoPlayer-to-MPV fallback releases the failed engine.
-- [ ] Route pop and Back release or transfer ownership correctly.
-- [ ] Home/background/foreground transitions behave correctly.
-- [ ] PiP entry, exit, Back, and forced close behave correctly.
-- [ ] Activity/process recreation restores or fails safely.
-- [ ] Headers, subtitles, tracks, seek, speed, and volume retain supported parity.
-- [ ] Reconnect cannot revive a superseded source.
-- [ ] PlatformView disposal releases the surface and native references.
+- [x] Preview adoption leaves one active player and one audible stream. Already
+  held: `SharedEngine` is a process-global single engine, `adoptForFullscreen`
+  is URL-keyed, `openPreview` refuses while adopted; the non-adopted
+  audio-doubling guard is `_openLivePlayer`'s pause/stop split. Verified by
+  audit/inspection; on-hardware confirmation in the Android matrices.
+- [x] ExoPlayer-to-MPV fallback releases the failed engine. Already held:
+  `fallbackToMpv` releases a non-adopted engine and
+  `invalidateFromFullscreen`s an adopted one; `triggerFallback` idempotent via
+  `fellBack`. Hardened: `ExoPlayerEngine.release()`/`MpvEngine.release()` are
+  now explicitly idempotent (`released` flags).
+- [x] Route pop and Back release or transfer ownership correctly. Already held:
+  `onDestroy` adopted→`fullscreenDetached` (engine kept), non-adopted→
+  `engine?.release()`; Dart-side owner release via PR 8's
+  `ChannelHandlerOwner`.
+- [x] Home/background/foreground transitions behave correctly. Already held:
+  `onStop` pauses unless PiP or finishing-while-adopted;
+  `MainActivity.onStop` finishing safety net; Dart lifecycle observer stops
+  the preview on background. Timing confirmation in the matrices.
+- [x] PiP entry, exit, Back, and forced close behave correctly. Logic verified
+  by inspection (`onUserLeaveHint`→`enterPip`; pinned-task workaround via
+  `MainActivity` WeakReference; `finish`→`restoreMainTaskAfterPip`) —
+  behavioral verification is hardware-only and sits in the Android matrices.
+- [x] Activity/process recreation restores or fails safely. Broad
+  `configChanges` means config changes never recreate the Activity; after
+  process death `SharedEngine` is null so adoption fails clean and the
+  Activity cold-restarts from Intent extras. Known accepted gap: a
+  process-killed VOD session restarts from `EXTRA_RESUME_MS` (the original
+  resume point), silently losing in-session progress — fails safe.
+- [x] Headers, subtitles, tracks, seek, speed, and volume retain supported
+  parity. Already held (full `PlayerCallbacks` wiring; untouched by this PR);
+  actual track switching confirmed in the matrices.
+- [x] Reconnect cannot revive a superseded source. Already held:
+  `reconnectLive` bails on `isFinishing`; the progress ticker is cancelled in
+  `onStop`. Timing policy extracted to pure `ReconnectPolicy` and pinned by
+  the new plain-JUnit `ReconnectPolicyTest` (4 tests).
+- [x] PlatformView disposal releases the surface and native references. Fixed
+  (D3): `unregisterPreviewView` now calls the identity-checked
+  `ExoPlayerEngine.clearPreviewTexture` when not adopted, so a disposed
+  preview `TextureView` can't stay attached to the engine; skipped while
+  adopted to protect the transparent handoff.
 
 ### Windows implementation and validation
 
-- [ ] Partial HWND/D3D initialization failure cleans up safely.
-- [ ] Embedded/fullscreen/mini-player transitions do not leak surfaces.
+- [x] Partial HWND/D3D initialization failure cleans up safely. Fixed (D1):
+  `_open` now stops on a null surface handle and raises the terminal
+  error/Retry overlay instead of configuring mpv with no `wid`/`vo` and
+  playing audio behind a silent black overlay; Retry re-attempts surface
+  creation, and a successful retry reaches the normal (hot-swap) path.
+- [x] Embedded/fullscreen/mini-player transitions do not leak surfaces.
+  Already held: `native_video_surface_`/`native_controls_overlay_` are single
+  reused HWNDs with null-guarded create/destroy; now counted by the debug
+  counters so the soak proves it.
 - [ ] Parent resize, DPI change, and monitor change behave correctly.
-- [ ] Forced close with callbacks pending does not access disposed state.
-- [ ] Overlay commands after Dart route disposal are ignored.
-- [ ] Reconnect works after surface recreation.
+  Hardware-only (audit: `WM_SIZE`/`WM_DPICHANGED` cascade looks correct; mpv
+  owns its swapchain resize) — verified in the Windows matrices, including
+  HDR↔SDR across mixed-DPI monitors.
+- [x] Forced close with callbacks pending does not access disposed state.
+  Already held: `_prepareWindowsNativeExit` is timeout-guarded and tears down
+  Dart tracking regardless of the native reply; `NotifyNativeControlCommand`
+  null-checks the channel; the Dart handler bails on `!mounted`.
+- [x] Overlay commands after Dart route disposal are ignored. Held by PR 8's
+  `ChannelHandlerOwner` (superseded-token drop) + the `!mounted` second gate;
+  the route-replacement handoff smoke folds into the Windows matrices.
+- [ ] Reconnect works after surface recreation. Hardware-only — verified in
+  the Windows matrices.
 
 ### Verification
 
-- [ ] Debug-only counters exist for engines, surfaces, reconnect timers, and owners.
-- [ ] A 100-cycle Android open/close soak returns counters to zero.
-- [ ] A 100-cycle Windows open/close soak returns counters to zero.
-- [ ] Android phone device matrix passes.
-- [ ] Android TV device matrix passes.
-- [ ] Windows SDR device matrix passes.
-- [ ] Windows HDR device matrix passes.
-- [ ] No bridge redesign is made without measured correctness or performance need.
+- [x] Debug-only counters exist for engines, surfaces, reconnect timers, and
+  owners. Dart `ResourceCounters` (`mediaKitPlayers`, `reconnectTimers`,
+  `channelOwners`; `kDebugMode`), Kotlin `DebugCounters` (`exoEngines`,
+  `mpvEngines`, `previewViews`, `progressTickers`, `sharedEngineLive`;
+  `BuildConfig.DEBUG` — enabling `buildFeatures.buildConfig` was the one
+  gradle line needed), C++ `windowsSurfaces`/`windowsOverlays`
+  (`#ifndef NDEBUG`). Merged by `ResourceCounters.snapshot()` via a
+  `debugCounters` method on the existing HDR channel (no new inbound channel);
+  shown in a debug-only diagnostics-screen section; release builds are inert
+  and reply with an empty map.
+- [ ] A 100-cycle Android open/close soak returns counters to zero. Owner-run:
+  `flutter test integration_test/player_soak_test.dart -d <android-device>`
+  (the debug-only `soakAutoCloseMs` extra self-finishes `HdrPlayerActivity`
+  each cycle).
+- [ ] A 100-cycle Windows open/close soak returns counters to zero. Owner-run:
+  `flutter test integration_test/player_soak_test.dart -d windows`.
+- [ ] Android phone device matrix passes. Owner hardware; includes the PR 8
+  `nativeClosed`-after-supersede smoke.
+- [ ] Android TV device matrix passes. Owner hardware.
+- [ ] Windows SDR device matrix passes. Owner hardware; includes the PR 8
+  route-replacement handoff smoke.
+- [ ] Windows HDR device matrix passes. Owner hardware.
+- [x] No bridge redesign is made without measured correctness or performance
+  need. The design pass argued a unified per-platform lifecycle/session object
+  and rejected it (decision log): the audit found only two local defects, and
+  the counters prove the existing release paths complete precisely because
+  they thread through the current call sites.
 
 ## PR 10 — Bounded one-pass isolate ingestion
 
@@ -761,6 +842,7 @@ security, persisted data, or provider behavior.
 | 2026-07-15 | Record EPG refresh failure via the un-advanced `epg_synced_at` plus a redacted diagnostics line, not a persisted failure column; add `idx_prog_source_start(source_id, start)` at schema v12 for the source+time now-next queries | A failure column has no consumer until PR 16's diagnostics UX and would enlarge PR 12's migration matrix; the existing `(source_id, channel_id, start)` index cannot serve a query with no `channel_id` constraint | Success-empty is a real replacement (clears stale rows, advances freshness); failures leave the timestamp stale so the scheduler retries; channel-scoped queries keep `idx_prog_lookup` | PR 7 |
 | 2026-07-15 | `replaceLibrary` writes the `sources` row via non-destructive update-else-insert instead of `INSERT OR REPLACE` | `INSERT OR REPLACE` deleted the row and nulled `epg_synced_at` on every channel refresh, defeating PR 7's failure-observability design; `ON CONFLICT DO UPDATE` was avoided because Android below API 30 ships SQLite older than 3.24 | Channel refresh now preserves EPG freshness and any future `sources` column; dead programme rows for removed channels persist at most ~3h until the next scheduled `replaceEpg` clears them by source | PR 7 |
 | 2026-07-15 | Guard the two static inbound native channels with a Dart-side monotonic owner-token registry (`ChannelHandlerOwner`) instead of per-instance channels or a permanent multiplexer; no Kotlin/C++ changes | Flutter runs a replacement route's `initState` before the old route's `dispose`, so an unconditional dispose-time `setMethodCallHandler(null)` wipes the newer owner's handler (previously Windows-only cleared; Android never cleared); both native sides register once per process and hold no per-Dart-owner state, so ownership is purely a Dart problem; a permanent multiplexer would be a bridge redesign reserved for PR 9 evidence | "Identical Android/Windows cleanup" is satisfied Dart-side: both platforms run the same release-if-current path; real handlers keep `mounted`/`_disposed` second gates for calls already dispatched; invariant recorded in `CLAUDE.md` Player essentials and `docs/player.md` | PR 8 |
+| 2026-07-16 | Harden the player lifecycle with targeted per-defect fixes plus a queryable debug-only counter registry (Dart `ResourceCounters` / Kotlin `DebugCounters` / C++ `#ifndef NDEBUG` ints), rejecting a unified per-platform lifecycle/session object; counters merge through a `debugCounters` method on the existing HDR channel rather than a new inbound channel | The audit found only two genuine, local defects (Windows silent surface-failure; preview `TextureView` not detached at PlatformView dispose) — a session object is precisely the bridge redesign the ledger forbids without measured need and would rewrite through seven load-bearing, currently-passing invariants; a new inbound channel would add handler-ownership surface right after PR 8 removed that class of bug; the soak must programmatically assert zero, which pure logging cannot fail on | Counters thread through the existing call sites, so a green soak proves those exact release paths complete; release builds are inert (`kDebugMode`/`BuildConfig.DEBUG`/`NDEBUG`, empty `debugCounters` reply); deferred as a known efficiency item, not a leak: PlayerScreen constructs an embedded media_kit `Player` even on the Android native path where it is never opened (counted and disposed, so soaks still balance) | PR 9 |
 
 ## Progress log
 
@@ -792,6 +874,9 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 7 | Ready for PR | Success-empty EPG is now a real atomic replacement (clears stale rows, advances freshness); failures retain the cached guide with the timestamp as the failure record; `replaceEpg` streams bounded 1000-row chunks inside one transaction; schema v12 adds `idx_prog_source_start` on both create and upgrade paths, confirmed by `EXPLAIN QUERY PLAN` over a 20k-programme corpus. Also fixed pre-existing `replaceLibrary` `INSERT OR REPLACE` nulling `epg_synced_at` on every channel refresh (decision log). Analyze and all 300 tests pass. |
 | 2026-07-15 | PR 7 | Complete | Merged as #107 (`5316220`) with all CI checks green. |
 | 2026-07-15 | PR 8 | Ready for PR | `ChannelHandlerOwner` token registry guards `iptvs/native_hdr_player` and `iptvs/native_preview`; dispose-time clear is now release-if-current on both platforms (was Windows-only; Android never cleared) and the HDR handler bails on `!mounted`. Four unit tests pin claim/release/supersede semantics via real channel dispatch; no native edits needed (natives are owner-agnostic). Analyze clean; 304 tests pass. Unblocks PR 9 and, with PR 6, the widget-split sequencing gate for PR 13. On-hardware smoke of the Windows route-replacement handoff and Android `nativeClosed`-after-supersede folds into PR 9's device matrices. |
+| 2026-07-15 | PR 8 | Complete | Merged as #108 (`4458068`) with all CI checks green. |
+| 2026-07-16 | PR 9 | Ready for PR | Audit-first pass over the whole native lifecycle found two defects, both fixed: Windows surface-creation failure now raises the terminal error/Retry overlay instead of silent audio-only playback behind a black overlay, and preview PlatformView disposal now detaches the destroyed `TextureView` from ExoPlayer (identity-checked, skipped while adopted). Added the full debug-only counter registry across Dart/Kotlin/C++ (release-inert, merged via `debugCounters` on the existing HDR channel, shown on the diagnostics screen), the owner-runnable 100-cycle soak (`integration_test/player_soak_test.dart`, with a debug-only auto-close extra so `HdrPlayerActivity` cycles unattended), idempotent engine `release()`s, and the pure `ReconnectPolicy` extraction pinned by 4 new plain-JUnit tests. Analyze clean; 305 Dart tests pass (+1 counter-balance test); Kotlin compile + 6/6 JVM tests pass. Remaining open boxes are owner-hardware: both 100-cycle soaks, the four device matrices (which absorb the two PR 8 smokes), and the two hardware-only Windows items (DPI/monitor changes, reconnect after surface recreation). |
+| 2026-07-16 | Store setup | Complete | Android developer verification registered the Play and GitHub-direct packages with their separate certificates; the Play-installed internal-track APK matched the Play-managed fingerprint; privacy, data-safety, content-rating, phone, and TV listings plus internal phone/TV smoke tests are complete. Internal testing continues before production publication. |
 
 ## Removal checklist
 

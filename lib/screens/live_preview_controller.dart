@@ -11,6 +11,7 @@ import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../player/channel_owner.dart';
 import '../player/mpv_options.dart';
+import '../player/resource_counters.dart';
 import '../sources/source.dart';
 
 /// Owns the live split-pane/phone **preview** player and its state — which
@@ -101,6 +102,7 @@ class LivePreviewController extends ChangeNotifier {
     final player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
     );
+    ResourceCounters.incMediaKitPlayers();
     // Unlike the fullscreen player, previews never get a native HDR/HWND surface —
     // they're always the embedded (texture) path. Apply the same live-stream
     // network/demuxer tuning + tone-map-to-SDR options the fullscreen embedded
@@ -373,7 +375,10 @@ class LivePreviewController extends ChangeNotifier {
     error = null;
     stream = null;
     if (!_disposed) notifyListeners();
-    if (player != null) await player.dispose();
+    if (player != null) {
+      await player.dispose();
+      ResourceCounters.decMediaKitPlayers();
+    }
   }
 
   @override
@@ -388,7 +393,12 @@ class LivePreviewController extends ChangeNotifier {
       unawaited(_stopNative());
     }
     unawaited(_hwdecProbe?.cancel());
-    unawaited(_player?.dispose());
+    final player = _player;
+    if (player != null) {
+      unawaited(
+        player.dispose().then((_) => ResourceCounters.decMediaKitPlayers()),
+      );
+    }
     super.dispose();
   }
 }

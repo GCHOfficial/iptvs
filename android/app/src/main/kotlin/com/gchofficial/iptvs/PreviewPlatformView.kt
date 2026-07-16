@@ -8,6 +8,7 @@ import android.view.View
 import android.widget.FrameLayout
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
+import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
@@ -56,11 +57,13 @@ class PreviewPlatformView(context: Context) : PlatformView {
 
     init {
         SharedEngine.registerPreviewView(texture, aspectFrame)
+        DebugCounters.incPreviewView()
     }
 
     override fun getView(): View = root
 
     override fun dispose() {
         SharedEngine.unregisterPreviewView(texture)
+        DebugCounters.decPreviewView()
     }
 }

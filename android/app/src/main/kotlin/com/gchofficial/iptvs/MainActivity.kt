@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
+import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -195,6 +196,15 @@ class MainActivity : FlutterActivity() {
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }
+                        // Debug-only integration-test soak: lets a test cycle the
+                        // native Activity unattended. Never read outside a debug
+                        // build (see HdrPlayerActivity), so gate it here too rather
+                        // than carry it onto a release-build intent for no reason.
+                        if (BuildConfig.DEBUG) {
+                            (args["soakAutoCloseMs"] as? Number)?.toLong()?.let {
+                                putExtra(HdrPlayerActivity.EXTRA_SOAK_AUTOCLOSE_MS, it)
+                            }
+                        }
                         // Live EPG now/next snapshot (epoch ms passed as doubles).
                         (args["epgNowTitle"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_EPG_NOW_TITLE, it)
@@ -233,6 +243,10 @@ class MainActivity : FlutterActivity() {
                     startActivityForResult(intent, REQUEST_NATIVE_PLAYER)
                     result.success(true)
                 }
+
+                // Debug-only lifecycle counters for an integration-test soak
+                // (see DebugCounters); empty map in a release build.
+                "debugCounters" -> result.success(DebugCounters.snapshot())
 
                 else -> result.notImplemented()
             }

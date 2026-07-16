@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -14,6 +15,7 @@ import '../sources/source.dart';
 import '../theme.dart';
 import 'channel_owner.dart';
 import 'mpv_options.dart';
+import 'resource_counters.dart';
 
 /// Identifies what's playing for the VOD resume store: where to save
 /// positions and where to resume from. Absent for live streams and anything
@@ -84,6 +86,14 @@ class PlayerScreen extends StatefulWidget {
   final bool favoriteInitial;
   final Future<void> Function(bool favorite)? onSetFavorite;
 
+  /// Debug-only: when non-null (and only honored under [kDebugMode]), passed
+  /// through as `soakAutoCloseMs` on the Android native `open` call so the
+  /// native Activity self-closes after this many milliseconds — lets
+  /// `integration_test/player_soak_test.dart` cycle the player without a real
+  /// Back press. Ignored on other platforms and in release builds.
+  @visibleForTesting
+  static int? debugSoakAutoCloseMs;
+
   const PlayerScreen({
     super.key,
     required this.title,
@@ -125,17 +135,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const Duration _nativeOpenTimeout = Duration(seconds: 10);
   static const Duration _nativeExitTimeout = Duration(seconds: 3);
 
-  late final Player _player =
-      widget.existingPlayer ??
-      Player(
-        configuration: PlayerConfiguration(
-          vo: _usesWindowsNativeSurface ? 'null' : null,
-          osc: _usesWindowsNativeSurface,
-          // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
-          bufferSize: 64 * 1024 * 1024,
-          logLevel: MPVLogLevel.warn,
-        ),
-      );
+  late final Player _player = _createPlayer();
+
+  // An adopted player was already counted by whoever constructed it (e.g.
+  // LivePreviewController._createPlayer) — only count one built fresh here.
+  Player _createPlayer() {
+    final existing = widget.existingPlayer;
+    if (existing != null) return existing;
+    ResourceCounters.incMediaKitPlayers();
+    return Player(
+      configuration: PlayerConfiguration(
+        vo: _usesWindowsNativeSurface ? 'null' : null,
+        osc: _usesWindowsNativeSurface,
+        // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
+        bufferSize: 64 * 1024 * 1024,
+        logLevel: MPVLogLevel.warn,
+      ),
+    );
+  }
+
   late final VideoController? _controller = _usesWindowsNativeSurface
       ? null
       : (widget.existingController ?? VideoController(_player));
@@ -256,6 +274,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         const Duration(seconds: 1),
         (_) => _pollLiveReconnect(),
       );
+      ResourceCounters.incReconnectTimers();
     }
     // VOD resume: persist the position periodically (plus on dispose and via
     // the native player's nativeClosed payload), so a crash mid-film loses at
@@ -410,8 +429,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     int? nativeWindowHandle;
     if (_usesWindowsNativeSurface) {
       nativeWindowHandle = await _createWindowsNativeHdrSurface();
-      if (nativeWindowHandle == null && mounted) {
-        setState(() => _nativePlaybackLaunched = false);
+      if (nativeWindowHandle == null) {
+        // No native HWND to hand mpv's `wid`/`vo` to: proceeding would leave
+        // audio-only playback behind a black overlay with no visible failure
+        // (embeddedVideoOptionsForPlatform() is empty on Windows and
+        // _controller is null, so nothing ever renders). Surface the same
+        // error/Retry overlay VOD errors use instead — Retry re-runs _open,
+        // including this surface-creation attempt.
+        if (mounted) {
+          setState(() {
+            _nativePlaybackLaunched = false;
+            _error = "Couldn't create the video surface.";
+          });
+        }
+        return;
       }
     } else if (mounted) {
       setState(() {
@@ -473,6 +504,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
             'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
             'canFavorite': _canFavorite,
             'isFavorite': _favorite,
+            if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
+              'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
             'subtitles': widget.stream.subtitles
                 .map(
@@ -1408,7 +1441,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // the real save-before-pop is in _exitAndPop/nativeClosed, both of which
     // run and complete well before this.
     unawaited(_persistPlaybackPosition());
-    _reconnectTimer?.cancel();
+    final reconnectTimer = _reconnectTimer;
+    if (reconnectTimer != null) {
+      final wasActive = reconnectTimer.isActive;
+      reconnectTimer.cancel();
+      if (wasActive) ResourceCounters.decReconnectTimers();
+    }
     _controlSyncThrottle?.cancel();
     for (final s in _subs) {
       s.cancel();
@@ -1425,9 +1463,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!_ownsPlayer) return;
     final platform = _player.platform;
     if (Platform.isWindows && platform is NativePlayer) {
-      unawaited(platform.dispose(synchronized: false));
+      unawaited(
+        platform
+            .dispose(synchronized: false)
+            .then((_) => ResourceCounters.decMediaKitPlayers()),
+      );
     } else {
-      unawaited(_player.dispose());
+      unawaited(
+        _player.dispose().then((_) => ResourceCounters.decMediaKitPlayers()),
+      );
     }
   }
 

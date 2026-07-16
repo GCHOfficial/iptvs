@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/channel_owner.dart';
+import 'package:iptvs/player/resource_counters.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -145,6 +147,28 @@ void main() {
       owner.release(freshToken);
       final result = await dispatch('ping');
       expect(result, isNull);
+    },
+  );
+
+  test(
+    'N claims + N releases return the channelOwners counter to zero',
+    () async {
+      // flutter test runs in debug mode (kDebugMode == true), so the counter
+      // is live here — but guard anyway rather than assume the test runner's
+      // build mode.
+      ResourceCounters.resetForTest();
+      final owner = ChannelHandlerOwner(channel);
+      const claims = 4;
+      final tokens = <int>[];
+      for (var i = 0; i < claims; i++) {
+        tokens.add(owner.claim((call) async => null));
+      }
+      for (final token in tokens) {
+        owner.release(token);
+      }
+      if (kDebugMode) {
+        expect(ResourceCounters.channelOwners, 0);
+      }
     },
   );
 }
