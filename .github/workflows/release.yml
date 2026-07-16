@@ -261,11 +261,37 @@ jobs:
             echo "All models failed; continuing without AI changelog."
             : > body.md
           fi
-      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
-          name: IPTVS Player ${{ needs.version.outputs.version }}${{ needs.version.outputs.track == 'beta' && ' Beta' || '' }}
-          prerelease: ${{ needs.version.outputs.track == 'beta' }}
-          body_path: body.md
-          generate_release_notes: true
-          files: dist/**
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
+          RELEASE_NAME: IPTVS Player ${{ needs.version.outputs.version }}${{ needs.version.outputs.track == 'beta' && ' Beta' || '' }}
+          RELEASE_TRACK: ${{ needs.version.outputs.track }}
+        run: |
+          set -euo pipefail
+
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                echo "Attempt $attempt failed; retrying in $((attempt * 10))s."
+                sleep $((attempt * 10))
+              fi
+            done
+            return 1
+          }
+
+          if retry gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            retry gh release edit "$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file body.md
+          else
+            create_args=("$RELEASE_TAG" --verify-tag --title "$RELEASE_NAME" --notes-file body.md --generate-notes)
+            if [ "$RELEASE_TRACK" = beta ]; then
+              create_args+=(--prerelease)
+            fi
+            retry gh release create "${create_args[@]}"
+          fi
+
+          retry gh release upload "$RELEASE_TAG" dist/* --clobber
