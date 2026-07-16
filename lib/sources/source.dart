@@ -17,6 +17,109 @@ class Category {
 
 enum ContentKind { live, movie, series, season, episode }
 
+/// The URL convention a provider uses for programmes in its archive.
+enum CatchupUrlMode { unsupported, xtreamTimeshift, stalkerQuery, m3uTemplate }
+
+/// Provider-reported (or explicitly configured) catch-up behavior.  The UI
+/// uses [supported] rather than attempting to infer support from URL failures.
+@immutable
+class CatchupCapability {
+  final CatchupUrlMode mode;
+  final String? timezone;
+  final int? fixedOffsetMinutes;
+  final Duration? maxArchiveWindow;
+  final String startFormat;
+  final String? endFormat;
+  final String? template;
+
+  const CatchupCapability({
+    this.mode = CatchupUrlMode.unsupported,
+    this.timezone,
+    this.fixedOffsetMinutes,
+    this.maxArchiveWindow,
+    this.startFormat = 'yyyy-MM-dd:HH-mm',
+    this.endFormat,
+    this.template,
+  });
+
+  bool get supported => mode != CatchupUrlMode.unsupported;
+  static const unsupported = CatchupCapability();
+}
+
+CatchupCapability catchupCapabilityOf(Source source) {
+  if (source is CatchupSource) {
+    return (source as CatchupSource).catchupCapability;
+  }
+  return CatchupCapability.unsupported;
+}
+
+/// Provider-agnostic access for callers holding the base [Source] type.
+extension SourceCatchupCapability on Source {
+  CatchupCapability get catchupCapability => catchupCapabilityOf(this);
+}
+
+/// Internal structural marker used by built-in providers. Kept separate from
+/// [Source] so third-party/test implementations are not broken by capability
+/// additions.
+abstract interface class CatchupSource {
+  CatchupCapability get catchupCapability;
+}
+
+/// Converts an absolute programme instant to the provider's wall clock.
+/// Fixed offsets are deterministic and are preferred for an explicit override;
+/// `UTC` is also handled without consulting the device timezone.
+DateTime catchupProviderTime(
+  DateTime instant, {
+  String? timezone,
+  int? fixedOffsetMinutes,
+}) {
+  final utc = instant.toUtc();
+  if (fixedOffsetMinutes != null) {
+    return utc.add(Duration(minutes: fixedOffsetMinutes));
+  }
+  if (timezone == null || timezone.isEmpty) return instant.toLocal();
+  final normalized = timezone.trim().toUpperCase();
+  if (normalized == 'UTC' || normalized == 'GMT' || normalized == 'Z') {
+    return utc;
+  }
+  final match = RegExp(
+    r'^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$',
+  ).firstMatch(normalized);
+  if (match != null) {
+    final minutes =
+        int.parse(match.group(2)!) * 60 + int.parse(match.group(3) ?? '0');
+    return utc.add(
+      Duration(minutes: match.group(1) == '-' ? -minutes : minutes),
+    );
+  }
+  // IANA names are retained in the capability for display and future
+  // timezone-database integration. Until then, the provider's wall clock is
+  // the device clock, which is the least surprising fallback.
+  return instant.toLocal();
+}
+
+String formatCatchupTime(
+  DateTime instant,
+  CatchupCapability capability, {
+  String? format,
+}) {
+  final t = catchupProviderTime(
+    instant,
+    timezone: capability.timezone,
+    fixedOffsetMinutes: capability.fixedOffsetMinutes,
+  );
+  String p(int n, [int width = 2]) => n.toString().padLeft(width, '0');
+  final f = format ?? capability.startFormat;
+  return f
+      .replaceAll('yyyy', p(t.year, 4))
+      .replaceAll('MM', p(t.month))
+      .replaceAll('dd', p(t.day))
+      .replaceAll('HH', p(t.hour))
+      .replaceAll('mm', p(t.minute))
+      .replaceAll('ss', p(t.second))
+      .replaceAll('X', t.timeZoneOffset.inSeconds == 0 ? 'Z' : '');
+}
+
 @immutable
 class MediaCategory {
   final String id;

@@ -56,12 +56,19 @@ class SourceConfig {
     // (app bar, player badge, logs); fall back to each source's derived name when
     // it's blank.
     final name = label.trim().isEmpty ? null : label.trim();
+    final catchupTimezone = settings['catchupTimezone']?.toString();
+    final catchupOffsetMinutes = int.tryParse(
+      '${settings['catchupOffsetMinutes'] ?? ''}',
+    );
+    final catchupMaxDays = int.tryParse('${settings['catchupMaxDays'] ?? ''}');
     switch (kind) {
       case SourceKind.stalker:
         return StalkerSource(
           sourceId: id,
           portal: fields['portal']!,
           mac: fields['mac']!,
+          catchupTimezone: catchupTimezone,
+          catchupOffsetMinutes: catchupOffsetMinutes,
           displayName: name,
         );
       case SourceKind.xtream:
@@ -71,6 +78,9 @@ class SourceConfig {
           username: fields['username']!,
           password: fields['password']!,
           playlistExpiryHint: fields['playlistExpiryHint'],
+          catchupTimezone: catchupTimezone,
+          catchupOffsetMinutes: catchupOffsetMinutes,
+          catchupMaxDays: catchupMaxDays,
           displayName: name,
         );
       case SourceKind.m3u:
