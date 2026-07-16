@@ -27,8 +27,10 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 9 — Native player lifecycle (ready for PR; owner-hardware verification outstanding)
-- Previous PR: PR 8 merged as #108; PR 7 merged as #107
+- Active PR: PR 10 — Bounded one-pass isolate ingestion (design pass)
+- Previous PR: PR 9 merged as #109 and released as v0.1.35 (direct + Play
+  closed testing); both 100-cycle soaks passed on 2026-07-16; device matrices
+  stay open while the closed test gathers data
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -76,7 +78,7 @@ Status convention:
 | 6 | Phase 1 | Guard controllers against stale async results | M | PR 0 | Complete; #106 |
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Complete; #107 |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Complete; #108 |
-| 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | Ready for PR |
+| 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | Merged; #109/v0.1.35 — device matrices outstanding |
 | 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
 | 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
 | 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | [ ] |
@@ -587,14 +589,17 @@ device-matrix boxes, which the owner runs.
   `debugCounters` method on the existing HDR channel (no new inbound channel);
   shown in a debug-only diagnostics-screen section; release builds are inert
   and reply with an empty map.
-- [ ] A 100-cycle Android open/close soak returns counters to zero. Owner-run:
+- [x] A 100-cycle Android open/close soak returns counters to zero. Owner-run:
   `flutter test integration_test/player_soak_test.dart -d <android-device>`
   (the debug-only `soakAutoCloseMs` extra self-finishes `HdrPlayerActivity`
-  each cycle).
-- [ ] A 100-cycle Windows open/close soak returns counters to zero. Owner-run:
-  `flutter test integration_test/player_soak_test.dart -d windows`.
+  each cycle). Passed on 2026-07-16; every counter returned to zero.
+- [x] A 100-cycle Windows open/close soak returns counters to zero. Owner-run:
+  `flutter test integration_test/player_soak_test.dart -d windows`. Passed on
+  2026-07-16; every counter returned to zero.
 - [ ] Android phone device matrix passes. Owner hardware; includes the PR 8
-  `nativeClosed`-after-supersede smoke.
+  `nativeClosed`-after-supersede smoke. In progress: the 0.1.35 closed test
+  (approved 2026-07-16, TestersCommunity window through ~2026-07-30) is
+  gathering field data alongside the owner runs.
 - [ ] Android TV device matrix passes. Owner hardware.
 - [ ] Windows SDR device matrix passes. Owner hardware; includes the PR 8
   route-replacement handoff smoke.
@@ -813,7 +818,9 @@ device-matrix boxes, which the owner runs.
 - [ ] Android TV lifecycle and focus matrices pass on a device.
 - [x] Windows x64 release build succeeds in PR #98 CI on 2026-07-14.
 - [ ] Windows SDR and HDR lifecycle matrices pass on hardware.
-- [ ] Android and Windows 100-cycle playback soaks return resource counters to zero.
+- [x] Android and Windows 100-cycle playback soaks return resource counters to
+  zero. Owner-run on 2026-07-16 via `integration_test/player_soak_test.dart`
+  on both platforms.
 
 ### General quality
 
@@ -877,6 +884,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-15 | PR 8 | Complete | Merged as #108 (`4458068`) with all CI checks green. |
 | 2026-07-16 | PR 9 | Ready for PR | Audit-first pass over the whole native lifecycle found two defects, both fixed: Windows surface-creation failure now raises the terminal error/Retry overlay instead of silent audio-only playback behind a black overlay, and preview PlatformView disposal now detaches the destroyed `TextureView` from ExoPlayer (identity-checked, skipped while adopted). Added the full debug-only counter registry across Dart/Kotlin/C++ (release-inert, merged via `debugCounters` on the existing HDR channel, shown on the diagnostics screen), the owner-runnable 100-cycle soak (`integration_test/player_soak_test.dart`, with a debug-only auto-close extra so `HdrPlayerActivity` cycles unattended), idempotent engine `release()`s, and the pure `ReconnectPolicy` extraction pinned by 4 new plain-JUnit tests. Analyze clean; 305 Dart tests pass (+1 counter-balance test); Kotlin compile + 6/6 JVM tests pass. Remaining open boxes are owner-hardware: both 100-cycle soaks, the four device matrices (which absorb the two PR 8 smokes), and the two hardware-only Windows items (DPI/monitor changes, reconnect after surface recreation). |
 | 2026-07-16 | Store setup | Complete | Android developer verification registered the Play and GitHub-direct packages with their separate certificates; the Play-installed internal-track APK matched the Play-managed fingerprint; privacy, data-safety, content-rating, phone, and TV listings plus internal phone/TV smoke tests are complete. Internal testing continues before production publication. |
+| 2026-07-16 | PR 9 | Complete (matrices open) | Merged as #109 (`49ea241`) with all CI checks green and released as v0.1.35 (signed direct release + Play AAB). Google approved the 0.1.35 closed-testing release the same day; TestersCommunity's 14-day tester window opened 2026-07-16, so the personal-account production gate completes no earlier than 2026-07-30. Owner ran both 100-cycle soaks (Android and Windows) on 2026-07-16 and every counter returned to zero. The four device matrices and the two hardware-only Windows items stay open while closed-test feedback accumulates. |
+| 2026-07-16 | PR 10 | In progress | Design pass started on `perf/isolate-ingestion`: audit the four ingestion paths, develop competing worker-boundary designs, then implement bounded one-pass isolate ingestion against the PR 0 fixture corpus and budgets. |
 
 ## Removal checklist
 
