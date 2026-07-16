@@ -227,8 +227,9 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   void _revealRow(int row) {
     if (!_vController.hasClients) return;
     final position = _vController.position;
-    final target = (row * _rowHeight - (position.viewportDimension - _rowHeight) / 2)
-        .clamp(0.0, position.maxScrollExtent);
+    final target =
+        (row * _rowHeight - (position.viewportDimension - _rowHeight) / 2)
+            .clamp(0.0, position.maxScrollExtent);
     if ((target - position.pixels).abs() < 0.5) return;
     _vController.animateTo(
       target,
@@ -657,10 +658,13 @@ double _cellWidth(
       ? windowStart
       : programme.start;
   var stop = programme.stop.isAfter(windowEnd) ? windowEnd : programme.stop;
-  if (nextStart != null && nextStart.isAfter(start) && nextStart.isBefore(stop)) {
+  if (nextStart != null &&
+      nextStart.isAfter(start) &&
+      nextStart.isBefore(stop)) {
     stop = nextStart;
   }
-  final width = stop.difference(start).inMinutes * _EpgGridScreenState._pxPerMinute;
+  final width =
+      stop.difference(start).inMinutes * _EpgGridScreenState._pxPerMinute;
   return width < 24 ? 24 : width;
 }
 
@@ -810,6 +814,9 @@ class _ChannelRow extends StatelessWidget {
                       bottom: 2,
                       child: _ProgrammeCell(
                         programme: p,
+                        channelName: channel.name,
+                        position: i + 1,
+                        total: programmes.length,
                         selected: i == selectedIndex,
                         onTap: () => onTapProgramme(p),
                       ),
@@ -838,11 +845,17 @@ class _ChannelRow extends StatelessWidget {
 /// implicit animation. Focus/selection lives in the parent grid.
 class _ProgrammeCell extends StatelessWidget {
   final Programme programme;
+  final String channelName;
+  final int position;
+  final int total;
   final bool selected;
   final VoidCallback onTap;
 
   const _ProgrammeCell({
     required this.programme,
+    required this.channelName,
+    required this.position,
+    required this.total,
     required this.selected,
     required this.onTap,
   });
@@ -861,38 +874,46 @@ class _ProgrammeCell extends StatelessWidget {
     final isCurrent =
         !programme.start.isAfter(now) && programme.stop.isAfter(now);
     final isPast = !programme.stop.isAfter(now);
-    return GestureDetector(
+    return Semantics(
+      label:
+          '${programme.title}, $channelName, ${_EpgGridScreenState._hm(programme.start)} to ${_EpgGridScreenState._hm(programme.stop)}, $position of $total',
+      button: true,
+      selected: selected,
       onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        decoration: BoxDecoration(
-          color: selected ? _selectedFill : AppColors.panel,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          border: Border.all(
-            color: selected ? AppColors.accent : AppColors.line,
-            width: selected ? 2 : 1,
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          decoration: BoxDecoration(
+            color: selected ? _selectedFill : AppColors.panel,
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+            border: Border.all(
+              color: selected ? AppColors.accent : AppColors.line,
+              width: selected ? 2 : 1,
+            ),
           ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              programme.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: selected || isCurrent
-                    ? AppColors.textHi
-                    : isPast
-                    ? AppColors.textLo
-                    : AppColors.textLo.withValues(alpha: 0.8),
-                fontSize: 12,
-                fontWeight: selected
-                    ? FontWeight.w700
-                    : isCurrent
-                    ? FontWeight.w600
-                    : FontWeight.w400,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                programme.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: selected || isCurrent
+                      ? AppColors.textHi
+                      : isPast
+                      ? AppColors.textLo
+                      : AppColors.textLo.withValues(alpha: 0.8),
+                  fontSize: 12,
+                  fontWeight: selected
+                      ? FontWeight.w700
+                      : isCurrent
+                      ? FontWeight.w600
+                      : FontWeight.w400,
+                ),
               ),
             ),
           ),

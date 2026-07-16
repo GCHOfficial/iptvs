@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 
 import '../sources/source.dart';
 import '../theme.dart';
@@ -274,41 +275,47 @@ class LiveTabView extends StatelessWidget {
         padding: padding,
         itemExtent: channelRowExtent,
         itemCount: visible.length,
+        semanticChildCount: visible.length,
         itemBuilder: (context, i) {
           final c = visible[i];
-          return _ChannelTile(
-            channel: c,
-            now: now[c.id],
-            next: next[c.id],
-            favorite: isFavorite(c.id),
-            enabled: !resolving,
-            // The cursor is drawn even when the list doesn't own the D-pad —
-            // subdued rather than accented — so you can always see where you'll
-            // land when you come back, while the *accent* clearly marks which
-            // pane the D-pad is actually in.
-            cursor: i == selectedChannelIndex,
-            favoriteCursor:
-                i == selectedChannelIndex &&
-                channelColumn == ChannelRowColumn.favorite,
-            listFocused: channelsFocusNode.hasFocus,
-            previewing: c.id == previewChannelId,
-            onTap: () {
-              onSelectChannelIndex(i);
-              onPlayChannel(c);
-            },
-            onToggleFavorite: () {
-              onSelectChannelIndex(i);
-              onToggleFavorite(c.id);
-            },
-            // Phone: long-press opens the audible preview sheet (it carries
-            // Play, favorite and catch-up). Wide layouts already have the
-            // preview panel, so long-press does nothing there.
-            onLongPress: wide
-                ? null
-                : () {
-                    onSelectChannelIndex(i);
-                    onPreviewChannel(c);
-                  },
+          return IndexedSemantics(
+            index: i,
+            child: _ChannelTile(
+              channel: c,
+              now: now[c.id],
+              next: next[c.id],
+              favorite: isFavorite(c.id),
+              enabled: !resolving,
+              position: i + 1,
+              total: visible.length,
+              // The cursor is drawn even when the list doesn't own the D-pad —
+              // subdued rather than accented — so you can always see where you'll
+              // land when you come back, while the *accent* clearly marks which
+              // pane the D-pad is actually in.
+              cursor: i == selectedChannelIndex,
+              favoriteCursor:
+                  i == selectedChannelIndex &&
+                  channelColumn == ChannelRowColumn.favorite,
+              listFocused: channelsFocusNode.hasFocus,
+              previewing: c.id == previewChannelId,
+              onTap: () {
+                onSelectChannelIndex(i);
+                onPlayChannel(c);
+              },
+              onToggleFavorite: () {
+                onSelectChannelIndex(i);
+                onToggleFavorite(c.id);
+              },
+              // Phone: long-press opens the audible preview sheet (it carries
+              // Play, favorite and catch-up). Wide layouts already have the
+              // preview panel, so long-press does nothing there.
+              onLongPress: wide
+                  ? null
+                  : () {
+                      onSelectChannelIndex(i);
+                      onPreviewChannel(c);
+                    },
+            ),
           );
         },
       ),
@@ -483,17 +490,23 @@ class _LiveCategoryPane extends StatelessWidget {
                 controller: scrollController,
                 itemExtent: rowExtent,
                 itemCount: items.length,
+                semanticChildCount: items.length,
                 itemBuilder: (context, i) {
                   final item = items[i];
-                  return _CategoryRow(
-                    label: item.label,
-                    active: item.id == selectedCategoryId,
-                    cursor: i == selectedIndex,
-                    listFocused: focusNode.hasFocus,
-                    onTap: () {
-                      onSelectIndex(i);
-                      onSelected(item.id);
-                    },
+                  return IndexedSemantics(
+                    index: i,
+                    child: _CategoryRow(
+                      label: item.label,
+                      active: item.id == selectedCategoryId,
+                      cursor: i == selectedIndex,
+                      listFocused: focusNode.hasFocus,
+                      position: i + 1,
+                      total: items.length,
+                      onTap: () {
+                        onSelectIndex(i);
+                        onSelected(item.id);
+                      },
+                    ),
                   );
                 },
               ),
@@ -516,6 +529,8 @@ class _CategoryRow extends StatelessWidget {
 
   /// The sidebar currently owns the D-pad (see [_ChannelTile.listFocused]).
   final bool listFocused;
+  final int position;
+  final int total;
   final VoidCallback onTap;
 
   const _CategoryRow({
@@ -523,40 +538,49 @@ class _CategoryRow extends StatelessWidget {
     required this.active,
     required this.cursor,
     required this.listFocused,
+    required this.position,
+    required this.total,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final focused = cursor && listFocused;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Material(
-        type: MaterialType.transparency,
-        child: InkWell(
-          canRequestFocus: false,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          hoverColor: AppColors.panelHi,
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            decoration: BoxDecoration(
-              color: cursor ? AppColors.panelHi : AppColors.panel,
-              borderRadius: BorderRadius.circular(AppRadius.tile),
-              border: Border.all(
-                color: focused ? AppColors.accent : AppColors.line,
-                width: focused ? 2 : 1,
+    return Semantics(
+      label: '$label, $position of $total',
+      button: true,
+      selected: active,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            canRequestFocus: false,
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+            hoverColor: AppColors.panelHi,
+            onTap: onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              decoration: BoxDecoration(
+                color: cursor ? AppColors.panelHi : AppColors.panel,
+                borderRadius: BorderRadius.circular(AppRadius.tile),
+                border: Border.all(
+                  color: focused ? AppColors.accent : AppColors.line,
+                  width: focused ? 2 : 1,
+                ),
               ),
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            alignment: Alignment.centerLeft,
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: active || cursor ? AppColors.textHi : AppColors.textLo,
-                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              alignment: Alignment.centerLeft,
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: active || cursor ? AppColors.textHi : AppColors.textLo,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                ),
               ),
             ),
           ),
@@ -1285,6 +1309,8 @@ class _ChannelTile extends StatelessWidget {
   final Programme? next;
   final bool favorite;
   final bool enabled;
+  final int position;
+  final int total;
 
   /// The D-pad selection cursor is on this row.
   final bool cursor;
@@ -1312,6 +1338,8 @@ class _ChannelTile extends StatelessWidget {
     required this.next,
     required this.favorite,
     required this.enabled,
+    required this.position,
+    required this.total,
     required this.cursor,
     required this.favoriteCursor,
     required this.listFocused,
@@ -1340,145 +1368,167 @@ class _ChannelTile extends StatelessWidget {
     // the *body* column; on the favorite column the star cell takes it over.
     // The panelHi fill stays either way, so the selected row remains visible.
     final active = cursor && listFocused && !favoriteCursor;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Material(
-        type: MaterialType.transparency,
-        child: InkWell(
-          canRequestFocus: false,
-          borderRadius: BorderRadius.circular(AppRadius.tile),
-          hoverColor: AppColors.panelHi,
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            decoration: BoxDecoration(
-              color: cursor ? AppColors.panelHi : AppColors.panel,
-              borderRadius: BorderRadius.circular(AppRadius.tile),
-              border: Border.all(
-                color: active ? AppColors.accent : AppColors.line,
-                width: active ? 2 : 1,
+    final programmeLabels = [
+      if (current != null) nowProgrammeLabel(current),
+      if (upcoming != null) nextProgrammeLabel(upcoming),
+    ].join(', ');
+    final semanticsLabel = [
+      channel.name,
+      if (programmeLabels.isNotEmpty) programmeLabels,
+      '$position of $total',
+      favorite ? 'Favorite' : 'Not favorite',
+    ].join(', ');
+    final favoriteAction = CustomSemanticsAction(
+      label: favorite ? 'Remove from favorites' : 'Add to favorites',
+    );
+    return Semantics(
+      label: semanticsLabel,
+      button: true,
+      selected: cursor,
+      enabled: enabled,
+      onTap: enabled ? onTap : null,
+      customSemanticsActions: {favoriteAction: onToggleFavorite},
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            canRequestFocus: false,
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+            hoverColor: AppColors.panelHi,
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              decoration: BoxDecoration(
+                color: cursor ? AppColors.panelHi : AppColors.panel,
+                borderRadius: BorderRadius.circular(AppRadius.tile),
+                border: Border.all(
+                  color: active ? AppColors.accent : AppColors.line,
+                  width: active ? 2 : 1,
+                ),
               ),
-            ),
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: metrics.compact ? 10 : 12,
-                vertical: metrics.compact ? 6 : 8,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  _Logo(channel: channel, size: metrics.compact ? 36 : 40),
-                  SizedBox(width: metrics.compact ? 10 : 12),
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          channel.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        if (current != null) ...[
-                          const SizedBox(height: 4),
-                          // Current show on its own emphasized line — leads with the
-                          // title so a long channel name never hides it.
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: metrics.compact ? 10 : 12,
+                  vertical: metrics.compact ? 6 : 8,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _Logo(channel: channel, size: metrics.compact ? 36 : 40),
+                    SizedBox(width: metrics.compact ? 10 : 12),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           Text(
-                            nowProgrammeLabel(current),
+                            channel.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: AppColors.accent,
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w600,
-                            ),
+                            style: Theme.of(context).textTheme.titleMedium,
                           ),
-                          const SizedBox(height: 4),
-                          // Time range + progress share a row so the bar reads as
-                          // "where we are between these times".
-                          Row(
-                            children: [
-                              Text(
-                                programmeTimeRange(current),
-                                style: const TextStyle(
-                                  color: AppColors.textLo,
-                                  fontSize: 11.5,
-                                ),
+                          if (current != null) ...[
+                            const SizedBox(height: 4),
+                            // Current show on its own emphasized line — leads with the
+                            // title so a long channel name never hides it.
+                            Text(
+                              nowProgrammeLabel(current),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.accent,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
                               ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(3),
-                                  child: LinearProgressIndicator(
-                                    value: progress,
-                                    minHeight: 3,
-                                    backgroundColor: AppColors.line,
-                                    valueColor:
-                                        const AlwaysStoppedAnimation<Color>(
-                                          AppColors.accent,
-                                        ),
+                            ),
+                            const SizedBox(height: 4),
+                            // Time range + progress share a row so the bar reads as
+                            // "where we are between these times".
+                            Row(
+                              children: [
+                                Text(
+                                  programmeTimeRange(current),
+                                  style: const TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 11.5,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(3),
+                                    child: LinearProgressIndicator(
+                                      value: progress,
+                                      minHeight: 3,
+                                      backgroundColor: AppColors.line,
+                                      valueColor:
+                                          const AlwaysStoppedAnimation<Color>(
+                                            AppColors.accent,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            if (upcoming != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  nextProgrammeLabel(upcoming),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 11.5,
                                   ),
                                 ),
                               ),
-                            ],
-                          ),
-                          if (upcoming != null)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                nextProgrammeLabel(upcoming),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: AppColors.textLo,
-                                  fontSize: 11.5,
-                                ),
-                              ),
-                            ),
+                          ],
                         ],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // Always-visible favorite star: a touch target on every row,
-                  // and the D-pad's intra-row favorite column when
-                  // [favoriteCursor] holds the cursor. Sized well inside the
-                  // fixed itemExtents (72 / 112), so the row never overflows.
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: onToggleFavorite,
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: favoriteCursor && listFocused
-                            ? AppColors.panelHi
-                            : null,
-                        borderRadius: BorderRadius.circular(AppRadius.tile),
-                        border: favoriteCursor && listFocused
-                            ? Border.all(color: AppColors.accent, width: 2)
-                            : null,
-                      ),
-                      child: Icon(
-                        favorite
-                            ? Icons.star_rounded
-                            : Icons.star_outline_rounded,
-                        size: 20,
-                        color: favorite
-                            ? AppColors.accent
-                            : AppColors.textLo.withValues(alpha: 0.55),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Icon(
-                    previewing
-                        ? Icons.play_circle_fill_rounded
-                        : Icons.play_arrow_rounded,
-                    color: enabled ? AppColors.accent : AppColors.textLo,
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    // Always-visible favorite star: a touch target on every row,
+                    // and the D-pad's intra-row favorite column when
+                    // [favoriteCursor] holds the cursor. Sized well inside the
+                    // fixed itemExtents (72 / 112), so the row never overflows.
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onToggleFavorite,
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: favoriteCursor && listFocused
+                              ? AppColors.panelHi
+                              : null,
+                          borderRadius: BorderRadius.circular(AppRadius.tile),
+                          border: favoriteCursor && listFocused
+                              ? Border.all(color: AppColors.accent, width: 2)
+                              : null,
+                        ),
+                        child: Icon(
+                          favorite
+                              ? Icons.star_rounded
+                              : Icons.star_outline_rounded,
+                          size: 20,
+                          color: favorite
+                              ? AppColors.accent
+                              : AppColors.textLo.withValues(alpha: 0.55),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(
+                      previewing
+                          ? Icons.play_circle_fill_rounded
+                          : Icons.play_arrow_rounded,
+                      color: enabled ? AppColors.accent : AppColors.textLo,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

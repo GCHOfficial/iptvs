@@ -35,6 +35,7 @@ void main() {
     List<String> toggled,
     List<String?> activated,
     int Function() tabsFocused,
+    void Function(List<Channel>) replaceVisible,
   })
   make({
     List<Channel> visible = const [],
@@ -44,11 +45,12 @@ void main() {
     final played = <String>[];
     final toggled = <String>[];
     final activated = <String?>[];
+    var currentVisible = visible;
     var tabs = 0;
     final focus = LiveFocusCoordinator(
       scrollController: ScrollController(),
       categoryScrollController: ScrollController(),
-      visibleChannels: () => visible,
+      visibleChannels: () => currentVisible,
       orderedCategoryIds: () => categories,
       channelRowExtent: () => 100,
       categoryRowExtent: () => 48,
@@ -66,10 +68,17 @@ void main() {
       toggled: toggled,
       activated: activated,
       tabsFocused: () => tabs,
+      replaceVisible: (replacement) => currentVisible = replacement,
     );
   }
 
   KeyEvent keyDown(LogicalKeyboardKey key) => KeyDownEvent(
+    physicalKey: PhysicalKeyboardKey.keyA,
+    logicalKey: key,
+    timeStamp: Duration.zero,
+  );
+
+  KeyEvent keyRepeat(LogicalKeyboardKey key) => KeyRepeatEvent(
     physicalKey: PhysicalKeyboardKey.keyA,
     logicalKey: key,
     timeStamp: Duration.zero,
@@ -111,6 +120,22 @@ void main() {
   }
 
   group('channel list', () {
+    testWidgets('async replacement retains the selected channel by id', (
+      tester,
+    ) async {
+      final h = make(visible: channels(['a', 'b', 'c']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.selectChannel(1);
+      expect(h.focus.selectedChannelId, 'b');
+
+      h.replaceVisible(channels(['new', 'a', 'b', 'c']));
+      h.focus.clampSelection();
+
+      expect(h.focus.selectedChannelId, 'b');
+      expect(h.focus.selectedChannelIndex, 2);
+    });
+
     testWidgets('Down walks the list and WRAPS past the last row', (
       tester,
     ) async {
@@ -210,6 +235,38 @@ void main() {
   // panes, OK acts on whichever column holds the cursor, and every vertical
   // move resets to the body so the star column is never sticky across rows.
   group('intra-row favorite column', () {
+    testWidgets('held activation cannot play or toggle twice', (tester) async {
+      final h = make(visible: channels(['a']));
+      addTearDown(h.focus.dispose);
+      await host(tester, h.focus);
+      h.focus.focusChannels();
+      await tester.pump();
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.select),
+      );
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyRepeat(LogicalKeyboardKey.select),
+      );
+      expect(h.played, ['a']);
+
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.arrowRight),
+      );
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyDown(LogicalKeyboardKey.select),
+      );
+      h.focus.handleChannelsKey(
+        h.focus.channelsFocusNode,
+        keyRepeat(LogicalKeyboardKey.select),
+      );
+      expect(h.toggled, ['a']);
+    });
+
     testWidgets('Right moves body → favorite; a second Right is consumed '
         'without change', (tester) async {
       final h = make(visible: channels(['a', 'b']));

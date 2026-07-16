@@ -65,6 +65,12 @@ retry* pipeline that key auto-repeat outran, that geometry traversal leaked out 
 re-asserts fought. Selecting row N is now a synchronous integer assignment that cannot fail or
 race.
 
+The coordinator also retains the selected channel's stable id. After an async
+refresh inserts, removes, or reorders rows, it reconciles the numeric cursor to
+that id before repainting; if the channel disappeared it clamps to the nearest
+valid index. Explicit search and category changes intentionally reset to the
+first result.
+
 Wide-layout geometry is also platform- and height-aware. Android TV images can expose either a
 960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot identify the
 required density. Android wide layouts use the compact 0.75 scale; other platforms scale from
@@ -144,6 +150,12 @@ archaeology). Live:
    (`TvTextField.clear`) peels to the search cell on live / the tabs on media;
 7. tabs → **exit**, behind a double-Back inside a 2s window (first press shows a "Press Back
    again to exit" snackbar), stopping the preview engine on the actual exit.
+
+Browsing bottom sheets capture the focus node that opened them and restore it
+after ordinary dismissal when it is still attached. If a lazy rebuild removed
+that node, the live list, media first tile, or current tab is used as a
+route-safe fallback. Playback launched from a sheet uses the dedicated
+post-player restoration path.
 
 Media keeps its own rungs (deep grid → top of grid → tabs). The **chrome** — the AppBar actions
 and the toolbar's buttons, which are plain `IconButton`s with **no route key** (`''`), while every
