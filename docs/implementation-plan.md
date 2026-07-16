@@ -27,14 +27,11 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: none — PR 11 merged as #111; its owner-run live-project
-  verification items are the next action, then PR 12 (historical migration
-  coverage) begins
-- Previous PR: PR 11 merged as #111 (`harden_cloud` migration confirmed
-  applied to the live project; advisor shows no mutable-search_path warnings);
-  PR 10 merged as #110 (on-device TV-Low stall/RSS capture outstanding); PR 9
-  released as v0.1.35; device matrices stay open while the closed test
-  gathers data
+- Active PR: none — PR 12 (historical migration coverage) is next
+- Previous PR: PR 11 complete — merged as #111, released as v0.1.36, live
+  verification passed 2026-07-16; PR 10 merged as #110 (on-device TV-Low
+  stall/RSS capture outstanding); device matrices stay open while the closed
+  test gathers data
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -724,17 +721,18 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ### Verification
 
-- [ ] Cross-user profile read/write attempts fail. Owner-run on the live
-  project (two accounts) after merge.
-- [ ] Expired pairing codes fail. Owner-run on the live project.
-- [ ] Completed pairing codes cannot be replayed. Owner-run on the live project.
-- [ ] Concurrent profile creation cannot exceed the profile cap. Owner-run:
-  parallel inserts at cap 20 exercise the new advisory lock.
-- [ ] Invalid or excessive push payloads fail before mutation. Owner-run:
-  assert typed `iptvs: ` error and unchanged rows; also record the Supabase
-  gateway's empirical max request-body size (a 413 below our 16 MB ceilings
-  would bound extreme payloads before the typed error; realistic payloads are
-  ~2 MB).
+- [x] Cross-user profile read/write attempts fail. Owner-run on the live
+  project (two accounts) on 2026-07-16 after v0.1.36.
+- [x] Expired pairing codes fail. Owner-run on the live project, 2026-07-16.
+- [x] Completed pairing codes cannot be replayed. Owner-run on the live
+  project, 2026-07-16.
+- [x] Concurrent profile creation cannot exceed the profile cap. Owner-run
+  parallel inserts at cap 20 exercised the new advisory lock, 2026-07-16.
+- [x] Invalid or excessive push payloads fail before mutation. Owner-run on
+  the live project, 2026-07-16: typed `iptvs: ` errors with rows unchanged,
+  and the >30/min push throttle rejects. Gateway body-size probing showed no
+  413 interfering at the tested payload sizes (realistic payloads are ~2 MB;
+  the exact platform ceiling was not pinned to a number).
 - [x] Clock-skew and equal-timestamp conflict cases are deterministic. By
   construction: no client timestamps exist anywhere — `updated_at` is server
   `now()` via trigger/RPC and is never compared; conflicts resolve by write
@@ -983,6 +981,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 11 | In progress | Deep-reasoner design pass complete on `sec/cloud-hardening`: gaps confirmed (no payload validation anywhere, `search_path = public` on 11 SECURITY DEFINER functions, no push rate limit, panel/Flutter error surfaces can echo Postgres `details`), pairing single-use verified already sound, ownership sweep found no gap. Implementing: one idempotent migration (BEFORE-trigger validation + RPC top-level guards + DB-side push rate limit), panel validation/error scrubbing, Flutter `friendlyCloudError`. |
 | 2026-07-16 | PR 11 | Ready for PR | Migration `20260716000000_harden_cloud.sql` (search_path sweep, trigger + RPC validation with ≥10x-over-250k-corpus limits, per-device push rate limit, advisory-locked INVOKER profile cap, `delete_account` reaps rate rows; orchestrator review added the kind/NOT-NULL/position pre-emption so table-constraint errors can't echo "Failing row contains" credentials). Panel: `validate.js` scheme/length validation + `friendlyError`/`scrubUrls` on every error surface, 20 node tests green. Flutter: `friendlyCloudError` replaces all raw `'$e'` sites (PostgrestException `details` leak closed), 4 new tests. Analyze clean; 338 tests pass. Live-project verification items are owner-run after merge (the migration auto-applies on push to main). |
 | 2026-07-16 | PR 11 | Merged (live checks open) | Merged as #111 (`545fc93`); all functional CI green (the one red check was GitGuardian's documented false positive on the synthetic credential fixtures in `panel/test/validate.test.js`). The Supabase GitHub integration applied `20260716000000_harden_cloud` to the live project, and the security advisor now shows no mutable-`search_path` findings — remaining advisor items are documented-intentional (policy-less `push_rate`, the privileged RPC surface, anonymous device sessions) plus Supabase's own benign `rls_auto_enable` event-trigger helper. Owner-run live verification (cross-user rejection, pairing expiry/replay, concurrent profile-cap race, oversized/throttled pushes, gateway body-size bound) remains open. |
+| 2026-07-16 | PR 11 | Complete | v0.1.36 released (signed direct release; all workflow gates green) and the owner completed the live-project verification pass the same day: 0.1.35→0.1.36 in-app update plus normal sync/panel smoke, oversized/invalid pushes rejected with typed `iptvs: ` errors before mutation, >30/min push throttle, pairing expiry/replay and cross-user rejection, and the concurrent profile-cap race at 20. No gateway 413 interfered at tested payload sizes. |
 
 ## Removal checklist
 
