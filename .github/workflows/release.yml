@@ -284,8 +284,40 @@ jobs:
             return 1
           }
 
-          if retry gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            retry gh release edit "$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file body.md
+          # Probe existence via the REST status code. `gh release view` is
+          # unusable here: it reports "release not found" for *any* REST
+          # failure (a 503 during an API outage looks identical to a real
+          # 404), which would misroute an existing release into `create`
+          # and a persistent "already exists" failure. With `gh api`, a
+          # real 404 answers immediately; anything else is transient and
+          # goes back through retry.
+          exists=""
+          probe_release() {
+            local err
+            if err=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --silent 2>&1); then
+              exists=yes
+              return 0
+            fi
+            if grep -q "HTTP 404" <<<"$err"; then
+              exists=no
+              return 0
+            fi
+            printf '%s\n' "$err" >&2
+            return 1
+          }
+          retry probe_release
+
+          if [ "$exists" = yes ]; then
+            edit_args=("$RELEASE_TAG" --title "$RELEASE_NAME")
+            # Keep the existing notes when the AI changelog came back empty
+            # (fail-open) — an empty --notes-file would wipe them.
+            if [ -s body.md ]; then
+              edit_args+=(--notes-file body.md)
+            fi
+            if [ "$RELEASE_TRACK" = beta ]; then
+              edit_args+=(--prerelease)
+            fi
+            retry gh release edit "${edit_args[@]}"
           else
             create_args=("$RELEASE_TAG" --verify-tag --title "$RELEASE_NAME" --notes-file body.md --generate-notes)
             if [ "$RELEASE_TRACK" = beta ]; then
