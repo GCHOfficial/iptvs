@@ -448,7 +448,7 @@ String redactText(String text) {
     caseSensitive: false,
   ).firstMatch(text);
   if (urlMatch != null) {
-    final redactedUrl = _redactUrlPath(urlMatch.group(0)!);
+    final redactedUrl = _redactUrlPath(redactUrl(urlMatch.group(0)!));
     return text.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
   }
   return _redactUrlPath(text);
@@ -465,7 +465,9 @@ String _redactUrlPath(String value) {
     return looksSecret ? '<redacted>' : segment;
   }).toList();
   final path = cleanSegments.join('/');
-  final authority = uri.hasAuthority ? '${uri.scheme}://${uri.authority}' : '';
+  final authority = uri.hasAuthority
+      ? '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}'
+      : '';
   final prefix = authority.isNotEmpty
       ? authority
       : (uri.scheme.isNotEmpty ? '${uri.scheme}:' : '');

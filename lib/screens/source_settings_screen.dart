@@ -56,7 +56,20 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   bool _loading = true;
 
   final TextEditingController _searchController = TextEditingController();
+  late final TextEditingController _catchupTimezoneController =
+      TextEditingController(
+        text: _config.settings['catchupTimezone']?.toString() ?? '',
+      );
+  late final TextEditingController _catchupOffsetController =
+      TextEditingController(
+        text: _config.settings['catchupOffsetMinutes']?.toString() ?? '',
+      );
+  late final TextEditingController _catchupDaysController =
+      TextEditingController(
+        text: _config.settings['catchupMaxDays']?.toString() ?? '',
+      );
   String _query = '';
+  String? _catchupError;
 
   @override
   void initState() {
@@ -67,21 +80,27 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   @override
   void dispose() {
     _searchController.dispose();
+    _catchupTimezoneController.dispose();
+    _catchupOffsetController.dispose();
+    _catchupDaysController.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
-    // The cache is keyed by the credential-derived [Source.id] (e.g.
-    // `stalker:portal|mac`), NOT the [SourceConfig] UUID — so resolve the
-    // built source's id to read the categories browsing stored.
+    // The cache is keyed by the stable SourceConfig UUID exposed as Source.id.
+    // Resolve it through the built source so this screen stays provider-neutral.
     final source = _config.build();
     final sourceId = source.id;
     await source.dispose();
     final live = await widget.db.readCategories(sourceId);
-    final movies =
-        await widget.db.readMediaCategories(sourceId, ContentKind.movie);
-    final series =
-        await widget.db.readMediaCategories(sourceId, ContentKind.series);
+    final movies = await widget.db.readMediaCategories(
+      sourceId,
+      ContentKind.movie,
+    );
+    final series = await widget.db.readMediaCategories(
+      sourceId,
+      ContentKind.series,
+    );
     if (!mounted) return;
     setState(() {
       _live = live;
@@ -129,7 +148,11 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   /// categories keep their state (the helper merges rather than replaces).
   Future<void> _bulkSection(ContentKind kind, {required bool hide}) async {
     final ids = _filtered(kind).map((c) => c.id);
-    final next = bulkToggleHidden(_config.hiddenCategoryIds(kind), ids, hide: hide);
+    final next = bulkToggleHidden(
+      _config.hiddenCategoryIds(kind),
+      ids,
+      hide: hide,
+    );
     await _save(_config.withHiddenCategories(kind, next));
   }
 
@@ -146,7 +169,44 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     await _save(next);
   }
 
-  bool get _hasAnyMatch => ContentKind.values.any((k) => _filtered(k).isNotEmpty);
+  Future<void> _saveCatchupOverrides() async {
+    final timezone = _catchupTimezoneController.text.trim();
+    final offsetText = _catchupOffsetController.text.trim();
+    final daysText = _catchupDaysController.text.trim();
+    final offset = offsetText.isEmpty ? null : int.tryParse(offsetText);
+    final days = daysText.isEmpty ? null : int.tryParse(daysText);
+    String? error;
+    if (!isSupportedCatchupTimezone(timezone)) {
+      error =
+          'Use an IANA timezone such as Europe/London, UTC, or a fixed offset.';
+    } else if (offsetText.isNotEmpty &&
+        (offset == null || offset < -14 * 60 || offset > 14 * 60)) {
+      error = 'Fixed offset must be minutes between -840 and 840.';
+    } else if (daysText.isNotEmpty &&
+        (days == null || days <= 0 || days > 365)) {
+      error = 'Archive window must be between 1 and 365 days.';
+    }
+    if (error != null) {
+      setState(() => _catchupError = error);
+      return;
+    }
+    final settings = <String, dynamic>{..._config.settings}
+      ..remove('catchupTimezone')
+      ..remove('catchupOffsetMinutes')
+      ..remove('catchupMaxDays');
+    if (timezone.isNotEmpty) settings['catchupTimezone'] = timezone;
+    if (offset != null) settings['catchupOffsetMinutes'] = offset;
+    if (days != null) settings['catchupMaxDays'] = days;
+    await _save(_config.copyWith(settings: settings));
+    if (!mounted) return;
+    setState(() => _catchupError = null);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Catch-up overrides saved')));
+  }
+
+  bool get _hasAnyMatch =>
+      ContentKind.values.any((k) => _filtered(k).isNotEmpty);
 
   @override
   Widget build(BuildContext context) {
@@ -206,6 +266,61 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                       ],
                     ),
                   ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                  child: Text(
+                    'Advanced catch-up',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                  child: Text(
+                    'Leave these empty to use provider values. A fixed offset '
+                    'takes precedence over the timezone.',
+                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                  ),
+                ),
+                TvTextField(
+                  controller: _catchupTimezoneController,
+                  hintText: 'Europe/London or UTC',
+                  label: 'Provider timezone',
+                  textInputAction: TextInputAction.next,
+                ),
+                const SizedBox(height: 8),
+                TvTextField(
+                  controller: _catchupOffsetController,
+                  hintText: 'e.g. 120',
+                  label: 'Fixed offset in minutes',
+                  textInputAction: TextInputAction.next,
+                ),
+                const SizedBox(height: 8),
+                TvTextField(
+                  controller: _catchupDaysController,
+                  hintText: 'e.g. 7',
+                  label: 'Maximum archive days',
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _saveCatchupOverrides(),
+                ),
+                if (_catchupError != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+                    child: Text(
+                      _catchupError!,
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: FilledButton.icon(
+                      onPressed: _saveCatchupOverrides,
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Save catch-up overrides'),
+                    ),
+                  ),
+                ),
                 _section('Live TV', ContentKind.live),
                 _section('Movies', ContentKind.movie),
                 _section('Series', ContentKind.series),

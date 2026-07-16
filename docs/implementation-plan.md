@@ -26,12 +26,12 @@ Status convention:
 ## Current status
 
 - Last updated: 2026-07-16
-- Active phase: Phase 2 — Performance and maintainability
-- Active PR: PR 16 (diagnostics and conflict/capability UX) — implemented and
-  ready for PR
-- Previous PR: PR 12 complete — merged as #112; PR 11 released as v0.1.36
-  with live verification passed 2026-07-16; PR 10's on-device TV-Low stall/RSS
-  capture remains outstanding while the closed test gathers data
+- Active phase: Phase 4 — Diagnostics and distribution gates
+- Active PR: PR 16 fixes implemented on the working tree; release/device gates
+  remain explicitly open
+- Previous PRs: PR 13–16 merged as #113–#116; PR 11 released as v0.1.36
+  with live verification passed 2026-07-16. PR 10's on-device TV-Low stall/RSS
+  capture and PR 15's physical input/accessibility matrix remain outstanding.
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -41,7 +41,8 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 347 tests with 11 opt-in
+- Current implementation `flutter test`: passed, 367 tests with 14 expected
+  skips
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -64,7 +65,9 @@ Status convention:
   on this gate.
 - [ ] Do not describe Android or Windows lifecycle work as fixed until the relevant
   native build and device tests pass.
-- [ ] Do not begin optional feature work while a Phase 0 release blocker remains.
+- [x] Do not begin optional feature work while a Phase 0 release blocker remains.
+  Phase 0 release blockers are complete; the remaining open items are Phase 1–4
+  device/performance/distribution gates.
 
 ## Pull-request overview
 
@@ -83,10 +86,10 @@ Status convention:
 | 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | Complete; #110 |
 | 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | Complete; #111/v0.1.36 |
 | 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | Complete; #112 |
-| 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | Ready for PR |
-| 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | [ ] |
-| 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | [ ] |
-| 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | Ready for PR |
+| 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | Implemented; #113 |
+| 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | Implemented; timezone/M3U fixes included |
+| 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | Implemented; device matrix open |
+| 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | Implemented; #116 fixes included |
 | 17 | Phase 4 | Publish a channel-safe Microsoft Store MSIX | M | PRs 2 and 9 | [ ] |
 
 Effort guide:
@@ -862,8 +865,9 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 - [x] Report redacted compressed and decoded byte counts. Bounded HTTP reads
   publish the encoded and decoded lengths to the local diagnostics log.
-- [x] Report parse and database-write duration. Structured ingestion summaries
-  now record bounded durations at the repository boundary.
+- [x] Report provider-load and database-write duration. Structured ingestion
+  summaries label the end-to-end provider/stream wait separately from SQLite
+  work; batched EPG records both phases.
 - [x] Report rejected-row counts without sensitive row contents. M3U pending
   entries and malformed Stalker catalog rows now emit counts only.
 - [x] Show cloud revision/timestamp and warn before destructive overwrite.
@@ -872,8 +876,9 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 - [x] Preview snapshot restore effects. Profile switching shows credential-free
   source add/remove/retain counts, the resulting active source, metadata
   replacement, cloud-managed count, and whether a panel pull follows.
-- [x] Show provider EPG/catch-up/resolution capabilities. Source cards expose
-  EPG and catch-up mode plus the provider's adaptive-resolution behavior.
+- [x] Show provider EPG/catch-up/resolution capabilities. Source cards use
+  provider-owned capability reports and show unknown/playlist-dependent states
+  instead of inferring support or claiming universal adaptive resolution.
 - [x] Show cache size and last successful refresh by source. The diagnostics
   route now presents credential-free channel/programme/media counts and channel
   and EPG freshness.
@@ -923,8 +928,8 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ### Correctness and persistence
 
-- [ ] Fresh-install and upgraded schemas match.
-- [ ] Every supported historical migration passes.
+- [x] Fresh-install and upgraded schemas match. PR 12's schema-signature suite.
+- [x] Every supported historical migration passes. PR 12's v8–v11 fixtures.
 - [x] EPG success-empty, failure retention, and atomic replacement pass.
   PR 7's persistence suite (26 tests) covers all three plus rollback.
 - [x] Source/profile/category race tests pass. PR 6's
@@ -961,9 +966,11 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 - [x] PR #98 build, Android, Windows, CodeQL, and secret-scanning workflows pass
   from a clean checkout on 2026-07-14.
 - [x] README and CI both declare Flutter 3.44.5.
-- [ ] `CLAUDE.md` schema and architecture claims match implementation.
-- [ ] `docs/player.md`, `docs/tv-navigation.md`, `docs/cloud-sync.md`, and
-  `docs/updates.md` describe the released behavior.
+- [x] `CLAUDE.md` schema and architecture claims match implementation. Reviewed
+  and corrected after the PR 0–16 audit on 2026-07-16.
+- [x] `docs/player.md`, `docs/tv-navigation.md`, `docs/cloud-sync.md`, and
+  `docs/updates.md` describe the released behavior. Reviewed after the PR 0–16
+  audit; cloud snapshot-revision behavior was added explicitly.
 
 ## Decision log
 
@@ -1032,6 +1039,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 13 | Ready for PR | Fixed same-source repository replacement by rebuilding/disposal-scoping the repository-backed live/media/favorites/preview controllers in `didUpdateWidget` while preserving screen-owned focus/scroll nodes; a widget regression proves the new source replaces the old controller data. Moved tabs/search/category/action chrome into `channel_list_chrome.dart` and embedded player controls/error/reconnect presentation into `player_overlay.dart`; route/dialog orchestration and all player/native lifecycle state remain with their existing owners. `channel_list_screen.dart` dropped from 2,043 to 1,590 lines and `player_screen.dart` from 1,845 to 1,638. Focused suites: 54 passed. Analyze clean; all 347 tests pass (14 expected skips). |
 | 2026-07-16 | PR 14 | Ready for PR | Added explicit `CatchupCapability`/URL modes, provider timezone or fixed-offset conversion, archive-window and formatting metadata, Xtream/Stalker source-owned capability reporting, M3U `catchup`/`catchup-days`/`catchup-source` parsing and template resolution, and persisted advanced per-source overrides. Unsupported catch-up remains explicit. Added timezone/device-disagreement, DST-boundary, and capability tests. Analyze clean; all 350 tests pass (14 expected skips). |
 | 2026-07-16 | PR 16 | Ready for PR | Completed structured redacted ingestion summaries (parse/database durations, encoded/decoded HTTP bytes, and parser rejection counts), source cache statistics, final-boundary export redaction, source-card EPG/catch-up/adaptive-resolution summaries, server-revision overwrite confirmation, credential-free profile snapshot restore previews, and safe force-refresh re-ingestion. Analyze clean; full suite passes (360 tests, 14 expected skips). |
+| 2026-07-16 | PR 14/16 review fixes | Implemented | Corrected M3U header/per-entry catch-up propagation, added real IANA/DST conversion and user-visible overrides, preferred reported provider timezones, replaced inferred capability labels with provider-owned unknown/supported states, advanced profile snapshot revisions for source/metadata mutations, split streamed provider/database timings, and redacted diagnostics at insertion/display/export. Analyze clean; 367 tests pass with 14 expected skips. The new cloud migration still requires normal deployment/live verification. |
 
 ## Removal checklist
 

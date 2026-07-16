@@ -51,7 +51,9 @@ transaction-scoped advisory lock, so the cap of 20 holds under parallel creation
 
 Conflict resolution is last-write-wins: a push fully replaces the target profile's set. Timestamp
 authority is the **server** — `updated_at` is stamped by the `touch_updated_at` BEFORE-UPDATE
-trigger and explicit `now()` in the push RPCs; clients send no timestamps and none are compared.
+trigger and explicit `now()` in the push RPCs; the snapshot-revision triggers also advance it for
+source and metadata inserts, updates, and deletes. Clients send no timestamps and none are
+compared.
 Concurrent writers therefore resolve by write order, not clock, so clock skew and equal client
 timestamps are irrelevant. A pull always reflects whatever the last successful write left in the
 row.

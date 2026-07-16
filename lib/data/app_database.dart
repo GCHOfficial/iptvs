@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -48,6 +49,16 @@ class CacheStats {
     required this.mediaItems,
     required this.lastChannelRefresh,
     required this.lastEpgRefresh,
+  });
+}
+
+class EpgStreamWriteMetrics {
+  final Duration providerDuration;
+  final Duration databaseDuration;
+
+  const EpgStreamWriteMetrics({
+    required this.providerDuration,
+    required this.databaseDuration,
   });
 }
 
@@ -1570,19 +1581,30 @@ class AppDatabase {
   /// (no error) would otherwise commit whatever partial set of rows it fed in
   /// as if it were the complete guide — exactly the half-fed state this
   /// method must never produce.
-  Future<void> replaceEpgStream(
+  Future<EpgStreamWriteMetrics> replaceEpgStream(
     String sourceId,
     Stream<List<Programme>> batches,
   ) async {
+    final providerWatch = Stopwatch();
+    final databaseWatch = Stopwatch();
     await _db.transaction((txn) async {
+      databaseWatch.start();
       await txn.delete(
         'programmes',
         where: 'source_id = ?',
         whereArgs: [sourceId],
       );
+      databaseWatch.stop();
       var batch = txn.batch();
       var n = 0;
-      await for (final chunk in batches) {
+      final iterator = StreamIterator<List<Programme>>(batches);
+      while (true) {
+        providerWatch.start();
+        final hasNext = await iterator.moveNext();
+        providerWatch.stop();
+        if (!hasNext) break;
+        final chunk = iterator.current;
+        databaseWatch.start();
         for (final p in chunk) {
           batch.insert('programmes', {
             'source_id': sourceId,
@@ -1598,7 +1620,9 @@ class AppDatabase {
             n = 0;
           }
         }
+        databaseWatch.stop();
       }
+      databaseWatch.start();
       if (n > 0) await batch.commit(noResult: true);
       await txn.update(
         'sources',
@@ -1606,7 +1630,12 @@ class AppDatabase {
         where: 'id = ?',
         whereArgs: [sourceId],
       );
+      databaseWatch.stop();
     });
+    return EpgStreamWriteMetrics(
+      providerDuration: providerWatch.elapsed,
+      databaseDuration: databaseWatch.elapsed,
+    );
   }
 
   /// The "now" half of [nowNext]: every programme airing at a given instant

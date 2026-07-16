@@ -694,7 +694,7 @@ void main() {
         ];
       }
 
-      await db.replaceEpgStream('src1', batches());
+      final metrics = await db.replaceEpgStream('src1', batches());
 
       final progs = await db.programmesForChannel(
         'src1',
@@ -704,6 +704,8 @@ void main() {
       );
       expect(progs.map((p) => p.title), ['A', 'B', 'C']);
       expect(await db.lastEpgSynced('src1'), isNotNull);
+      expect(metrics.providerDuration, isNot(Duration.zero));
+      expect(metrics.databaseDuration, isNot(Duration.zero));
       await db.close();
     });
   });

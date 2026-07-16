@@ -142,7 +142,10 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `epg_grid_screen.dart` (the TV-guide timeline, selection-cursor model) — both navigation models
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
   (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`
-  toggles a source's categories (persisted on `SourceConfig.settings`). Favorites are tagged from
+  toggles a source's categories and edits advanced catch-up timezone/offset/window overrides
+  (persisted on `SourceConfig.settings`). `SourceCapabilityReporter` owns the EPG/catch-up/
+  resolution summary; the UI preserves `unknown` for playlist-dependent M3U behavior rather
+  than guessing. Favorites are tagged from
   the per-item surfaces and appear as a "Favorites" entry atop each category list. Live channels
   with an archive (`Channel.hasArchive`) get a catch-up button (`CatchupSheet`, played via
   `Source.resolveArchive`). `diagnostics_screen.dart` views/exports the in-memory log;
@@ -254,7 +257,9 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   limits are sized ≥10x over a 250k-channel portal, and rejections are `iptvs: `-prefixed
   `check_violation` errors that never echo payload values. Every `SECURITY DEFINER` function pins
   `search_path = ''`. Last-write-wins timestamp authority is server `now()` — clients send no
-  timestamps. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
+  timestamps. `profiles.updated_at` is the whole-snapshot revision: source and metadata child
+  mutations advance it through `touch_profile_snapshot_revision`, so destructive device pushes
+  can detect intervening panel changes. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
   render Postgres `details`/`hint` (CHECK-style "Failing row contains" leaks credentials).
 
 ## Database migrations

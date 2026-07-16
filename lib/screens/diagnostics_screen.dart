@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/app_database.dart';
+import '../data/net.dart';
 import '../player/resource_counters.dart';
 import '../theme.dart';
 
@@ -75,7 +76,8 @@ class DiagnosticsScreen extends StatelessWidget {
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8),
                       child: SelectableText(
-                        '${_time(entry.time)}  ${entry.scope}\n${entry.message}',
+                        '${_time(entry.time)}  ${redactText(entry.scope)}\n'
+                        '${redactText(entry.message)}',
                         style: const TextStyle(
                           color: AppColors.textLo,
                           fontSize: 12,
