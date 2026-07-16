@@ -241,6 +241,13 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - The app boots into `ProfilePickScreen`, which self-decides via
   `shouldShowPickerAtStartup(mode, profileCount)` — single-profile installs boot straight to
   `HomeShell`.
+- Cloud writes are bounded by BEFORE-triggers on the tables (binding panel *direct* writes too)
+  plus pre-mutation count/size guards in the push RPCs, and pushes are rate-limited DB-side —
+  limits are sized ≥10x over a 250k-channel portal, and rejections are `iptvs: `-prefixed
+  `check_violation` errors that never echo payload values. Every `SECURITY DEFINER` function pins
+  `search_path = ''`. Last-write-wins timestamp authority is server `now()` — clients send no
+  timestamps. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
+  render Postgres `details`/`hint` (CHECK-style "Failing row contains" leaks credentials).
 
 ## Database migrations
 

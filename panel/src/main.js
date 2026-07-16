@@ -1,4 +1,8 @@
 import { supabase, KIND_FIELDS } from './supabase.js';
+import { validateSource, friendlyError } from './validate.js';
+
+const MAX_PROFILE_NAME_LENGTH = 256;
+const MAX_METADATA_FIELD_LENGTH = 1024;
 
 const app = document.getElementById('app');
 // Profiles per account are capped server-side (a BEFORE INSERT trigger); mirror
@@ -129,8 +133,9 @@ function renderLogin() {
       email,
       options: { emailRedirectTo: redirectTo },
     });
+    if (error) console.error(error);
     document.getElementById('msg').textContent = error
-      ? error.message
+      ? friendlyError(error)
       : 'Check your email for the sign-in link.';
   };
 }
@@ -148,7 +153,7 @@ async function renderSources() {
     .select('*')
     .eq('profile_id', currentProfileId)
     .order('position');
-  if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
+  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
 
   const nextPos = data.length ? Math.max(...data.map((s) => s.position ?? 0)) + 1 : 0;
   view().innerHTML = `
@@ -199,7 +204,7 @@ async function reorder(data, index, dir) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i].position === i) continue;
     const { error } = await supabase.from('sources').update({ position: i }).eq('id', arr[i].id);
-    if (error) return toast(error.message, true);
+    if (error) { console.error(error); return toast(friendlyError(error), true); }
   }
   renderSources();
 }
@@ -248,11 +253,14 @@ function editSource(existing, nextPos = 0) {
       const v = (fd.get(f.key) ?? '').trim();
       if (v) fields[f.key] = v;
     }
+    const label = (fd.get('label') ?? '').trim();
+    const validationError = validateSource(kind, label, fields);
+    if (validationError) return toast(validationError, true);
     const row = {
       owner: session.user.id,
       profile_id: currentProfileId,
       kind,
-      label: (fd.get('label') ?? '').trim(),
+      label,
       fields,
     };
     let res;
@@ -262,7 +270,7 @@ function editSource(existing, nextPos = 0) {
       row.position = nextPos; // append after the current last source
       res = await supabase.from('sources').insert(row);
     }
-    if (res.error) return toast(res.error.message, true);
+    if (res.error) { console.error(res.error); return toast(friendlyError(res.error), true); }
     toast('Saved');
     renderSources();
   };
@@ -271,7 +279,7 @@ function editSource(existing, nextPos = 0) {
 async function deleteSource(id) {
   if (!confirm('Delete this source?')) return;
   const { error } = await supabase.from('sources').delete().eq('id', id);
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   renderSources();
 }
 
@@ -280,7 +288,7 @@ async function deleteSource(id) {
 async function renderProfiles() {
   view().innerHTML = '<p class="muted">Loading…</p>';
   const { data, error } = await supabase.from('profiles').select('*').order('position');
-  if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
+  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
   profiles = data;
   const nextPos = data.length ? Math.max(...data.map((p) => p.position ?? 0)) + 1 : 0;
   const atCap = data.length >= MAX_PROFILES;
@@ -322,10 +330,13 @@ function profileRow(p, i, n) {
 async function addProfile(nextPos) {
   const name = prompt('Profile name', '');
   if (name === null) return;
+  if (name.trim().length > MAX_PROFILE_NAME_LENGTH) {
+    return toast(`Profile name is too long (max ${MAX_PROFILE_NAME_LENGTH} characters).`, true);
+  }
   const { error } = await supabase
     .from('profiles')
     .insert({ owner: session.user.id, name: name.trim() || 'Profile', position: nextPos });
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   await ensureProfiles();
   render();
 }
@@ -334,11 +345,14 @@ async function renameProfile(id, data) {
   const cur = data.find((p) => p.id === id);
   const name = prompt('Profile name', cur?.name ?? '');
   if (name === null) return;
+  if (name.trim().length > MAX_PROFILE_NAME_LENGTH) {
+    return toast(`Profile name is too long (max ${MAX_PROFILE_NAME_LENGTH} characters).`, true);
+  }
   const { error } = await supabase
     .from('profiles')
     .update({ name: name.trim() || 'Profile' })
     .eq('id', id);
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   await ensureProfiles();
   render();
 }
@@ -347,7 +361,7 @@ async function deleteProfile(id, count) {
   if (count <= 1) return toast('Keep at least one profile.', true);
   if (!confirm('Delete this profile? Its sources, metadata, and favorites are removed.')) return;
   const { error } = await supabase.from('profiles').delete().eq('id', id);
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   if (currentProfileId === id) currentProfileId = null; // re-settled by ensureProfiles
   await ensureProfiles();
   render();
@@ -362,7 +376,7 @@ async function reorderProfiles(data, index, dir) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i].position === i) continue;
     const { error } = await supabase.from('profiles').update({ position: i }).eq('id', arr[i].id);
-    if (error) return toast(error.message, true);
+    if (error) { console.error(error); return toast(friendlyError(error), true); }
   }
   renderProfiles();
 }
@@ -408,10 +422,16 @@ async function renderMetadata() {
       mdblistApiKey: (fd.get('mdblistApiKey') ?? '').trim(),
       autoEnrich: fd.get('autoEnrich') === 'on',
     };
+    for (const [key, value] of Object.entries(config)) {
+      if (typeof value === 'string' && value.length > MAX_METADATA_FIELD_LENGTH) {
+        return toast(`${key} is too long (max ${MAX_METADATA_FIELD_LENGTH} characters).`, true);
+      }
+    }
     const { error } = await supabase
       .from('metadata_configs')
       .upsert({ owner: session.user.id, profile_id: currentProfileId, config });
-    toast(error ? error.message : 'Saved', !!error);
+    if (error) console.error(error);
+    toast(error ? friendlyError(error) : 'Saved', !!error);
   };
 }
 
@@ -423,7 +443,7 @@ async function renderDevices() {
     .from('devices')
     .select('*')
     .order('created_at');
-  if (error) return (view().innerHTML = `<p class="error">${esc(error.message)}</p>`);
+  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
 
   view().innerHTML = `
     <form id="claim" class="form claim">
@@ -443,7 +463,7 @@ async function renderDevices() {
     e.preventDefault();
     const code = new FormData(e.target).get('code').trim().toUpperCase();
     const { error } = await supabase.rpc('claim_pairing', { p_code: code });
-    if (error) return toast(error.message, true);
+    if (error) { console.error(error); return toast(friendlyError(error), true); }
     toast('Device paired');
     renderDevices();
   };
@@ -476,14 +496,14 @@ async function renameDevice(id, data) {
     .from('devices')
     .update({ label: label.trim() })
     .eq('device_uid', id);
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   renderDevices();
 }
 
 async function revokeDevice(id) {
   if (!confirm('Revoke this device? It will stop syncing.')) return;
   const { error } = await supabase.from('devices').delete().eq('device_uid', id);
-  if (error) return toast(error.message, true);
+  if (error) { console.error(error); return toast(friendlyError(error), true); }
   renderDevices();
 }
 
@@ -527,9 +547,10 @@ async function deleteAccount() {
   button.textContent = 'Deleting…';
   const { error } = await supabase.rpc('delete_account');
   if (error) {
+    console.error(error);
     button.disabled = false;
     button.textContent = 'Delete cloud account';
-    return toast(error.message, true);
+    return toast(friendlyError(error), true);
   }
 
   localStorage.removeItem('iptvs_profile');
