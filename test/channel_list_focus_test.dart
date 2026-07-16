@@ -832,6 +832,37 @@ void main() {
 
     await unmount(tester);
   });
+
+  testWidgets('repository replacement reloads controllers for the new source', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final firstRepo = LibraryRepository(source: DemoSource(), db: db);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChannelListScreen(repo: firstRepo, config: config),
+      ),
+    );
+    await pumpUntil(tester, find.text('Big Buck Bunny (H.264)'));
+
+    final replacementRepo = LibraryRepository(source: _ManySource(), db: db);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ChannelListScreen(repo: replacementRepo, config: config),
+      ),
+    );
+    await pumpUntil(tester, find.text('Channel 0'));
+
+    expect(find.text('Channel 0'), findsOneWidget);
+    expect(find.text('Big Buck Bunny (H.264)'), findsNothing);
+    expect(find.text('Many'), findsOneWidget);
+
+    await unmount(tester);
+  });
 }
 
 /// A live source that actually carries EPG, so the *tall* channel row (name +

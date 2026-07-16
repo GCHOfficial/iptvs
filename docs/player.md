@@ -1,8 +1,9 @@
 # Player — full detail
 
-`lib/player/player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with two
-platform-specific native-HDR paths layered on top of the embedded path. The compact rules live in
-CLAUDE.md; read this before changing playback, preview, or overlay code.
+`lib/player/player_screen.dart` coordinates a resolved `StreamInfo`, media_kit lifecycle, and two
+platform-specific native-HDR paths. `lib/player/player_overlay.dart` contains the embedded
+media_kit controls plus reconnect/error presentation. The compact rules live in CLAUDE.md; read
+this before changing playback, preview, or overlay code.
 
 ## Android
 

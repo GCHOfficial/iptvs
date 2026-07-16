@@ -26,13 +26,12 @@ Status convention:
 ## Current status
 
 - Last updated: 2026-07-16
-- Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 12 (historical migration coverage) — implemented on
-  `test/migration-coverage`, ready for PR
-- Previous PR: PR 11 complete — merged as #111, released as v0.1.36, live
-  verification passed 2026-07-16; PR 10 merged as #110 (on-device TV-Low
-  stall/RSS capture outstanding); device matrices stay open while the closed
-  test gathers data
+- Active phase: Phase 2 — Performance and maintainability
+- Active PR: PR 13 (split oversized UI files) — implemented on
+  `refactor/split-ui-files`, ready for PR
+- Previous PR: PR 12 complete — merged as #112; PR 11 released as v0.1.36
+  with live verification passed 2026-07-16; PR 10's on-device TV-Low stall/RSS
+  capture remains outstanding while the closed test gathers data
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -42,7 +41,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 334 tests with 11 opt-in
+- Current implementation `flutter test`: passed, 347 tests with 11 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -81,10 +80,10 @@ Status convention:
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Complete; #107 |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Complete; #108 |
 | 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | Merged; #109/v0.1.35 — device matrices outstanding |
-| 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | Ready for PR |
-| 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
-| 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | [ ] |
-| 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | [ ] |
+| 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | Complete; #110 |
+| 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | Complete; #111/v0.1.36 |
+| 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | Complete; #112 |
+| 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | Ready for PR |
 | 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | [ ] |
 | 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | [ ] |
 | 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | [ ] |
@@ -769,20 +768,31 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ## PR 13 — Split oversized UI files
 
-- [ ] Fix the adjacent defect found during PR 6: a metadata-config-only change
+- [x] Fix the adjacent defect found during PR 6: a metadata-config-only change
   (same active source id) rebuilds the repository while `ChannelListScreen`'s
   `ValueKey(config.id)` is unchanged, so live controllers keep the old,
-  disposed repository/source. Add `didUpdateWidget` handling or key on
-  repository identity while preserving controller/focus-node ownership.
-- [ ] Keep `channel_list_screen.dart` responsible for shell, routes, and dialogs.
-- [ ] Extract live pane widgets without moving their state ownership.
-- [ ] Extract media grid/details widgets without moving controller state.
-- [ ] Separate player lifecycle coordination from platform presentation widgets.
-- [ ] Preserve the current `ChangeNotifier`/`Listenable` design.
-- [ ] Preserve focus-node ownership and disposal exactly.
-- [ ] Avoid abstractions without at least two concrete consumers.
-- [ ] Run focused widget tests after each extraction.
-- [ ] `flutter analyze` and `flutter test` pass.
+  disposed repository/source. `didUpdateWidget` now replaces and disposes only
+  the repository-backed controllers/listenables while retaining the screen's
+  focus nodes and scroll ownership; pinned by
+  `repository replacement reloads controllers for the new source`.
+- [x] Keep `channel_list_screen.dart` responsible for shell, routes, and dialogs.
+  Tabs/toolbar/dropdowns moved to `channel_list_chrome.dart`; the screen retains
+  navigation, playback routes, sheets, filtering, and ownership.
+- [x] Extract live pane widgets without moving their state ownership
+  (`live_tab_view.dart`; state remains in the screen/controllers).
+- [x] Extract media grid/details widgets without moving controller state
+  (`media_tab_view.dart`; controller lifetime remains in the screen).
+- [x] Separate player lifecycle coordination from platform presentation widgets.
+  `player_overlay.dart` owns embedded controls/error/reconnect presentation;
+  `player_screen.dart` retains engines, native channels/surfaces, reconnect,
+  persistence, handoff, and disposal.
+- [x] Preserve the current `ChangeNotifier`/`Listenable` design.
+- [x] Preserve focus-node ownership and disposal exactly.
+- [x] Avoid abstractions without at least two concrete consumers (the extracted
+  types are concrete presentation components; no generic UI abstraction added).
+- [x] Run focused widget/controller tests after extraction (54 passed:
+  channel-list focus, live focus/controller, media controller, channel owner).
+- [x] `flutter analyze` and `flutter test` pass (clean; 347 passed, 14 skipped).
 
 ## PR 14 — Catch-up capability and timezone model
 
@@ -995,6 +1005,8 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 11 | Merged (live checks open) | Merged as #111 (`545fc93`); all functional CI green (the one red check was GitGuardian's documented false positive on the synthetic credential fixtures in `panel/test/validate.test.js`). The Supabase GitHub integration applied `20260716000000_harden_cloud` to the live project, and the security advisor now shows no mutable-`search_path` findings — remaining advisor items are documented-intentional (policy-less `push_rate`, the privileged RPC surface, anonymous device sessions) plus Supabase's own benign `rls_auto_enable` event-trigger helper. Owner-run live verification (cross-user rejection, pairing expiry/replay, concurrent profile-cap race, oversized/throttled pushes, gateway body-size bound) remains open. |
 | 2026-07-16 | PR 11 | Complete | v0.1.36 released (signed direct release; all workflow gates green) and the owner completed the live-project verification pass the same day: 0.1.35→0.1.36 in-app update plus normal sync/panel smoke, oversized/invalid pushes rejected with typed `iptvs: ` errors before mutation, >30/min push throttle, pairing expiry/replay and cross-user rejection, and the concurrent profile-cap race at 20. No gateway 413 interfered at tested payload sizes. |
 | 2026-07-16 | PR 12 | Ready for PR | Tag archaeology confirmed the public schema history and corrected the v11 range (v0.1.16–v0.1.34, not –v0.1.30; v12 first shipped in v0.1.35); normalized-DDL diffs across each tag range show no intra-range drift, and the v8–v11 fixture builders match the tagged fresh-install DDL exactly. Compatibility claim scoped to released schemas 8–11 → current (pre-v8 branches documented as best-effort dev-era paths in the `schemaVersion` doc comment, CLAUDE.md, and validation-baseline). `released_schema_fixtures_test.dart` now pins, per released version: migrate → pragma-based schema parity with a fresh install (`table_info`, name-keyed indexes, `foreign_key_list`) → seeded favorites/positions/EPG/`external_metadata` survival → stable second open (version 12, data intact, signature unchanged). Analyze clean; 346 tests pass (+8). |
+| 2026-07-16 | PR 12 | Complete | Squash-merged as #112 (`c07920e`); the remote topic branch was removed. |
+| 2026-07-16 | PR 13 | Ready for PR | Fixed same-source repository replacement by rebuilding/disposal-scoping the repository-backed live/media/favorites/preview controllers in `didUpdateWidget` while preserving screen-owned focus/scroll nodes; a widget regression proves the new source replaces the old controller data. Moved tabs/search/category/action chrome into `channel_list_chrome.dart` and embedded player controls/error/reconnect presentation into `player_overlay.dart`; route/dialog orchestration and all player/native lifecycle state remain with their existing owners. `channel_list_screen.dart` dropped from 2,043 to 1,590 lines and `player_screen.dart` from 1,845 to 1,638. Focused suites: 54 passed. Analyze clean; all 347 tests pass (14 expected skips). |
 
 ## Removal checklist
 
