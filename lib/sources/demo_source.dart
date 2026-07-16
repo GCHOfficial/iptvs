@@ -9,7 +9,7 @@ import 'source.dart';
 /// These are well-known public test streams (Mux's hls.js test set, Apple's
 /// HLS examples, Blender open movies). They're intended for testing and may
 /// occasionally be down; swap any that misbehave.
-class DemoSource implements Source, CatchupSource {
+class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
   DemoSource({this.sourceId = 'demo', this.displayName});
 
   final String sourceId;
@@ -27,6 +27,13 @@ class DemoSource implements Source, CatchupSource {
 
   @override
   CatchupCapability get catchupCapability => CatchupCapability.unsupported;
+
+  @override
+  SourceCapabilities get sourceCapabilities => const SourceCapabilities(
+    epg: CapabilityAvailability.unavailable,
+    catchup: CapabilityAvailability.unavailable,
+    resolution: ResolutionCapability.fixed,
+  );
 
   static const _category = Category(id: 'test', title: 'Test streams');
   static const _mediaCategory = MediaCategory(

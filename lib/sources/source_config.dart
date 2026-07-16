@@ -69,6 +69,7 @@ class SourceConfig {
           mac: fields['mac']!,
           catchupTimezone: catchupTimezone,
           catchupOffsetMinutes: catchupOffsetMinutes,
+          catchupMaxDays: catchupMaxDays,
           displayName: name,
         );
       case SourceKind.xtream:
@@ -89,6 +90,9 @@ class SourceConfig {
           playlistUrl: fields['playlistUrl']!,
           epgUrl: _opt('epgUrl'),
           userAgent: _opt('userAgent'),
+          catchupTimezone: catchupTimezone,
+          catchupOffsetMinutes: catchupOffsetMinutes,
+          catchupMaxDays: catchupMaxDays,
           displayName: name,
         );
       case SourceKind.demo:

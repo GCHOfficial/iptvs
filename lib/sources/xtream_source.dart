@@ -16,7 +16,12 @@ import 'xmltv.dart';
 ///
 /// Implements live TV; VOD and series can be layered on the same interface
 /// later. Stream URLs follow `/live/USER/PASS/STREAM_ID.ext`.
-class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
+class XtreamSource
+    implements
+        Source,
+        BatchedEpgSource,
+        CatchupSource,
+        SourceCapabilityReporter {
   final String sourceId;
   final String host; // e.g. http://host:port
   final String username;
@@ -39,6 +44,7 @@ class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
     ..connectionTimeout = const Duration(seconds: 15)
     ..autoUncompress = false;
   final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
+  String? _providerCatchupTimezone;
 
   // Stalker portals usually return compact provider pages, often around
   // 14 rows. Xtream's common API does not expose equivalent paging, so keep
@@ -81,7 +87,7 @@ class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
   @override
   CatchupCapability get catchupCapability => CatchupCapability(
     mode: CatchupUrlMode.xtreamTimeshift,
-    timezone: catchupTimezone,
+    timezone: catchupTimezone ?? _providerCatchupTimezone,
     fixedOffsetMinutes: catchupOffsetMinutes,
     maxArchiveWindow: catchupMaxDays == null
         ? null
@@ -90,11 +96,27 @@ class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
   );
 
   @override
+  SourceCapabilities get sourceCapabilities => const SourceCapabilities(
+    epg: CapabilityAvailability.supported,
+    catchup: CapabilityAvailability.supported,
+    resolution: ResolutionCapability.providerDefined,
+  );
+
+  @override
   Future<void> connect() async {
     final info = await _api({});
     final user = info is Map ? info['user_info'] : null;
     if (user is Map && '${user['auth']}' == '0') {
       throw StateError('Xtream authentication failed');
+    }
+    final server = info is Map ? info['server_info'] : null;
+    final reported = server is Map
+        ? server['timezone']?.toString().trim()
+        : null;
+    if (reported != null &&
+        reported.isNotEmpty &&
+        isSupportedCatchupTimezone(reported)) {
+      _providerCatchupTimezone = reported;
     }
   }
 

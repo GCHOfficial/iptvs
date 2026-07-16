@@ -6,48 +6,45 @@ import 'package:iptvs/sources/source_identity.dart';
 
 void main() {
   group('parseM3uPlaylist', () {
-    test(
-      'small and large playlists parse to the same shape '
-      '(exercises both sides of the isolate-offload threshold)',
-      () {
-        String playlistOf(int channelCount) {
-          final out = StringBuffer('#EXTM3U\n');
-          for (var i = 0; i < channelCount; i++) {
-            out
-              ..writeln(
-                '#EXTINF:-1 tvg-id="channel.$i" group-title="Group ${i % 5}",'
-                'Channel $i',
-              )
-              ..writeln('http://server/live/$i.ts');
-          }
-          return out.toString();
+    test('small and large playlists parse to the same shape '
+        '(exercises both sides of the isolate-offload threshold)', () {
+      String playlistOf(int channelCount) {
+        final out = StringBuffer('#EXTM3U\n');
+        for (var i = 0; i < channelCount; i++) {
+          out
+            ..writeln(
+              '#EXTINF:-1 tvg-id="channel.$i" group-title="Group ${i % 5}",'
+              'Channel $i',
+            )
+            ..writeln('http://server/live/$i.ts');
         }
+        return out.toString();
+      }
 
-        // A handful of channels stays well under the 256 KB isolate
-        // threshold; a few thousand pushes the same playlist shape past it.
-        // Production only ever calls parseM3uPlaylist from the isolate
-        // entrypoint or inline below the threshold — both paths run this
-        // exact function, so parity here pins that the threshold only
-        // decides *where* parsing runs, never *what* it produces.
-        final small = playlistOf(5);
-        final large = playlistOf(3000);
-        expect(utf8.encode(small).length, lessThan(256 * 1024));
-        expect(utf8.encode(large).length, greaterThan(256 * 1024));
+      // A handful of channels stays well under the 256 KB isolate
+      // threshold; a few thousand pushes the same playlist shape past it.
+      // Production only ever calls parseM3uPlaylist from the isolate
+      // entrypoint or inline below the threshold — both paths run this
+      // exact function, so parity here pins that the threshold only
+      // decides *where* parsing runs, never *what* it produces.
+      final small = playlistOf(5);
+      final large = playlistOf(3000);
+      expect(utf8.encode(small).length, lessThan(256 * 1024));
+      expect(utf8.encode(large).length, greaterThan(256 * 1024));
 
-        final parsedSmall = parseM3uPlaylist(small);
-        final parsedLarge = parseM3uPlaylist(large);
+      final parsedSmall = parseM3uPlaylist(small);
+      final parsedLarge = parseM3uPlaylist(large);
 
-        expect(parsedSmall.channels, hasLength(5));
-        expect(parsedLarge.channels, hasLength(3000));
-        for (final parsed in [parsedSmall, parsedLarge]) {
-          final first = parsed.channels.first;
-          expect(first.name, 'Channel 0');
-          expect(first.categoryId, 'Group 0');
-          expect(first.extra['tvgId'], 'channel.0');
-          expect(first.extra['url'], 'http://server/live/0.ts');
-        }
-      },
-    );
+      expect(parsedSmall.channels, hasLength(5));
+      expect(parsedLarge.channels, hasLength(3000));
+      for (final parsed in [parsedSmall, parsedLarge]) {
+        final first = parsed.channels.first;
+        expect(first.name, 'Channel 0');
+        expect(first.categoryId, 'Group 0');
+        expect(first.extra['tvgId'], 'channel.0');
+        expect(first.extra['url'], 'http://server/live/0.ts');
+      }
+    });
     test(
       'duplicate tvg-ids yield distinct channels keyed by opaque locator IDs',
       () {
@@ -91,6 +88,38 @@ http://server/live/3.ts
       );
       expect(parsed.channels.single.extra.containsKey('tvgId'), isFalse);
       expect(parsed.channels.single.categoryId, 'News');
+    });
+
+    test('header catch-up applies to every channel', () {
+      const playlist = '''
+#EXTM3U catchup="append" catchup-days="3" catchup-source="https://archive.invalid/{start}/{end}"
+#EXTINF:-1 group-title="News",One
+http://stream.invalid/one
+#EXTINF:-1 group-title="News",Two
+http://stream.invalid/two
+''';
+      final parsed = parseM3uPlaylist(playlist);
+      expect(parsed.channels, hasLength(2));
+      expect(parsed.channels.map((c) => c.archiveDays), [3, 3]);
+      expect(parsed.channels[1].extra['catchupSource'], contains('{start}'));
+      expect(parsed.catchupCapability.supported, isTrue);
+    });
+
+    test('EXTINF catch-up overrides the header for one channel', () {
+      const playlist = '''
+#EXTM3U catchup-source="https://archive.invalid/default/{start}"
+#EXTINF:-1 catchup="none",No archive
+http://stream.invalid/one
+#EXTINF:-1 catchup-days="5" catchup-source="https://archive.invalid/custom/{start}",Archive
+http://stream.invalid/two
+''';
+      final parsed = parseM3uPlaylist(playlist);
+      expect(parsed.channels[0].archiveDays, 0);
+      expect(parsed.channels[1].archiveDays, 5);
+      expect(
+        parsed.channels[1].extra['catchupSource'],
+        'https://archive.invalid/custom/{start}',
+      );
     });
   });
 

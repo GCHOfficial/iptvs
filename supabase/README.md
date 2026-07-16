@@ -26,6 +26,11 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   already read all of its owner's data. The legacy 1-arg `push_sources`/
   `push_metadata` delegate to the device's `active_profile_id` so older app builds
   stay scoped to one profile.
+- **Snapshot revisions** (`..._profile_snapshot_revision.sql`) —
+  `profiles.updated_at` is the revision for the complete profile snapshot.
+  Triggers advance it for source and metadata inserts, updates, and deletes as
+  well as direct profile/favorites edits, so the app's destructive-push warning
+  detects panel changes anywhere in the snapshot.
 - **Profile cap** (`..._profile_cap.sql`) — a `BEFORE INSERT` trigger
   (`enforce_profile_cap`) limits each account to **20** profiles. Enforced in the
   database so neither the panel nor a crafted client can exceed it; the panel also

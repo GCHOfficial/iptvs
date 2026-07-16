@@ -1,4 +1,6 @@
 import 'package:flutter/foundation.dart';
+import 'package:timezone/data/latest.dart' as timezone_data;
+import 'package:timezone/timezone.dart' as tz;
 
 import '../data/load_token.dart';
 
@@ -19,6 +21,26 @@ enum ContentKind { live, movie, series, season, episode }
 
 /// The URL convention a provider uses for programmes in its archive.
 enum CatchupUrlMode { unsupported, xtreamTimeshift, stalkerQuery, m3uTemplate }
+
+enum CapabilityAvailability { supported, unavailable, unknown }
+
+enum ResolutionCapability { providerDefined, playlistDefined, fixed, unknown }
+
+/// Provider-owned capability summary used by source-management UX. `unknown`
+/// is intentional: a saved M3U URL cannot truthfully advertise attributes that
+/// are only discoverable after downloading its playlist.
+@immutable
+class SourceCapabilities {
+  final CapabilityAvailability epg;
+  final CapabilityAvailability catchup;
+  final ResolutionCapability resolution;
+
+  const SourceCapabilities({
+    required this.epg,
+    required this.catchup,
+    required this.resolution,
+  });
+}
 
 /// Provider-reported (or explicitly configured) catch-up behavior.  The UI
 /// uses [supported] rather than attempting to infer support from URL failures.
@@ -65,6 +87,46 @@ abstract interface class CatchupSource {
   CatchupCapability get catchupCapability;
 }
 
+abstract interface class SourceCapabilityReporter {
+  SourceCapabilities get sourceCapabilities;
+}
+
+SourceCapabilities capabilitiesOf(Source source) =>
+    source is SourceCapabilityReporter
+    ? (source as SourceCapabilityReporter).sourceCapabilities
+    : const SourceCapabilities(
+        epg: CapabilityAvailability.unknown,
+        catchup: CapabilityAvailability.unknown,
+        resolution: ResolutionCapability.unknown,
+      );
+
+bool _timezonesInitialized = false;
+
+void _ensureTimezonesInitialized() {
+  if (_timezonesInitialized) return;
+  timezone_data.initializeTimeZones();
+  _timezonesInitialized = true;
+}
+
+bool isSupportedCatchupTimezone(String value) {
+  final normalized = value.trim();
+  if (normalized.isEmpty) return true;
+  if (RegExp(
+    r'^(?:UTC|GMT)?[+-]\d{1,2}(?::?\d{2})?$',
+    caseSensitive: false,
+  ).hasMatch(normalized)) {
+    return true;
+  }
+  if (const {'UTC', 'GMT', 'Z'}.contains(normalized.toUpperCase())) return true;
+  _ensureTimezonesInitialized();
+  try {
+    tz.getLocation(normalized);
+    return true;
+  } on tz.LocationNotFoundException {
+    return false;
+  }
+}
+
 /// Converts an absolute programme instant to the provider's wall clock.
 /// Fixed offsets are deterministic and are preferred for an explicit override;
 /// `UTC` is also handled without consulting the device timezone.
@@ -92,10 +154,14 @@ DateTime catchupProviderTime(
       Duration(minutes: match.group(1) == '-' ? -minutes : minutes),
     );
   }
-  // IANA names are retained in the capability for display and future
-  // timezone-database integration. Until then, the provider's wall clock is
-  // the device clock, which is the least surprising fallback.
-  return instant.toLocal();
+  _ensureTimezonesInitialized();
+  try {
+    return tz.TZDateTime.from(utc, tz.getLocation(timezone.trim()));
+  } on tz.LocationNotFoundException {
+    // Invalid provider metadata must fail predictably instead of silently
+    // applying the device timezone and constructing a wrong archive URL.
+    throw ArgumentError.value(timezone, 'timezone', 'Unknown IANA timezone');
+  }
 }
 
 String formatCatchupTime(

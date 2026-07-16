@@ -142,7 +142,7 @@ class _OrderedListPage {
 /// Point this at a portal you're entitled to. Field mappings follow the
 /// standard Stalker schema; if a particular panel names a field differently,
 /// adjust [_mapChannel].
-class StalkerSource implements Source, CatchupSource {
+class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
   final String sourceId;
   final String portal; // e.g. http://host:port/c/
   final String mac;
@@ -151,6 +151,7 @@ class StalkerSource implements Source, CatchupSource {
   final String timezone;
   final String? catchupTimezone;
   final int? catchupOffsetMinutes;
+  final int? catchupMaxDays;
   final bool diagnostics;
   @visibleForTesting
   final Future<Map<String, dynamic>> Function(Map<String, String> params)?
@@ -167,6 +168,7 @@ class StalkerSource implements Source, CatchupSource {
   final Map<String, String> _vodCategoryTitles = {};
   Future<void>? _connectFuture;
   bool _profileLoaded = false;
+  String? _providerCatchupTimezone;
 
   StalkerSource({
     required this.sourceId,
@@ -177,6 +179,7 @@ class StalkerSource implements Source, CatchupSource {
     this.timezone = 'Europe/Bucharest',
     this.catchupTimezone,
     this.catchupOffsetMinutes,
+    this.catchupMaxDays,
     this.diagnostics = true,
     this.displayName,
     this.debugApi,
@@ -196,9 +199,19 @@ class StalkerSource implements Source, CatchupSource {
   @override
   CatchupCapability get catchupCapability => CatchupCapability(
     mode: CatchupUrlMode.stalkerQuery,
-    timezone: catchupTimezone ?? timezone,
+    timezone: catchupTimezone ?? _providerCatchupTimezone,
     fixedOffsetMinutes: catchupOffsetMinutes,
+    maxArchiveWindow: catchupMaxDays == null
+        ? null
+        : Duration(days: catchupMaxDays!),
     startFormat: 'epoch',
+  );
+
+  @override
+  SourceCapabilities get sourceCapabilities => const SourceCapabilities(
+    epg: CapabilityAvailability.supported,
+    catchup: CapabilityAvailability.supported,
+    resolution: ResolutionCapability.providerDefined,
   );
 
   @override
@@ -1963,7 +1976,18 @@ class StalkerSource implements Source, CatchupSource {
       'prehash': '',
       ...identity.profileParams(profile: profile, timestamp: timestamp),
     });
-    return r['js'];
+    final js = r['js'];
+    if (js is Map) {
+      final reported = _firstString(js, const [
+        'timezone',
+        'default_timezone',
+        'server_timezone',
+      ]);
+      if (reported != null && isSupportedCatchupTimezone(reported)) {
+        _providerCatchupTimezone = reported;
+      }
+    }
+    return js;
   }
 
   /// Calls the resolved endpoint, re-handshaking once if the token expired.

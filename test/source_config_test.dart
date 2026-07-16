@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
+import 'package:iptvs/sources/xtream_source.dart';
 
 void main() {
   const base = SourceConfig(
@@ -64,6 +65,23 @@ void main() {
       final cfg = SourceConfig.fromJson(legacy);
       expect(cfg.settings, isEmpty);
       expect(cfg.hiddenCategoryIds(ContentKind.live), isEmpty);
+    });
+
+    test('build applies persisted catch-up overrides', () {
+      final configured = base.copyWith(
+        settings: const {
+          'catchupTimezone': 'Europe/London',
+          'catchupOffsetMinutes': 60,
+          'catchupMaxDays': 14,
+        },
+      );
+      final source = configured.build() as XtreamSource;
+      expect(source.catchupCapability.timezone, 'Europe/London');
+      expect(source.catchupCapability.fixedOffsetMinutes, 60);
+      expect(
+        source.catchupCapability.maxArchiveWindow,
+        const Duration(days: 14),
+      );
     });
   });
 

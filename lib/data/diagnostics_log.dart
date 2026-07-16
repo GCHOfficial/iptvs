@@ -28,7 +28,11 @@ class DiagnosticsLog extends ChangeNotifier {
 
   void add(String scope, String message) {
     _entries.addLast(
-      DiagnosticsEntry(time: DateTime.now(), scope: scope, message: message),
+      DiagnosticsEntry(
+        time: DateTime.now(),
+        scope: redactText(scope),
+        message: redactText(message),
+      ),
     );
     while (_entries.length > _maxEntries) {
       _entries.removeFirst();
@@ -40,21 +44,24 @@ class DiagnosticsLog extends ChangeNotifier {
   /// Callers must not pass payloads or individual row contents here.
   void recordIngestion({
     required String scope,
-    int compressedBytes = 0,
-    int decodedBytes = 0,
-    required Duration parseDuration,
+    int? compressedBytes,
+    int? decodedBytes,
+    required Duration providerDuration,
     required Duration databaseDuration,
-    int rejectedRows = 0,
+    int? rejectedRows,
   }) {
     add(
       scope,
-      'ingestion compressed_bytes=${compressedBytes.clamp(0, 1 << 30)} '
-      'decoded_bytes=${decodedBytes.clamp(0, 1 << 30)} '
-      'parse_ms=${parseDuration.inMilliseconds.clamp(0, 1 << 31)} '
+      'ingestion compressed_bytes=${_bounded(compressedBytes)} '
+      'decoded_bytes=${_bounded(decodedBytes)} '
+      'provider_ms=${providerDuration.inMilliseconds.clamp(0, 1 << 31)} '
       'database_ms=${databaseDuration.inMilliseconds.clamp(0, 1 << 31)} '
-      'rejected_rows=${rejectedRows.clamp(0, 1 << 30)}',
+      'rejected_rows=${_bounded(rejectedRows)}',
     );
   }
+
+  String _bounded(int? value) =>
+      value == null ? 'unknown' : value.clamp(0, 1 << 30).toString();
 
   void clear() {
     _entries.clear();

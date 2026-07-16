@@ -157,10 +157,10 @@ class LibraryRepository {
       }
     }
 
-    final parseWatch = Stopwatch()..start();
+    final providerWatch = Stopwatch()..start();
     final categories = await source.categories();
     final channels = await source.channels();
-    parseWatch.stop();
+    providerWatch.stop();
     if (token?.isCancelled ?? false) {
       // Superseded by a newer load — the controller has already (or will)
       // discard this snapshot by generation, so skip the stale cache write
@@ -177,9 +177,8 @@ class LibraryRepository {
     databaseWatch.stop();
     DiagnosticsLog.instance.recordIngestion(
       scope: 'source:${source.id}',
-      parseDuration: parseWatch.elapsed,
+      providerDuration: providerWatch.elapsed,
       databaseDuration: databaseWatch.elapsed,
-      rejectedRows: 0,
     );
     return LibrarySnapshot(
       categories: categories,
@@ -206,14 +205,11 @@ class LibraryRepository {
       final batches = batchedSource.epgBatched(channels, token: token);
       if (batches != null) {
         try {
-          final ingestWatch = Stopwatch()..start();
-          await db.replaceEpgStream(source.id, batches);
-          ingestWatch.stop();
+          final metrics = await db.replaceEpgStream(source.id, batches);
           DiagnosticsLog.instance.recordIngestion(
             scope: 'epg:${source.id}',
-            parseDuration: ingestWatch.elapsed,
-            databaseDuration: Duration.zero,
-            rejectedRows: 0,
+            providerDuration: metrics.providerDuration,
+            databaseDuration: metrics.databaseDuration,
           );
         } on LoadCancelledException {
           // Superseded by a newer load — not a real failure, so this stays
@@ -229,9 +225,9 @@ class LibraryRepository {
       }
     }
 
-    final parseWatch = Stopwatch()..start();
+    final providerWatch = Stopwatch()..start();
     final programmes = await source.epg(channels);
-    parseWatch.stop();
+    providerWatch.stop();
     // Always replace — a success-empty result (a source with no EPG data)
     // must still clear any stale cached programmes and advance
     // epg_synced_at, or a no-EPG source gets re-fetched on every load.
@@ -240,9 +236,8 @@ class LibraryRepository {
     databaseWatch.stop();
     DiagnosticsLog.instance.recordIngestion(
       scope: 'epg:${source.id}',
-      parseDuration: parseWatch.elapsed,
+      providerDuration: providerWatch.elapsed,
       databaseDuration: databaseWatch.elapsed,
-      rejectedRows: 0,
     );
   }
 

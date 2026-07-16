@@ -349,6 +349,11 @@ class _SourceCardState extends State<_SourceCard> {
 
   DateTime? _expiry;
   CatchupCapability _catchup = CatchupCapability.unsupported;
+  SourceCapabilities _capabilities = const SourceCapabilities(
+    epg: CapabilityAvailability.unknown,
+    catchup: CapabilityAvailability.unknown,
+    resolution: ResolutionCapability.unknown,
+  );
   bool _expiryLoading = true;
   bool _expiryFailed = false;
 
@@ -366,12 +371,17 @@ class _SourceCardState extends State<_SourceCard> {
       });
     }
     final source = widget.config.build();
+    if (mounted) {
+      setState(() {
+        _catchup = source.catchupCapability;
+        _capabilities = capabilitiesOf(source);
+      });
+    }
     try {
       final value = await source.subscriptionExpiry();
       if (!mounted) return;
       setState(() {
         _expiry = value;
-        _catchup = source.catchupCapability;
         _expiryLoading = false;
       });
     } catch (_) {
@@ -389,6 +399,7 @@ class _SourceCardState extends State<_SourceCard> {
   void didUpdateWidget(covariant _SourceCard old) {
     super.didUpdateWidget(old);
     if (old.config.fields.toString() != widget.config.fields.toString() ||
+        old.config.settings.toString() != widget.config.settings.toString() ||
         old.config.kind != widget.config.kind) {
       _fetchExpiry();
     }
@@ -418,18 +429,23 @@ class _SourceCardState extends State<_SourceCard> {
   }
 
   String get _capabilitySummary {
-    final catchup = _catchup.supported
-        ? 'Catch-up ${_catchup.mode.name}'
-        : 'Catch-up unavailable';
-    final epg = switch (widget.config.kind) {
-      SourceKind.m3u =>
-        (widget.config.fields['epgUrl']?.trim().isNotEmpty ?? false)
-            ? 'EPG configured'
-            : 'EPG from playlist',
-      SourceKind.demo => 'EPG unavailable',
-      _ => 'EPG supported',
+    final catchup = switch (_capabilities.catchup) {
+      CapabilityAvailability.supported => 'Catch-up ${_catchup.mode.name}',
+      CapabilityAvailability.unavailable => 'Catch-up unavailable',
+      CapabilityAvailability.unknown => 'Catch-up playlist-dependent',
     };
-    return '$epg · $catchup · Resolution adaptive';
+    final epg = switch (_capabilities.epg) {
+      CapabilityAvailability.supported => 'EPG supported',
+      CapabilityAvailability.unavailable => 'EPG unavailable',
+      CapabilityAvailability.unknown => 'EPG playlist-dependent',
+    };
+    final resolution = switch (_capabilities.resolution) {
+      ResolutionCapability.providerDefined => 'Resolution provider-defined',
+      ResolutionCapability.playlistDefined => 'Resolution playlist-defined',
+      ResolutionCapability.fixed => 'Resolution fixed',
+      ResolutionCapability.unknown => 'Resolution unknown',
+    };
+    return '$epg · $catchup · $resolution';
   }
 
   // Left/Right walk this ordered chain; Up/Down leave the row (buttons are
