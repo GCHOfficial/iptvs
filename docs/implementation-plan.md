@@ -27,11 +27,14 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 11 — Cloud, RLS, RPC, and panel hardening (ready for PR on
-  `sec/cloud-hardening`; live-project verification is owner-run after merge)
-- Previous PR: PR 10 merged as #110 (on-device TV-Low stall/RSS capture
-  outstanding); PR 9 released as v0.1.35 with both 100-cycle soaks passed;
-  device matrices stay open while the closed test gathers data
+- Active PR: none — PR 11 merged as #111; its owner-run live-project
+  verification items are the next action, then PR 12 (historical migration
+  coverage) begins
+- Previous PR: PR 11 merged as #111 (`harden_cloud` migration confirmed
+  applied to the live project; advisor shows no mutable-search_path warnings);
+  PR 10 merged as #110 (on-device TV-Low stall/RSS capture outstanding); PR 9
+  released as v0.1.35; device matrices stay open while the closed test
+  gathers data
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -979,6 +982,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 10 | Merged | Merged as #110 with all CI checks green. Owner-run TV-Low stall and peak-RSS before/after capture remains open. |
 | 2026-07-16 | PR 11 | In progress | Deep-reasoner design pass complete on `sec/cloud-hardening`: gaps confirmed (no payload validation anywhere, `search_path = public` on 11 SECURITY DEFINER functions, no push rate limit, panel/Flutter error surfaces can echo Postgres `details`), pairing single-use verified already sound, ownership sweep found no gap. Implementing: one idempotent migration (BEFORE-trigger validation + RPC top-level guards + DB-side push rate limit), panel validation/error scrubbing, Flutter `friendlyCloudError`. |
 | 2026-07-16 | PR 11 | Ready for PR | Migration `20260716000000_harden_cloud.sql` (search_path sweep, trigger + RPC validation with ≥10x-over-250k-corpus limits, per-device push rate limit, advisory-locked INVOKER profile cap, `delete_account` reaps rate rows; orchestrator review added the kind/NOT-NULL/position pre-emption so table-constraint errors can't echo "Failing row contains" credentials). Panel: `validate.js` scheme/length validation + `friendlyError`/`scrubUrls` on every error surface, 20 node tests green. Flutter: `friendlyCloudError` replaces all raw `'$e'` sites (PostgrestException `details` leak closed), 4 new tests. Analyze clean; 338 tests pass. Live-project verification items are owner-run after merge (the migration auto-applies on push to main). |
+| 2026-07-16 | PR 11 | Merged (live checks open) | Merged as #111 (`545fc93`); all functional CI green (the one red check was GitGuardian's documented false positive on the synthetic credential fixtures in `panel/test/validate.test.js`). The Supabase GitHub integration applied `20260716000000_harden_cloud` to the live project, and the security advisor now shows no mutable-`search_path` findings — remaining advisor items are documented-intentional (policy-less `push_rate`, the privileged RPC surface, anonymous device sessions) plus Supabase's own benign `rls_auto_enable` event-trigger helper. Owner-run live verification (cross-user rejection, pairing expiry/replay, concurrent profile-cap race, oversized/throttled pushes, gateway body-size bound) remains open. |
 
 ## Removal checklist
 
