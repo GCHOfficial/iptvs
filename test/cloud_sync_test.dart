@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/cloud_sync.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
   group('cloudRowToConfig', () {
@@ -106,6 +107,49 @@ void main() {
       expect(isUuid('1719500000000000'), isFalse);
       expect(isUuid('not-a-uuid'), isFalse);
       expect(isUuid('123E4567-E89B-42D3-A456-426614174000'), isTrue);
+    });
+  });
+
+  group('friendlyCloudError', () {
+    test(
+      'strips the server prefix from a PostgrestException and never leaks '
+      'details',
+      () {
+        final e = PostgrestException(
+          message: 'iptvs: too many favorites (max 200000)',
+          code: '23514',
+          details:
+              'Failing row contains (http://user:pass@host/live/user/pass/1.ts).',
+        );
+        final message = friendlyCloudError(e);
+        expect(message, 'too many favorites (max 200000)');
+        expect(message.contains('Failing row'), isFalse);
+        expect(message.contains('pass'), isFalse);
+      },
+    );
+
+    test('uses the AuthException message as-is', () {
+      final e = AuthException('Invalid login credentials');
+      expect(friendlyCloudError(e), 'Invalid login credentials');
+    });
+
+    test('falls back to a generic message for anything else', () {
+      expect(
+        friendlyCloudError(Exception('SocketException: some raw detail')),
+        'Cloud sync failed. Check your connection and try again.',
+      );
+    });
+
+    test('redacts a credentialed URL embedded in the message', () {
+      final e = PostgrestException(
+        message: 'iptvs: could not reach '
+            'http://panel.example.com/live/someuser12345/s3cretp4ssw0rd/1.ts',
+      );
+      final message = friendlyCloudError(e);
+      expect(message.contains('someuser12345'), isFalse);
+      expect(message.contains('s3cretp4ssw0rd'), isFalse);
+      expect(message.contains('<redacted>'), isTrue);
+      expect(message.contains('panel.example.com'), isTrue);
     });
   });
 }

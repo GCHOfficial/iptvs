@@ -43,7 +43,38 @@ rejected, and a payload can't touch another account's rows (insert forces `owner
 upsert's `DO UPDATE` is guarded by `owner = o`). A paired device can already read all of its
 owner's credentials, so writing that **same** owner's list adds no cross-account blast radius.
 Pairing codes are short-lived + rate-limited. Push uses last-write-wins (it replaces the panel's
-set).
+set). Every `SECURITY DEFINER` function pins `search_path = ''` with schema-qualified references
+(the profile-cap trigger is `SECURITY INVOKER` and serializes concurrent inserts per owner with a
+transaction-scoped advisory lock, so the cap of 20 holds under parallel creation).
+
+### Last-write-wins and timestamp authority
+
+Conflict resolution is last-write-wins: a push fully replaces the target profile's set. Timestamp
+authority is the **server** — `updated_at` is stamped by the `touch_updated_at` BEFORE-UPDATE
+trigger and explicit `now()` in the push RPCs; clients send no timestamps and none are compared.
+Concurrent writers therefore resolve by write order, not clock, so clock skew and equal client
+timestamps are irrelevant. A pull always reflects whatever the last successful write left in the
+row.
+
+### Validation limits and rate limiting
+
+Writes are bounded at two layers (`..._harden_cloud.sql`): **BEFORE INSERT/UPDATE triggers** on
+`sources`/`profiles`/`metadata_configs` call shared `assert_*` helpers — binding the panel's
+*direct* table writes as well as the RPCs — and each push RPC additionally checks the top-level
+array count and byte size **before any mutation**. Rejections raise `check_violation` with a
+stable `iptvs: ` message prefix and never interpolate payload values (a raw CHECK constraint was
+deliberately rejected: its "Failing row contains (…)" detail would leak credentials through
+client error surfaces). Limits are sized ≥10x above realistic maxima from the 250k-channel
+validation corpus — e.g. 200,000 favorites, 50,000 hidden-category ids per kind, 8 KiB per field
+value, 16 MB payload ceilings — so a legitimate user on a huge portal is never rejected. The
+push RPCs are rate-limited DB-side (`check_push_rate`, 30 calls/min per device session —
+deliberately per-device, not per-owner, since two devices on one account are independent
+human-driven callers — one self-resetting row per subject in the policy-less `push_rate`
+table, reaped on account deletion). Reads/pulls are deliberately unthrottled
+(PostgREST has no per-user limit and an Edge proxy isn't justified) — accepted risk, mitigated
+by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` and the app's
+`friendlyCloudError` show `iptvs: `-prefixed messages as-is and reduce everything else to
+generic text — Postgres `details`/`hint` are never rendered.
 
 ## Pairing flow (code-based, works on every platform)
 

@@ -6,8 +6,34 @@ import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'metadata_config.dart';
+import 'net.dart';
 import 'source_store.dart';
 import 'source_identity_migration.dart';
+
+/// The prefix the server puts on validation errors it wants surfaced verbatim
+/// (`errcode check_violation`, e.g. "iptvs: too many favorites (max 200000)").
+const _kServerMessagePrefix = 'iptvs: ';
+
+/// A short, safe-to-display message for a cloud sync failure. Never uses
+/// [Exception.toString] on a [PostgrestException]: it includes the `details`
+/// field, which for a failing-row constraint violation can contain the row's
+/// raw data (including credentials embedded in provider URLs). Only
+/// `.message` is shown, and even that is run through [redactText] in case a
+/// server message ever embeds a URL.
+String friendlyCloudError(Object e) {
+  final String raw;
+  if (e is PostgrestException) {
+    final message = e.message;
+    raw = message.startsWith(_kServerMessagePrefix)
+        ? message.substring(_kServerMessagePrefix.length)
+        : message;
+  } else if (e is AuthException) {
+    raw = e.message;
+  } else {
+    return 'Cloud sync failed. Check your connection and try again.';
+  }
+  return redactText(raw);
+}
 
 /// A pairing code a device shows so a signed-in panel user can claim it.
 class PairingCode {

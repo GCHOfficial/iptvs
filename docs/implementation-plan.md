@@ -27,11 +27,11 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 10 — Bounded one-pass isolate ingestion (ready for PR;
-  on-device stall/RSS capture outstanding)
-- Previous PR: PR 9 merged as #109 and released as v0.1.35 (direct + Play
-  closed testing); both 100-cycle soaks passed on 2026-07-16; device matrices
-  stay open while the closed test gathers data
+- Active PR: PR 11 — Cloud, RLS, RPC, and panel hardening (ready for PR on
+  `sec/cloud-hardening`; live-project verification is owner-run after merge)
+- Previous PR: PR 10 merged as #110 (on-device TV-Low stall/RSS capture
+  outstanding); PR 9 released as v0.1.35 with both 100-cycle soaks passed;
+  device matrices stay open while the closed test gathers data
 - Plan baseline commit: `966418fec7a07646163073377c6a3a1013b93dd0`
 - Baseline branch: `main`
 - Baseline working tree: clean
@@ -680,25 +680,67 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ### Implementation
 
-- [ ] Set a fixed `search_path` in every `SECURITY DEFINER` function.
-- [ ] Enforce ownership in every profile/snapshot RPC.
-- [ ] Validate JSON shape, field lengths, array counts, and total payload size.
-- [ ] Make pairing completion single-use and transactionally safe.
-- [ ] Apply rate limits at the API/edge boundary.
-- [ ] Validate source schemes and field lengths in the panel.
-- [ ] Prevent panel errors from echoing credential-bearing input.
-- [ ] Document last-write-wins behavior and timestamp authority.
+- [x] Set a fixed `search_path` in every `SECURITY DEFINER` function.
+  `20260716000000_harden_cloud.sql` recreates all 11 remaining
+  `search_path = public` functions (pairing, push, set_device_profile, legacy
+  delegates, `current_device_owner`, `enforce_profile_cap`) with
+  `search_path = ''` and schema-qualified references; helpers were already `''`.
+- [x] Enforce ownership in every profile/snapshot RPC. Design-pass audit found
+  no gap: every RPC gates on `current_device_owner()` plus a profile-ownership
+  check or an owner-scoped mutation; `delete_account` is self-only with the
+  `is_anonymous` device guard. Existing checks carried verbatim into the
+  recreated functions.
+- [x] Validate JSON shape, field lengths, array counts, and total payload size.
+  BEFORE-INSERT/UPDATE triggers on `sources`/`profiles`/`metadata_configs`
+  call shared `assert_*` validators (binding panel direct writes and RPC
+  writes), and each push RPC checks top-level array count/byte size before any
+  mutation. Limits sized ≥10x over the 250k-channel corpus (favorites 200,000 /
+  16 MB; 50,000 hidden-category ids per kind / 8 MB settings; fields 64 KB).
+  Validators also pre-empt the table's own CHECK/NOT NULL errors, whose
+  "Failing row contains" DETAIL would echo credentials.
+- [x] Make pairing completion single-use and transactionally safe. Audited as
+  already sound (`FOR UPDATE` + `claimed_by is null` guard; `pairing_status`
+  scoped to `device_uid = auth.uid()` so codes can't be probed); recreated with
+  pinned `search_path` only, no logic change.
+- [x] Apply rate limits at the API/edge boundary. DB-side token window
+  (`push_rate` + `check_push_rate`, 30/min per device session) on the push
+  RPCs; auth endpoints keep Supabase's built-in limits; reads/pulls stay
+  unthrottled by design (decision log). An Edge Function proxy was rejected.
+- [x] Validate source schemes and field lengths in the panel.
+  `panel/src/validate.js` `validateSource`: http/https-or-schemeless
+  allowlist on URL fields, per-field length caps; wired into `editSource`,
+  profile-name and metadata forms.
+- [x] Prevent panel errors from echoing credential-bearing input. All panel
+  error surfaces route through `friendlyError` (+`scrubUrls`; `details`/`hint`
+  never rendered; raw error to console only). Flutter's cloud screen equally
+  routes through `friendlyCloudError` (`e.message` only, `redactText`'d) —
+  `PostgrestException.toString()` would have leaked `details`.
+- [x] Document last-write-wins behavior and timestamp authority.
+  docs/cloud-sync.md "Last-write-wins and timestamp authority" +
+  "Validation limits and rate limiting"; CLAUDE.md essentials bullet.
 
 ### Verification
 
-- [ ] Cross-user profile read/write attempts fail.
-- [ ] Expired pairing codes fail.
-- [ ] Completed pairing codes cannot be replayed.
-- [ ] Concurrent profile creation cannot exceed the profile cap.
-- [ ] Invalid or excessive push payloads fail before mutation.
-- [ ] Clock-skew and equal-timestamp conflict cases are deterministic.
-- [ ] Panel rendering and validation tests pass.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [ ] Cross-user profile read/write attempts fail. Owner-run on the live
+  project (two accounts) after merge.
+- [ ] Expired pairing codes fail. Owner-run on the live project.
+- [ ] Completed pairing codes cannot be replayed. Owner-run on the live project.
+- [ ] Concurrent profile creation cannot exceed the profile cap. Owner-run:
+  parallel inserts at cap 20 exercise the new advisory lock.
+- [ ] Invalid or excessive push payloads fail before mutation. Owner-run:
+  assert typed `iptvs: ` error and unchanged rows; also record the Supabase
+  gateway's empirical max request-body size (a 413 below our 16 MB ceilings
+  would bound extreme payloads before the typed error; realistic payloads are
+  ~2 MB).
+- [x] Clock-skew and equal-timestamp conflict cases are deterministic. By
+  construction: no client timestamps exist anywhere — `updated_at` is server
+  `now()` via trigger/RPC and is never compared; conflicts resolve by write
+  order (documented in docs/cloud-sync.md).
+- [x] Panel rendering and validation tests pass. 20 `node:test` cases over
+  `validate.js` (`npm test` in `panel/`): schemes, lengths, scrubbing,
+  `details` suppression.
+- [x] `flutter analyze` and `flutter test` pass. Analyze clean; 338 tests
+  (+4 `friendlyCloudError` leak-regression cases).
 
 ## PR 12 — Historical migration coverage
 
@@ -895,6 +937,7 @@ security, persisted data, or provider behavior.
 | 2026-07-15 | `replaceLibrary` writes the `sources` row via non-destructive update-else-insert instead of `INSERT OR REPLACE` | `INSERT OR REPLACE` deleted the row and nulled `epg_synced_at` on every channel refresh, defeating PR 7's failure-observability design; `ON CONFLICT DO UPDATE` was avoided because Android below API 30 ships SQLite older than 3.24 | Channel refresh now preserves EPG freshness and any future `sources` column; dead programme rows for removed channels persist at most ~3h until the next scheduled `replaceEpg` clears them by source | PR 7 |
 | 2026-07-15 | Guard the two static inbound native channels with a Dart-side monotonic owner-token registry (`ChannelHandlerOwner`) instead of per-instance channels or a permanent multiplexer; no Kotlin/C++ changes | Flutter runs a replacement route's `initState` before the old route's `dispose`, so an unconditional dispose-time `setMethodCallHandler(null)` wipes the newer owner's handler (previously Windows-only cleared; Android never cleared); both native sides register once per process and hold no per-Dart-owner state, so ownership is purely a Dart problem; a permanent multiplexer would be a bridge redesign reserved for PR 9 evidence | "Identical Android/Windows cleanup" is satisfied Dart-side: both platforms run the same release-if-current path; real handlers keep `mounted`/`_disposed` second gates for calls already dispatched; invariant recorded in `CLAUDE.md` Player essentials and `docs/player.md` | PR 8 |
 | 2026-07-16 | PR 10 uses a hybrid worker boundary: one-pass `Isolate.run` decode+map (bytes in, typed list out) for large Xtream/Stalker channel and media payloads, streamed compact `Programme` batches only for XMLTV EPG (new `replaceEpgStream` preserving the atomic success-empty/rollback contract), and an additive `LoadToken` cancel guard beside the existing generation guards; disk-backed M3U line parsing and ordered-list-fallback offload are deferred | Channels/media are held in full by the UI regardless, so batch-streaming them reduces nothing — the win is keeping the dynamic JSON graph inside the worker and building the typed graph off the main isolate; EPG is the only path where the full typed list on the main isolate is pure waste (programmes flow straight to SQLite); a long-lived ingestion isolate's spawn-amortization benefit is irrelevant at refresh cadence and would force multi-batch semantics onto the atomic cache | `Source` stays provider-agnostic via one optional `epgBatched` member defaulting to null; existing generation guards and their pinned tests are untouched (the token adds only DB-write/batch-feed guarding); main-isolate stall and peak-memory verification remain before/after recordings on the low-memory TV device since PR 0 budgets were intentionally unset | PR 10 |
+| 2026-07-16 | PR 11 validation lives in BEFORE-INSERT/UPDATE triggers calling shared `assert_*` helpers on `sources`/`profiles`/`metadata_configs`, plus cheap top-level array-count/byte-size guards inside the push RPCs before any mutation; CHECK constraints and RPC-only validation were both rejected. Rate limiting is a DB-side token window (`push_rate` table + `check_push_rate`, 30 pushes/min per device session — per-device rather than per-owner so multiple devices on one account never throttle each other) modeled on `request_pairing`'s counter; an Edge Function proxy was rejected. All limits sized ≥10x above realistic maxima measured against the 250k-channel validation corpus (favorites cap 200,000; 50,000 hidden-category ids per kind; 16 MB payload ceilings) | The panel writes tables directly under RLS, so RPC-only validation leaves the credential-bearing `sources.fields` path unbounded; a CHECK-constraint failure emits `details = "Failing row contains (…)"` which `PostgrestException.toString()` surfaces verbatim in the Flutter UI — a credential leak; triggers deploy idempotently on a live table with no NOT VALID/VALIDATE dance. An Edge proxy is a new deploy target plus counter store for a threat already bounded to the caller's own account by owner-scoping and payload caps | Legitimate huge-portal users are never rejected by our own validation (typed `iptvs: `-prefixed `check_violation` errors, no payload values interpolated); reads/pulls stay unthrottled by design (RLS-scoped, documented as accepted risk); the Supabase gateway's own body-size ceiling is verified empirically against the live project as an owner-run item | PR 11 |
 | 2026-07-16 | Harden the player lifecycle with targeted per-defect fixes plus a queryable debug-only counter registry (Dart `ResourceCounters` / Kotlin `DebugCounters` / C++ `#ifndef NDEBUG` ints), rejecting a unified per-platform lifecycle/session object; counters merge through a `debugCounters` method on the existing HDR channel rather than a new inbound channel | The audit found only two genuine, local defects (Windows silent surface-failure; preview `TextureView` not detached at PlatformView dispose) — a session object is precisely the bridge redesign the ledger forbids without measured need and would rewrite through seven load-bearing, currently-passing invariants; a new inbound channel would add handler-ownership surface right after PR 8 removed that class of bug; the soak must programmatically assert zero, which pure logging cannot fail on | Counters thread through the existing call sites, so a green soak proves those exact release paths complete; release builds are inert (`kDebugMode`/`BuildConfig.DEBUG`/`NDEBUG`, empty `debugCounters` reply); deferred as a known efficiency item, not a leak: PlayerScreen constructs an embedded media_kit `Player` even on the Android native path where it is never opened (counted and disposed, so soaks still balance) | PR 9 |
 
 ## Progress log
@@ -933,6 +976,9 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 9 | Complete (matrices open) | Merged as #109 (`49ea241`) with all CI checks green and released as v0.1.35 (signed direct release + Play AAB). Google approved the 0.1.35 closed-testing release the same day; TestersCommunity's 14-day tester window opened 2026-07-16, so the personal-account production gate completes no earlier than 2026-07-30. Owner ran both 100-cycle soaks (Android and Windows) on 2026-07-16 and every counter returned to zero. The four device matrices and the two hardware-only Windows items stay open while closed-test feedback accumulates. |
 | 2026-07-16 | PR 10 | In progress | Design pass started on `perf/isolate-ingestion`: audit the four ingestion paths, develop competing worker-boundary designs, then implement bounded one-pass isolate ingestion against the PR 0 fixture corpus and budgets. |
 | 2026-07-16 | PR 10 | Ready for PR | Hybrid worker boundary implemented: Xtream/Stalker catalogs decode+map bytes→typed lists in one worker job (dynamic JSON graph never crosses the isolate boundary; Stalker's ~28 MB `get_all_channels` no longer `jsonDecode`s on the UI thread), XMLTV streams 1000-row `Programme` batches with single-in-flight ack flow control into the new one-transaction `replaceEpgStream` (success-empty contract preserved; cancellation rolls back via `LoadCancelledException`), and an additive `LoadToken` stops superseded loads from writing stale data (pinned generation-guard tests pass unmodified — token rides a documented settable repository field because a signature change would break the pinned `_GatedRepo` overrides). `BatchedEpgSource` is a separate optional capability interface since `implements` doesn't inherit default bodies. Dev-host baselines recorded (inline vs. isolate round-trip; batched XMLTV slightly faster than single-list). Analyze clean; 334 tests pass (+29: ingest parity, malformed-row, batch/cancel, stream-persistence suites). Remaining open boxes are owner-run on-device: TV-Low stall and peak-RSS before/after capture. |
+| 2026-07-16 | PR 10 | Merged | Merged as #110 with all CI checks green. Owner-run TV-Low stall and peak-RSS before/after capture remains open. |
+| 2026-07-16 | PR 11 | In progress | Deep-reasoner design pass complete on `sec/cloud-hardening`: gaps confirmed (no payload validation anywhere, `search_path = public` on 11 SECURITY DEFINER functions, no push rate limit, panel/Flutter error surfaces can echo Postgres `details`), pairing single-use verified already sound, ownership sweep found no gap. Implementing: one idempotent migration (BEFORE-trigger validation + RPC top-level guards + DB-side push rate limit), panel validation/error scrubbing, Flutter `friendlyCloudError`. |
+| 2026-07-16 | PR 11 | Ready for PR | Migration `20260716000000_harden_cloud.sql` (search_path sweep, trigger + RPC validation with ≥10x-over-250k-corpus limits, per-device push rate limit, advisory-locked INVOKER profile cap, `delete_account` reaps rate rows; orchestrator review added the kind/NOT-NULL/position pre-emption so table-constraint errors can't echo "Failing row contains" credentials). Panel: `validate.js` scheme/length validation + `friendlyError`/`scrubUrls` on every error surface, 20 node tests green. Flutter: `friendlyCloudError` replaces all raw `'$e'` sites (PostgrestException `details` leak closed), 4 new tests. Analyze clean; 338 tests pass. Live-project verification items are owner-run after merge (the migration auto-applies on push to main). |
 
 ## Removal checklist
 

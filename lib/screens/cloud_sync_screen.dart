@@ -67,7 +67,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         await _newCode();
       }
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -107,7 +107,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = '$e';
+          _error = friendlyCloudError(e);
           _busy = false;
         });
       }
@@ -168,7 +168,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       setState(() => _status = '${initial ? 'Paired — ' : ''}$sources'
           '${metadata ? ' · metadata updated' : ''}.');
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -244,7 +244,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           'Pushed $count source${count == 1 ? '' : 's'} · metadata · favorites '
           'to $_activeProfileName.');
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -268,7 +268,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       });
       await _newCode();
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }

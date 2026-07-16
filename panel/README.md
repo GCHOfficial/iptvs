@@ -18,7 +18,13 @@ npm run dev
 
 ```bash
 npm run build   # outputs panel/dist/, base path '/iptvs/' (PANEL_BASE to override)
+npm test        # node:test over src/validate.js (validation + error scrubbing)
 ```
+
+Input validation and error display live in `src/validate.js` — a dependency-free
+module (`validateSource` scheme/length checks mirroring the server-side limits,
+`scrubUrls` credential stripping, `friendlyError` safe error mapping; raw errors
+go to `console.error` only, and Postgres `details`/`hint` are never rendered).
 
 GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
 (`.github/workflows/pages.yml`). Supabase values come from repo

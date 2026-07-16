@@ -13,21 +13,8 @@ if (!url || !key) {
 
 export const supabase = createClient(url, key);
 
-// Field shapes mirror lib/sources/source_config.dart so the panel and app agree.
-export const KIND_FIELDS = {
-  stalker: [
-    { key: 'portal', label: 'Portal URL', required: true },
-    { key: 'mac', label: 'MAC address', required: true },
-  ],
-  xtream: [
-    { key: 'host', label: 'Host', required: true },
-    { key: 'username', label: 'Username', required: true },
-    { key: 'password', label: 'Password', required: true, password: true },
-  ],
-  m3u: [
-    { key: 'playlistUrl', label: 'Playlist URL', required: true },
-    { key: 'epgUrl', label: 'EPG URL (optional)', required: false },
-    { key: 'userAgent', label: 'User-Agent (optional)', required: false },
-  ],
-  demo: [],
-};
+// Field shapes mirror lib/sources/source_config.dart so the panel and app
+// agree. The canonical definition (plus validation limits) lives in
+// validate.js — a dependency-free module so it's testable without
+// supabase-js — and is re-exported here for callers importing from this file.
+export { KIND_FIELDS } from './validate.js';
