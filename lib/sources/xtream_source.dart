@@ -15,7 +15,7 @@ import 'xmltv.dart';
 ///
 /// Implements live TV; VOD and series can be layered on the same interface
 /// later. Stream URLs follow `/live/USER/PASS/STREAM_ID.ext`.
-class XtreamSource implements Source, BatchedEpgSource {
+class XtreamSource implements Source, BatchedEpgSource, CatchupSource {
   final String sourceId;
   final String host; // e.g. http://host:port
   final String username;
@@ -25,6 +25,12 @@ class XtreamSource implements Source, BatchedEpgSource {
   /// Xtream source. Some panels expose it in the playlist URL but omit it
   /// from `player_api.php`.
   final String? playlistExpiryHint;
+
+  /// Advanced per-source catch-up overrides. When omitted, Xtream panels are
+  /// treated as using the device wall clock.
+  final String? catchupTimezone;
+  final int? catchupOffsetMinutes;
+  final int? catchupMaxDays;
   @visibleForTesting
   final Future<dynamic> Function(Map<String, String> params)? debugApi;
 
@@ -46,6 +52,9 @@ class XtreamSource implements Source, BatchedEpgSource {
     required this.password,
     this.streamExtension = 'ts',
     this.playlistExpiryHint,
+    this.catchupTimezone,
+    this.catchupOffsetMinutes,
+    this.catchupMaxDays,
     this.debugApi,
     this.displayName,
   });
@@ -67,6 +76,17 @@ class XtreamSource implements Source, BatchedEpgSource {
   String get name => displayName?.trim().isNotEmpty == true
       ? displayName!.trim()
       : 'Xtream · ${Uri.tryParse(_base)?.host ?? 'panel'}';
+
+  @override
+  CatchupCapability get catchupCapability => CatchupCapability(
+    mode: CatchupUrlMode.xtreamTimeshift,
+    timezone: catchupTimezone,
+    fixedOffsetMinutes: catchupOffsetMinutes,
+    maxArchiveWindow: catchupMaxDays == null
+        ? null
+        : Duration(days: catchupMaxDays!),
+    startFormat: 'yyyy-MM-dd:HH-mm',
+  );
 
   @override
   Future<void> connect() async {
@@ -148,7 +168,7 @@ class XtreamSource implements Source, BatchedEpgSource {
     return StreamInfo(
       url:
           '$_base/timeshift/$username/$password/$duration/'
-          '${_timeshiftStart(programme.start)}/$streamId.$streamExtension',
+          '${_timeshiftStart(programme.start, catchupCapability)}/$streamId.$streamExtension',
       isLive: false,
     );
   }
@@ -158,14 +178,16 @@ class XtreamSource implements Source, BatchedEpgSource {
   /// (device ≈ panel region in practice). A per-source offset is the future
   /// refinement if a panel sits in a different zone.
   @visibleForTesting
-  static String timeshiftStart(DateTime start) => _timeshiftStart(start);
+  static String timeshiftStart(
+    DateTime start, [
+    CatchupCapability? capability,
+  ]) => _timeshiftStart(
+    start,
+    capability ?? const CatchupCapability(mode: CatchupUrlMode.xtreamTimeshift),
+  );
 
-  static String _timeshiftStart(DateTime start) {
-    final t = start.toLocal();
-    String p2(int n) => n.toString().padLeft(2, '0');
-    return '${t.year.toString().padLeft(4, '0')}-${p2(t.month)}-${p2(t.day)}:'
-        '${p2(t.hour)}-${p2(t.minute)}';
-  }
+  static String _timeshiftStart(DateTime start, CatchupCapability capability) =>
+      formatCatchupTime(start, capability);
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {

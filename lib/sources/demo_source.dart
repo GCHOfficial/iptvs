@@ -9,7 +9,7 @@ import 'source.dart';
 /// These are well-known public test streams (Mux's hls.js test set, Apple's
 /// HLS examples, Blender open movies). They're intended for testing and may
 /// occasionally be down; swap any that misbehave.
-class DemoSource implements Source {
+class DemoSource implements Source, CatchupSource {
   DemoSource({this.sourceId = 'demo', this.displayName});
 
   final String sourceId;
@@ -21,10 +21,12 @@ class DemoSource implements Source {
   String get id => sourceId;
 
   @override
-  String get name =>
-      displayName?.trim().isNotEmpty == true
-          ? displayName!.trim()
-          : 'Demo · public test streams';
+  String get name => displayName?.trim().isNotEmpty == true
+      ? displayName!.trim()
+      : 'Demo · public test streams';
+
+  @override
+  CatchupCapability get catchupCapability => CatchupCapability.unsupported;
 
   static const _category = Category(id: 'test', title: 'Test streams');
   static const _mediaCategory = MediaCategory(
@@ -127,10 +129,9 @@ class DemoSource implements Source {
   Future<List<Category>> categories() async => const [_category];
 
   @override
-  Future<List<Channel>> channels({String? categoryId}) async =>
-      _channels
-          .where((c) => categoryId == null || c.categoryId == categoryId)
-          .toList();
+  Future<List<Channel>> channels({String? categoryId}) async => _channels
+      .where((c) => categoryId == null || c.categoryId == categoryId)
+      .toList();
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
@@ -178,10 +179,9 @@ class DemoSource implements Source {
     MediaItem? parent,
     int page = 1,
   }) async {
-    final items =
-        page == 1
-            ? await mediaItems(kind, categoryId: categoryId, parent: parent)
-            : const <MediaItem>[];
+    final items = page == 1
+        ? await mediaItems(kind, categoryId: categoryId, parent: parent)
+        : const <MediaItem>[];
     return MediaPage(items: items, page: page, totalPages: 1);
   }
 

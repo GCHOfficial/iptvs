@@ -142,13 +142,15 @@ class _OrderedListPage {
 /// Point this at a portal you're entitled to. Field mappings follow the
 /// standard Stalker schema; if a particular panel names a field differently,
 /// adjust [_mapChannel].
-class StalkerSource implements Source {
+class StalkerSource implements Source, CatchupSource {
   final String sourceId;
   final String portal; // e.g. http://host:port/c/
   final String mac;
   final MagProfile profile;
   final String lang;
   final String timezone;
+  final String? catchupTimezone;
+  final int? catchupOffsetMinutes;
   final bool diagnostics;
   @visibleForTesting
   final Future<Map<String, dynamic>> Function(Map<String, String> params)?
@@ -173,6 +175,8 @@ class StalkerSource implements Source {
     this.profile = MagProfile.mag250,
     this.lang = 'en',
     this.timezone = 'Europe/Bucharest',
+    this.catchupTimezone,
+    this.catchupOffsetMinutes,
     this.diagnostics = true,
     this.displayName,
     this.debugApi,
@@ -188,6 +192,14 @@ class StalkerSource implements Source {
   String get name => displayName?.trim().isNotEmpty == true
       ? displayName!.trim()
       : 'Stalker · $mac';
+
+  @override
+  CatchupCapability get catchupCapability => CatchupCapability(
+    mode: CatchupUrlMode.stalkerQuery,
+    timezone: catchupTimezone ?? timezone,
+    fixedOffsetMinutes: catchupOffsetMinutes,
+    startFormat: 'epoch',
+  );
 
   @override
   Future<void> connect() async {

@@ -16,7 +16,7 @@ import 'xmltv.dart';
 /// Stream URLs are static, so resolving needs no network. EPG comes from an
 /// XMLTV guide — either an explicit [epgUrl] or the playlist's own
 /// `url-tvg`/`x-tvg-url` header attribute.
-class M3uSource implements Source, BatchedEpgSource {
+class M3uSource implements Source, BatchedEpgSource, CatchupSource {
   final String sourceId;
   final String playlistUrl;
   final String? epgUrl;
@@ -29,6 +29,7 @@ class M3uSource implements Source, BatchedEpgSource {
   List<Channel>? _channels;
   List<Category>? _categories;
   String? _headerEpgUrl;
+  CatchupCapability _catchupCapability = CatchupCapability.unsupported;
 
   M3uSource({
     required this.sourceId,
@@ -48,6 +49,9 @@ class M3uSource implements Source, BatchedEpgSource {
   String get name => displayName?.trim().isNotEmpty == true
       ? displayName!.trim()
       : 'M3U · ${Uri.tryParse(playlistUrl)?.host ?? 'playlist'}';
+
+  @override
+  CatchupCapability get catchupCapability => _catchupCapability;
 
   @override
   Future<void> connect() async {} // nothing to authenticate
@@ -81,7 +85,26 @@ class M3uSource implements Source, BatchedEpgSource {
   Future<StreamInfo> resolveArchive(
     Channel channel,
     Programme programme,
-  ) async => throw UnsupportedError('M3U playlists do not support catch-up');
+  ) async {
+    final template =
+        channel.extra['catchupSource']?.toString() ??
+        catchupCapability.template;
+    if (template == null || template.isEmpty) {
+      throw UnsupportedError('M3U channel does not advertise catch-up');
+    }
+    final start = programme.start.toUtc().millisecondsSinceEpoch ~/ 1000;
+    final end = programme.stop.toUtc().millisecondsSinceEpoch ~/ 1000;
+    final url = template
+        .replaceAll('{start}', '$start')
+        .replaceAll('{end}', '$end')
+        .replaceAll('%START%', '$start')
+        .replaceAll('%END%', '$end');
+    return StreamInfo(
+      url: url,
+      headers: userAgent == null ? const {} : {'User-Agent': userAgent!},
+      isLive: false,
+    );
+  }
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
@@ -182,6 +205,7 @@ class M3uSource implements Source, BatchedEpgSource {
     _channels = parsed.channels;
     _categories = parsed.categories;
     _headerEpgUrl = parsed.headerEpgUrl;
+    _catchupCapability = parsed.catchupCapability;
   }
 
   Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
@@ -204,7 +228,13 @@ class M3uParsed {
   final List<Channel> channels;
   final List<Category> categories;
   final String? headerEpgUrl;
-  const M3uParsed(this.channels, this.categories, this.headerEpgUrl);
+  final CatchupCapability catchupCapability;
+  const M3uParsed(
+    this.channels,
+    this.categories,
+    this.headerEpgUrl, [
+    this.catchupCapability = CatchupCapability.unsupported,
+  ]);
 }
 
 /// Isolate entrypoint: decodes [bytes] and parses the playlist. Kept top-level
@@ -219,8 +249,11 @@ M3uParsed parseM3uPlaylist(String content) {
   final channels = <Channel>[];
   final categoryTitles = <String>{};
   String? headerEpgUrl;
+  CatchupCapability capability = CatchupCapability.unsupported;
 
   String? name, group, logo, tvgId;
+  String? catchupSource;
+  var catchupDays = 0;
 
   for (final raw in const LineSplitter().convert(content)) {
     final line = raw.trim();
@@ -228,6 +261,17 @@ M3uParsed parseM3uPlaylist(String content) {
 
     if (line.startsWith('#EXTM3U')) {
       headerEpgUrl = _attr(line, 'url-tvg') ?? _attr(line, 'x-tvg-url');
+      final catchup = _attr(line, 'catchup');
+      final days = int.tryParse(_attr(line, 'catchup-days') ?? '');
+      if (catchup != null && catchup.toLowerCase() != 'none') {
+        capability = CatchupCapability(
+          mode: CatchupUrlMode.m3uTemplate,
+          maxArchiveWindow: days == null ? null : Duration(days: days),
+          template: _attr(line, 'catchup-source'),
+        );
+      }
+      catchupSource = _attr(line, 'catchup-source');
+      catchupDays = int.tryParse(_attr(line, 'catchup-days') ?? '') ?? 0;
       continue;
     }
     if (line.startsWith('#EXTINF')) {
@@ -255,20 +299,27 @@ M3uParsed parseM3uPlaylist(String content) {
           number: channels.length + 1,
           logo: (logo != null && logo.isNotEmpty) ? logo : null,
           categoryId: g,
+          archiveDays: catchupSource == null
+              ? 0
+              : (catchupDays > 0 ? catchupDays : kDefaultArchiveDays),
           extra: {
             'url': line,
             if (tvgId != null && tvgId.isNotEmpty) 'tvgId': tvgId,
+            ...?catchupSource == null
+                ? null
+                : <String, dynamic>{'catchupSource': catchupSource},
           },
         ),
       );
-      name = group = logo = tvgId = null;
+      name = group = logo = tvgId = catchupSource = null;
+      catchupDays = 0;
     }
   }
 
   final categories = (categoryTitles.toList()..sort())
       .map((t) => Category(id: t, title: t))
       .toList();
-  return M3uParsed(channels, categories, headerEpgUrl);
+  return M3uParsed(channels, categories, headerEpgUrl, capability);
 }
 
 String? _attr(String line, String key) =>

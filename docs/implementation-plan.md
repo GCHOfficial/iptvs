@@ -796,18 +796,18 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ## PR 14 — Catch-up capability and timezone model
 
-- [ ] Model provider catch-up URL mode.
-- [ ] Model provider timezone or explicit fixed offset.
-- [ ] Model maximum archive window and duration.
-- [ ] Model required start/end formatting.
-- [ ] Keep URL construction inside the owning Source implementation.
-- [ ] Prefer provider-reported timezone when available.
-- [ ] Add an advanced per-source override.
-- [ ] Parse applicable M3U catch-up attributes into the shared capability model.
-- [ ] Test device/provider timezone disagreement.
-- [ ] Test DST boundaries.
-- [ ] Test unsupported catch-up as an explicit capability, not a failed URL guess.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] Model provider catch-up URL mode.
+- [x] Model provider timezone or explicit fixed offset.
+- [x] Model maximum archive window and duration.
+- [x] Model required start/end formatting.
+- [x] Keep URL construction inside the owning Source implementation.
+- [x] Prefer provider-reported timezone when available.
+- [x] Add an advanced per-source override.
+- [x] Parse applicable M3U catch-up attributes into the shared capability model.
+- [x] Test device/provider timezone disagreement.
+- [x] Test DST boundaries.
+- [x] Test unsupported catch-up as an explicit capability, not a failed URL guess.
+- [x] `flutter analyze` and `flutter test` pass.
 
 ## PR 15 — TV focus, accessibility, and input parity
 
@@ -1007,6 +1007,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 12 | Ready for PR | Tag archaeology confirmed the public schema history and corrected the v11 range (v0.1.16–v0.1.34, not –v0.1.30; v12 first shipped in v0.1.35); normalized-DDL diffs across each tag range show no intra-range drift, and the v8–v11 fixture builders match the tagged fresh-install DDL exactly. Compatibility claim scoped to released schemas 8–11 → current (pre-v8 branches documented as best-effort dev-era paths in the `schemaVersion` doc comment, CLAUDE.md, and validation-baseline). `released_schema_fixtures_test.dart` now pins, per released version: migrate → pragma-based schema parity with a fresh install (`table_info`, name-keyed indexes, `foreign_key_list`) → seeded favorites/positions/EPG/`external_metadata` survival → stable second open (version 12, data intact, signature unchanged). Analyze clean; 346 tests pass (+8). |
 | 2026-07-16 | PR 12 | Complete | Squash-merged as #112 (`c07920e`); the remote topic branch was removed. |
 | 2026-07-16 | PR 13 | Ready for PR | Fixed same-source repository replacement by rebuilding/disposal-scoping the repository-backed live/media/favorites/preview controllers in `didUpdateWidget` while preserving screen-owned focus/scroll nodes; a widget regression proves the new source replaces the old controller data. Moved tabs/search/category/action chrome into `channel_list_chrome.dart` and embedded player controls/error/reconnect presentation into `player_overlay.dart`; route/dialog orchestration and all player/native lifecycle state remain with their existing owners. `channel_list_screen.dart` dropped from 2,043 to 1,590 lines and `player_screen.dart` from 1,845 to 1,638. Focused suites: 54 passed. Analyze clean; all 347 tests pass (14 expected skips). |
+| 2026-07-16 | PR 14 | Ready for PR | Added explicit `CatchupCapability`/URL modes, provider timezone or fixed-offset conversion, archive-window and formatting metadata, Xtream/Stalker source-owned capability reporting, M3U `catchup`/`catchup-days`/`catchup-source` parsing and template resolution, and persisted advanced per-source overrides. Unsupported catch-up remains explicit. Added timezone/device-disagreement, DST-boundary, and capability tests. Analyze clean; all 350 tests pass (14 expected skips). |
 
 ## Removal checklist
 
