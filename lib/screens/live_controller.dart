@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' hide Category;
 
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 
@@ -32,6 +33,7 @@ class LiveController extends ChangeNotifier {
   Timer? _epgTimer;
   bool _disposed = false;
   int _loadGeneration = 0;
+  LoadToken? _loadToken;
 
   void _set(VoidCallback fn) {
     if (_disposed) return;
@@ -49,11 +51,17 @@ class LiveController extends ChangeNotifier {
 
   Future<void> load({bool forceRefresh = false}) async {
     final gen = ++_loadGeneration;
+    // A newer load supersedes any still-running one — cancel its token so it
+    // stops writing to the cache once this one has started.
+    _loadToken?.cancel();
+    final token = LoadToken();
+    _loadToken = token;
     _set(() {
       loading = true;
       error = null;
     });
     try {
+      repo.loadToken = token;
       final snap = await retryTransientNetworkOperation(
         () => repo.load(forceRefresh: forceRefresh),
         onRetry: (error, nextAttempt) {
@@ -107,6 +115,7 @@ class LiveController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _epgTimer?.cancel();
+    _loadToken?.cancel();
     super.dispose();
   }
 }

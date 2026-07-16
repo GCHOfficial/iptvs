@@ -27,7 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: PR 10 — Bounded one-pass isolate ingestion (design pass)
+- Active PR: PR 10 — Bounded one-pass isolate ingestion (ready for PR;
+  on-device stall/RSS capture outstanding)
 - Previous PR: PR 9 merged as #109 and released as v0.1.35 (direct + Play
   closed testing); both 100-cycle soaks passed on 2026-07-16; device matrices
   stay open while the closed test gathers data
@@ -40,7 +41,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 305 tests with 7 opt-in
+- Current implementation `flutter test`: passed, 334 tests with 11 opt-in
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
   plus a disposable-key Play release AAB pass locally; the development flavor's
@@ -79,7 +80,7 @@ Status convention:
 | 7 | Phase 1 | Make EPG refresh atomic and indexed | M | PR 4 | Complete; #107 |
 | 8 | Phase 1 | Give MethodChannel handlers explicit ownership | M | PR 0 | Complete; #108 |
 | 9 | Phase 1 | Harden and validate native player lifecycle | L | PR 8 | Merged; #109/v0.1.35 — device matrices outstanding |
-| 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | [ ] |
+| 10 | Phase 2 | Build bounded one-pass isolate ingestion | L | PR 3 | Ready for PR |
 | 11 | Phase 2 | Harden cloud sync, RLS, RPCs, and panel input | M | PR 5 | [ ] |
 | 12 | Phase 2 | Test every supported historical migration | M | PRs 5 and 7 | [ ] |
 | 13 | Phase 2 | Split oversized UI files along tested boundaries | M | PRs 6 and 8 | [ ] |
@@ -612,24 +613,68 @@ device-matrix boxes, which the owner runs.
 
 ## PR 10 — Bounded one-pass isolate ingestion
 
+Design: hybrid worker boundary (decision log, 2026-07-16) — one-pass typed workers for
+channel/media catalogs, streamed batches only for EPG, additive `LoadToken` cancellation.
+
 ### Implementation
 
-- [ ] Xtream: decode and map large responses within one worker job.
-- [ ] Stalker: join, decode, and map large channel responses in one worker job.
-- [ ] XMLTV: decompress, parse, and return compact programme batches.
-- [ ] M3U: decode and parse with bounded batches.
-- [ ] Avoid returning both a giant dynamic graph and a typed graph.
-- [ ] Prevent cancelled or stale batches from reaching the repository.
-- [ ] Retain measured inline paths for genuinely small payloads.
+- [x] Xtream: decode and map large responses within one worker job. Top-level
+  `decodeLiveChannelsBytes`/`decodeMediaItemsBytes` (bytes → typed lists) run
+  under `compute` at/above the existing 256 KB threshold, inline below it; the
+  dynamic JSON graph never crosses the isolate boundary. Small/generic calls
+  (auth, categories, series details) keep the dynamic `_decodeJson` path.
+- [x] Stalker: join, decode, and map large channel responses in one worker
+  job. New `_requestBytes` fetches `get_all_channels` raw; top-level
+  `_ingestStalkerChannels` does utf8→json→token/portal-error detection→
+  per-row `_mapChannel` under `Isolate.run`, mirroring `_call`'s
+  re-handshake-once semantics (rows carry `tv_genre_id` inline; the
+  page-bounded ordered-list fallback stays inline — deferred, decision log).
+- [x] XMLTV: decompress, parse, and return compact programme batches.
+  `parseXmltvBatched` streams 1000-row `Programme` batches from a raw
+  spawned isolate with an ack handshake bounding in-flight batches to one
+  (a `ReceivePort` has no backpressure; unbounded sends would re-create the
+  peak-memory blowup streaming exists to avoid).
+- [x] M3U: decode and parse with bounded batches. Playlist parsing was
+  already one-pass typed (`_parseM3uBytes` via `compute`); added the small-
+  payload inline threshold. Disk-backed/batch-streamed playlist parsing is
+  deferred: the UI holds the full channel list regardless, so it yields no
+  peak-memory win (decision log). M3U's XMLTV guide uses the batched EPG path.
+- [x] Avoid returning both a giant dynamic graph and a typed graph. All
+  large-payload workers return only the typed result; parity pinned by
+  `test/xtream_ingest_test.dart` / `test/stalker_ingest_test.dart` /
+  `test/xmltv_batch_test.dart`.
+- [x] Prevent cancelled or stale batches from reaching the repository.
+  `LoadToken` (additive to the pinned generation guards) is cancelled by each
+  superseding load: stale channel/media cache writes are skipped in
+  `LibraryRepository`, and a cancelled EPG feed throws `LoadCancelledException`
+  so `replaceEpgStream`'s single transaction rolls back — a half-fed guide
+  can never commit (success-empty contract unchanged).
+- [x] Retain measured inline paths for genuinely small payloads. Existing
+  256 KB (JSON) / 64 KB (XMLTV) thresholds kept and applied to every new
+  path; dev-host baselines record the isolate round-trip overhead
+  (~150–280 ms on 40–54 MB catalogs) that justifies them.
 
 ### Verification
 
 - [ ] Main-isolate stalls meet the PR 0 budget on the low-memory TV device.
-- [ ] Peak memory remains within the agreed regression allowance.
-- [ ] Cancellation stops publication of subsequent batches.
-- [ ] Malformed data has deterministic partial-failure behavior.
-- [ ] Results match the existing parser fixture corpus.
-- [ ] `flutter analyze` and `flutter test` pass.
+  Owner-run on `TV-Low` hardware/emulator; PR 0 budgets are intentionally
+  unset, so the deliverable is a recorded before/after stall comparison.
+- [ ] Peak memory remains within the agreed regression allowance. Owner-run
+  device capture pending; dev-host RSS recorded in
+  `docs/validation-baseline.md` ("One-pass isolate ingestion baseline").
+- [x] Cancellation stops publication of subsequent batches.
+  `test/epg_batch_cancel_test.dart`: cancel after the first batch → no
+  further batches, `replaceEpgStream` rolls back to the seeded guide; stale
+  channel write skipped at repository level.
+- [x] Malformed data has deterministic partial-failure behavior. Per-row/
+  per-element skip pinned in `test/stalker_ingest_test.dart`,
+  `test/xtream_ingest_test.dart`, `test/xmltv_batch_test.dart`; whole-payload
+  JSON/XML corruption throws the same errors as the old paths.
+- [x] Results match the existing parser fixture corpus. Parity tests over the
+  PR 0 `WorkloadFixtures` corpus (new workers vs. old pipeline, field-by-field
+  samples + counts); `parseXmltvBatched` flattened == `parseXmltv`.
+- [x] `flutter analyze` and `flutter test` pass on 2026-07-16 (334 passed;
+  11 opt-in baselines and 3 Windows-only updater tests skipped on Linux).
 
 ## PR 11 — Cloud, RLS, RPC, and panel hardening
 
@@ -849,6 +894,7 @@ security, persisted data, or provider behavior.
 | 2026-07-15 | Record EPG refresh failure via the un-advanced `epg_synced_at` plus a redacted diagnostics line, not a persisted failure column; add `idx_prog_source_start(source_id, start)` at schema v12 for the source+time now-next queries | A failure column has no consumer until PR 16's diagnostics UX and would enlarge PR 12's migration matrix; the existing `(source_id, channel_id, start)` index cannot serve a query with no `channel_id` constraint | Success-empty is a real replacement (clears stale rows, advances freshness); failures leave the timestamp stale so the scheduler retries; channel-scoped queries keep `idx_prog_lookup` | PR 7 |
 | 2026-07-15 | `replaceLibrary` writes the `sources` row via non-destructive update-else-insert instead of `INSERT OR REPLACE` | `INSERT OR REPLACE` deleted the row and nulled `epg_synced_at` on every channel refresh, defeating PR 7's failure-observability design; `ON CONFLICT DO UPDATE` was avoided because Android below API 30 ships SQLite older than 3.24 | Channel refresh now preserves EPG freshness and any future `sources` column; dead programme rows for removed channels persist at most ~3h until the next scheduled `replaceEpg` clears them by source | PR 7 |
 | 2026-07-15 | Guard the two static inbound native channels with a Dart-side monotonic owner-token registry (`ChannelHandlerOwner`) instead of per-instance channels or a permanent multiplexer; no Kotlin/C++ changes | Flutter runs a replacement route's `initState` before the old route's `dispose`, so an unconditional dispose-time `setMethodCallHandler(null)` wipes the newer owner's handler (previously Windows-only cleared; Android never cleared); both native sides register once per process and hold no per-Dart-owner state, so ownership is purely a Dart problem; a permanent multiplexer would be a bridge redesign reserved for PR 9 evidence | "Identical Android/Windows cleanup" is satisfied Dart-side: both platforms run the same release-if-current path; real handlers keep `mounted`/`_disposed` second gates for calls already dispatched; invariant recorded in `CLAUDE.md` Player essentials and `docs/player.md` | PR 8 |
+| 2026-07-16 | PR 10 uses a hybrid worker boundary: one-pass `Isolate.run` decode+map (bytes in, typed list out) for large Xtream/Stalker channel and media payloads, streamed compact `Programme` batches only for XMLTV EPG (new `replaceEpgStream` preserving the atomic success-empty/rollback contract), and an additive `LoadToken` cancel guard beside the existing generation guards; disk-backed M3U line parsing and ordered-list-fallback offload are deferred | Channels/media are held in full by the UI regardless, so batch-streaming them reduces nothing — the win is keeping the dynamic JSON graph inside the worker and building the typed graph off the main isolate; EPG is the only path where the full typed list on the main isolate is pure waste (programmes flow straight to SQLite); a long-lived ingestion isolate's spawn-amortization benefit is irrelevant at refresh cadence and would force multi-batch semantics onto the atomic cache | `Source` stays provider-agnostic via one optional `epgBatched` member defaulting to null; existing generation guards and their pinned tests are untouched (the token adds only DB-write/batch-feed guarding); main-isolate stall and peak-memory verification remain before/after recordings on the low-memory TV device since PR 0 budgets were intentionally unset | PR 10 |
 | 2026-07-16 | Harden the player lifecycle with targeted per-defect fixes plus a queryable debug-only counter registry (Dart `ResourceCounters` / Kotlin `DebugCounters` / C++ `#ifndef NDEBUG` ints), rejecting a unified per-platform lifecycle/session object; counters merge through a `debugCounters` method on the existing HDR channel rather than a new inbound channel | The audit found only two genuine, local defects (Windows silent surface-failure; preview `TextureView` not detached at PlatformView dispose) — a session object is precisely the bridge redesign the ledger forbids without measured need and would rewrite through seven load-bearing, currently-passing invariants; a new inbound channel would add handler-ownership surface right after PR 8 removed that class of bug; the soak must programmatically assert zero, which pure logging cannot fail on | Counters thread through the existing call sites, so a green soak proves those exact release paths complete; release builds are inert (`kDebugMode`/`BuildConfig.DEBUG`/`NDEBUG`, empty `debugCounters` reply); deferred as a known efficiency item, not a leak: PlayerScreen constructs an embedded media_kit `Player` even on the Android native path where it is never opened (counted and disposed, so soaks still balance) | PR 9 |
 
 ## Progress log
@@ -886,6 +932,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | Store setup | Complete | Android developer verification registered the Play and GitHub-direct packages with their separate certificates; the Play-installed internal-track APK matched the Play-managed fingerprint; privacy, data-safety, content-rating, phone, and TV listings plus internal phone/TV smoke tests are complete. Internal testing continues before production publication. |
 | 2026-07-16 | PR 9 | Complete (matrices open) | Merged as #109 (`49ea241`) with all CI checks green and released as v0.1.35 (signed direct release + Play AAB). Google approved the 0.1.35 closed-testing release the same day; TestersCommunity's 14-day tester window opened 2026-07-16, so the personal-account production gate completes no earlier than 2026-07-30. Owner ran both 100-cycle soaks (Android and Windows) on 2026-07-16 and every counter returned to zero. The four device matrices and the two hardware-only Windows items stay open while closed-test feedback accumulates. |
 | 2026-07-16 | PR 10 | In progress | Design pass started on `perf/isolate-ingestion`: audit the four ingestion paths, develop competing worker-boundary designs, then implement bounded one-pass isolate ingestion against the PR 0 fixture corpus and budgets. |
+| 2026-07-16 | PR 10 | Ready for PR | Hybrid worker boundary implemented: Xtream/Stalker catalogs decode+map bytes→typed lists in one worker job (dynamic JSON graph never crosses the isolate boundary; Stalker's ~28 MB `get_all_channels` no longer `jsonDecode`s on the UI thread), XMLTV streams 1000-row `Programme` batches with single-in-flight ack flow control into the new one-transaction `replaceEpgStream` (success-empty contract preserved; cancellation rolls back via `LoadCancelledException`), and an additive `LoadToken` stops superseded loads from writing stale data (pinned generation-guard tests pass unmodified — token rides a documented settable repository field because a signature change would break the pinned `_GatedRepo` overrides). `BatchedEpgSource` is a separate optional capability interface since `implements` doesn't inherit default bodies. Dev-host baselines recorded (inline vs. isolate round-trip; batched XMLTV slightly faster than single-list). Analyze clean; 334 tests pass (+29: ingest parity, malformed-row, batch/cancel, stream-persistence suites). Remaining open boxes are owner-run on-device: TV-Low stall and peak-RSS before/after capture. |
 
 ## Removal checklist
 

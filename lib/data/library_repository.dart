@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import '../sources/source.dart';
 import 'app_database.dart';
 import 'diagnostics_log.dart';
+import 'load_token.dart';
 import 'metadata_provider.dart';
 import 'net.dart' show redactText;
 
@@ -87,16 +88,44 @@ class LibraryRepository {
 
   bool get canEnrichMetadata => metadataProviders.isNotEmpty;
 
+  /// Cooperative-cancellation token for the in-flight [load]/[loadMedia]/
+  /// [loadMoreMedia] call, additive to the controllers' `_loadGeneration`
+  /// guards (see CLAUDE.md "Async publishes are generation-guarded"): the
+  /// generation guard stops a stale result from being *published*; this token
+  /// stops a stale call from *writing* to the cache or feeding more EPG
+  /// batches once a newer call has superseded it.
+  ///
+  /// This is a plain settable field rather than a parameter on those methods
+  /// on purpose: [LibraryRepository] is subclassed by Completer-gated test
+  /// doubles (`test/live_controller_test.dart`, `test/media_tab_controller_test.dart`)
+  /// that `@override` `load`/`loadMedia`/`loadMoreMedia`, and Dart requires an
+  /// override to redeclare every parameter of the method it overrides —
+  /// adding a new named parameter to these methods would break those pinned
+  /// overrides. A caller sets [loadToken] to the token it wants honoured, then
+  /// invokes the method in the same synchronous prologue (no `await` in
+  /// between); each method reads it into a local at its very first line,
+  /// before its own first `await`, so a later reassignment (a newer call
+  /// superseding this one) can never leak into a call already under way.
+  LoadToken? loadToken;
+
   Future<LibrarySnapshot> load({bool forceRefresh = false}) async {
+    final token = loadToken;
     // Always connect: cheap auth, and resolve()/playback/EPG need it.
     await source.connect();
 
-    final snapshot = await _loadChannels(forceRefresh: forceRefresh);
+    final snapshot = await _loadChannels(
+      forceRefresh: forceRefresh,
+      token: token,
+    );
 
     // EPG is best-effort and time-sensitive — refresh on its own schedule, and
     // never let an EPG failure break the channel list.
     try {
-      await _ensureEpg(snapshot.channels, forceRefresh: forceRefresh);
+      await _ensureEpg(
+        snapshot.channels,
+        forceRefresh: forceRefresh,
+        token: token,
+      );
     } catch (error) {
       // Source may not provide EPG, or the call failed — keep the cached
       // guide and just note the failure; retry happens on the next load.
@@ -109,7 +138,10 @@ class LibraryRepository {
     return snapshot;
   }
 
-  Future<LibrarySnapshot> _loadChannels({required bool forceRefresh}) async {
+  Future<LibrarySnapshot> _loadChannels({
+    required bool forceRefresh,
+    LoadToken? token,
+  }) async {
     if (!forceRefresh) {
       final synced = await db.lastSynced(source.id);
       if (synced != null) {
@@ -127,6 +159,17 @@ class LibraryRepository {
 
     final categories = await source.categories();
     final channels = await source.channels();
+    if (token?.isCancelled ?? false) {
+      // Superseded by a newer load — the controller has already (or will)
+      // discard this snapshot by generation, so skip the stale cache write
+      // and leave the previous cache intact for the next read.
+      return LibrarySnapshot(
+        categories: categories,
+        channels: channels,
+        fromCache: false,
+        syncedAt: DateTime.now(),
+      );
+    }
     await db.replaceLibrary(source.id, source.name, categories, channels);
     return LibrarySnapshot(
       categories: categories,
@@ -139,10 +182,34 @@ class LibraryRepository {
   Future<void> _ensureEpg(
     List<Channel> channels, {
     required bool forceRefresh,
+    LoadToken? token,
   }) async {
     final last = await db.lastEpgSynced(source.id);
     final stale = last == null || DateTime.now().difference(last) > _epgMaxAge;
     if (!forceRefresh && !stale) return;
+
+    if (source is BatchedEpgSource) {
+      // `is` doesn't promote across unrelated interfaces (Source and
+      // BatchedEpgSource share no subtype relationship), hence the explicit
+      // cast — safe, guarded by the check above.
+      final batchedSource = source as BatchedEpgSource;
+      final batches = batchedSource.epgBatched(channels, token: token);
+      if (batches != null) {
+        try {
+          await db.replaceEpgStream(source.id, batches);
+        } on LoadCancelledException {
+          // Superseded by a newer load — not a real failure, so this stays
+          // out of `load()`'s outer catch (which would otherwise log it as a
+          // scary "EPG refresh failed" error). Keep the last-good guide;
+          // retry happens on the next load.
+          DiagnosticsLog.instance.add(
+            'epg',
+            'EPG batch load superseded; retaining cached guide',
+          );
+        }
+        return;
+      }
+    }
 
     final programmes = await source.epg(channels);
     // Always replace — a success-empty result (a source with no EPG data)
@@ -181,6 +248,7 @@ class LibraryRepository {
     MediaItem? parent,
     bool forceRefresh = false,
   }) async {
+    final token = loadToken;
     await source.connect();
     final parentId = parent?.id;
     if (!forceRefresh) {
@@ -236,6 +304,21 @@ class LibraryRepository {
             fetched.items,
             action: 'load-child',
           );
+    if (token?.isCancelled ?? false) {
+      // Superseded by a newer load — skip the stale cache write; the
+      // previous cache stays intact for the next read.
+      return MediaLibrarySnapshot(
+        kind: kind,
+        categoryId: categoryId,
+        parentId: parentId,
+        categories: categories,
+        items: await _mergeCachedMetadata(fetchedItems),
+        fromCache: false,
+        syncedAt: DateTime.now(),
+        loadedPages: fetched.loadedPages,
+        totalPages: fetched.totalPages,
+      );
+    }
     await db.replaceMediaLibrary(
       source.id,
       kind,
@@ -339,6 +422,7 @@ class LibraryRepository {
     String? categoryId,
     MediaItem? parent,
   }) async {
+    final token = loadToken;
     await source.connect();
     final parentId = parent?.id;
     final sync = await db.mediaSyncState(
@@ -387,6 +471,25 @@ class LibraryRepository {
               ),
       );
       if (!fetched.hasMore) break;
+    }
+    if (token?.isCancelled ?? false) {
+      // Superseded by a newer load — skip the stale append; the prior sync
+      // state (loadedPages/totalPages) stays intact for the next read.
+      return MediaLibrarySnapshot(
+        kind: kind,
+        categoryId: categoryId,
+        parentId: parentId,
+        categories: await db.readMediaCategories(source.id, kind),
+        items: await _readMergedMediaItems(
+          kind,
+          categoryId: categoryId,
+          parentId: parentId,
+        ),
+        fromCache: true,
+        syncedAt: sync.syncedAt,
+        loadedPages: sync.loadedPages,
+        totalPages: sync.totalPages,
+      );
     }
     await db.appendMediaItems(
       source.id,

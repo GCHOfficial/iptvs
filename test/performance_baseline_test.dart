@@ -1,11 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/sources/m3u_source.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/sources/stalker_source.dart';
 import 'package:iptvs/sources/xmltv.dart';
+import 'package:iptvs/sources/xtream_source.dart';
 
 import 'support/workload_fixtures.dart';
 
@@ -96,6 +100,123 @@ void main() {
           }
         });
       }
+
+      // The following four baselines exercise PR 10's one-pass isolate
+      // ingestion paths directly (bytes in, typed lists out), rather than the
+      // pre-PR-10 decode-then-map-inline shape the tests above still cover.
+      // Each reports both the inline call (no isolate spawn) and the
+      // production isolate round trip, so a regression in isolate spawn/copy
+      // overhead is visible separately from the underlying parse cost.
+
+      test('Xtream live one-pass decodeLiveChannelsBytes 250000 items', () async {
+        const itemCount = 250000;
+        final bytes = WorkloadFixtures.xtreamLiveJson(itemCount);
+
+        final inlineWatch = Stopwatch()..start();
+        final inlineResult = decodeLiveChannelsBytes(bytes);
+        inlineWatch.stop();
+        expect(inlineResult, hasLength(itemCount));
+
+        final isolateWatch = Stopwatch()..start();
+        final isolateResult = await compute(decodeLiveChannelsBytes, bytes);
+        isolateWatch.stop();
+        expect(isolateResult, hasLength(itemCount));
+
+        _report('xtream-live-onepass', {
+          'items': itemCount,
+          'inputBytes': bytes.length,
+          'inlineMs': inlineWatch.elapsedMilliseconds,
+          'isolateRoundTripMs': isolateWatch.elapsedMilliseconds,
+          'maxRssBytes': ProcessInfo.maxRss,
+        });
+      });
+
+      test('Xtream VOD one-pass decodeMediaItemsBytes 250000 items', () async {
+        const itemCount = 250000;
+        final bytes = WorkloadFixtures.xtreamVodJson(itemCount);
+        final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
+
+        final inlineWatch = Stopwatch()..start();
+        final inlineResult = decodeMediaItemsBytes(args);
+        inlineWatch.stop();
+        expect(inlineResult, hasLength(itemCount));
+
+        final isolateWatch = Stopwatch()..start();
+        final isolateResult = await compute(decodeMediaItemsBytes, args);
+        isolateWatch.stop();
+        expect(isolateResult, hasLength(itemCount));
+
+        _report('xtream-vod-onepass', {
+          'items': itemCount,
+          'inputBytes': bytes.length,
+          'inlineMs': inlineWatch.elapsedMilliseconds,
+          'isolateRoundTripMs': isolateWatch.elapsedMilliseconds,
+          'maxRssBytes': ProcessInfo.maxRss,
+        });
+      });
+
+      // No pre-PR-10 baseline exists for this path: the old
+      // decode-into-a-dynamic-tree-then-map-inline Stalker ingestion had no
+      // bytes-in/typed-list-out seam to benchmark directly, so this entry is
+      // new rather than a comparison against a prior number.
+      test('Stalker one-pass debugIngestChannels 250000 items', () async {
+        const itemCount = 250000;
+        final bytes = WorkloadFixtures.stalkerChannelsJson(itemCount);
+
+        final inlineWatch = Stopwatch()..start();
+        final inlineResult = StalkerSource.debugIngestChannels(bytes);
+        inlineWatch.stop();
+        expect(inlineResult.channels, hasLength(itemCount));
+
+        final isolateWatch = Stopwatch()..start();
+        final isolateResult = await Isolate.run(
+          () => StalkerSource.debugIngestChannels(bytes),
+        );
+        isolateWatch.stop();
+        expect(isolateResult.channels, hasLength(itemCount));
+
+        _report('stalker-onepass', {
+          'items': itemCount,
+          'inputBytes': bytes.length,
+          'inlineMs': inlineWatch.elapsedMilliseconds,
+          'isolateRoundTripMs': isolateWatch.elapsedMilliseconds,
+          'maxRssBytes': ProcessInfo.maxRss,
+        });
+      });
+
+      // Compares against the 'xmltv-gzip' entry above (parseXmltv, one big
+      // list) by draining parseXmltvBatched's streamed batches over the same
+      // fixture end to end, so the two numbers are directly comparable.
+      test('XMLTV batched parseXmltvBatched 100000 programmes', () async {
+        const channelCount = 500;
+        const programmesPerChannel = 200;
+        final bytes = WorkloadFixtures.xmltv(
+          channelCount: channelCount,
+          programmesPerChannel: programmesPerChannel,
+          gzip: true,
+        );
+        final channelMap = {
+          for (var i = 0; i < channelCount; i++) 'channel.$i': 'id-$i',
+        };
+
+        final watch = Stopwatch()..start();
+        var total = 0;
+        var batches = 0;
+        await for (final batch in parseXmltvBatched(bytes, channelMap)) {
+          total += batch.length;
+          batches++;
+        }
+        watch.stop();
+
+        expect(total, channelCount * programmesPerChannel);
+        _report('xmltv-batched', {
+          'items': total,
+          'batches': batches,
+          'compressedBytes': bytes.length,
+          'parseMs': watch.elapsedMilliseconds,
+          'maxRssBytes': ProcessInfo.maxRss,
+        });
+      });
 
       test('SQLite 50000 channels and 100000 programmes', () async {
         const channelCount = 50000;

@@ -1,9 +1,53 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/sources/m3u_source.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
 void main() {
   group('parseM3uPlaylist', () {
+    test(
+      'small and large playlists parse to the same shape '
+      '(exercises both sides of the isolate-offload threshold)',
+      () {
+        String playlistOf(int channelCount) {
+          final out = StringBuffer('#EXTM3U\n');
+          for (var i = 0; i < channelCount; i++) {
+            out
+              ..writeln(
+                '#EXTINF:-1 tvg-id="channel.$i" group-title="Group ${i % 5}",'
+                'Channel $i',
+              )
+              ..writeln('http://server/live/$i.ts');
+          }
+          return out.toString();
+        }
+
+        // A handful of channels stays well under the 256 KB isolate
+        // threshold; a few thousand pushes the same playlist shape past it.
+        // Production only ever calls parseM3uPlaylist from the isolate
+        // entrypoint or inline below the threshold — both paths run this
+        // exact function, so parity here pins that the threshold only
+        // decides *where* parsing runs, never *what* it produces.
+        final small = playlistOf(5);
+        final large = playlistOf(3000);
+        expect(utf8.encode(small).length, lessThan(256 * 1024));
+        expect(utf8.encode(large).length, greaterThan(256 * 1024));
+
+        final parsedSmall = parseM3uPlaylist(small);
+        final parsedLarge = parseM3uPlaylist(large);
+
+        expect(parsedSmall.channels, hasLength(5));
+        expect(parsedLarge.channels, hasLength(3000));
+        for (final parsed in [parsedSmall, parsedLarge]) {
+          final first = parsed.channels.first;
+          expect(first.name, 'Channel 0');
+          expect(first.categoryId, 'Group 0');
+          expect(first.extra['tvgId'], 'channel.0');
+          expect(first.extra['url'], 'http://server/live/0.ts');
+        }
+      },
+    );
     test(
       'duplicate tvg-ids yield distinct channels keyed by opaque locator IDs',
       () {

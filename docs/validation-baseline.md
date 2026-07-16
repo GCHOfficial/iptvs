@@ -30,16 +30,33 @@ isolate for large/provider-controlled responses.
 The policies are intentionally workload-specific: metadata and Stalker JSON are
 small, while playlists, EPG, and Xtream catalogs allow the larger PR 0 fixtures.
 Update artifacts stream to a temporary partial file, hash as they arrive, and
-delete that file on cancellation, timeout, or validation failure. Provider
-parsers still receive a bounded byte buffer; PR 10 will replace that final buffer
-with one-pass isolate/file ingestion once the parser boundaries are tested.
+delete that file on cancellation, timeout, or validation failure. PR 10 replaced
+the final buffered-decode-then-map-inline step for the two largest catalog
+shapes with one-pass ingestion: `decodeLiveChannelsBytes`/`decodeMediaItemsBytes`
+(Xtream, `lib/sources/xtream_source.dart`) and
+`StalkerSource.debugIngestChannels`'s underlying `_ingestStalkerChannels` seam
+(`lib/sources/stalker_source.dart`) take the raw response bytes and hand back
+typed `Channel`/`MediaItem` lists directly — the intermediate dynamic JSON tree
+is built and consumed entirely inside the worker isolate (`compute` for Xtream,
+`Isolate.run` for Stalker) and never crosses back to the caller. XMLTV guides
+get the same treatment plus streaming: `parseXmltvBatched`
+(`lib/sources/xmltv.dart`) yields bounded `Programme` batches with a single
+in-flight batch at a time, feeding `AppDatabase.replaceEpgStream` so a large
+guide commits incrementally inside one transaction instead of holding the
+entire parsed guide in memory. All three keep the existing inline path below
+their isolate thresholds (256 KB for Xtream/Stalker JSON, 64 KB for XMLTV) —
+isolate spawn overhead isn't worth it for the many small calls. Disk-backed M3U
+parsing is explicitly deferred: `ChannelListScreen` and its controllers hold
+the full decoded channel list in memory regardless of how it was parsed, so
+streaming the parse alone yields no memory win without a much larger change to
+how the UI consumes the list.
 
 An oversized monolithic live catalog is not automatically a source failure.
 Stalker retries through its paginated `get_ordered_list` endpoint; Xtream merges
 category-scoped `get_live_streams` responses and deduplicates stable stream IDs.
 If one page/category still exceeds its individual bound, the request is rejected.
-M3U has no server pagination, so larger-than-memory playlists remain bounded
-until PR 10 supplies disk-backed incremental line parsing.
+M3U has no server pagination, so larger-than-memory playlists remain bounded by
+the existing response-size policy; see the disk-backed-parsing deferral above.
 
 The regression contract is in `test/net_workload_test.dart`: slow-drip total
 deadlines, idle stalls, early/streamed size enforcement, hostile gzip expansion,
@@ -162,6 +179,36 @@ SQLite baseline with 50,000 channels and 100,000 programmes:
 These are comparison values, not release budgets. In particular, the parser
 tests call synchronous parsing functions directly and therefore do not measure
 the production isolate handoff, frame scheduling, or isolate data-copy cost.
+
+### One-pass isolate ingestion baseline (PR 10)
+
+Recorded on the same `DEV-Linux-1` host (Flutter 3.44.5, Dart 3.12.2) against
+the PR 10 working tree. `Inline` calls the worker function directly with no
+isolate spawn; `Isolate round trip` goes through the same routing production
+uses (`compute` for Xtream, `Isolate.run` for Stalker) so the spawn/copy
+overhead is visible on its own. **Recorded on dev host only; TV-device
+stall/RSS capture is pending** — the low-memory Android TV device run is
+owner-run, same as the rest of this document's TV rows.
+
+| Workload | Items | Input | Inline | Isolate round trip |
+|---|---:|---:|---:|---:|
+| Xtream live one-pass (`decodeLiveChannelsBytes`) | 250,000 | 48.76 MB | 512 ms | 695 ms |
+| Xtream VOD one-pass (`decodeMediaItemsBytes`) | 250,000 | 41.82 MB | 548 ms | 803 ms |
+| Stalker one-pass (`debugIngestChannels`) — no prior baseline existed for this seam | 250,000 | 54.14 MB | 545 ms | 824 ms |
+
+XMLTV batched vs. single-list, same 100,000-programme/0.93 MB-compressed
+fixture as the `XMLTV gzip` row above:
+
+| Workload | Items | Batches | Parse |
+|---|---:|---:|---:|
+| `parseXmltv` (single list, existing) | 100,000 | — | 908 ms |
+| `parseXmltvBatched` (drained end to end) | 100,000 | 100 | 850 ms |
+
+Draining the streamed batches was slightly faster than building one big list,
+consistent with never materializing the full result twice. As with the table
+above, these are dev-host comparison points, not release budgets, and the
+isolate round trip numbers still don't capture production frame-scheduling or
+UI-thread contention.
 
 ## Recorded Android profile baseline
 

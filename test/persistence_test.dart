@@ -407,47 +407,44 @@ void main() {
       },
     );
 
-    test(
-      'v10 database gains the playback_positions table on upgrade',
-      () async {
-        // Simulate a pre-v11 install: open at v10 (no positions table), then
-        // reopen through AppDatabase so the oldV < 11 repair branch runs.
-        sqfliteFfiInit();
-        databaseFactory = databaseFactoryFfi;
-        final raw = await openDatabase(
-          dbPath(),
-          version: 10,
-          onCreate: (db, _) async {
-            await db.execute(
-              'CREATE TABLE sources (id TEXT PRIMARY KEY, '
-              'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
-            );
-            // `programmes` has existed since onCreate/oldV<2, so a genuine v10
-            // install always has it too — the v11->v12 index-add branch targets it.
-            await db.execute(
-              'CREATE TABLE programmes (source_id TEXT NOT NULL, '
-              'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
-              'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
-            );
-          },
-        );
-        await raw.close();
+    test('v10 database gains the playback_positions table on upgrade', () async {
+      // Simulate a pre-v11 install: open at v10 (no positions table), then
+      // reopen through AppDatabase so the oldV < 11 repair branch runs.
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+      final raw = await openDatabase(
+        dbPath(),
+        version: 10,
+        onCreate: (db, _) async {
+          await db.execute(
+            'CREATE TABLE sources (id TEXT PRIMARY KEY, '
+            'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
+          );
+          // `programmes` has existed since onCreate/oldV<2, so a genuine v10
+          // install always has it too — the v11->v12 index-add branch targets it.
+          await db.execute(
+            'CREATE TABLE programmes (source_id TEXT NOT NULL, '
+            'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
+            'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
+          );
+        },
+      );
+      await raw.close();
 
-        final db = await AppDatabase.openAt(dbPath());
-        await db.savePlaybackPosition(
-          'src',
-          ContentKind.movie,
-          'm1',
-          position: const Duration(minutes: 12),
-          duration: const Duration(minutes: 90),
-        );
-        expect(
-          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
-          isNotNull,
-        );
-        await db.close();
-      },
-    );
+      final db = await AppDatabase.openAt(dbPath());
+      await db.savePlaybackPosition(
+        'src',
+        ContentKind.movie,
+        'm1',
+        position: const Duration(minutes: 12),
+        duration: const Duration(minutes: 90),
+      );
+      expect(
+        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+        isNotNull,
+      );
+      await db.close();
+    });
   });
 
   group('AppDatabase programmes', () {
@@ -588,6 +585,129 @@ void main() {
     );
   });
 
+  group('AppDatabase.replaceEpgStream', () {
+    test(
+      'a success-empty stream clears stale rows and advances epg_synced_at',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [Category(id: 'c1', title: 'News')],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+        );
+        await db.replaceEpg('src1', [
+          Programme(
+            channelId: 'ch1',
+            start: t(10),
+            stop: t(11),
+            title: 'Stale',
+          ),
+        ]);
+
+        // Millisecond-truncated to match epg_synced_at's storage precision —
+        // an empty stream is fast enough end-to-end that comparing against a
+        // microsecond-precision `DateTime.now()` was flaky (the stored value
+        // can floor into the same millisecond as a `beforeCall` that's a
+        // fraction of a millisecond ahead of it).
+        final beforeCall = DateTime.fromMillisecondsSinceEpoch(
+          DateTime.now().millisecondsSinceEpoch,
+        );
+        await db.replaceEpgStream(
+          'src1',
+          const Stream<List<Programme>>.empty(),
+        );
+
+        final result = await db.nowNext('src1', t(10, 30));
+        expect(result.now, isEmpty);
+        final synced = await db.lastEpgSynced('src1');
+        expect(synced, isNotNull);
+        expect(
+          synced!.isAtSameMomentAs(beforeCall) || synced.isAfter(beforeCall),
+          isTrue,
+        );
+        await db.close();
+      },
+    );
+
+    test(
+      'a mid-stream error retains the last-good guide and old timestamp',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [Category(id: 'c1', title: 'News')],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+        );
+        await db.replaceEpg('src1', [
+          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'Good'),
+        ]);
+        final before = await db.lastEpgSynced('src1');
+        expect(before, isNotNull);
+
+        Stream<List<Programme>> throwingBatches() async* {
+          yield [
+            Programme(
+              channelId: 'ch1',
+              start: t(12),
+              stop: t(13),
+              title: 'Partial',
+            ),
+          ];
+          throw StateError('epg batch feed failed mid-stream');
+        }
+
+        await expectLater(
+          db.replaceEpgStream('src1', throwingBatches()),
+          throwsA(isA<StateError>()),
+        );
+
+        final result = await db.nowNext('src1', t(10, 30));
+        expect(result.now['ch1']?.title, 'Good');
+        expect(await db.lastEpgSynced('src1'), before);
+        await db.close();
+      },
+    );
+
+    test('a completed multi-batch stream lands all rows atomically', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+      );
+
+      Stream<List<Programme>> batches() async* {
+        yield [
+          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+        ];
+        yield [
+          Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+        ];
+        yield [
+          Programme(channelId: 'ch1', start: t(12), stop: t(13), title: 'C'),
+        ];
+      }
+
+      await db.replaceEpgStream('src1', batches());
+
+      final progs = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(9),
+        to: t(14),
+      );
+      expect(progs.map((p) => p.title), ['A', 'B', 'C']);
+      expect(await db.lastEpgSynced('src1'), isNotNull);
+      await db.close();
+    });
+  });
+
   group('AppDatabase EPG index', () {
     Future<bool> indexExists(String path) async {
       // A fresh connection to inspect sqlite_master. `openDatabase` here is
@@ -631,33 +751,30 @@ void main() {
       },
     );
 
-    test(
-      'a large now-next query is served by idx_prog_source_start',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        final firstStart = DateTime.utc(2026, 1, 1);
-        const channelCount = 2000;
-        const perChannel = 10; // ~20k programmes total.
-        final programmes = <Programme>[
-          for (var c = 0; c < channelCount; c++)
-            for (var i = 0; i < perChannel; i++)
-              Programme(
-                channelId: 'channel-$c',
-                start: firstStart.add(Duration(hours: i)),
-                stop: firstStart.add(Duration(hours: i + 1)),
-                title: 'P$c-$i',
-              ),
-        ];
-        await db.replaceEpg('perf-source', programmes);
+    test('a large now-next query is served by idx_prog_source_start', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final firstStart = DateTime.utc(2026, 1, 1);
+      const channelCount = 2000;
+      const perChannel = 10; // ~20k programmes total.
+      final programmes = <Programme>[
+        for (var c = 0; c < channelCount; c++)
+          for (var i = 0; i < perChannel; i++)
+            Programme(
+              channelId: 'channel-$c',
+              start: firstStart.add(Duration(hours: i)),
+              stop: firstStart.add(Duration(hours: i + 1)),
+              title: 'P$c-$i',
+            ),
+      ];
+      await db.replaceEpg('perf-source', programmes);
 
-        final plan = await db.explainNowQueryPlan(
-          'perf-source',
-          firstStart.add(const Duration(minutes: 30)),
-        );
-        expect(plan.any((d) => d.contains('idx_prog_source_start')), isTrue);
-        await db.close();
-      },
-    );
+      final plan = await db.explainNowQueryPlan(
+        'perf-source',
+        firstStart.add(const Duration(minutes: 30)),
+      );
+      expect(plan.any((d) => d.contains('idx_prog_source_start')), isTrue);
+      await db.close();
+    });
   });
 
   group('stable identity migration', () {
