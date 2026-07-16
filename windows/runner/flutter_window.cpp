@@ -51,6 +51,13 @@ constexpr int kNativeMenuRowHeight = 40;
 constexpr int kNativeMenuMaxRows = 5;
 constexpr int kNativeMenuPadding = 10;
 constexpr int kNativeControlsKindOverlay = 0;
+#ifndef NDEBUG
+// Debug-only native resource counters, surfaced via the "debugCounters"
+// method on kNativeHdrPlayerChannel. Touched only from the platform/UI
+// thread (all FlutterWindow methods run there), so plain ints are fine.
+int g_debug_surface_count = 0;
+int g_debug_overlay_count = 0;
+#endif
 bool g_native_video_cursor_visible = true;
 // Mini-player mode (see SetNativeWindowMiniPlayer): dragging the video moves
 // the whole window.
@@ -1975,6 +1982,9 @@ HWND FlutterWindow::CreateNativeVideoSurface() {
     SetWindowPos(native_video_surface_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SetFocus(native_video_surface_);
+#ifndef NDEBUG
+    ++g_debug_surface_count;
+#endif
   }
   CreateNativeControls();
   return native_video_surface_;
@@ -1984,6 +1994,9 @@ void FlutterWindow::DestroyNativeVideoSurface() {
   if (native_video_surface_) {
     DestroyWindow(native_video_surface_);
     native_video_surface_ = nullptr;
+#ifndef NDEBUG
+    --g_debug_surface_count;
+#endif
   }
 }
 
@@ -2027,6 +2040,11 @@ void FlutterWindow::CreateNativeControls() {
                        parent, nullptr, GetModuleHandle(nullptr), nullptr);
     SetWindowLongPtr(native_controls_overlay_, GWLP_USERDATA,
                      kNativeControlsKindOverlay);
+#ifndef NDEBUG
+    if (native_controls_overlay_) {
+      ++g_debug_overlay_count;
+    }
+#endif
   }
   ResizeNativeControls();
   native_controls_visible_ = false;
@@ -2040,6 +2058,9 @@ void FlutterWindow::DestroyNativeControls() {
     SetWindowRgn(native_controls_overlay_, nullptr, TRUE);
     DestroyWindow(native_controls_overlay_);
     native_controls_overlay_ = nullptr;
+#ifndef NDEBUG
+    --g_debug_overlay_count;
+#endif
   }
   native_controls_region_dirty_ = true;
 }
@@ -2591,6 +2612,18 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
           }
           SetNativeWindowMiniPlayer(mini);
           result->Success(flutter::EncodableValue(native_window_mini_));
+          return;
+        }
+
+        if (call.method_name() == "debugCounters") {
+          flutter::EncodableMap counters;
+#ifndef NDEBUG
+          counters[flutter::EncodableValue("windowsSurfaces")] =
+              flutter::EncodableValue(g_debug_surface_count);
+          counters[flutter::EncodableValue("windowsOverlays")] =
+              flutter::EncodableValue(g_debug_overlay_count);
+#endif
+          result->Success(flutter::EncodableValue(counters));
           return;
         }
 

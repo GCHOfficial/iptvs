@@ -54,6 +54,10 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Used by integration_test/player_soak_test.dart — a real-hardware soak run
+  # (never CI / plain `flutter test`, see the file's doc comment).
+  integration_test:
+    sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

@@ -270,6 +270,15 @@ HWND surface, mpv d3d11). Other platforms: embedded `media_kit_video`, HDR tone-
   all playback logs go through `_logPlayback` (redacted).
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
+- **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in
+  the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
+  channel-owner claims), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
+  `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays` — all release-inert
+  (`kDebugMode`/`BuildConfig.DEBUG`/`#ifndef NDEBUG`) and merged by `ResourceCounters.snapshot()`
+  via a `debugCounters` method on the existing HDR channel. Counters must return to zero after an
+  open/close cycle; `integration_test/player_soak_test.dart` (owner-run on hardware, never CI)
+  asserts it over 100 cycles. When adding a lifecycle resource or a new create/dispose path, keep
+  the counting balanced. Detail: docs/player.md "Debug resource counters + lifecycle soak".
 - **Inbound native channels are token-owned.** `iptvs/native_hdr_player` and
   `iptvs/native_preview` are process-static; handler registration goes through
   `ChannelHandlerOwner` (`lib/player/channel_owner.dart`): claim bumps a monotonic token,
@@ -302,6 +311,10 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 - **Known gap:** migration coverage exercises v1→8, fresh-create, and the v7→8
   `external_metadata` repair, but not the v3→7 ALTER/`media_page_state` rebuild branches. Worth
   adding if those paths change.
+- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `PlayerBackPolicyTest`,
+  `ReconnectPolicyTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`) for pure logic
+  extracted from the native player. `integration_test/player_soak_test.dart` is owner-run on real
+  hardware only (see docs/player.md) — plain `flutter test` doesn't collect it.
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
   every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
   literal `username=…&password=…` pattern when the parser under test doesn't need it.

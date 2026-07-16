@@ -18,6 +18,9 @@ class MpvEngine(
 ) : PlaybackEngine {
 
     private val controller = MpvController(context, state, post)
+    // MpvController.destroy() is itself idempotent, but this also guards
+    // DebugCounters against a double-decrement if release() is called twice.
+    private var released = false
 
     override val view: View = SurfaceView(context).apply {
         // 10-bit surface reduces banding for the tone-mapped SDR output.
@@ -28,6 +31,7 @@ class MpvEngine(
 
     init {
         controller.create(headers)
+        DebugCounters.incMpvEngine()
     }
 
     override fun load(url: String, subtitles: List<SubtitleSpec>) =
@@ -43,5 +47,11 @@ class MpvEngine(
     override fun selectSubtitle(id: String) = controller.selectSubtitle(id)
     override fun applyAspect(mode: AspectMode) = controller.applyAspect(mode)
     override fun pause() = controller.pause()
-    override fun release() = controller.destroy()
+
+    override fun release() {
+        if (released) return
+        released = true
+        controller.destroy()
+        DebugCounters.decMpvEngine()
+    }
 }

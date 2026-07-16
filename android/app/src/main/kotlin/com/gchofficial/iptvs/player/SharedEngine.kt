@@ -25,7 +25,14 @@ object SharedEngine {
     private const val TAG = "iptvs.shared"
 
     var engine: ExoPlayerEngine? = null
-        private set
+        private set(value) {
+            // Balances DebugCounters.sharedEngineLive across every assignment
+            // site, including the adoption handoff (which never reassigns this
+            // field, so it stays at 1 throughout — see docs/player.md).
+            if (value == null && field != null) DebugCounters.decSharedEngineLive()
+            if (value != null && field == null) DebugCounters.incSharedEngineLive()
+            field = value
+        }
     var uiState: PlayerUiState? = null
         private set
 
@@ -201,6 +208,12 @@ object SharedEngine {
             previewTexture = null
             previewAspectFrame = null
         }
+        // Release the engine's reference to this now-destroyed TextureView.
+        // Skipped while fullscreen has adopted the engine: it owns/re-attaches
+        // the video output for that handoff (claimViewSurface /
+        // fullscreenDetached), so clearing here would fight that transparent
+        // handoff instead of just tidying up a torn-down preview.
+        if (!adoptedByFullscreen) engine?.clearPreviewTexture(texture)
     }
 
     private fun applyPreviewAspect(width: Int, height: Int) {

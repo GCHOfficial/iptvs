@@ -66,6 +66,17 @@ direct certificate recorded below must never be supplied as either of those
 keys. Upload-key setup and CI values are documented in
 `docs/store-publishing.md`.
 
+On 2026-07-16, Android developer verification registered both active release
+identities. `com.gchofficial.iptvs.player` is registered with Google's
+Play-managed app-signing certificate
+`F4:D9:F8:2B:A1:DB:51:94:19:D4:9C:2B:7D:39:AA:A5:F0:10:A8:92:CB:F0:37:1A:AE:01:30:41:6E:DB:37:53`.
+The outside-Play `com.gchofficial.iptvs.player.direct` package is registered
+separately with the permanent direct-distribution certificate recorded below.
+On 2026-07-16, the base APK of the internal-track app installed by Play on an
+SM-S938B was pulled with `adb` and checked with
+`tool/verify_android_apk_certificate.sh`; `apksigner` reported the exact
+Play-managed SHA-256 fingerprint above.
+
 ## User-data transition from the retired app
 
 Android deliberately isolates application data by application ID and signing
@@ -185,7 +196,7 @@ future direct-download updates; disclosure allows malicious replacement APKs.
   key; this does not replace creation of the protected permanent key.
 - [x] `apksigner` reports the disposable validation fingerprint, proving the
   Gradle environment-variable path signs the output.
-- [ ] A protected GitHub release run reports the permanent fingerprint above.
-- [ ] A minimum-SDK (API 26) install/start smoke test passes. Current API 36
+- [x] A protected GitHub release run reports the permanent fingerprint above.
+- [x] A minimum-SDK (API 26) install/start smoke test passes. Current API 36
   phone/TV and Play internal-update paths are verified; every intermediate API
   is not required as an early-testing gate.

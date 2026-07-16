@@ -9,9 +9,15 @@ handling changes.
 - [x] Upload version `0.1.31` (`versionCode` 1) as an Android App Bundle.
 - [x] Enrol in Play App Signing using the Play-managed app-signing key.
 - [x] Create an internal release and add testers.
-- [ ] Confirm the tester opt-in link installs on a physical phone.
-- [ ] Record the installed APK's Play app-signing certificate fingerprint.
-- [ ] Run the phone smoke test below.
+- [x] Confirm the tester opt-in link installs on a physical phone.
+- [x] Record the Play Console app-signing certificate SHA-256 fingerprint:
+  `F4:D9:F8:2B:A1:DB:51:94:19:D4:9C:2B:7D:39:AA:A5:F0:10:A8:92:CB:F0:37:1A:AE:01:30:41:6E:DB:37:53`.
+- [x] Confirm Android developer verification registered the Play package with
+  that same fingerprint.
+- [x] Confirm an installed internal-track APK uses that fingerprint. On
+  2026-07-16, the repository certificate verifier checked the Play-installed
+  base APK from an SM-S938B and reported an exact SHA-256 match.
+- [x] Run the phone smoke test below.
 
 For a new internal release, the opt-in and download links can take several
 hours to become available. A temporary package-name listing can remain visible
@@ -237,10 +243,10 @@ device-lifecycle behaviour.
 
 ## New personal-account production gate
 
-- [ ] Finish all App content and store-listing sections.
+- [x] Finish all App content and store-listing sections.
 - [ ] Create a closed test.
 - [ ] Recruit at least 12 testers who remain opted in continuously for 14 days.
-- [ ] Collect actionable phone and TV feedback and record fixes.
+- [x] Collect actionable phone and TV feedback and record fixes.
 - [ ] Apply for production access after the Console makes the application
   available.
 - [ ] Complete production countries/regions and free-app pricing deliberately.
@@ -251,31 +257,31 @@ device-lifecycle behaviour.
 
 ### Android phone
 
-- Clean install from Play; verify package name and Play signing certificate.
-- Add Demo source; browse Live, Movies, and Series; start and stop playback.
-- Exercise Back, rotation, background/resume, PiP, favourites, and Continue
+- [x] Clean install from Play; verify package name and Play signing certificate.
+- [x] Add Demo source; browse Live, Movies, and Series; start and stop playback.
+- [x] Exercise Back, rotation, background/resume, PiP, favourites, and Continue
   Watching.
-- Pair cloud sync, push/pull a test profile, then unpair.
-- Confirm there is no GitHub update UI or package-install permission.
-- Confirm privacy/support/deletion links open.
+- [x] Pair cloud sync, push/pull a test profile, then unpair.
+- [x] Confirm there is no GitHub update UI or package-install permission.
+- [x] Confirm privacy/support/deletion links open.
 
 ### Android TV
 
-- Install from the Play TV track, not by sideloading the direct APK.
-- Complete every primary path using only D-pad, Select, and Back.
-- Verify focus restoration after dialogs, search, playback, and route returns.
-- Verify no keyboard/touchscreen requirement and no focus trap.
-- Test native fullscreen controls, reconnect, subtitles/tracks, and app exit.
+- [x] Install from the Play TV track, not by sideloading the direct APK.
+- [x] Complete every primary path using only D-pad, Select, and Back.
+- [x] Verify focus restoration after dialogs, search, playback, and route returns.
+- [x] Verify no keyboard/touchscreen requirement and no focus trap.
+- [x] Test native fullscreen controls, reconnect, subtitles/tracks, and app exit.
 
 ### Cloud account deletion
 
-1. Create a disposable panel account and pair a disposable app installation.
-2. Add one profile, every source kind with fake credentials, metadata settings,
+1. [x] Create a disposable panel account and pair a disposable app installation.
+2. [x] Add one profile, every source kind with fake credentials, metadata settings,
    a favourite, and a device label.
-3. Delete the account from the panel and confirm the session is signed out.
-4. Confirm the same magic link no longer exposes the old rows.
-5. Confirm the paired device can no longer pull or push.
-6. Query the Supabase dashboard privately and confirm account-owned rows and
+3. [x] Delete the account from the panel and confirm the session is signed out.
+4. [x] Confirm the same magic link no longer exposes the old rows.
+5. [x] Confirm the paired device can no longer pull or push.
+6. [x] Query the Supabase dashboard privately and confirm account-owned rows and
    paired anonymous auth users are gone.
 7. Confirm an anonymous device cannot call `delete_account`, and Account A
    cannot delete or affect Account B.

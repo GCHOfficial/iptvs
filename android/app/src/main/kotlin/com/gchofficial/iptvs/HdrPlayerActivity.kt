@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
+import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
@@ -27,6 +28,7 @@ import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
+import com.gchofficial.iptvs.player.ReconnectPolicy
 import com.gchofficial.iptvs.player.SharedEngine
 import com.gchofficial.iptvs.player.SubtitleSpec
 import com.gchofficial.iptvs.player.nextPlayerBackAction
@@ -53,6 +55,10 @@ class HdrPlayerActivity : ComponentActivity() {
     private val engineState = mutableStateOf<PlaybackEngine?>(null)
     private var engine: PlaybackEngine? = null
     private var progressTicker: Job? = null
+
+    // Debug-only: lets an integration-test soak cycle this Activity without a
+    // human closing it each time. Inert (never scheduled) outside BuildConfig.DEBUG.
+    private var soakAutoCloseJob: Job? = null
 
     // True while this Activity plays through the *adopted* shared preview engine
     // (see [SharedEngine]): it never releases that engine — on exit it hands the
@@ -191,6 +197,16 @@ class HdrPlayerActivity : ComponentActivity() {
             if (resumeMs > 0L && !uiState.isLive) engine?.seekTo(resumeMs)
         }
 
+        if (BuildConfig.DEBUG) {
+            val soakAutoCloseMs = intent.getLongExtra(EXTRA_SOAK_AUTOCLOSE_MS, -1L)
+            if (soakAutoCloseMs > 0L) {
+                soakAutoCloseJob = lifecycleScope.launch {
+                    delay(soakAutoCloseMs)
+                    finish()
+                }
+            }
+        }
+
         setContent {
             engineState.value?.let { active ->
                 PlayerScreen(
@@ -257,7 +273,11 @@ class HdrPlayerActivity : ComponentActivity() {
         }
         val now = System.currentTimeMillis()
         if (stalledSinceMs == 0L) stalledSinceMs = now
-        val threshold = if (uiState.ended) ENDED_RECONNECT_MS else STALL_RECONNECT_MS
+        val threshold = if (uiState.ended) {
+            ReconnectPolicy.ENDED_RECONNECT_MS
+        } else {
+            ReconnectPolicy.STALL_RECONNECT_MS
+        }
         if (now - stalledSinceMs >= threshold) reconnectLive(force = false)
     }
 
@@ -269,8 +289,7 @@ class HdrPlayerActivity : ComponentActivity() {
         if (!uiState.isLive || isFinishing) return
         val now = System.currentTimeMillis()
         val sinceLast = now - lastReconnectMs
-        val minGap = if (force) STALL_RECONNECT_MS else
-            minOf((reconnectAttempt + 1) * STALL_RECONNECT_MS, MAX_BACKOFF_MS)
+        val minGap = ReconnectPolicy.minGapMs(reconnectAttempt, force)
         if (lastReconnectMs != 0L && sinceLast < minGap) return
         reconnectAttempt++
         lastReconnectMs = now
@@ -321,6 +340,11 @@ class HdrPlayerActivity : ComponentActivity() {
                 pollLiveReconnect()
                 delay(500)
             }
+        }.also { job ->
+            DebugCounters.incProgressTicker()
+            // Fires exactly once whether the job is cancelled (onStop) or
+            // completes on its own, so the counter can't double-decrement.
+            job.invokeOnCompletion { DebugCounters.decProgressTicker() }
         }
     }
 
@@ -468,6 +492,8 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        soakAutoCloseJob?.cancel()
+        soakAutoCloseJob = null
         if (adoptedShared) {
             // Not ours to release: hand the video output back to the preview
             // surface; the engine keeps playing across the return.
@@ -565,6 +591,13 @@ class HdrPlayerActivity : ComponentActivity() {
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
 
+        /**
+         * Debug-only: auto-`finish()` this many ms after open, so an
+         * integration-test soak can cycle the Activity unattended. Read only
+         * when [BuildConfig.DEBUG]; absent/non-positive means never scheduled.
+         */
+        const val EXTRA_SOAK_AUTOCLOSE_MS = "soak_autoclose_ms"
+
         /** Favorite toggle (live channels): whether to show the star + its seed state. */
         const val EXTRA_CAN_FAVORITE = "can_favorite"
         const val EXTRA_IS_FAVORITE = "is_favorite"
@@ -574,10 +607,5 @@ class HdrPlayerActivity : ComponentActivity() {
         const val RESULT_DURATION_MS = "duration_ms"
         const val RESULT_FAVORITE = "favorite"
         private const val TAG = "iptvs.hdr"
-
-        // Live reconnect watchdog thresholds.
-        private const val STALL_RECONNECT_MS = 8_000L // buffering this long -> reconnect
-        private const val ENDED_RECONNECT_MS = 2_000L // a live drop is faster to retry
-        private const val MAX_BACKOFF_MS = 30_000L // cap between repeated attempts
     }
 }

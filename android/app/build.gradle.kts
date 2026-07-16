@@ -99,6 +99,10 @@ android {
     buildFeatures {
         // Jetpack Compose powers the native HDR player's control overlay.
         compose = true
+        // Generates BuildConfig.DEBUG, used to no-op the native player's debug-only
+        // lifecycle counters (player/DebugCounters.kt) and integration-test soak
+        // auto-close in release builds.
+        buildConfig = true
     }
 
     packaging {

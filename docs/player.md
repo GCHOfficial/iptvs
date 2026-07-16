@@ -110,6 +110,15 @@ dynamic metadata, and *not* synthesised by `hdr-compute-peak` (so no false-posit
 HDR10) — and upgrades PQ→"HDR10+ · PQ"; any missing property/error stays at "HDR10". Older mpv
 builds without those sub-properties simply under-report (HDR10).
 
+If the native HWND surface **fails to create** (`createSurface` returning null), `_open` stops
+and surfaces the standard terminal error/Retry overlay ("Couldn't create the video surface.") —
+Retry re-runs `_open` including a fresh surface-creation attempt. It must **not** fall through to
+opening the stream: on Windows `_controller` is always null and
+`embeddedVideoOptionsForPlatform()` is empty, so proceeding would mean audio-only playback behind
+a silent black overlay (the pre-PR-9 behavior). An adopted player on this path lands on the same
+overlay (its audio keeps running, as it did before, but the failure is now visible and
+recoverable — a successful Retry reaches the normal hot-swap).
+
 A **mini-player** mode (`setMiniPlayer`, toggled with the `M` key) restyles the top-level window
 into a compact frameless always-on-top window docked bottom-right — draggable via the video area
 (manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,
@@ -134,6 +143,13 @@ provider connection** ever exists (single-connection IPTV accounts). On exit the
 back (`fullscreenDetached`); the Activity never releases an adopted engine, and `onStop` skips its
 usual pause when finishing-while-adopted. Engine callbacks (`onUnsupportedVideo` /
 `onRecoverableError`) are mutable vars for the same reason — each host rebinds them.
+
+When the preview **platform view disposes**, `SharedEngine.unregisterPreviewView` also detaches
+the destroyed `TextureView` from the engine (`ExoPlayerEngine.clearPreviewTexture`, an
+identity-checked `clearVideoTextureView`) so ExoPlayer can't keep a reference to a dead view —
+but **only when not adopted**: during an adopted fullscreen handoff the Activity owns the video
+output (`claimViewSurface`/`fullscreenDetached`), and clearing there would fight the transparent
+handoff.
 
 Streams ExoPlayer can't decode (DV P5 on non-DV hardware) fall back **per channel** to the
 embedded media_kit preview (the `previewEvent: unsupported`/`lost` events;
@@ -189,7 +205,9 @@ stacks: Android in `HdrPlayerActivity` (its 500ms progress ticker watches `Playe
 ExoPlayer network errors that leave it idle trigger an immediate reconnect); Windows/embedded in
 `player_screen.dart` (a 1s `Timer` watching media_kit's buffering/error streams — the Dart
 `_player` only plays on these paths). The same **reload** is how "Go to live" works, since live
-IPTV is typically non-seekable.
+IPTV is typically non-seekable. The Android watchdog's timing policy (stall/ended thresholds,
+attempt-scaled capped backoff) is the pure `ReconnectPolicy` object
+(`android/.../player/ReconnectPolicy.kt`), pinned by the plain-JUnit `ReconnectPolicyTest`.
 
 ## Headers and logging
 
@@ -222,3 +240,38 @@ registry (the repo's generation-guard idiom):
 Pinned by `test/channel_owner_test.dart` (claim/release/supersede semantics via
 `TestDefaultBinaryMessengerBinding`); the `mounted`/`_disposed` gates inside the real handlers are
 verified by inspection (instantiating `PlayerScreen` needs a live media_kit engine).
+
+## Debug resource counters + lifecycle soak
+
+Debug-only counters track every player-lifecycle resource, in the layer that owns it, and must
+**return to zero after a full open/close cycle** — a nonzero settled count means a leak:
+
+- **Dart** (`lib/player/resource_counters.dart`, `kDebugMode`-gated): `mediaKitPlayers`
+  (constructed at `LivePreviewController._createPlayer` and PlayerScreen's fresh-`Player` branch —
+  an *adopted* player is counted once by its creator and decremented by whoever actually calls
+  `dispose()`: `discardPlayer` after a Windows hot-swap, or the controller's own `dispose`),
+  `reconnectTimers` (the 1s live watchdog), `channelOwners` (`ChannelHandlerOwner.claim`/`release`
+  — release decrements unconditionally since every claimant releases exactly once, even
+  superseded).
+- **Kotlin** (`android/.../player/DebugCounters.kt`, `BuildConfig.DEBUG`-gated `AtomicInteger`s):
+  `exoEngines`/`mpvEngines` (constructor ↔ now-idempotent `release()`), `previewViews`
+  (`PreviewPlatformView` init/dispose), `progressTickers` (launch ↔ `invokeOnCompletion`),
+  `sharedEngineLive` (the `SharedEngine.engine` setter — a single choke point, so the adoption
+  handoff stays balanced).
+- **C++** (`windows/runner/flutter_window.cpp`, `#ifndef NDEBUG`): `windowsSurfaces` /
+  `windowsOverlays` — incremented only when `CreateWindowEx` actually creates (the reuse path
+  doesn't count), decremented on real destroys. Platform-thread-confined plain ints.
+
+`ResourceCounters.snapshot()` merges the Dart counts with the natives' reply to a `debugCounters`
+method on `iptvs/native_hdr_player` (deliberately *not* a new inbound channel — no new handler
+ownership surface; release builds reply with an empty map). The snapshot renders in a
+`kDebugMode`-only section of the diagnostics screen.
+
+The **100-cycle soak** (`integration_test/player_soak_test.dart`, never run by CI or plain
+`flutter test`) cycles `PlayerScreen` push/pop and preview start/stop on real hardware —
+`flutter test integration_test/player_soak_test.dart -d windows|<android>` — then asserts every
+counter is zero. It never asserts playback state (the soak device's network may not reach the
+demo streams). On Android, `PlayerScreen.debugSoakAutoCloseMs` (debug-only, passed as
+`soakAutoCloseMs` on the native `open` call → `EXTRA_SOAK_AUTOCLOSE_MS`) makes
+`HdrPlayerActivity` finish itself each cycle so the soak runs unattended; the extra is inert in
+release builds.
