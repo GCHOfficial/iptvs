@@ -43,6 +43,16 @@ class AppDatabase {
 
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
+  ///
+  /// Publicly shipped schema versions (repository release tags): 8
+  /// (v0.1.0–v0.1.7), 9 (v0.1.8–v0.1.10), 10 (v0.1.11–v0.1.15), 11
+  /// (v0.1.16–v0.1.34), 12 (v0.1.35+). Upgrades from those versions are the
+  /// supported compatibility claim, pinned by
+  /// `test/released_schema_fixtures_test.dart` (fixture → migrate → schema
+  /// parity with a fresh install → stable second open). The pre-v8 branches
+  /// below never shipped in a tagged release; they are kept as best-effort
+  /// repair paths for development-era installs and are exercised only by the
+  /// v1/v7 regression tests in `test/persistence_test.dart`.
   static const schemaVersion = 12;
 
   static Future<AppDatabase> open() async {

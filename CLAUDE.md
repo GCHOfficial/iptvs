@@ -264,7 +264,12 @@ skipped for those users — therefore **any table `_createMediaTables` doesn't c
 have an `oldV < N` repair branch**, or fresh installs miss it (the v7 `external_metadata` bug:
 created only in an `oldV >= 3 && oldV < 7` branch, fresh installs crashed on every metadata
 query; v8 fixed it both ways). `AppDatabase.openAt(path)` is the `@visibleForTesting` seam used
-by `test/persistence_test.dart`.
+by `test/persistence_test.dart`. **Supported upgrades are the publicly shipped schemas only**
+(8–11 → current; tag ranges in docs/validation-baseline.md), pinned by
+`test/released_schema_fixtures_test.dart` — per released version: fixture → migrate →
+pragma-based schema parity with a fresh install → seeded-data checks → stable second open. Keep
+that suite green (and extend the fixtures) whenever the schema changes; pre-v8 branches are
+best-effort dev-era repair paths outside the claim.
 
 ## Player (essentials)
 
@@ -335,9 +340,11 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   redaction, metadata config, source-hint language detection (`widget_test.dart` — mostly logic
   tests despite the name); redaction + DB migrations + repository cache behaviour (`net_test.dart`,
   `persistence_test.dart`).
-- **Known gap:** migration coverage exercises v1→8, fresh-create, and the v7→8
-  `external_metadata` repair, but not the v3→7 ALTER/`media_page_state` rebuild branches. Worth
-  adding if those paths change.
+- Migration coverage: `released_schema_fixtures_test.dart` pins every publicly shipped upgrade
+  path (v8–v11 → current: schema parity with fresh install, seeded-data survival, stable second
+  open); `persistence_test.dart` keeps the v1→current chain and the v7→8 `external_metadata`
+  repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
+  are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
 - Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `PlayerBackPolicyTest`,
   `ReconnectPolicyTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`) for pure logic
   extracted from the native player. `integration_test/player_soak_test.dart` is owner-run on real

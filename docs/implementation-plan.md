@@ -27,7 +27,8 @@ Status convention:
 
 - Last updated: 2026-07-16
 - Active phase: Phase 1 — Correctness and lifecycle
-- Active PR: none — PR 12 (historical migration coverage) is next
+- Active PR: PR 12 (historical migration coverage) — implemented on
+  `test/migration-coverage`, ready for PR
 - Previous PR: PR 11 complete — merged as #111, released as v0.1.36, live
   verification passed 2026-07-16; PR 10 merged as #110 (on-device TV-Low
   stall/RSS capture outstanding); device matrices stay open while the closed
@@ -745,15 +746,26 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 
 ## PR 12 — Historical migration coverage
 
-- [ ] List schema versions that shipped publicly.
-- [ ] Remove unsupported intermediate versions from the compatibility claim.
-- [ ] Add a sanitized database fixture for each supported historical version.
-- [ ] Open and migrate every fixture.
-- [ ] Compare tables, columns, indexes, constraints, and foreign keys with fresh DB.
-- [ ] Validate representative favorites, positions, EPG, and metadata after upgrade.
-- [ ] Open every migrated fixture a second time to prove stable startup.
-- [ ] Update `AppDatabase.schemaVersion` documentation after migrations land.
-- [ ] `flutter analyze` and `flutter test` pass.
+- [x] List schema versions that shipped publicly (8: v0.1.0–7, 9: v0.1.8–10,
+  10: v0.1.11–15, 11: v0.1.16–34, 12: v0.1.35+; the old table understated the
+  v11 range as ending at v0.1.30 — corrected in docs/validation-baseline.md).
+- [x] Remove unsupported intermediate versions from the compatibility claim
+  (supported upgrades are released schemas 8–11 → current; pre-v8 `onUpgrade`
+  branches stay as best-effort dev-era repair paths, documented as outside the
+  claim in the `schemaVersion` doc comment, CLAUDE.md, and validation-baseline).
+- [x] Add a sanitized database fixture for each supported historical version
+  (v8–v11 builders re-verified against tagged source: fresh-install DDL at each
+  range's first tag plus normalized-DDL diff across each range — no drift).
+- [x] Open and migrate every fixture.
+- [x] Compare tables, columns, indexes, constraints, and foreign keys with
+  fresh DB (pragma-based `schemaSignature`: `table_info`, name-keyed
+  `index_list`/`index_info`, `foreign_key_list`).
+- [x] Validate representative favorites, positions, EPG, and metadata after
+  upgrade (seeded programme + `external_metadata` rows added to the fixtures).
+- [x] Open every migrated fixture a second time to prove stable startup
+  (version stays 12, data intact, schema signature unchanged).
+- [x] Update `AppDatabase.schemaVersion` documentation after migrations land.
+- [x] `flutter analyze` and `flutter test` pass (clean; 346 passed).
 
 ## PR 13 — Split oversized UI files
 
@@ -982,6 +994,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 11 | Ready for PR | Migration `20260716000000_harden_cloud.sql` (search_path sweep, trigger + RPC validation with ≥10x-over-250k-corpus limits, per-device push rate limit, advisory-locked INVOKER profile cap, `delete_account` reaps rate rows; orchestrator review added the kind/NOT-NULL/position pre-emption so table-constraint errors can't echo "Failing row contains" credentials). Panel: `validate.js` scheme/length validation + `friendlyError`/`scrubUrls` on every error surface, 20 node tests green. Flutter: `friendlyCloudError` replaces all raw `'$e'` sites (PostgrestException `details` leak closed), 4 new tests. Analyze clean; 338 tests pass. Live-project verification items are owner-run after merge (the migration auto-applies on push to main). |
 | 2026-07-16 | PR 11 | Merged (live checks open) | Merged as #111 (`545fc93`); all functional CI green (the one red check was GitGuardian's documented false positive on the synthetic credential fixtures in `panel/test/validate.test.js`). The Supabase GitHub integration applied `20260716000000_harden_cloud` to the live project, and the security advisor now shows no mutable-`search_path` findings — remaining advisor items are documented-intentional (policy-less `push_rate`, the privileged RPC surface, anonymous device sessions) plus Supabase's own benign `rls_auto_enable` event-trigger helper. Owner-run live verification (cross-user rejection, pairing expiry/replay, concurrent profile-cap race, oversized/throttled pushes, gateway body-size bound) remains open. |
 | 2026-07-16 | PR 11 | Complete | v0.1.36 released (signed direct release; all workflow gates green) and the owner completed the live-project verification pass the same day: 0.1.35→0.1.36 in-app update plus normal sync/panel smoke, oversized/invalid pushes rejected with typed `iptvs: ` errors before mutation, >30/min push throttle, pairing expiry/replay and cross-user rejection, and the concurrent profile-cap race at 20. No gateway 413 interfered at tested payload sizes. |
+| 2026-07-16 | PR 12 | Ready for PR | Tag archaeology confirmed the public schema history and corrected the v11 range (v0.1.16–v0.1.34, not –v0.1.30; v12 first shipped in v0.1.35); normalized-DDL diffs across each tag range show no intra-range drift, and the v8–v11 fixture builders match the tagged fresh-install DDL exactly. Compatibility claim scoped to released schemas 8–11 → current (pre-v8 branches documented as best-effort dev-era paths in the `schemaVersion` doc comment, CLAUDE.md, and validation-baseline). `released_schema_fixtures_test.dart` now pins, per released version: migrate → pragma-based schema parity with a fresh install (`table_info`, name-keyed indexes, `foreign_key_list`) → seeded favorites/positions/EPG/`external_metadata` survival → stable second open (version 12, data intact, signature unchanged). Analyze clean; 346 tests pass (+8). |
 
 ## Removal checklist
 
