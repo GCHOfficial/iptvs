@@ -1330,7 +1330,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                       if (!context.mounted) return;
                       await Navigator.of(context).push(
                         MaterialPageRoute(
-                          builder: (_) => const DiagnosticsScreen(),
+                          builder: (_) => DiagnosticsScreen(
+                            database: widget.repo.db,
+                            sourceId: widget.repo.source.id,
+                            onReingest: () => _loadLive(forceRefresh: true),
+                          ),
                         ),
                       );
                     },

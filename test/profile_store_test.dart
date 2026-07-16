@@ -40,6 +40,44 @@ void main() {
     });
   });
 
+  test('snapshot restore preview reports effects without source fields', () {
+    const current = ProfileSnapshot(
+      sourcesJson: [
+        {
+          'id': 'keep',
+          'label': 'Current',
+          'fields': {'password': 'must-not-appear'},
+        },
+        {'id': 'remove', 'label': 'Remove', 'fields': {}},
+      ],
+      activeSourceId: 'remove',
+      metadataJson: {'provider': 'tmdb'},
+    );
+    const target = ProfileSnapshot(
+      sourcesJson: [
+        {'id': 'keep', 'label': 'Current', 'fields': {}},
+        {
+          'id': 'add',
+          'label': 'Living room',
+          'fields': {'url': 'https://user:secret@example.invalid'},
+        },
+      ],
+      activeSourceId: 'add',
+      metadataJson: {'provider': 'tvdb'},
+      managedIds: ['add'],
+    );
+
+    final preview = previewSnapshotRestore(current, target);
+    expect(preview.sourcesAdded, 1);
+    expect(preview.sourcesRemoved, 1);
+    expect(preview.sourcesRetained, 1);
+    expect(preview.activeSourceLabel, 'Living room');
+    expect(preview.metadataChanges, isTrue);
+    expect(preview.managedSources, 1);
+    expect(preview.toString(), isNot(contains('must-not-appear')));
+    expect(preview.toString(), isNot(contains('secret')));
+  });
+
   group('LocalProfile JSON', () {
     test('round-trips with its snapshot', () {
       const profile = LocalProfile(

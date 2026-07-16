@@ -48,11 +48,36 @@ class CloudProfile {
   final String id;
   final String name;
   final int position;
+  final DateTime? updatedAt;
   const CloudProfile({
     required this.id,
     required this.name,
     required this.position,
+    this.updatedAt,
   });
+}
+
+/// Server-authoritative revision metadata used by a client before a
+/// destructive push. It deliberately contains no profile/source payload.
+class CloudRevision {
+  final String profileId;
+  final DateTime? updatedAt;
+
+  const CloudRevision({required this.profileId, this.updatedAt});
+}
+
+/// Whether a destructive overwrite warning is warranted. A missing server
+/// timestamp is treated conservatively as a conflict when the caller has a
+/// local snapshot, since an old client must never silently replace unknown
+/// remote state.
+bool shouldWarnBeforeOverwrite({
+  required DateTime? knownRemoteRevision,
+  required DateTime? currentRemoteRevision,
+  required bool hasLocalChanges,
+}) {
+  if (!hasLocalChanges) return false;
+  if (knownRemoteRevision == null || currentRemoteRevision == null) return true;
+  return currentRemoteRevision.isAfter(knownRemoteRevision);
 }
 
 /// The content kinds whose favorites are synced (live channels / movies /
@@ -168,7 +193,7 @@ class CloudSync {
   Future<List<CloudProfile>> listProfiles() async {
     final rows = await _client
         .from('profiles')
-        .select('id, name, position')
+        .select('id, name, position, updated_at')
         .order('position');
     return [
       for (final r in rows)
@@ -176,8 +201,26 @@ class CloudSync {
           id: r['id'] as String,
           name: (r['name'] as String?) ?? '',
           position: (r['position'] as int?) ?? 0,
+          updatedAt: r['updated_at'] == null
+              ? null
+              : DateTime.tryParse(r['updated_at'].toString()),
         ),
     ];
+  }
+
+  Future<CloudRevision?> profileRevision(String profileId) async {
+    final row = await _client
+        .from('profiles')
+        .select('id, updated_at')
+        .eq('id', profileId)
+        .maybeSingle();
+    if (row == null) return null;
+    return CloudRevision(
+      profileId: row['id'] as String,
+      updatedAt: row['updated_at'] == null
+          ? null
+          : DateTime.tryParse(row['updated_at'].toString()),
+    );
   }
 
   /// The profile this device currently syncs (from its `devices` row, falling

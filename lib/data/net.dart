@@ -36,6 +36,15 @@ class HttpWorkloadPolicy {
   );
 }
 
+class HttpReadMetrics {
+  final int compressedBytes;
+  final int decodedBytes;
+  const HttpReadMetrics({
+    required this.compressedBytes,
+    required this.decodedBytes,
+  });
+}
+
 const int _mib = 1024 * 1024;
 
 /// Provider payload limits are deliberately generous relative to normal API
@@ -171,10 +180,13 @@ String sourceLoadErrorMessage(Object error) {
 /// One non-resetting deadline spanning request creation, headers, redirects,
 /// body transfer, and optional decoding.
 class HttpOperation {
-  HttpOperation(this.policy) : _stopwatch = Stopwatch()..start();
+  HttpOperation(this.policy, {this.onReadMetrics})
+    : _stopwatch = Stopwatch()..start();
 
   final HttpWorkloadPolicy policy;
   final Stopwatch _stopwatch;
+  HttpReadMetrics? lastReadMetrics;
+  final void Function(HttpReadMetrics metrics)? onReadMetrics;
 
   Duration get remaining {
     final value = policy.totalTimeout - _stopwatch.elapsed;
@@ -203,11 +215,22 @@ class HttpOperation {
     );
     if (!_isGzip(response, encoded)) {
       _checkLimit(encoded.length, policy.maximumDecodedBytes, policy.name);
+      lastReadMetrics = HttpReadMetrics(
+        compressedBytes: encoded.length,
+        decodedBytes: encoded.length,
+      );
+      onReadMetrics?.call(lastReadMetrics!);
       return encoded;
     }
-    return wait(
+    final decoded = await wait(
       Isolate.run(() => decodeGzipBounded(encoded, policy.maximumDecodedBytes)),
     );
+    lastReadMetrics = HttpReadMetrics(
+      compressedBytes: encoded.length,
+      decodedBytes: decoded.length,
+    );
+    onReadMetrics?.call(lastReadMetrics!);
+    return decoded;
   }
 
   /// Streams a response directly to [destination], bounding both a declared

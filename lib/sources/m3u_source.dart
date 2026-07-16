@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../data/load_token.dart';
+import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import 'expiry.dart';
 import 'source.dart';
@@ -206,10 +207,20 @@ class M3uSource implements Source, BatchedEpgSource, CatchupSource {
     _categories = parsed.categories;
     _headerEpgUrl = parsed.headerEpgUrl;
     _catchupCapability = parsed.catchupCapability;
+    DiagnosticsLog.instance.add(
+      'parse:m3u',
+      'rejected_rows=${parsed.rejectedRows}',
+    );
   }
 
   Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
-    final operation = HttpOperation(policy);
+    final operation = HttpOperation(
+      policy,
+      onReadMetrics: (m) => DiagnosticsLog.instance.add(
+        'http:${policy.name}',
+        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+      ),
+    );
     final req = await operation.wait(_http.getUrl(uri));
     if (userAgent != null) {
       req.headers.set(HttpHeaders.userAgentHeader, userAgent!);
@@ -229,11 +240,13 @@ class M3uParsed {
   final List<Category> categories;
   final String? headerEpgUrl;
   final CatchupCapability catchupCapability;
+  final int rejectedRows;
   const M3uParsed(
     this.channels,
     this.categories,
     this.headerEpgUrl, [
     this.catchupCapability = CatchupCapability.unsupported,
+    this.rejectedRows = 0,
   ]);
 }
 
@@ -254,6 +267,7 @@ M3uParsed parseM3uPlaylist(String content) {
   String? name, group, logo, tvgId;
   String? catchupSource;
   var catchupDays = 0;
+  var rejectedRows = 0;
 
   for (final raw in const LineSplitter().convert(content)) {
     final line = raw.trim();
@@ -315,11 +329,18 @@ M3uParsed parseM3uPlaylist(String content) {
       catchupDays = 0;
     }
   }
+  if (name != null) rejectedRows++;
 
   final categories = (categoryTitles.toList()..sort())
       .map((t) => Category(id: t, title: t))
       .toList();
-  return M3uParsed(channels, categories, headerEpgUrl, capability);
+  return M3uParsed(
+    channels,
+    categories,
+    headerEpgUrl,
+    capability,
+    rejectedRows,
+  );
 }
 
 String? _attr(String line, String key) =>
