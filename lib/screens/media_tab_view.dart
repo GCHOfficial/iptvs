@@ -152,6 +152,8 @@ class MediaTabView extends StatelessWidget {
                     return _MediaListTile(
                       item: visible[i],
                       favorite: isFavorite(visible[i].id),
+                      position: i + 1,
+                      total: visible.length,
                       autofocus: autofocusFor(i),
                       focusNode: focusNodeFor(i),
                       onTap: () => onOpenMedia(visible[i]),
@@ -188,6 +190,8 @@ class MediaTabView extends StatelessWidget {
                   return _MediaGridTile(
                     item: visible[i],
                     favorite: isFavorite(visible[i].id),
+                    position: i + 1,
+                    total: visible.length,
                     autofocus: autofocusFor(i),
                     focusNode: focusNodeFor(i),
                     onTap: () => onOpenMedia(visible[i]),
@@ -591,6 +595,8 @@ class _Thumb extends StatelessWidget {
 class _MediaListTile extends StatelessWidget {
   final MediaItem item;
   final bool favorite;
+  final int position;
+  final int total;
   final bool autofocus;
   final FocusNode? focusNode;
   final VoidCallback onTap;
@@ -598,6 +604,8 @@ class _MediaListTile extends StatelessWidget {
   const _MediaListTile({
     required this.item,
     required this.favorite,
+    required this.position,
+    required this.total,
     required this.autofocus,
     this.focusNode,
     required this.onTap,
@@ -609,6 +617,12 @@ class _MediaListTile extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
+      semanticsLabel: [
+        item.title,
+        if (item.year != null) item.year!,
+        '$position of $total',
+        if (favorite) 'Favorite',
+      ].join(', '),
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -685,6 +699,8 @@ class _MediaListTile extends StatelessWidget {
 class _MediaGridTile extends StatelessWidget {
   final MediaItem item;
   final bool favorite;
+  final int position;
+  final int total;
   final bool autofocus;
   final FocusNode? focusNode;
   final VoidCallback onTap;
@@ -692,6 +708,8 @@ class _MediaGridTile extends StatelessWidget {
   const _MediaGridTile({
     required this.item,
     required this.favorite,
+    required this.position,
+    required this.total,
     required this.autofocus,
     this.focusNode,
     required this.onTap,
@@ -703,6 +721,12 @@ class _MediaGridTile extends StatelessWidget {
       autofocus: autofocus,
       focusNode: focusNode,
       debugLabel: 'media.item.${item.id}',
+      semanticsLabel: [
+        item.title,
+        if (item.year != null) item.year!,
+        '$position of $total',
+        if (favorite) 'Favorite',
+      ].join(', '),
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.all(10),

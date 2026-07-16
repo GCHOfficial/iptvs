@@ -146,6 +146,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
   /// The D-pad cursor into [visibleChannels].
   int get selectedChannelIndex => _selectedChannelIndex;
   int _selectedChannelIndex = 0;
+  String? _selectedChannelId;
 
   /// The D-pad cursor into [orderedCategoryIds] (0 = "All channels").
   int get selectedCategoryIndex => _selectedCategoryIndex;
@@ -194,28 +195,44 @@ class LiveFocusCoordinator extends ChangeNotifier {
     return LiveFocusRegion.none;
   }
 
-  /// Keep the cursor in range when the visible list shrinks (search, filter,
-  /// refresh). Call whenever the channel list changes.
+  /// Reconcile the cursor after the visible list changes.
+  ///
+  /// Async refreshes can insert, remove, or reorder rows. Preserve the logical
+  /// channel by id when it still exists rather than leaving the same numeric
+  /// index pointed at an unrelated row. Explicit search/category changes call
+  /// [resetChannelSelection] first, so those still intentionally start at the
+  /// top of their new result set.
   void clampSelection() {
     final visible = visibleChannels();
+    final rememberedIndex = _selectedChannelId == null
+        ? -1
+        : visible.indexWhere((channel) => channel.id == _selectedChannelId);
     final maxIndex = visible.isEmpty ? 0 : visible.length - 1;
-    final channel = _selectedChannelIndex.clamp(0, maxIndex);
+    final channel = rememberedIndex >= 0
+        ? rememberedIndex
+        : _selectedChannelIndex.clamp(0, maxIndex);
     final ids = orderedCategoryIds();
     final maxCategory = ids.isEmpty ? 0 : ids.length - 1;
     final category = _selectedCategoryIndex.clamp(0, maxCategory);
+    final channelId = visible.isEmpty ? null : visible[channel].id;
     if (channel == _selectedChannelIndex &&
-        category == _selectedCategoryIndex) {
+        category == _selectedCategoryIndex &&
+        channelId == _selectedChannelId) {
       return;
     }
     _selectedChannelIndex = channel;
+    _selectedChannelId = channelId;
     _selectedCategoryIndex = category;
     _notify();
   }
 
   /// Put the channel cursor back at the top (a new filter/search starts fresh).
   void resetChannelSelection() {
-    if (_selectedChannelIndex == 0) return;
+    final visible = visibleChannels();
+    final firstId = visible.isEmpty ? null : visible.first.id;
+    if (_selectedChannelIndex == 0 && _selectedChannelId == firstId) return;
     _selectedChannelIndex = 0;
+    _selectedChannelId = firstId;
     _notify();
   }
 
@@ -235,8 +252,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
     final next = index.clamp(0, visible.length - 1);
     final changed =
         next != _selectedChannelIndex ||
+        visible[next].id != _selectedChannelId ||
         _channelColumn != ChannelRowColumn.body;
     _selectedChannelIndex = next;
+    _selectedChannelId = visible[next].id;
     _channelColumn = ChannelRowColumn.body;
     _rememberBrowsed(visible[next].id);
     if (reveal) _revealChannel(next);

@@ -819,24 +819,33 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
   `test/epg_grid_test.dart`.
 - [x] Up/down wrapping rules match documented navigation. Pure coordinator and
   real-key widget tests cover channel/category wrapping and upward escape.
-- [ ] Search open/close restores the intended focus target.
+- [x] Search open/close restores the intended focus target. `TvTextField`
+  returns Back/IME dismissal to its routed entry cell; widget tests cover Back
+  and the clear-button path.
 - [x] Back ladder does not clear or change data prematurely. Flutter tests cover
   row/favorite/category/search/tab rungs; Android native unit and API-36 emulator
   checks cover menu/info/controls/exit policy and duplicate Back suppression.
-- [ ] Dialog and sheet dismissal restores focus.
+- [x] Dialog and sheet dismissal restores focus. Update/EPG dialogs autofocus
+  an action, and browsing sheets restore the prior attached focus node with a
+  route-safe list/tab fallback.
 - [x] In-row favorite activation preserves logical selection. Covered by pure
   coordinator and real-key widget tests.
-- [ ] Return from native playback restores focus.
-- [ ] Async rebuild retains logical selection and usable focus.
-- [ ] Held-key repeat cannot issue duplicate activation.
+- [x] Return from native playback restores focus. Live restores the played
+  channel by id, media restores its last-played tile, and the route-current
+  guard leaves EPG restoration to the pushed guide route.
+- [x] Async rebuild retains logical selection and usable focus. The live model
+  remembers the selected channel id and reconciles its numeric cursor after
+  refresh/reorder; explicit search/category changes still reset.
+- [x] Held-key repeat cannot issue duplicate activation. Activation runs only
+  for `KeyDownEvent`; repeat/up events are swallowed and covered by tests.
 
 ### Semantics
 
-- [ ] Custom rows expose selected state.
-- [ ] Rows expose useful channel/programme labels.
-- [ ] Lists/grids expose position information where practical.
-- [ ] Favorite state and actions are exposed.
-- [ ] Custom controls expose an activation action.
+- [x] Custom rows expose selected state.
+- [x] Rows expose useful channel/programme labels.
+- [x] Lists/grids expose position information where practical.
+- [x] Favorite state and actions are exposed.
+- [x] Custom controls expose an activation action.
 
 ### Device matrix
 
@@ -976,6 +985,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | Store setup | In progress | Reserved Microsoft `IPTVS Player`, recorded Partner Center identity, completed Play verification, and created Play app `com.gchofficial.iptvs.player`; generated/configured an isolated Play upload key and protected identity/certificate-verified AAB workflow, with two encrypted backups confirmed; Play enrollment and Store packages remain |
 | 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
 | 2026-07-15 | PR 15 subset | Merged | PR #100 merged as `912392f`; Android TV Back, density, category focus, tests, and store screenshots are on `main`. |
+| 2026-07-16 | PR 15 | Ready for PR | Added stable-id selection reconciliation, explicit sheet/search/playback focus restoration coverage, repeat-safe activation tests, and selected/position/action semantics for live, media, and EPG custom rows. `flutter analyze` is clean and all 356 tests pass (14 skipped); the physical device/input/screen-reader matrix remains owner-run. |
 | 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Phone/TV profiling also exposed and fixed non-finite media-card image cache sizing. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
 | 2026-07-15 | PR 3 | Merged | PR #101 merged as `ec33886`; owner verified large Stalker live/EPG loading, playback, and movie/series posters on the 2 GiB TV emulator. A focused follow-up retries one transient catalog failure and keeps raw provider exceptions out of the UI. |
 | 2026-07-15 | PR 0 | Complete | Android phone/TV profile baselines and longstanding Windows x64 SDR/HDR validation are sufficient for early testing. Deeper import/RSS/SQLite budgets are deferred until closed-testing feedback supplies representative problems. |

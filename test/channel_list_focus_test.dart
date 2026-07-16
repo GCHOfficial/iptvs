@@ -690,6 +690,71 @@ void main() {
   );
 
   focusTestWidgets(
+    'channel and category rows expose selection, position, and actions',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pumpWideScreenWith(tester, _ManySource());
+      await settle(tester);
+
+      final firstChannel = find.bySemanticsLabel(
+        'Channel 0, 1 of 12, Not favorite',
+      );
+      expect(firstChannel, findsOneWidget);
+      expect(
+        tester.getSemantics(firstChannel),
+        matchesSemantics(
+          label: 'Channel 0, 1 of 12, Not favorite',
+          isButton: true,
+          hasSelectedState: true,
+          isSelected: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          hasTapAction: true,
+        ),
+      );
+
+      const allChannelsLabel = 'All channels, 1 of 31';
+      final allChannels = find.bySemanticsLabel(allChannelsLabel);
+      expect(allChannels, findsOneWidget);
+      expect(
+        tester.getSemantics(allChannels),
+        matchesSemantics(
+          label: allChannelsLabel,
+          isButton: true,
+          hasSelectedState: true,
+          isSelected: true,
+          hasTapAction: true,
+        ),
+      );
+
+      semantics.dispose();
+      await unmount(tester);
+    },
+  );
+
+  focusTestWidgets(
+    'dismissing the phone preview sheet restores the channel-list focus',
+    (tester) async {
+      await pumpNarrowScreenWith(tester, _ManySource());
+      await settle(tester);
+      expect(focusLabel(), 'live.channels');
+
+      await tester.longPress(find.text('Channel 0'));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Play fullscreen'), findsOneWidget);
+
+      await tester.binding.handlePopRoute();
+      await tester.pump(const Duration(milliseconds: 350));
+      await settle(tester);
+
+      expect(find.text('Play fullscreen'), findsNothing);
+      expect(focusLabel(), 'live.channels');
+
+      await unmount(tester);
+    },
+  );
+
+  focusTestWidgets(
     'Back mirrors Left: it peels the favorite column before the first-row rung',
     (tester) async {
       await pumpWideScreenWith(tester, _ManySource());

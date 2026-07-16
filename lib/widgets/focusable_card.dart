@@ -19,6 +19,8 @@ class FocusableCard extends StatefulWidget {
   final bool scrollOnFocus;
   final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
   final String? debugLabel;
+  final String? semanticsLabel;
+  final bool? selected;
 
   /// Optional external focus node, so a parent can move focus to this card
   /// programmatically (e.g. land on a specific row after returning from a
@@ -35,6 +37,8 @@ class FocusableCard extends StatefulWidget {
     this.focusNode,
     this.onKeyEvent,
     this.debugLabel,
+    this.semanticsLabel,
+    this.selected,
   });
 
   @override
@@ -92,25 +96,34 @@ class _FocusableCardState extends State<FocusableCard> {
               },
             ),
           },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            decoration: BoxDecoration(
-              color: _focused ? AppColors.panelHi : AppColors.panel,
-              borderRadius: BorderRadius.circular(AppRadius.tile),
-              border: Border.all(
-                color: _focused ? AppColors.accent : AppColors.line,
-                width: _focused ? 2 : 1,
-              ),
-            ),
-            child: Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                canRequestFocus: false,
-                borderRadius: BorderRadius.circular(AppRadius.tile),
-                hoverColor: AppColors.panelHi,
-                onTap: widget.onTap,
-                onLongPress: widget.onLongPress,
-                child: widget.child,
+          child: Semantics(
+            label: widget.semanticsLabel,
+            button: true,
+            selected: widget.selected,
+            onTap: widget.onTap,
+            child: ExcludeSemantics(
+              excluding: widget.semanticsLabel != null,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                decoration: BoxDecoration(
+                  color: _focused ? AppColors.panelHi : AppColors.panel,
+                  borderRadius: BorderRadius.circular(AppRadius.tile),
+                  border: Border.all(
+                    color: _focused ? AppColors.accent : AppColors.line,
+                    width: _focused ? 2 : 1,
+                  ),
+                ),
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: InkWell(
+                    canRequestFocus: false,
+                    borderRadius: BorderRadius.circular(AppRadius.tile),
+                    hoverColor: AppColors.panelHi,
+                    onTap: widget.onTap,
+                    onLongPress: widget.onLongPress,
+                    child: widget.child,
+                  ),
+                ),
               ),
             ),
           ),

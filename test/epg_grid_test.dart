@@ -15,8 +15,10 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -152,6 +154,24 @@ void main() {
       reason: 'programme cells must be lightweight, not FocusableCards',
     );
 
+    await unmount(tester);
+  });
+
+  testWidgets('programme cells expose channel, position, and selected state', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await pumpGrid(tester);
+
+    final selected = find.bySemanticsLabel(
+      RegExp(r'^A-now, ChanA, .+, 2 of 4$'),
+    );
+    expect(selected, findsOneWidget);
+    final data = tester.getSemantics(selected).getSemanticsData();
+    expect(data.flagsCollection.isSelected, Tristate.isTrue);
+    expect(data.hasAction(SemanticsAction.tap), isTrue);
+
+    semantics.dispose();
     await unmount(tester);
   });
 

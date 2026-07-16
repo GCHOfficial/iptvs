@@ -20,7 +20,10 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: TvTextField(controller: controller, hintText: 'Search channels'),
+          body: TvTextField(
+            controller: controller,
+            hintText: 'Search channels',
+          ),
         ),
       ),
     );
@@ -47,6 +50,40 @@ void main() {
 
     await tester.enterText(find.byType(TextField), 'hello');
     expect(controller.text, 'hello');
+  });
+
+  testWidgets('Back closes edit mode and restores focus to the search cell', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    addTearDown(controller.dispose);
+    final cellFocus = RoutedFocusNode('search.cell');
+    addTearDown(cellFocus.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TvTextField(
+            controller: controller,
+            hintText: 'Search channels',
+            cellFocusNode: cellFocus,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(TvTextField));
+    await tester.pumpAndSettle();
+    expect(
+      focusRouteKey(FocusManager.instance.primaryFocus),
+      'TvTextField.field',
+    );
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+
+    expect(focusRouteKey(FocusManager.instance.primaryFocus), 'search.cell');
+    expect(find.byType(TvTextField), findsOneWidget);
   });
 
   // Regression guard for the recurring "hint sits high on Android" bug: with
@@ -214,8 +251,11 @@ void main() {
 
     clearNode.requestFocus();
     await tester.pump();
-    expect(clearNode.hasPrimaryFocus, isTrue,
-        reason: 'the clear button must be focusable without entering edit mode');
+    expect(
+      clearNode.hasPrimaryFocus,
+      isTrue,
+      reason: 'the clear button must be focusable without entering edit mode',
+    );
 
     // OK activates it: the field is cleared and focus is parked back on the
     // cell (the button disappears once the text empties).

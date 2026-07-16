@@ -351,6 +351,29 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     });
   }
 
+  /// Modal routes normally restore focus, but that restoration is timing
+  /// dependent when a sheet rebuilds the lazy list behind it. Keep an explicit
+  /// handle to the browsing target and restore it after ordinary dismissal.
+  /// A sheet action that immediately opens playback is excluded; the player
+  /// return path owns focus in that case.
+  void _restoreFocusAfterModal(FocusNode? previousFocus) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _resolving) return;
+      if (ModalRoute.of(context)?.isCurrent == false) return;
+      if (previousFocus?.context != null && previousFocus!.canRequestFocus) {
+        previousFocus.requestFocus();
+        return;
+      }
+      if (_tab == ContentKind.live) {
+        _focus.focusChannels();
+      } else if (_visibleMedia(_tab).isNotEmpty) {
+        _media(_tab).firstFocusNode.requestFocus();
+      } else {
+        _focusTabs();
+      }
+    });
+  }
+
   void _setQuery(String value) {
     setState(() => _query = value);
     _searchTimer?.cancel();
@@ -394,7 +417,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   Future<void> _toggleFavorite(ContentKind kind, String id) async {
     final nowEmpty = await _favorites.toggle(kind, id);
-    if (!mounted || !nowEmpty) return;
+    if (!mounted) return;
+    if (kind == ContentKind.live) {
+      _focus.clampSelection();
+    }
+    if (!nowEmpty) return;
     // Emptying the Favorites view leaves nothing to select — fall back to All.
     setState(() {
       if (kind == ContentKind.live && _categoryId == kFavoritesCategoryId) {
@@ -714,6 +741,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// preview player; the sheet's Play button hands off to fullscreen.
   Future<void> _showPreviewSheet(Channel channel) async {
     if (_resolving) return;
+    final previousFocus = FocusManager.instance.primaryFocus;
     unawaited(_preview.start(channel, muted: false));
     // Set when Play hands the preview to fullscreen — the handoff owns the
     // preview's lifecycle from there (stopped when fullscreen exits), so the
@@ -758,6 +786,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       ),
     );
     if (!handedOff) await _preview.stop(clearSelection: true);
+    _restoreFocusAfterModal(previousFocus);
   }
 
   /// Open the catch-up picker for an archive-capable [channel]: list its cached
@@ -775,6 +804,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       );
       return;
     }
+    final previousFocus = FocusManager.instance.primaryFocus;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -792,6 +822,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         },
       ),
     );
+    _restoreFocusAfterModal(previousFocus);
   }
 
   /// Resolve a past [programme] to a catch-up stream and open it fullscreen.
@@ -917,6 +948,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           )
         : null;
     if (!mounted) return;
+    final previousFocus = FocusManager.instance.primaryFocus;
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -949,6 +981,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             : null,
       ),
     );
+    _restoreFocusAfterModal(previousFocus);
   }
 
   String _fmt(int n) => n.toString().replaceAllMapped(

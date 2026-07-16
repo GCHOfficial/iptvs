@@ -225,6 +225,11 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   exit is behind a double-Back snackbar.
 - Pinned by `test/live_focus_coordinator_test.dart`, `test/channel_list_focus_test.dart`,
   `test/epg_grid_test.dart`, `test/tv_text_field_test.dart` — keep them green.
+- Selection-model rows still expose accessibility semantics: useful
+  channel/programme labels, selected state, list position, activation, and
+  favorite state/action. `FocusableCard` consumers should provide a concise
+  `semanticsLabel` when visual descendants would otherwise read as a fragmented
+  tile.
 
 ## Cloud sync + profiles (essentials)
 
