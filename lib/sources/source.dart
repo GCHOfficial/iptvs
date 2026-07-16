@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../data/load_token.dart';
+
 /// Provider-agnostic domain model + interface for an IPTV source.
 ///
 /// Stalker, Xtream Codes, and M3U each implement [Source], so the rest of the
@@ -253,8 +255,10 @@ abstract class Source {
   /// seek bar. Resolve at play time, like [resolve] (archive URLs are as
   /// short-lived as live ones). Only called for channels with
   /// [Channel.hasArchive]; sources without catch-up throw.
-  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) async =>
-      throw UnsupportedError('$runtimeType does not support catch-up');
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => throw UnsupportedError('$runtimeType does not support catch-up');
 
   /// Electronic program guide for roughly the next few hours, given the
   /// source's [channels] (XMLTV sources need them to map tvg-id → channel id;
@@ -311,4 +315,33 @@ abstract class Source {
   /// one (M3U/Demo) or it can't be determined. Implementations must redact any
   /// URL that reaches a log or error.
   Future<DateTime?> subscriptionExpiry() async => null;
+}
+
+/// Optional capability a [Source] can additionally implement to stream a
+/// large XMLTV guide as bounded batches instead of building one big
+/// [Programme] list in memory — see `LibraryRepository._ensureEpg` and
+/// `AppDatabase.replaceEpgStream`.
+///
+/// Deliberately a *separate* interface rather than a defaulted member on
+/// [Source] itself: every [Source] implementation in this codebase declares
+/// `implements Source` (not `extends`), and Dart does not inherit default
+/// method bodies through `implements` — every member of the interface must be
+/// redeclared by the implementer regardless of whether the interface gives it
+/// a body. Adding a member directly to [Source] would therefore force every
+/// implementer, including ones with no batched path (Stalker, Demo), to
+/// redeclare it just to keep compiling. A source without this capability (the
+/// common case) simply doesn't implement [BatchedEpgSource]; the repository
+/// falls back to [Source.epg].
+abstract interface class BatchedEpgSource {
+  /// Streamed counterpart of [Source.epg]: batches of [Programme]s for
+  /// [channels], or null when this source has no EPG configured (mirrors
+  /// [Source.epg]'s empty-list return for that case — the repository treats
+  /// null exactly like an empty [Source.epg] result and falls back to it).
+  /// [token], when given, lets the caller cooperatively cancel a stale
+  /// in-flight load; a cancelled stream ends in an error rather than
+  /// completing normally (see `LoadCancelledException`).
+  Stream<List<Programme>>? epgBatched(
+    List<Channel> channels, {
+    LoadToken? token,
+  });
 }

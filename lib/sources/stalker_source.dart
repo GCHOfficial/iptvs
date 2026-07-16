@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
@@ -751,22 +752,15 @@ class StalkerSource implements Source {
 
   Future<List<Channel>> _fetchAllChannels() async {
     try {
-      final r = await _call({'type': 'itv', 'action': 'get_all_channels'});
-      final js = r['js'];
-      final list = (js is Map && js['data'] is List)
-          ? js['data'] as List
-          : (js is List ? js : const []);
       // get_all_channels returns the whole portal in one payload (tens of
-      // thousands of rows on big portals) — build the Channel objects off the
-      // UI isolate. _mapChannel and its helpers are static/pure, so the
-      // closure captures only the decoded JSON list.
-      final channels = list.length < 500
-          ? list.map((e) => _mapChannel(Map<String, dynamic>.from(e))).toList()
-          : await Isolate.run(
-              () => list
-                  .map((e) => _mapChannel(Map<String, dynamic>.from(e)))
-                  .toList(),
-            );
+      // thousands of rows, ~28 MB on the largest observed portal). The
+      // network path below decodes+maps it in one pass off the calling
+      // isolate. debugApi (the test seam) already returns decoded `js`, so
+      // there's no raw body to offload — that path keeps the original
+      // decoded-list mapping unchanged.
+      final channels = debugApi != null
+          ? await _fetchAllChannelsViaCall()
+          : await _fetchAllChannelsFromBytes();
       if (channels.isNotEmpty) return channels;
     } on StalkerException catch (e) {
       // Some portals only expose ITV through paginated get_ordered_list.
@@ -784,6 +778,60 @@ class StalkerSource implements Source {
     }
     return _fetchChannelsWithOrderedList();
   }
+
+  /// [debugApi]-backed path: the override already returns decoded `js`, so
+  /// there's nothing to decode off-isolate — only the row→[Channel] mapping
+  /// is worth offloading, same as before this PR.
+  Future<List<Channel>> _fetchAllChannelsViaCall() async {
+    final r = await _call({'type': 'itv', 'action': 'get_all_channels'});
+    final js = r['js'];
+    final list = (js is Map && js['data'] is List)
+        ? js['data'] as List
+        : (js is List ? js : const []);
+    return list.length < 500
+        ? list.map((e) => _mapChannel(Map<String, dynamic>.from(e))).toList()
+        : await Isolate.run(
+            () => list
+                .map((e) => _mapChannel(Map<String, dynamic>.from(e)))
+                .toList(),
+          );
+  }
+
+  /// Network path: fetch the raw response body and do
+  /// decode→extract→row-map in a single pass — inline for small bodies, off
+  /// the calling isolate once the body crosses [_isolateJsonThreshold] (mirrors
+  /// xtream_source.dart's `_isolateJsonThreshold`: isolate spawn overhead
+  /// would dominate for the many small auth/category calls, so only the
+  /// monolithic catalog response is worth offloading).
+  ///
+  /// Mirrors `_call`'s re-handshake-once-on-invalid-token semantics: [retry]
+  /// is only honored on the first attempt, exactly like `_call`'s own
+  /// `retry` parameter.
+  Future<List<Channel>> _fetchAllChannelsFromBytes({bool retry = true}) async {
+    final params = {'type': 'itv', 'action': 'get_all_channels'};
+    final endpoint = await _resolveEndpoint();
+    final bytes = await _requestBytes(endpoint, params);
+    final result = bytes.length < _isolateJsonThreshold
+        ? _ingestStalkerChannels(bytes)
+        : await Isolate.run(() => _ingestStalkerChannels(bytes));
+    if (retry && result.tokenInvalid) {
+      _debug('token invalid; re-handshaking for ${_actionName(params)}');
+      _token = null;
+      _endpoint = null;
+      await _resolveEndpoint();
+      await _getProfile();
+      return _fetchAllChannelsFromBytes(retry: false);
+    }
+    final portalError = result.portalErrorMessage;
+    if (portalError != null) {
+      throw StalkerException(
+        '${_actionName(params)} failed: ${redactStalkerDiagnostic(portalError)}',
+      );
+    }
+    return result.channels;
+  }
+
+  static const _isolateJsonThreshold = 256 * 1024;
 
   Future<List<Channel>> _fetchChannelsWithOrderedList() async {
     final genres = await categories();
@@ -928,6 +976,20 @@ class StalkerSource implements Source {
     if (value == null) return null;
     return int.tryParse(value.toString());
   }
+
+  @visibleForTesting
+  static Channel debugMapChannel(Map<String, dynamic> ch) => _mapChannel(ch);
+
+  /// Test seam for the one-pass ingestion worker below: lets
+  /// `test/stalker_ingest_test.dart` exercise decode→map→result without a
+  /// network round trip.
+  @visibleForTesting
+  static ({
+    List<Channel> channels,
+    bool tokenInvalid,
+    String? portalErrorMessage,
+  })
+  debugIngestChannels(Uint8List bytes) => _ingestStalkerChannels(bytes);
 
   static Channel _mapChannel(Map<String, dynamic> ch) {
     final id =
@@ -1972,6 +2034,65 @@ class StalkerSource implements Source {
     throw StalkerException('Request failed after retries');
   }
 
+  /// Same request/retry/redacted-logging behavior as [_request], but returns
+  /// the raw response bytes instead of decoding — used only for
+  /// `get_all_channels`, whose body is large enough (tens of MB on the
+  /// biggest observed portals) that decoding on the calling isolate would
+  /// stall it. The non-200 error path decodes only a small bounded preview
+  /// slice (never the whole body) purely for the redacted diagnostic.
+  Future<Uint8List> _requestBytes(
+    String endpoint,
+    Map<String, String> params,
+  ) async {
+    final uri = Uri.parse(
+      endpoint,
+    ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      final operation = HttpOperation(kStalkerJsonWorkload);
+      final req = await operation.wait(_http.getUrl(uri));
+      req.followRedirects = true;
+      req.headers
+        ..set(HttpHeaders.userAgentHeader, profile.userAgent)
+        ..set('X-User-Agent', 'Model: ${profile.model}; Link: WiFi')
+        ..set(HttpHeaders.acceptHeader, '*/*')
+        ..set('Cookie', 'mac=$mac; stb_lang=$lang; timezone=$timezone')
+        ..set(HttpHeaders.refererHeader, _referer ?? _base().toString());
+      if (_token != null) {
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+      }
+
+      final resp = await operation.wait(req.close());
+      final bytes = await operation.readBytes(resp);
+      _debug(
+        '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
+        'body=${bytes.length}B',
+      );
+      if (resp.statusCode != 200) {
+        if (_isTransientStatus(resp.statusCode) && attempt < 3) {
+          _debug(
+            'transient HTTP ${resp.statusCode}; retrying ${_actionName(params)} attempt ${attempt + 1}',
+          );
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+          continue;
+        }
+        _debug('non-200 body ${_bodyPreview(_bytesPreview(bytes))}');
+        throw StalkerException(
+          'HTTP ${resp.statusCode} from ${_redactUrl(endpoint)}',
+        );
+      }
+      return bytes;
+    }
+    throw StalkerException('Request failed after retries');
+  }
+
+  /// Bounded (first 200 bytes) decode of a body for the non-200 error preview
+  /// only — never the whole response, which for `get_all_channels` can be
+  /// tens of MB.
+  String _bytesPreview(Uint8List bytes) {
+    final slice = bytes.length <= 200 ? bytes : bytes.sublist(0, 200);
+    return utf8.decode(slice, allowMalformed: true);
+  }
+
   Map<String, String> _playbackHeaders() {
     return {HttpHeaders.userAgentHeader: profile.userAgent};
   }
@@ -2068,7 +2189,11 @@ class StalkerSource implements Source {
     return '$origin/vod4/${s.replaceFirst(RegExp(r'^/+'), '')}';
   }
 
-  bool _looksTokenInvalid(Map<String, dynamic> response) {
+  // Static (no instance state) so the one-pass channel-ingestion worker below
+  // — a top-level function that runs off-isolate and can't hold a
+  // StalkerSource — can reuse the same token-invalid/portal-error detection
+  // `_call` applies to every other action.
+  static bool _looksTokenInvalid(Map<String, dynamic> response) {
     if (response['js'] == null) return true;
     final text = _diagnosticText(response).toLowerCase();
     if (text.isEmpty) return false;
@@ -2085,7 +2210,7 @@ class StalkerSource implements Source {
     return mentionsAuth && mentionsInvalid;
   }
 
-  String? _portalErrorMessage(Map<String, dynamic> response) {
+  static String? _portalErrorMessage(Map<String, dynamic> response) {
     final js = response['js'];
     if (js == null) return 'Empty js payload';
     final direct = _firstString(response, ['error', 'msg', 'message']);
@@ -2097,7 +2222,7 @@ class StalkerSource implements Source {
     return null;
   }
 
-  String _diagnosticText(Map<String, dynamic> response) {
+  static String _diagnosticText(Map<String, dynamic> response) {
     final values = <String>[];
     void add(dynamic value) {
       if (value == null) return;
@@ -2160,4 +2285,63 @@ class StalkerSource implements Source {
     developer.log(redacted, name: 'iptvs.stalker');
     debugPrint('[iptvs.stalker] $redacted');
   }
+}
+
+/// Isolate entrypoint for `get_all_channels`: decode the raw response bytes,
+/// pull out the row list, and map every row to a [Channel] in one pass —
+/// top-level + only static/pure helpers so it can run under [Isolate.run]
+/// without capturing any [StalkerSource] instance state. Also detects the
+/// same token-invalid/portal-error shapes `_call` checks for every other
+/// action, since decoding now happens here instead of in `_call`/`_request`.
+///
+/// A row that isn't a Map, or that throws while converting/mapping, is
+/// skipped rather than aborting the whole catalog — one bad row must never
+/// take down an otherwise-good portal response
+/// (`WorkloadFixtures.stalkerChannelsJson(malformedEvery:)` exercises this).
+({List<Channel> channels, bool tokenInvalid, String? portalErrorMessage})
+_ingestStalkerChannels(Uint8List bytes) {
+  final Map<String, dynamic> response;
+  try {
+    final body = utf8.decode(bytes, allowMalformed: true);
+    final decoded = jsonDecode(body);
+    if (decoded is! Map) {
+      throw StalkerException('Unexpected response shape');
+    }
+    response = Map<String, dynamic>.from(decoded);
+  } on FormatException {
+    throw StalkerException('Non-JSON response (wrong endpoint?)');
+  }
+
+  if (StalkerSource._looksTokenInvalid(response)) {
+    return (
+      channels: const <Channel>[],
+      tokenInvalid: true,
+      portalErrorMessage: null,
+    );
+  }
+  final portalError = StalkerSource._portalErrorMessage(response);
+  if (portalError != null) {
+    return (
+      channels: const <Channel>[],
+      tokenInvalid: false,
+      portalErrorMessage: portalError,
+    );
+  }
+
+  final js = response['js'];
+  final list = (js is Map && js['data'] is List)
+      ? js['data'] as List
+      : (js is List ? js : const []);
+  final channels = <Channel>[];
+  for (final row in list) {
+    if (row is! Map) continue;
+    try {
+      channels.add(StalkerSource._mapChannel(Map<String, dynamic>.from(row)));
+    } catch (_) {
+      // Malformed row (bad types, missing required shape) — drop it, keep
+      // going.
+      continue;
+    }
+  }
+  return (channels: channels, tokenInvalid: false, portalErrorMessage: null);
 }

@@ -9,6 +9,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
+import 'load_token.dart';
 import 'secret_locator_vault.dart';
 
 /// A saved VOD resume point (see `playback_positions`).
@@ -1506,6 +1507,61 @@ class AppDatabase {
     });
   }
 
+  /// Streamed counterpart of [replaceEpg] for a large guide ingested in
+  /// bounded batches (see [BatchedEpgSource]/`parseXmltvBatched`): the delete,
+  /// every inserted batch, and the `epg_synced_at` bump all happen in ONE
+  /// transaction, exactly like [replaceEpg]. An empty [batches] stream that
+  /// completes normally is still success — rows cleared, timestamp advanced,
+  /// same success-empty contract as [replaceEpg].
+  ///
+  /// Cancellation contract: [batches] must signal a mid-feed cancellation by
+  /// *throwing* (e.g. [LoadCancelledException]) rather than simply ending
+  /// early. Any error thrown by the stream propagates out of the transaction
+  /// body, which rolls it back — the delete and every batch inserted so far
+  /// are undone, leaving the previous guide and its old `epg_synced_at`
+  /// untouched. A stream that just stops yielding and completes normally
+  /// (no error) would otherwise commit whatever partial set of rows it fed in
+  /// as if it were the complete guide — exactly the half-fed state this
+  /// method must never produce.
+  Future<void> replaceEpgStream(
+    String sourceId,
+    Stream<List<Programme>> batches,
+  ) async {
+    await _db.transaction((txn) async {
+      await txn.delete(
+        'programmes',
+        where: 'source_id = ?',
+        whereArgs: [sourceId],
+      );
+      var batch = txn.batch();
+      var n = 0;
+      await for (final chunk in batches) {
+        for (final p in chunk) {
+          batch.insert('programmes', {
+            'source_id': sourceId,
+            'channel_id': p.channelId,
+            'start': p.start.millisecondsSinceEpoch,
+            'stop': p.stop.millisecondsSinceEpoch,
+            'title': p.title,
+            'description': p.description,
+          });
+          if (++n >= _epgInsertChunk) {
+            await batch.commit(noResult: true);
+            batch = txn.batch();
+            n = 0;
+          }
+        }
+      }
+      if (n > 0) await batch.commit(noResult: true);
+      await txn.update(
+        'sources',
+        {'epg_synced_at': DateTime.now().millisecondsSinceEpoch},
+        where: 'id = ?',
+        whereArgs: [sourceId],
+      );
+    });
+  }
+
   /// The "now" half of [nowNext]: every programme airing at a given instant
   /// across a source's channels. Keyed on `(source_id, start)` with no
   /// `channel_id` constraint — a per-source scan of all channels' programmes
@@ -1549,10 +1605,11 @@ class AppDatabase {
   @visibleForTesting
   Future<List<String>> explainNowQueryPlan(String sourceId, DateTime at) async {
     final t = at.millisecondsSinceEpoch;
-    final rows = await _db.rawQuery(
-      'EXPLAIN QUERY PLAN $_nowQuery',
-      [sourceId, t, t],
-    );
+    final rows = await _db.rawQuery('EXPLAIN QUERY PLAN $_nowQuery', [
+      sourceId,
+      t,
+      t,
+    ]);
     return rows.map((r) => r['detail'] as String).toList();
   }
 

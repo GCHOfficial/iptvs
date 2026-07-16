@@ -244,8 +244,12 @@ device-lifecycle behaviour.
 ## New personal-account production gate
 
 - [x] Finish all App content and store-listing sections.
-- [ ] Create a closed test.
+- [x] Create a closed test. The 0.1.35 closed-testing release (native player
+  lifecycle hardening, PR 9) was approved by Google on 2026-07-16.
 - [ ] Recruit at least 12 testers who remain opted in continuously for 14 days.
+  In progress: TestersCommunity engaged on 2026-07-16; their testing window
+  opens later that day, so the 14-day continuous opt-in completes no earlier
+  than 2026-07-30. Tick only once the Console shows the requirement met.
 - [x] Collect actionable phone and TV feedback and record fixes.
 - [ ] Apply for production access after the Console makes the application
   available.

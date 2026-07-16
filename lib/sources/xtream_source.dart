@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
+import '../data/load_token.dart';
 import '../data/net.dart';
 import 'expiry.dart';
 import 'source.dart';
@@ -14,7 +15,7 @@ import 'xmltv.dart';
 ///
 /// Implements live TV; VOD and series can be layered on the same interface
 /// later. Stream URLs follow `/live/USER/PASS/STREAM_ID.ext`.
-class XtreamSource implements Source {
+class XtreamSource implements Source, BatchedEpgSource {
   final String sourceId;
   final String host; // e.g. http://host:port
   final String username;
@@ -95,39 +96,14 @@ class XtreamSource implements Source {
   Future<List<Channel>> channels({String? categoryId}) async {
     final params = {'action': 'get_live_streams'};
     if (categoryId != null) params['category_id'] = categoryId;
-    dynamic r;
+    Object? raw;
     try {
-      r = await _api(params);
+      raw = await _fetchCatalogRaw(params);
     } on HttpWorkloadException {
       if (categoryId != null) rethrow;
       return _channelsPartitionedByCategory();
     }
-    return _mapLiveChannels(r);
-  }
-
-  List<Channel> _mapLiveChannels(dynamic r) {
-    if (r is! List) return const [];
-    return r.whereType<Map>().map((s) {
-      final m = Map<String, dynamic>.from(s);
-      final streamId = '${m['stream_id']}';
-      final epgId = m['epg_channel_id']?.toString();
-      return Channel(
-        id: streamId,
-        name: '${m['name']}',
-        number: int.tryParse('${m['num']}'),
-        logo:
-            (m['stream_icon'] is String &&
-                (m['stream_icon'] as String).isNotEmpty)
-            ? m['stream_icon'] as String
-            : null,
-        categoryId: m['category_id']?.toString(),
-        archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
-        extra: {
-          'streamId': streamId,
-          if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
-        },
-      );
-    }).toList();
+    return _channelsFromRaw(raw);
   }
 
   /// Xtream's common API has no formal pagination for live streams, but most
@@ -143,11 +119,11 @@ class XtreamSource implements Source {
     final out = <Channel>[];
     final seen = <String>{};
     for (final category in available) {
-      final response = await _api({
+      final raw = await _fetchCatalogRaw({
         'action': 'get_live_streams',
         'category_id': category.id,
       });
-      for (final channel in _mapLiveChannels(response)) {
+      for (final channel in await _channelsFromRaw(raw)) {
         if (seen.add(channel.id)) out.add(channel);
       }
     }
@@ -193,17 +169,40 @@ class XtreamSource implements Source {
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
+    final map = _tvgIdMap(channels);
+    if (map.isEmpty) return const [];
+    final bytes = await _download(_xmltvUri, kEpgWorkload);
+    return parseXmltv(bytes, map);
+  }
+
+  @override
+  Stream<List<Programme>>? epgBatched(
+    List<Channel> channels, {
+    LoadToken? token,
+  }) {
+    final map = _tvgIdMap(channels);
+    if (map.isEmpty) return null;
+    return _streamEpg(map, token);
+  }
+
+  Map<String, String> _tvgIdMap(List<Channel> channels) {
     final map = <String, String>{};
     for (final c in channels) {
       final tvg = c.extra['tvgId']?.toString();
       if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
     }
-    if (map.isEmpty) return const [];
-    final uri = Uri.parse(
-      '$_base/xmltv.php?username=$username&password=$password',
-    );
-    final bytes = await _download(uri, kEpgWorkload);
-    return parseXmltv(bytes, map);
+    return map;
+  }
+
+  Uri get _xmltvUri =>
+      Uri.parse('$_base/xmltv.php?username=$username&password=$password');
+
+  Stream<List<Programme>> _streamEpg(
+    Map<String, String> map,
+    LoadToken? token,
+  ) async* {
+    final bytes = await _download(_xmltvUri, kEpgWorkload);
+    yield* parseXmltvBatched(bytes, map, token: token);
   }
 
   @override
@@ -407,6 +406,50 @@ class XtreamSource implements Source {
     return compute(_decodeJsonBytes, bytes);
   }
 
+  /// Fetches a catalog endpoint (`get_live_streams`/`get_vod_streams`/
+  /// `get_series`) and hands back either the already-decoded value from
+  /// [debugApi] (tests bypass HTTP entirely) or the raw response bytes for a
+  /// real panel call. Real bytes let the caller route through the one-pass
+  /// typed worker below instead of decoding into a dynamic tree first.
+  Future<Object?> _fetchCatalogRaw(Map<String, String> params) async {
+    final override = debugApi;
+    if (override != null) return override(params);
+    final uri = Uri.parse('$_base/player_api.php').replace(
+      queryParameters: {'username': username, 'password': password, ...params},
+    );
+    return _download(uri, kProviderJsonWorkload);
+  }
+
+  /// Bounded one-pass ingestion for `get_live_streams`: [raw] is either the
+  /// decoded [debugApi] value (mapped inline — it's already small, synthetic
+  /// test data) or real response bytes, which get the same threshold-gated
+  /// isolate/inline routing as [_decodeJson].
+  Future<List<Channel>> _channelsFromRaw(Object? raw) => raw is Uint8List
+      ? _decodeLiveChannels(raw)
+      : Future.value(mapLiveChannels(raw));
+
+  Future<List<Channel>> _decodeLiveChannels(Uint8List bytes) {
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(decodeLiveChannelsBytes(bytes));
+    }
+    return compute(decodeLiveChannelsBytes, bytes);
+  }
+
+  /// Bounded one-pass ingestion for `get_vod_streams`/`get_series`. See
+  /// [_channelsFromRaw] for the debugApi-vs-real-bytes split.
+  Future<List<MediaItem>> _mediaItemsFromRaw(Object? raw, ContentKind kind) =>
+      raw is Uint8List
+      ? _decodeMediaItems(raw, kind)
+      : Future.value(mapMediaItemsFromDecoded(raw, kind));
+
+  Future<List<MediaItem>> _decodeMediaItems(Uint8List bytes, ContentKind kind) {
+    final args = XtreamMediaDecodeArgs(bytes, kind);
+    if (bytes.length < _isolateJsonThreshold) {
+      return Future.value(decodeMediaItemsBytes(args));
+    }
+    return compute(decodeMediaItemsBytes, args);
+  }
+
   Future<Uint8List> _download(Uri uri, HttpWorkloadPolicy policy) async {
     final operation = HttpOperation(policy);
     final req = await operation.wait(_http.getUrl(uri));
@@ -485,11 +528,8 @@ class XtreamSource implements Source {
       if (action == null) return const <MediaItem>[];
       final params = {'action': action};
       if (categoryId != null) params['category_id'] = categoryId;
-      final r = await _api(params);
-      return _listFromAny(r)
-          .map((e) => _mapMediaItem(Map<String, dynamic>.from(e), kind))
-          .where((item) => item.id.isNotEmpty)
-          .toList();
+      final raw = await _fetchCatalogRaw(params);
+      return _mediaItemsFromRaw(raw, kind);
     });
   }
 
@@ -565,99 +605,171 @@ class XtreamSource implements Source {
   @visibleForTesting
   MediaItem debugMapMediaItem(Map<String, dynamic> m, ContentKind kind) =>
       _mapMediaItem(m, kind);
-
-  MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
-    final id = kind == ContentKind.movie
-        ? _firstString(m, ['stream_id', 'id', 'movie_id', 'vod_id'])
-        : _firstString(m, ['series_id', 'id', 'stream_id']);
-    return MediaItem(
-      id: id ?? '',
-      title: _firstString(m, ['name', 'title']) ?? 'Untitled',
-      kind: kind,
-      categoryId: m['category_id']?.toString(),
-      poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
-      backdrop: _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
-      description: _firstString(m, ['plot', 'description']),
-      year: _firstString(m, ['year', 'releaseDate', 'release_date']),
-      rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
-      providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
-      extra: m,
-    );
-  }
-
-  List<Map<String, dynamic>> _listFromAny(dynamic value) {
-    if (value is List) {
-      return value
-          .whereType<Map>()
-          .map((entry) => Map<String, dynamic>.from(entry))
-          .toList();
-    }
-    if (value is Map) {
-      for (final key in const [
-        'data',
-        'items',
-        'results',
-        'series',
-        'movies',
-        'available_channels',
-        'categories',
-      ]) {
-        final nested = value[key];
-        final rows = _listFromAny(nested);
-        if (rows.isNotEmpty) return rows;
-      }
-    }
-    return const [];
-  }
-
-  int? _parseInt(dynamic value) {
-    if (value is int) return value;
-    if (value == null) return null;
-    return int.tryParse(value.toString());
-  }
-
-  /// Catch-up window in days from a live-stream's `tv_archive` (0/1) and
-  /// `tv_archive_duration` (days). Archive off → 0; on but duration
-  /// missing/zero → [kDefaultArchiveDays].
-  int _archiveDays(dynamic archive, dynamic duration) {
-    final on = archive == 1 || archive == '1' || archive == true;
-    if (!on) return 0;
-    final days = _parseInt(duration) ?? 0;
-    return days > 0 ? days : kDefaultArchiveDays;
-  }
-
-  double? _parseDouble(String? value) {
-    if (value == null) return null;
-    return double.tryParse(value.replaceAll(',', '.'));
-  }
-
-  int? _parseDurationSeconds(String? value) {
-    if (value == null || value.isEmpty) return null;
-    final direct = int.tryParse(value);
-    if (direct != null) return direct;
-    final parts = value.split(':').map(int.tryParse).toList();
-    if (parts.any((part) => part == null)) return null;
-    if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
-    if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
-    return null;
-  }
-
-  String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
-    for (final key in keys) {
-      final value = map[key];
-      if (value == null) continue;
-      final text = value.toString().trim();
-      if (text.isNotEmpty && text != 'null') return text;
-    }
-    return null;
-  }
 }
 
 /// Isolate entrypoint: decode UTF-8 JSON bytes. Top-level + pure so it can run
 /// under [compute]. Returns the raw decoded tree (List/Map of primitives),
-/// which is sendable back across the isolate port.
+/// which is sendable back across the isolate port. Used for the small/generic
+/// calls (auth, categories, `get_series_info`) that have no typed worker.
 dynamic _decodeJsonBytes(Uint8List bytes) =>
     jsonDecode(utf8.decode(bytes, allowMalformed: true));
+
+/// Maps a decoded `get_live_streams` response (or a category-partitioned
+/// slice of one) straight to typed [Channel]s. Top-level + pure: it's the
+/// core of [decodeLiveChannelsBytes] (isolate path) and is also called
+/// directly with an already-decoded [debugApi] value (test path, no bytes to
+/// decode). Public so fixture-driven tests can exercise it directly.
+@visibleForTesting
+List<Channel> mapLiveChannels(dynamic decoded) {
+  if (decoded is! List) return const [];
+  return decoded.whereType<Map>().map((s) {
+    final m = Map<String, dynamic>.from(s);
+    final streamId = '${m['stream_id']}';
+    final epgId = m['epg_channel_id']?.toString();
+    return Channel(
+      id: streamId,
+      name: '${m['name']}',
+      number: int.tryParse('${m['num']}'),
+      logo:
+          (m['stream_icon'] is String &&
+              (m['stream_icon'] as String).isNotEmpty)
+          ? m['stream_icon'] as String
+          : null,
+      categoryId: m['category_id']?.toString(),
+      archiveDays: _archiveDays(m['tv_archive'], m['tv_archive_duration']),
+      extra: {
+        'streamId': streamId,
+        if (epgId != null && epgId.isNotEmpty) 'tvgId': epgId,
+      },
+    );
+  }).toList();
+}
+
+/// Isolate entrypoint: decode + map a `get_live_streams` response in one
+/// pass, so the dynamic JSON tree is built and consumed entirely inside the
+/// worker isolate — only the typed [Channel] list crosses back to the main
+/// isolate. Top-level + pure so it can run under [compute]; public so
+/// fixture-driven tests can exercise it directly with raw bytes.
+@visibleForTesting
+List<Channel> decodeLiveChannelsBytes(Uint8List bytes) =>
+    mapLiveChannels(jsonDecode(utf8.decode(bytes, allowMalformed: true)));
+
+/// Maps a decoded VOD/series catalog response (`get_vod_streams`/
+/// `get_series`) to typed [MediaItem]s. Shared by the already-decoded
+/// [debugApi] path and [decodeMediaItemsBytes] (isolate) path.
+@visibleForTesting
+List<MediaItem> mapMediaItemsFromDecoded(dynamic decoded, ContentKind kind) =>
+    _listFromAny(decoded)
+        .map((e) => _mapMediaItem(e, kind))
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+
+/// Bundles the isolate arguments for [decodeMediaItemsBytes] — [compute]
+/// only passes a single message, and mapping needs both the raw bytes and
+/// which [ContentKind] they represent.
+@visibleForTesting
+class XtreamMediaDecodeArgs {
+  final Uint8List bytes;
+  final ContentKind kind;
+  const XtreamMediaDecodeArgs(this.bytes, this.kind);
+}
+
+/// Isolate entrypoint: decode + map a VOD/series catalog response in one
+/// pass — the dynamic JSON tree never leaves the worker isolate. Top-level +
+/// pure so it can run under [compute]; public so fixture-driven tests can
+/// exercise it directly with raw bytes.
+@visibleForTesting
+List<MediaItem> decodeMediaItemsBytes(XtreamMediaDecodeArgs args) =>
+    mapMediaItemsFromDecoded(
+      jsonDecode(utf8.decode(args.bytes, allowMalformed: true)),
+      args.kind,
+    );
+
+MediaItem _mapMediaItem(Map<String, dynamic> m, ContentKind kind) {
+  final id = kind == ContentKind.movie
+      ? _firstString(m, ['stream_id', 'id', 'movie_id', 'vod_id'])
+      : _firstString(m, ['series_id', 'id', 'stream_id']);
+  return MediaItem(
+    id: id ?? '',
+    title: _firstString(m, ['name', 'title']) ?? 'Untitled',
+    kind: kind,
+    categoryId: m['category_id']?.toString(),
+    poster: _firstString(m, ['stream_icon', 'cover', 'cover_big']),
+    backdrop: _firstString(m, ['backdrop_path', 'backdrop', 'cover_big']),
+    description: _firstString(m, ['plot', 'description']),
+    year: _firstString(m, ['year', 'releaseDate', 'release_date']),
+    rating: _parseDouble(_firstString(m, ['rating', 'rating_5based'])),
+    providerId: _firstString(m, ['tmdb_id', 'imdb_id']),
+    extra: m,
+  );
+}
+
+List<Map<String, dynamic>> _listFromAny(dynamic value) {
+  if (value is List) {
+    return value
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+  }
+  if (value is Map) {
+    for (final key in const [
+      'data',
+      'items',
+      'results',
+      'series',
+      'movies',
+      'available_channels',
+      'categories',
+    ]) {
+      final nested = value[key];
+      final rows = _listFromAny(nested);
+      if (rows.isNotEmpty) return rows;
+    }
+  }
+  return const [];
+}
+
+int? _parseInt(dynamic value) {
+  if (value is int) return value;
+  if (value == null) return null;
+  return int.tryParse(value.toString());
+}
+
+/// Catch-up window in days from a live-stream's `tv_archive` (0/1) and
+/// `tv_archive_duration` (days). Archive off → 0; on but duration
+/// missing/zero → [kDefaultArchiveDays].
+int _archiveDays(dynamic archive, dynamic duration) {
+  final on = archive == 1 || archive == '1' || archive == true;
+  if (!on) return 0;
+  final days = _parseInt(duration) ?? 0;
+  return days > 0 ? days : kDefaultArchiveDays;
+}
+
+double? _parseDouble(String? value) {
+  if (value == null) return null;
+  return double.tryParse(value.replaceAll(',', '.'));
+}
+
+int? _parseDurationSeconds(String? value) {
+  if (value == null || value.isEmpty) return null;
+  final direct = int.tryParse(value);
+  if (direct != null) return direct;
+  final parts = value.split(':').map(int.tryParse).toList();
+  if (parts.any((part) => part == null)) return null;
+  if (parts.length == 3) return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
+  if (parts.length == 2) return parts[0]! * 60 + parts[1]!;
+  return null;
+}
+
+String? _firstString(Map<dynamic, dynamic> map, List<String> keys) {
+  for (final key in keys) {
+    final value = map[key];
+    if (value == null) continue;
+    final text = value.toString().trim();
+    if (text.isNotEmpty && text != 'null') return text;
+  }
+  return null;
+}
 
 /// Credentials extracted from a URL that points at an Xtream Codes panel
 /// (typically a `get.php` playlist link). [host] is `scheme://host[:port]`.

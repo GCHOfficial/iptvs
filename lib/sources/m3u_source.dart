@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
+import '../data/load_token.dart';
 import '../data/net.dart';
 import 'expiry.dart';
 import 'source.dart';
@@ -15,7 +16,7 @@ import 'xmltv.dart';
 /// Stream URLs are static, so resolving needs no network. EPG comes from an
 /// XMLTV guide — either an explicit [epgUrl] or the playlist's own
 /// `url-tvg`/`x-tvg-url` header attribute.
-class M3uSource implements Source {
+class M3uSource implements Source, BatchedEpgSource {
   final String sourceId;
   final String playlistUrl;
   final String? epgUrl;
@@ -86,14 +87,40 @@ class M3uSource implements Source {
   Future<List<Programme>> epg(List<Channel> channels) async {
     final url = epgUrl ?? _headerEpgUrl;
     if (url == null) return const [];
+    final map = _tvgIdMap(channels);
+    if (map.isEmpty) return const [];
+    final bytes = await _download(Uri.parse(url), kEpgWorkload);
+    return parseXmltv(bytes, map);
+  }
+
+  @override
+  Stream<List<Programme>>? epgBatched(
+    List<Channel> channels, {
+    LoadToken? token,
+  }) {
+    final url = epgUrl ?? _headerEpgUrl;
+    if (url == null) return null;
+    final map = _tvgIdMap(channels);
+    if (map.isEmpty) return null;
+    return _streamEpg(url, map, token);
+  }
+
+  Map<String, String> _tvgIdMap(List<Channel> channels) {
     final map = <String, String>{};
     for (final c in channels) {
       final tvg = c.extra['tvgId']?.toString();
       if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
     }
-    if (map.isEmpty) return const [];
+    return map;
+  }
+
+  Stream<List<Programme>> _streamEpg(
+    String url,
+    Map<String, String> map,
+    LoadToken? token,
+  ) async* {
     final bytes = await _download(Uri.parse(url), kEpgWorkload);
-    return parseXmltv(bytes, map);
+    yield* parseXmltvBatched(bytes, map, token: token);
   }
 
   @override
@@ -139,13 +166,19 @@ class M3uSource implements Source {
 
   // ── parsing ────────────────────────────────────────────────────────────
 
+  // Small playlists parse fast enough inline; isolate spawn overhead would
+  // dominate. Mirrors XtreamSource's `_isolateJsonThreshold`.
+  static const _isolateM3uThreshold = 256 * 1024;
+
   Future<void> _ensureParsed() async {
     if (_channels != null) return;
     final bytes = await _download(Uri.parse(playlistUrl), kPlaylistWorkload);
     // Decode + parse on a background isolate: a large playlist (tens of MB,
     // tens of thousands of channels) would otherwise stall the UI thread for
     // hundreds of ms while building Channel objects.
-    final parsed = await compute(_parseM3uBytes, bytes);
+    final parsed = bytes.length < _isolateM3uThreshold
+        ? _parseM3uBytes(bytes)
+        : await compute(_parseM3uBytes, bytes);
     _channels = parsed.channels;
     _categories = parsed.categories;
     _headerEpgUrl = parsed.headerEpgUrl;

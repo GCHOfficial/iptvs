@@ -114,9 +114,13 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   metadata enrichment. The most logic-dense file; treat its cache/refresh/merge paths carefully.
   EPG contract: a normally completed empty `Source.epg` result is **success** and atomically
   replaces the cache (clears stale rows, advances `epg_synced_at`); a thrown error retains the
-  last good guide with the un-advanced timestamp as the failure record. Don't reintroduce an
-  `isNotEmpty` guard before `replaceEpg`, and don't write the `sources` row with
-  `INSERT OR REPLACE` (it destroys columns the writer doesn't own — see `replaceLibrary`).
+  last good guide with the un-advanced timestamp as the failure record. `replaceEpgStream` is
+  the streamed counterpart (large XMLTV guides via the optional `BatchedEpgSource` capability):
+  same one-transaction, success-empty semantics, and a cancelled feed must end in a thrown
+  `LoadCancelledException` — never a quiet stream close — so the transaction rolls back instead
+  of committing a half-fed guide. Don't reintroduce an `isNotEmpty` guard before `replaceEpg`/
+  `replaceEpgStream`, and don't write the `sources` row with `INSERT OR REPLACE` (it destroys
+  columns the writer doesn't own — see `replaceLibrary`).
 - **`lib/data/app_database.dart`** — local SQLite cache keyed by `Source.id`, versioned schema
   with hand-rolled `onUpgrade`. See "Database migrations" below.
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider`s enriching
@@ -164,6 +168,22 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   Disposal is expressed solely through `_disposed`, checked in `_set` (the only
   `notifyListeners` site). Pinned by `test/media_tab_controller_test.dart` and
   `test/live_controller_test.dart` — keep new async publish paths behind these guards.
+  Additive to (never instead of) the generation guard: a `LoadToken`
+  (`lib/data/load_token.dart`) per generation stops a superseded load from *writing* to the
+  cache or feeding more EPG batches (the generation guard only stops the UI publish). It is
+  delivered via the settable `LibraryRepository.loadToken` field — set in the same synchronous
+  prologue as the call, read into a local before the method's first `await` — not a method
+  parameter, because the pinned tests' `_GatedRepo` overrides would break on any signature change.
+- **Large provider payloads are ingested one-pass off the main isolate.** Xtream/Stalker
+  catalogs ≥256 KB go bytes-in→typed-list-out through top-level workers
+  (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels`) — the
+  dynamic JSON graph never crosses the isolate boundary; smaller payloads parse inline (isolate
+  spawn would dominate). Large XMLTV guides stream bounded `Programme` batches
+  (`parseXmltvBatched`, single in-flight batch by design) straight into `replaceEpgStream`.
+  Sources with a batched guide implement the optional `BatchedEpgSource` capability interface —
+  deliberately separate from `Source`, since `implements` doesn't inherit default bodies.
+  Don't add new parse/map work on the main isolate for provider-sized payloads, and don't
+  return both a dynamic and a typed graph from a worker.
 - **Liveness is provider metadata, not inferred.** `StreamInfo.isLive` is set by the `Source`.
   Don't guess from stream duration (an HLS live window looks finite). Live = no seek bar.
 - **Secrets must never reach logs, on-screen errors, or exported diagnostics.** Provider URLs and

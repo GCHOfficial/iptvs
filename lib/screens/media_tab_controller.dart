@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
+import '../data/load_token.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
@@ -77,6 +78,7 @@ class MediaTabController extends ChangeNotifier {
   int _loadGeneration = 0;
   String? _pendingSearch;
   bool _disposed = false;
+  LoadToken? _loadToken;
 
   void _set(VoidCallback fn) {
     if (_disposed) return;
@@ -143,6 +145,11 @@ class MediaTabController extends ChangeNotifier {
 
   Future<void> load({bool forceRefresh = false}) async {
     final gen = ++_loadGeneration;
+    // A newer load supersedes any still-running one — cancel its token so it
+    // stops writing to the cache once this one has started.
+    _loadToken?.cancel();
+    final token = LoadToken();
+    _loadToken = token;
     final categoryToLoad = _loadCategory;
     _set(() {
       _cancelEnrich();
@@ -153,6 +160,7 @@ class MediaTabController extends ChangeNotifier {
     });
     unawaited(loadContinueWatching());
     try {
+      repo.loadToken = token;
       final snap = await retryTransientNetworkOperation(
         () => repo.loadMedia(
           kind,
@@ -208,6 +216,10 @@ class MediaTabController extends ChangeNotifier {
       error = null;
     });
     try {
+      // Subordinate op: reuse the current token rather than minting a new
+      // one — it doesn't bump `_loadGeneration`, so it isn't itself a fresh
+      // dataset load, just an extension of the one already in flight.
+      repo.loadToken = _loadToken;
       final snap = await repo.loadMoreMedia(kind, categoryId: categoryToLoad);
       if (_disposed || gen != _loadGeneration) return;
       DiagnosticsLog.instance.add(
@@ -397,6 +409,7 @@ class MediaTabController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _loadToken?.cancel();
     firstFocusNode.dispose();
     scrollController.dispose();
     super.dispose();
