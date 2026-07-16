@@ -261,11 +261,69 @@ jobs:
             echo "All models failed; continuing without AI changelog."
             : > body.md
           fi
-      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
-          name: IPTVS Player ${{ needs.version.outputs.version }}${{ needs.version.outputs.track == 'beta' && ' Beta' || '' }}
-          prerelease: ${{ needs.version.outputs.track == 'beta' }}
-          body_path: body.md
-          generate_release_notes: true
-          files: dist/**
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
+          RELEASE_NAME: IPTVS Player ${{ needs.version.outputs.version }}${{ needs.version.outputs.track == 'beta' && ' Beta' || '' }}
+          RELEASE_TRACK: ${{ needs.version.outputs.track }}
+        run: |
+          set -euo pipefail
+
+          retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                echo "Attempt $attempt failed; retrying in $((attempt * 10))s."
+                sleep $((attempt * 10))
+              fi
+            done
+            return 1
+          }
+
+          # Probe existence via the REST status code. `gh release view` is
+          # unusable here: it reports "release not found" for *any* REST
+          # failure (a 503 during an API outage looks identical to a real
+          # 404), which would misroute an existing release into `create`
+          # and a persistent "already exists" failure. With `gh api`, a
+          # real 404 answers immediately; anything else is transient and
+          # goes back through retry.
+          exists=""
+          probe_release() {
+            local err
+            if err=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --silent 2>&1); then
+              exists=yes
+              return 0
+            fi
+            if grep -q "HTTP 404" <<<"$err"; then
+              exists=no
+              return 0
+            fi
+            printf '%s\n' "$err" >&2
+            return 1
+          }
+          retry probe_release
+
+          if [ "$exists" = yes ]; then
+            edit_args=("$RELEASE_TAG" --title "$RELEASE_NAME")
+            # Keep the existing notes when the AI changelog came back empty
+            # (fail-open) — an empty --notes-file would wipe them.
+            if [ -s body.md ]; then
+              edit_args+=(--notes-file body.md)
+            fi
+            if [ "$RELEASE_TRACK" = beta ]; then
+              edit_args+=(--prerelease)
+            fi
+            retry gh release edit "${edit_args[@]}"
+          else
+            create_args=("$RELEASE_TAG" --verify-tag --title "$RELEASE_NAME" --notes-file body.md --generate-notes)
+            if [ "$RELEASE_TRACK" = beta ]; then
+              create_args+=(--prerelease)
+            fi
+            retry gh release create "${create_args[@]}"
+          fi
+
+          retry gh release upload "$RELEASE_TAG" dist/* --clobber

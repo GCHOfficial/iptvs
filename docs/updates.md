@@ -10,11 +10,23 @@ pipeline, or the update dialog.
 
 The release body opens with a short **AI-generated changelog** (release.yml's "Generate AI
 changelog" step: commit subjects since the previous tag → Gemini, key in the `GEMINI_API_KEY`
-repo secret → `body_path`), with GitHub's auto-generated notes appended below. It tries
+repo secret → `--notes-file`), with GitHub's auto-generated notes appended below. It tries
 `gemini-3.5-flash` → `gemini-3.1-flash-lite` → `gemini-3-flash-preview` (two attempts each — the
 primary 503s under load, which cut v0.1.29 without a changelog). The step is fail-open — no key /
 no previous tag / API error just yields the auto notes — and the body is what the in-app update
 dialog renders.
+
+## Release publishing
+
+The publish step drives the `gh` CLI directly with per-command retries (5 attempts, linear
+backoff) — a GitHub API 503 mid-publish previously failed the whole job. Release existence is
+probed with a raw `gh api` status check because `gh release view` reports "release not found"
+for *any* REST failure, so an outage would misroute an existing release into `gh release
+create` and a persistent "already exists" error; only a real HTTP 404 selects the create path,
+anything non-404 goes back through retry. Re-runs converge: an existing release is edited
+(title/notes/prerelease) and assets re-uploaded with `--clobber`, and an empty AI-changelog
+body never overwrites an existing release's notes on the edit path. `--verify-tag` keeps a
+manual dispatch from minting a release for a tag that was never pushed.
 
 GitHub-direct builds expose a Stable/Beta selector. Stable uses GitHub's latest
 normal release; Beta selects the highest signed, non-draft release including
