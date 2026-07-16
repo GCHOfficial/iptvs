@@ -87,14 +87,23 @@ fixtures:
 | `v0.1.0`–`v0.1.7` | 8 |
 | `v0.1.8`–`v0.1.10` | 9 |
 | `v0.1.11`–`v0.1.15` | 10 |
-| `v0.1.16`–`v0.1.30` | 11 |
+| `v0.1.16`–`v0.1.34` | 11 |
+| `v0.1.35`+ | 12 (current) |
 
+The supported upgrade claim covers exactly these released schemas (8–11 → 12).
 Versions 1 and 7 remain useful regression fixtures because they cover the full
-upgrade chain and the historical missing-`external_metadata` repair. They are
-not currently claimed as publicly tagged release schemas. Reviewable v8–v11
-fixture builders live in `test/support/historical_database_fixtures.dart`. PR 12
-must compare each upgraded schema with a fresh installation and re-check the
-fixtures against their tagged source before changing the migration contract.
+upgrade chain and the historical missing-`external_metadata` repair, but they
+never shipped in a tagged release and sit outside the supported claim. The
+reviewable v8–v11 fixture builders live in
+`test/support/historical_database_fixtures.dart`; PR 12 re-verified them
+against their tagged source (fresh-install DDL at each range's first tag, plus
+a normalized-DDL diff across each range confirming no intra-range drift) and
+pinned the contract in `test/released_schema_fixtures_test.dart`: every fixture
+is migrated and compared with a fresh installation over tables, columns,
+indexes, and foreign keys (pragma-based, so `ALTER`-added columns compare
+structurally), seeded favorites/positions/EPG/metadata are validated after the
+upgrade, and each migrated fixture is opened a second time to prove stable
+startup. Re-run that suite before changing the migration contract.
 
 ## Reference environments
 

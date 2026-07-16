@@ -96,6 +96,17 @@ Future<void> _seed(Database db, int version) async {
       'updated_at': 4000,
     });
   }
+  await db.insert('external_metadata', {
+    'source_id': sourceId,
+    'media_kind': 'movie',
+    'media_id': 'movie-1',
+    'provider': 'tmdb',
+    'provider_key': 'movie/123',
+    'title': 'Fixture Movie (TMDB)',
+    'overview': 'Fixture overview.',
+    'rating': 7.5,
+    'refreshed_at': 5000,
+  });
 }
 
 const _v8Schema = [
