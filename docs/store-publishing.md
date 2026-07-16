@@ -84,6 +84,16 @@ Permanent Play upload certificate SHA-256:
 51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41
 ```
 
+Permanent Play-managed app-signing certificate SHA-256:
+
+```text
+F4:D9:F8:2B:A1:DB:51:94:19:D4:9C:2B:7D:39:AA:A5:F0:10:A8:92:CB:F0:37:1A:AE:01:30:41:6E:DB:37:53
+```
+
+Google Play controls this app-signing key. It signs APKs delivered for
+`com.gchofficial.iptvs.player`; it is intentionally different from the upload
+certificate above.
+
 Permanent direct-distribution certificate SHA-256:
 
 ```text
@@ -93,7 +103,10 @@ Permanent direct-distribution certificate SHA-256:
 ### Play implementation checklist
 
 Play Console identity verification and application creation completed on
-2026-07-14. Package IDs cannot be renamed after publication.
+2026-07-14. Android developer verification registered the Play package with
+the Play-managed certificate and the outside-Play GitHub-direct package with
+its direct-distribution certificate on 2026-07-16. Package IDs cannot be
+renamed after publication.
 
 - [x] Confirm the permanent application ID: `com.gchofficial.iptvs.player`.
 - [x] Generate and back up the separate GitHub-direct app-signing key.
@@ -103,7 +116,7 @@ Play Console identity verification and application creation completed on
 - [ ] Exercise the cloud migration from a released old APK into Play and
   GitHub-direct device installs.
 - [x] Create **IPTVS Player** in Play Console with the new ID.
-- [ ] Enroll in Play App Signing with a Play-managed app-signing key by uploading
+- [x] Enroll in Play App Signing with a Play-managed app-signing key by uploading
   the first signed AAB using Google's recommended default.
 - [x] Generate and configure a separate Play upload key. Permanent upload
   certificate SHA-256 is `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
@@ -112,10 +125,15 @@ Play Console identity verification and application creation completed on
 - [x] Add a protected App Bundle build using the upload key.
 - [x] Verify the AAB package name, updater exclusions, archive signature, and
   expected upload certificate in CI.
-- [ ] Record and verify the Play-managed app-signing certificate on an installed
-  internal-track APK.
-- [ ] Complete privacy, data-safety, content-rating, phone, and TV listings.
-- [ ] Test internal-track phone and Android TV installs before production.
+- [x] Record the Play-managed app-signing certificate from Play Console and
+  confirm that Android developer verification registered the same fingerprint.
+- [x] Register `com.gchofficial.iptvs.player.direct` as an outside-Play package
+  with the permanent direct-distribution certificate.
+- [x] Verify that an installed internal-track APK uses the recorded Play-managed
+  app-signing certificate. On 2026-07-16, `apksigner` verified the Play-installed
+  base APK from an SM-S938B against the recorded SHA-256 fingerprint.
+- [x] Complete privacy, data-safety, content-rating, phone, and TV listings.
+- [x] Test internal-track phone and Android TV installs before production.
 
 The exact current Console answers, listing copy, propagation troubleshooting,
 asset checklist, Android TV opt-in, and release smoke tests are tracked in
