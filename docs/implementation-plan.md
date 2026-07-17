@@ -25,10 +25,10 @@ Status convention:
 
 ## Current status
 
-- Last updated: 2026-07-16
+- Last updated: 2026-07-17
 - Active phase: Phase 4 — Diagnostics and distribution gates
-- Active PR: PR 16 fixes implemented on the working tree; release/device gates
-  remain explicitly open
+- Active PR: PR 17 repository-controlled MSIX packaging and submission material
+  implemented; Windows certification/flight/device gates remain explicitly open
 - Previous PRs: PR 13–16 merged as #113–#116; PR 11 released as v0.1.36
   with live verification passed 2026-07-16. PR 10's on-device TV-Low stall/RSS
   capture and PR 15's physical input/accessibility matrix remain outstanding.
@@ -41,7 +41,7 @@ Status convention:
 - Baseline `flutter analyze`: passed
 - Baseline `flutter test`: passed, 204 tests
 - Current PR 0 `flutter analyze`: passed on 2026-07-14
-- Current implementation `flutter test`: passed, 367 tests with 14 expected
+- Current implementation `flutter test`: passed, 371 tests with 14 expected
   skips
   baselines and 3 Windows-only updater integration tests skipped on Linux
 - Android native builds: development, GitHub-direct, and Google Play debug APKs
@@ -90,7 +90,7 @@ Status convention:
 | 14 | Phase 3 | Model catch-up capabilities and timezone | M | PR 4 | Implemented; timezone/M3U fixes included |
 | 15 | Phase 3 | Complete TV focus, accessibility, and input parity | L | PR 9 | Implemented; device matrix open |
 | 16 | Phase 4 | Add diagnostics and conflict/capability UX | M/L | Stable release | Implemented; #116 fixes included |
-| 17 | Phase 4 | Publish a channel-safe Microsoft Store MSIX | M | PRs 2 and 9 | [ ] |
+| 17 | Phase 4 | Publish a channel-safe Microsoft Store MSIX | M | PRs 2 and 9 | Implemented; certification/flight gates open |
 
 Effort guide:
 
@@ -895,18 +895,26 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
   Center.
 - [x] Record the exact Package Identity Name, Publisher, publisher display name,
   product name, PFN, Package SID, and Store ID in `docs/store-publishing.md`.
-- [ ] Add deterministic x64 MSIX packaging using those identity values.
+- [x] Add deterministic x64 MSIX packaging using those identity values. The
+  dedicated workflow uses the checked-in manifest template and fails on
+  identity or runtime-payload drift.
 - [x] Add explicit `development`, `githubDirect`, `googlePlay`, and
   `microsoftStore` build-time distribution channels.
 - [x] Disable GitHub update checks and PowerShell replacement in Store builds.
-- [ ] Keep Store and GitHub-direct Windows artifacts in separate workflow jobs.
-- [ ] Use four-part MSIX versions with the fourth component set to `0`.
+- [x] Keep Store and GitHub-direct Windows artifacts in separate workflow jobs.
+  Store MSIX is manual in `microsoft-store.yml`; direct ZIP remains in
+  `release.yml` and cannot consume the Store artifact.
+- [x] Use four-part MSIX versions with the fourth component set to `0`.
+  Packaging accepts exactly three numeric inputs with a non-zero major
+  component and emits `<input>.0`; the first submission uses `1.0.0.0`.
 - [ ] Validate the packaged app writes only to supported app-data/cache locations.
 - [ ] Run Windows App Certification Kit against the packaged Release build.
 - [ ] Test Store flighting install, upgrade, rollback, uninstall, secure storage,
   HDR/SDR playback, libmpv loading, and firewall behavior.
 - [ ] Provide privacy/support URLs, listing assets, age rating, and a credential-free
-  demo path for certification.
+  demo path for certification. URLs, support contact, and exact built-in demo
+  steps are recorded; Windows screenshots, Store age rating, and final content
+  disclosures remain owner-run Partner Center work.
 - [ ] Confirm Store signing on the downloaded certified package.
 
 ## Release-candidate gate
@@ -1006,6 +1014,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-14 | PR 15 subset | Ready for PR | API-36 Android TV emulator confirmed compact live density and native controls→exit Back peeling; automated tests now prove category filtering hands focus to the filtered channel list. Broader accessibility and device matrix remain. |
 | 2026-07-15 | PR 15 subset | Merged | PR #100 merged as `912392f`; Android TV Back, density, category focus, tests, and store screenshots are on `main`. |
 | 2026-07-16 | PR 15 | Ready for PR | Added stable-id selection reconciliation, explicit sheet/search/playback focus restoration coverage, repeat-safe activation tests, and selected/position/action semantics for live, media, and EPG custom rows. `flutter analyze` is clean and all 356 tests pass (14 skipped); the physical device/input/screen-reader matrix remains owner-run. |
+| 2026-07-17 | PR 17 | In progress | Added exact-identity x64 MSIX packaging and unpack-time verification in a dedicated manual Store workflow; four-part `.0` versioning, minimal full-trust manifest, required Flutter/libmpv payload, Store URLs, and credential-free demo instructions are pinned. Run CI packaging, WACK, Partner Center flight/device matrix, listing assets/rating, and certified-signature check next. |
 | 2026-07-15 | PR 3 | In progress | Shared bounded HTTP/decompression boundary implemented and all Dart callers migrated; oversized Stalker/Xtream live catalogs now partition through pagination/categories instead of rejecting the source. Phone/TV profiling also exposed and fixed non-finite media-card image cache sizing. Provider temp-file ingestion remains intentionally sequenced with PR 10's one-pass parser work. |
 | 2026-07-15 | PR 3 | Merged | PR #101 merged as `ec33886`; owner verified large Stalker live/EPG loading, playback, and movie/series posters on the 2 GiB TV emulator. A focused follow-up retries one transient catalog failure and keeps raw provider exceptions out of the UI. |
 | 2026-07-15 | PR 0 | Complete | Android phone/TV profile baselines and longstanding Windows x64 SDR/HDR validation are sufficient for early testing. Deeper import/RSS/SQLite budgets are deferred until closed-testing feedback supplies representative problems. |
