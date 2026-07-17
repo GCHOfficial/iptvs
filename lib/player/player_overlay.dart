@@ -99,21 +99,12 @@ class PlayerVideoSurface extends StatelessWidget {
               fontWeight: FontWeight.w600,
             ),
           ),
-          if (epgNow case final now?) ...[
-            const SizedBox(height: 2),
+          if (epgNow case final now?)
             Text(
-              '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}',
+              _programmeLine(now, epgNext),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: AppColors.textLo, fontSize: 12),
-            ),
-          ],
-          if (epgNext case final next?)
-            Text(
-              'Next · ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AppColors.textLo, fontSize: 11),
             ),
         ],
       ),
@@ -141,6 +132,12 @@ class PlayerVideoSurface extends StatelessWidget {
 
   static String _hm(DateTime time) =>
       '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+  static String _programmeLine(Programme now, Programme? next) {
+    final current = '${_hm(now.start)} – ${_hm(now.stop)} · ${now.title}';
+    if (next == null) return current;
+    return '$current  •  Next ${_hm(next.start)} – ${_hm(next.stop)} · ${next.title}';
+  }
 }
 
 class PlayerReconnectChip extends StatelessWidget {

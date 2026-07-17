@@ -9,14 +9,19 @@ channel/VOD/EPG data locally, enriches movie/series metadata from public APIs, a
 plays streams with **true HDR** — handling HEVC / AC-3 / MPEG-TS that a plain video
 element can't.
 
-> iptvs ships **no channels, playlists, or content** of its own and is not
-> affiliated with any IPTV provider. You bring your own provider credentials. See
+> iptvs ships no provider channels or playlists and is not affiliated with any
+> IPTV provider. A credential-free **Demo** source links to public protocol
+> fixtures and Blender open movies for development and closed testing; those
+> third-party streams remain subject to their own terms and licences. See
 > [Disclaimer](#disclaimer).
 
 ## Features
 
 - **Providers, one interface** — Stalker (MAG portal), Xtream Codes, and M3U/M3U8
   playlists, plus a built-in demo source. Live TV, Movies (VOD), and Series.
+- **Credential-free demo catalogue** — generated now/next and archive rows,
+  codec/HLS/HEVC/MP4 playback fixtures, four Blender open-movie films with
+  artwork and attribution metadata, and two browsable series hierarchies.
 - **True HDR** — HDR10, HDR10+, HLG, and Dolby Vision Profile 8 play through the
   hardware decoder to the display; Dolby Vision Profile 5 is reshaped via a
   `libdovi`-enabled libmpv. Dynamic range is read from the decoder, so the badge

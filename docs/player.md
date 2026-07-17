@@ -67,6 +67,10 @@ to the live edge; the LIVE badge greys when behind. Most control logic lives in 
 Dart `open` call passes `title`/`sourceName`/`isLive`/EPG now-next/headers/subtitles, and
 `MainActivity` calls back `nativeClosed` so the Dart route pops on exit.
 
+The embedded media_kit top bar compacts EPG now/next into one ellipsized line. This keeps the
+overlay within short desktop/Linux video heights while retaining both programme labels; native
+Android/Windows overlays keep their existing platform-specific EPG layout.
+
 **FPS** comes from `Format.frameRate` when present (container-declared, authoritative); otherwise
 it's derived **once** from a short burst of real frame-presentation timestamps
 (`ExoPlayer.setVideoFrameMetadataListener`, `ExoPlayerEngine.onVideoFrameMetadata` — median of
