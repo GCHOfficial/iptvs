@@ -1,0 +1,81 @@
+name: Microsoft Store MSIX
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Three-part Store version without leading v (for example 1.2.3)'
+        required: true
+
+concurrency:
+  group: microsoft-store-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.44.5
+
+jobs:
+  build-msix:
+    name: Build Microsoft Store MSIX
+    runs-on: windows-latest
+    environment: microsoft-store
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Validate Store version
+        shell: powershell
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:STORE_VERSION -notmatch '^([1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw 'Store version must contain exactly three numeric components and have a non-zero major component.'
+          }
+          foreach ($part in $env:STORE_VERSION.Split('.')) {
+            if ([int]$part -gt 65535) {
+              throw 'Every Store version component must be between 0 and 65535.'
+            }
+          }
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache libmpv DLL
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: windows/libmpv/libmpv-2.dll
+          key: libmpv-dll-${{ hashFiles('windows/CMakeLists.txt') }}
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - name: Build Store release (Windows x64)
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build windows --release --build-name $env:STORE_VERSION --build-number 0 --dart-define=DISTRIBUTION_CHANNEL=microsoftStore --dart-define=SUPABASE_URL=$env:SUPABASE_URL --dart-define=SUPABASE_ANON_KEY=$env:SUPABASE_ANON_KEY
+      - name: Package and verify unsigned Store MSIX
+        shell: powershell
+        env:
+          STORE_VERSION: ${{ inputs.version }}
+        run: >-
+          ./tool/package_windows_msix.ps1
+          -BuildDirectory build/windows/x64/runner/Release
+          -Version $env:STORE_VERSION
+          -OutputPath "iptvs-$env:STORE_VERSION-windows-store-x64.msix"
+      - name: Record package SHA-256
+        shell: powershell
+        run: |
+          $package = Get-Item 'iptvs-*-windows-store-x64.msix'
+          $hash = (Get-FileHash $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($package.Name)" | Set-Content "$($package.FullName).sha256" -Encoding Ascii
+          Write-Host "MSIX SHA-256: $hash"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: microsoft-store-msix-${{ inputs.version }}
+          path: |
+            iptvs-*-windows-store-x64.msix
+            iptvs-*-windows-store-x64.msix.sha256
+          if-no-files-found: error
+          retention-days: 14

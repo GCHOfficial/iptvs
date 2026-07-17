@@ -215,11 +215,25 @@ These values are exact and case-sensitive:
 | Package Family Name | `George-CosminHanta.IPTVSPlayer_0a4z5zccam0py` |
 | Package SID | `S-1-15-2-2604606762-3968970359-1786003176-2720169948-3773242850-1324970824-1308558992` |
 | Store ID | `9P8KK9T379WN` |
+| Store deep link | Available after the product is live |
+| Web Store URL | Available after the product is live |
+
+The Store deep link and public Web Store URL must be copied back into this
+table after publication. Do not predict either URL from the Store ID before
+Partner Center marks the product live.
 
 ### Required application changes
 
-- Add an x64 MSIX packaging target using the Partner Center identity.
-- Use four-part package versions with the fourth component reserved as `0`.
+- The manual **Microsoft Store MSIX** workflow builds an unsigned x64 package
+  from the Flutter Release payload using the exact Partner Center identity.
+  `tool/package_windows_msix.ps1` creates the manifest and required logo sizes;
+  `tool/verify_windows_msix.ps1` unpacks the result and rejects identity,
+  version, capability, executable, Flutter asset, or libmpv drift.
+- Store workflow inputs are three-part versions such as `1.2.3`; the package
+  identity is always emitted as `1.2.3.0`. Each component must be at most
+  65535, the major component cannot be zero, and the fourth component is
+  reserved as `0` for Store use. Use `1.0.0` for the first submission, which
+  produces package version `1.0.0.0`.
 - Declare the desktop full-trust entry point and only required capabilities.
 - Verify all runtime writes use application-data/cache directories; the installed
   package directory is read-only.
@@ -235,20 +249,77 @@ These values are exact and case-sensitive:
 
 - [x] Reserve the product name: `IPTVS Player`.
 - [x] Record the Partner Center identity values above.
-- [ ] Choose supported Windows versions and x64-only availability.
-- [ ] Add deterministic MSIX packaging to the Windows release job.
+- [x] Choose Windows 10 version 2004 (`10.0.19041.0`) as the minimum and
+  x64-only availability; the manifest records Windows 11 24H2
+  (`10.0.26100.0`) as the highest tested schema target.
+- [x] Add deterministic MSIX packaging in a dedicated Store workflow, separate
+  from the GitHub-direct release workflow.
 - [x] Disable the self-updater in Store builds through build-time ownership:
   `microsoftStore` and `googlePlay` hide GitHub checks; `githubDirect` alone
   owns the self-updater.
-- [ ] Validate package contents contain `iptvs.exe`, Flutter assets, and libmpv.
+- [x] Validate package contents contain `iptvs.exe`, Flutter assets, and libmpv;
+  packaging fails if any required runtime file is absent.
 - [ ] Run the Windows App Certification Kit.
 - [ ] Test installation and upgrade from Partner Center package flighting.
-- [ ] Provide an accessible privacy-policy URL and support contact.
+- [x] Provide an accessible privacy-policy URL and support contact:
+  `https://gchofficial.github.io/iptvs/privacy.html`,
+  `https://gchofficial.github.io/iptvs/support.html`, and
+  `gchofficial@gmail.com`.
 - [ ] Provide accurate screenshots, input requirements, and content disclosures.
-- [ ] Give certification a testable demo path that needs no IPTV credentials.
+- [x] Give certification a testable demo path that needs no IPTV credentials:
+  on first launch choose **Add profile**, enter any local profile name, and
+  select **Create**. The seeded demo source opens without an account or provider
+  credentials and exercises browsing and playback with public demo media.
 - [ ] Confirm no bundled or promoted streams imply rights the app does not own.
 
 The public Store support and privacy contact is `gchofficial@gmail.com`.
+
+### Build and submission procedure
+
+Run **Microsoft Store MSIX** manually with the next monotonically increasing
+three-part version (`1.0.0` for the first submission). The workflow compiles with
+`DISTRIBUTION_CHANNEL=microsoftStore`, omits the GitHub update key, packages the
+Release directory, verifies the package by unpacking it, and uploads an unsigned
+`iptvs-<version>-windows-store-x64.msix` CI artifact for Partner Center. The
+Store signs the package during certification; do not attach this unsigned MSIX
+to GitHub Releases or distribute it for ordinary sideloading.
+
+Before submission:
+
+1. Download the workflow artifact and upload only the `.msix` to the reserved
+   **IPTVS Player** product in Partner Center.
+2. Record the workflow run and submitted version here.
+3. Run the Windows App Certification Kit against a locally test-signed copy of
+   the same Release package, then retain the report. Test signing is for WACK
+   and local installation only; it must not alter the submitted artifact.
+4. Complete the package flight matrix below using the Store-delivered package.
+5. After certification, download/install through Microsoft Store and verify the
+   package identity and Microsoft signature with `Get-AppxPackage` and
+   `Get-AuthenticodeSignature` before public rollout.
+
+### Certification and flight evidence
+
+| Gate | Evidence |
+|---|---|
+| Packaging workflow | [ ] Run URL, version, and SHA-256 |
+| Windows App Certification Kit | [ ] Report and Windows build |
+| Clean Store flight install/start | [ ] Device and package version |
+| Store flight upgrade | [ ] From/to versions; data retained |
+| Store rollback | [ ] Partner Center action and resulting version |
+| Uninstall/reinstall | [ ] Expected app data and secure-storage result |
+| SDR and HDR playback | [ ] Display/GPU, stream, and result |
+| libmpv loading | [ ] Playback result; packaged DLL version/hash |
+| Firewall behavior | [ ] First-run prompt/result and network playback |
+| Runtime writes | [ ] ProcMon trace limited to package app-data/cache/temp |
+| Certified signature | [ ] Package full name, signer, and status |
+
+For runtime-write validation, filter Process Monitor to `Process Name is
+iptvs.exe`, exercise profile creation, source refresh, EPG, playback, and app
+restart, then check successful write/create/set-information operations. App
+code writes SQLite under `getApplicationSupportDirectory`; update downloads and
+the detached PowerShell replacement path are unreachable in a
+`microsoftStore` build. Keep the trace as device evidence rather than marking
+this gate complete from source inspection.
 
 ## Release-channel invariant
 
