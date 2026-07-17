@@ -269,8 +269,18 @@ Partner Center marks the product live.
 - [x] Give certification a testable demo path that needs no IPTV credentials:
   on first launch choose **Add profile**, enter any local profile name, and
   select **Create**. The seeded demo source opens without an account or provider
-  credentials and exercises browsing and playback with public demo media.
-- [ ] Confirm no bundled or promoted streams imply rights the app does not own.
+  credentials and exercises browsing and playback with public demo media. The
+  Live tab has two open-movie simulcasts (with generated now/next and archive
+  guide rows) plus four protocol/codec fixtures; Movies has Big Buck Bunny,
+  Sintel, Tears of Steel, and Spring; Series has Codec Test Series and the
+  Caminandes open shorts hierarchy.
+- [x] Confirm no bundled or promoted streams imply rights the app does not own.
+  Blender titles are linked from Blender's official video service and labelled
+  with their Creative Commons attribution licence in the item description;
+  Apple URLs are the developer site's testing samples, and Mux URLs are clearly
+  labelled protocol test fixtures, not app-owned programming. The app links to
+  remote media and does not redistribute it; reconfirm the Mux endpoint terms
+  before a production Store submission if those fixtures remain enabled there.
 
 The public Store support and privacy contact is `gchofficial@gmail.com`.
 

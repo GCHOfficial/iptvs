@@ -26,13 +26,14 @@ void main() {
       expect(await source.categories(), isNotEmpty);
 
       final channels = await source.channels();
-      expect(channels.length, 4);
+      expect(channels.length, 6);
 
       final stream = await source.resolve(channels.first);
       expect(stream.url, startsWith('http'));
 
-      // The demo source has no EPG.
-      expect(await source.epg(channels), isEmpty);
+      // The demo source includes a generated guide so the closed-test path
+      // exercises now/next and archive UI without provider credentials.
+      expect(await source.epg(channels), isNotEmpty);
     });
   });
 
