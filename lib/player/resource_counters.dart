@@ -5,9 +5,9 @@ import 'package:flutter/services.dart';
 
 /// Debug-only, in-process counters for player-lifecycle resources: media_kit
 /// [Player] instances, the live-reconnect watchdog [Timer] in
-/// `player_screen.dart`, and [ChannelHandlerOwner] claims. Every
-/// increment/decrement helper is a no-op outside [kDebugMode], so this never
-/// touches release behavior.
+/// `player_screen.dart`, [ChannelHandlerOwner] claims, and the Linux native
+/// mpv IPC sessions (`LinuxNativeSession`). Every increment/decrement helper
+/// is a no-op outside [kDebugMode], so this never touches release behavior.
 ///
 /// [snapshot] merges these Dart-side counts with the native debug counters
 /// exposed by the Android/Windows `iptvs/native_hdr_player` channel's
@@ -31,6 +31,7 @@ class ResourceCounters {
   static int mediaKitPlayers = 0;
   static int reconnectTimers = 0;
   static int channelOwners = 0;
+  static int linuxNativeSessions = 0;
 
   static void incMediaKitPlayers() {
     if (kDebugMode) mediaKitPlayers++;
@@ -56,6 +57,14 @@ class ResourceCounters {
     if (kDebugMode) channelOwners--;
   }
 
+  static void incLinuxNativeSessions() {
+    if (kDebugMode) linuxNativeSessions++;
+  }
+
+  static void decLinuxNativeSessions() {
+    if (kDebugMode) linuxNativeSessions--;
+  }
+
   /// Snapshot of Dart-side counters merged with the native `debugCounters`
   /// map (Android/Windows only). Empty in release; never throws — any native
   /// failure (missing method, platform exception, wrong shape) just omits the
@@ -66,6 +75,7 @@ class ResourceCounters {
       'mediaKitPlayers': mediaKitPlayers,
       'reconnectTimers': reconnectTimers,
       'channelOwners': channelOwners,
+      'linuxNativeSessions': linuxNativeSessions,
     };
     if (Platform.isAndroid || Platform.isWindows) {
       try {
@@ -93,5 +103,6 @@ class ResourceCounters {
     mediaKitPlayers = 0;
     reconnectTimers = 0;
     channelOwners = 0;
+    linuxNativeSessions = 0;
   }
 }

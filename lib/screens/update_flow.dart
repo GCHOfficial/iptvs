@@ -486,11 +486,12 @@ Future<void> _downloadAndInstall(
           ),
         );
       case InstallOutcome.launched:
-        if (Platform.isWindows) {
+        if (Platform.isWindows || Platform.isLinux) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Updating — the app will restart…')),
           );
-          // Give the helper a beat to start, then quit so files unlock.
+          // Give the detached helper a beat to start, then quit so it can swap
+          // the portable Windows folder or running Linux AppImage.
           await Future<void>.delayed(const Duration(milliseconds: 600));
           exit(0);
         }

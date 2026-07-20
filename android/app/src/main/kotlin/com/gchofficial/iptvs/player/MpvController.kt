@@ -92,7 +92,7 @@ class MpvController(
         if (rest.isNotEmpty()) {
             mpv.setOptionString(
                 "http-header-fields",
-                rest.joinToString(",") { "${it.key}: ${it.value}" },
+                MpvOptionEncoding.encodeHeaderFields(rest.map { it.key to it.value }),
             )
         }
     }

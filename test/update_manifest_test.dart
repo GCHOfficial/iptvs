@@ -7,6 +7,7 @@ import 'package:iptvs/data/update_manifest.dart';
 
 Uint8List _manifestBytes({
   String version = '1.4.2',
+  String platform = 'android',
   String filename = 'iptvs-1.4.2-android.apk',
   int byteSize = 12345,
   String sha256 =
@@ -19,7 +20,7 @@ Uint8List _manifestBytes({
       'minimum_version': '1.0.0',
       'artifacts': [
         {
-          'platform': 'android',
+          'platform': platform,
           'filename': filename,
           'byte_size': byteSize,
           'sha256': sha256,
@@ -43,25 +44,28 @@ Future<({String publicKey, String signature})> _sign(Uint8List bytes) async {
 void main() {
   const verifier = ReleaseManifestVerifier();
 
-  test('accepts a detached signature produced by the CI OpenSSL commands', () async {
-    final bytes = Uint8List.fromList(
-      utf8.encode(
-        '{"schema":1,"version":"1.4.2","minimum_version":"0.1.0",'
-        '"artifacts":[{"platform":"android",'
-        '"filename":"iptvs-1.4.2-android.apk","byte_size":5,'
-        '"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}',
-      ),
-    );
+  test(
+    'accepts a detached signature produced by the CI OpenSSL commands',
+    () async {
+      final bytes = Uint8List.fromList(
+        utf8.encode(
+          '{"schema":1,"version":"1.4.2","minimum_version":"0.1.0",'
+          '"artifacts":[{"platform":"android",'
+          '"filename":"iptvs-1.4.2-android.apk","byte_size":5,'
+          '"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}',
+        ),
+      );
 
-    final manifest = await verifier.verify(
-      manifestBytes: bytes,
-      signatureBase64:
-          '62k6SPfz0orSnznIRn5LDfoRL4+zpFFlg15YPSNW1TGvXBXUOVqsU6ybbBz6VUh9brofaE7r/8COKZoTBgX0Bg==',
-      publicKeyBase64: 'i6CuVlUd5rYtdQOIHmznHE70sizci80VJ/IvEZCnyAw=',
-    );
+      final manifest = await verifier.verify(
+        manifestBytes: bytes,
+        signatureBase64:
+            '62k6SPfz0orSnznIRn5LDfoRL4+zpFFlg15YPSNW1TGvXBXUOVqsU6ybbBz6VUh9brofaE7r/8COKZoTBgX0Bg==',
+        publicKeyBase64: 'i6CuVlUd5rYtdQOIHmznHE70sizci80VJ/IvEZCnyAw=',
+      );
 
-    expect(manifest.version, '1.4.2');
-  });
+      expect(manifest.version, '1.4.2');
+    },
+  );
 
   test('accepts a valid signature over the exact manifest bytes', () async {
     final bytes = _manifestBytes();
@@ -133,6 +137,25 @@ void main() {
         publicKeyBase64: signed.publicKey,
       ),
       throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('accepts the exact Linux AppImage platform and filename', () async {
+    final bytes = _manifestBytes(
+      platform: 'linux-x86_64',
+      filename: 'iptvs-1.4.2-linux-x86_64.AppImage',
+    );
+    final signed = await _sign(bytes);
+
+    final manifest = await verifier.verify(
+      manifestBytes: bytes,
+      signatureBase64: signed.signature,
+      publicKeyBase64: signed.publicKey,
+    );
+
+    expect(
+      manifest.artifacts['linux-x86_64']?.filename,
+      'iptvs-1.4.2-linux-x86_64.AppImage',
     );
   });
 

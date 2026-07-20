@@ -89,7 +89,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   /// Throttled boot-time update check. Runs only on the release platforms
-  /// (Android/Windows) where an in-app install is possible, and only if we
+  /// (Android/Windows/Linux AppImage) where an in-app install is possible, and only if we
   /// haven't checked recently. [runUpdateCheck] prompts (respecting the
   /// skipped-version preference) and records the check time.
   Future<void> _maybeCheckForUpdate() async {

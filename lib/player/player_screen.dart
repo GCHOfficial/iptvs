@@ -16,6 +16,82 @@ import 'channel_owner.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
+import 'linux_native_session.dart';
+
+/// Buffering/dropped this long before a non-forced live reconnect fires.
+/// Mirrors Android's `ReconnectPolicy.STALL_RECONNECT_MS`.
+const int kReconnectStallMs = 8000;
+
+/// Cap on the attempt-scaled backoff between repeated reconnect attempts.
+/// Mirrors Android's `ReconnectPolicy.MAX_BACKOFF_MS`.
+const int kReconnectMaxBackoffMs = 30000;
+
+/// Minimum gap (ms) required since the last reconnect attempt before the next
+/// may fire. [priorAttempts] is the number of reconnect attempts already made
+/// (0 before the first). A forced reconnect (a hard player error / native
+/// drop) always uses the base stall threshold instead of scaling with the
+/// attempt count. This is the pure Dart mirror of Android's
+/// `ReconnectPolicy.minGapMs`, shared by the embedded/Windows watchdog, the
+/// Linux-native IPC watchdog, and the live preview's clean-EOF restart
+/// (`LivePreviewController`) so every recovery path backs off identically.
+int reconnectMinGapMs({
+  required int priorAttempts,
+  required bool force,
+  int stallMs = kReconnectStallMs,
+  int maxBackoffMs = kReconnectMaxBackoffMs,
+}) => force ? stallMs : ((priorAttempts + 1) * stallMs).clamp(0, maxBackoffMs);
+
+/// Whether a media_kit `completed` event should trigger a live reconnect.
+/// A clean server-side EOF surfaces as mpv `eof-reached` → `completed=true`
+/// with `buffering=false`, so the buffering-gated stall watchdog can never see
+/// it (and `reconnect_at_eof` can't compensate — see `kLiveMpvOptions`). Live
+/// treats it as a drop, mirroring the Linux-native `end-file` drop signal; VOD
+/// completing is a legitimate end of playback, and an active native session
+/// means the embedded player's events describe a stopped engine, not the
+/// stream.
+bool shouldReconnectOnCompleted({
+  required bool completed,
+  required bool isLive,
+  required bool nativeSessionActive,
+}) => completed && isLive && !nativeSessionActive;
+
+/// Pure dynamic-range label from colorimetry (gamma/primaries/matrix). Shared
+/// by the embedded/Windows path (media_kit [VideoParams]), the native Linux
+/// path ([LinuxHdrColorimetry] read over mpv's IPC), and [isHdrColorimetry] —
+/// same PQ/HLG/BT.2020/Dolby-Vision precedence either way. [hdr10Plus] only
+/// distinguishes the two PQ labels; both are HDR.
+@visibleForTesting
+String dynamicRangeLabelFrom({
+  String? gamma,
+  String? primaries,
+  String? matrix,
+  bool hdr10Plus = false,
+}) {
+  final g = gamma?.toLowerCase() ?? '';
+  final p = primaries?.toLowerCase() ?? '';
+  final m = matrix?.toLowerCase() ?? '';
+  if (m.contains('dolby') || g.contains('dolby')) return 'Dolby Vision';
+  if (g.contains('pq')) return hdr10Plus ? 'HDR10+ · PQ' : 'HDR10 · PQ';
+  if (g.contains('hlg')) return 'HLG';
+  if (p.contains('2020')) return 'HDR · BT.2020';
+  if (g.isEmpty && p.isEmpty) return '';
+  return 'SDR';
+}
+
+/// Whether these colorimetry params describe an HDR source (PQ/HLG/Dolby
+/// Vision, or a BT.2020 primaries signal). Drives the Linux Wayland
+/// native-mpv escalation (`_PlayerScreenState._maybeEscalateLinuxNative`) and
+/// feeds `decideFullscreenHandoff`'s `streamLikelyHdr` in
+/// `channel_list_screen.dart`. Derived from [dynamicRangeLabelFrom] so the
+/// HDR/SDR precedence stays single-sourced.
+bool isHdrColorimetry({String? gamma, String? primaries, String? matrix}) {
+  final label = dynamicRangeLabelFrom(
+    gamma: gamma,
+    primaries: primaries,
+    matrix: matrix,
+  );
+  return label.isNotEmpty && label != 'SDR';
+}
 
 /// Identifies what's playing for the VOD resume store: where to save
 /// positions and where to resume from. Absent for live streams and anything
@@ -86,6 +162,25 @@ class PlayerScreen extends StatefulWidget {
   final bool favoriteInitial;
   final Future<void> Function(bool favorite)? onSetFavorite;
 
+  /// Re-resolves this live channel's stream fresh from the source. Used by the
+  /// live reconnect watchdog and "Go to live": Stalker `create_link` URLs
+  /// carry single-use/short-lived `play_token`s, so after a portal-side kill
+  /// the originally resolved URL is permanently dead — a reload must get a
+  /// fresh link ("resolve at play time, never ahead"). When null, reloads fall
+  /// back to the original [stream] URL.
+  final Future<StreamInfo?> Function()? resolveAgain;
+
+  /// Linux only: go straight to the native mpv path on open instead of the
+  /// embedded media_kit surface. Set true by the channel list for the
+  /// Wayland+HDR same-channel handoff ([FullscreenHandoff.stopResolveFresh]),
+  /// where the preview was already stopped and [stream] re-resolved fresh — the
+  /// native mpv process can't adopt an engine, so there's nothing to keep
+  /// embedded. When false (zap / EPG grid / VOD / SDR), the screen opens
+  /// embedded and escalates *once* to native only if the source reports PQ/HLG
+  /// on Wayland (see `_maybeEscalateLinuxNative`). Ignored off Linux and when a
+  /// native launch fails (falls back to embedded either way).
+  final bool preferLinuxNative;
+
   /// Debug-only: when non-null (and only honored under [kDebugMode]), passed
   /// through as `soakAutoCloseMs` on the Android native `open` call so the
   /// native Activity self-closes after this many milliseconds — lets
@@ -107,6 +202,8 @@ class PlayerScreen extends StatefulWidget {
     this.playback,
     this.favoriteInitial = false,
     this.onSetFavorite,
+    this.resolveAgain,
+    this.preferLinuxNative = false,
   });
 
   @override
@@ -156,7 +253,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   late final VideoController? _controller = _usesWindowsNativeSurface
       ? null
-      : (widget.existingController ?? VideoController(_player));
+      : (widget.existingController ??
+            VideoController(
+              _player,
+              configuration: VideoControllerConfiguration(
+                // GNU/Linux defaults to `auto`, which can select fragile
+                // zero-copy paths. Match the proven Windows policy: use the
+                // safest available VA-API/VDPAU path and fall back cleanly.
+                hwdec: Platform.isLinux ? 'auto-safe' : null,
+              ),
+            ));
+  final GlobalKey<PlayerVideoSurfaceState> _embeddedSurfaceKey = GlobalKey();
 
   /// False when [_player] was adopted from an existing preview — it's owned by
   /// the caller (e.g. [LivePreviewController]), so this screen must never
@@ -188,8 +295,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _lastReconnectMs = 0;
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
-  static const int _kStallReconnectMs = 8000;
-  static const int _kMaxBackoffMs = 30000;
   late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
   // Android adopted-handoff: set once the native launch failed and the
   // embedded fallback is taking over (ends the transparent handoff window).
@@ -233,6 +338,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
   ];
 
   bool get _usesWindowsNativeSurface => Platform.isWindows;
+  bool get _usesLinuxNativeSurface => Platform.isLinux;
+  LinuxNativeSession? _linuxNativeSession;
+  StreamSubscription<String>? _linuxNativeControlSub;
+  StreamSubscription<LinuxNativePlaybackSignal>? _linuxNativePlaybackSub;
+  bool _linuxNativeClosing = false;
+
+  /// True once the native mpv reported its first file-loaded/playback-restart
+  /// for the current session — gates the preview→native handoff blackout and
+  /// keeps initial buffering out of the stall watchdog.
+  bool _linuxNativeStarted = false;
+
+  /// One-shot guard for the Linux embedded→native escalation: once the
+  /// embedded player reports a PQ/HLG source on Wayland we escalate to native
+  /// mpv exactly once and never re-escalate or de-escalate (see
+  /// `_maybeEscalateLinuxNative`). `_linuxEscalating` blocks re-entry while the
+  /// (async) escalation is mid-flight.
+  bool _linuxEscalated = false;
+  bool _linuxEscalating = false;
 
   /// Android adopted-handoff window: this route (pushed non-opaque by the
   /// caller) stays fully transparent so the channel list — including the
@@ -269,6 +392,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
     // Track buffering for the live reconnect watchdog.
     _subs.add(_player.stream.buffering.listen((value) => _buffering = value));
+    // Clean server-side EOF (mpv eof-reached → completed=true, buffering=false)
+    // is invisible to the buffering-gated watchdog above — treat it as a live
+    // drop, like the Linux-native end-file signal. App-initiated stop() emits
+    // completed=false, so teardown and the native handoff never trip this.
+    _subs.add(
+      _player.stream.completed.listen((completed) {
+        if (!mounted) return;
+        if (!shouldReconnectOnCompleted(
+          completed: completed,
+          isLive: _isLive,
+          nativeSessionActive:
+              _linuxNativeSession != null || _nativePlaybackLaunched,
+        )) {
+          return;
+        }
+        _logPlayback('live stream completed (clean EOF) — reconnecting');
+        _reconnectLive(force: true);
+      }),
+    );
     if (_isLive) {
       _reconnectTimer = Timer.periodic(
         const Duration(seconds: 1),
@@ -373,6 +515,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
         unawaited(_logActiveVideoOutput());
         unawaited(_probeHdr10Plus(params));
+        unawaited(_maybeEscalateLinuxNative(params));
       }),
     );
     // Clear the error overlay once playback actually starts.
@@ -400,8 +543,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _showNativeControls(scheduleHide: false);
     _logPlayback(
       'open live=$_isLive url=${_redactPlayback(widget.stream.url)} '
-      'surface=${_usesWindowsNativeSurface ? 'native-windows' : 'embedded'} '
-      'headers=${widget.stream.headers.keys.join(',')}',
+      'surface=${_usesWindowsNativeSurface
+          ? 'native-windows'
+          : _usesLinuxNativeSurface
+          ? (widget.preferLinuxNative ? 'linux-native-attempt' : 'linux-embedded')
+          : 'embedded'} '
+      'headers=${widget.stream.headers.keys.join(',')} '
+      'instance=${identityHashCode(this)} adopted=${widget.existingPlayer != null}',
     );
 
     if (await _tryOpenNativeHdrPlayer()) {
@@ -412,6 +560,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
       // running behind it.
       if (widget.existingPlayer != null) unawaited(_player.pause());
       return;
+    }
+
+    if (_usesLinuxNativeSurface && widget.preferLinuxNative) {
+      // Wayland+HDR same-channel handoff ([FullscreenHandoff.stopResolveFresh]):
+      // the channel list already stopped the preview and re-resolved [stream]
+      // fresh (the native mpv process can't adopt a running engine, so no
+      // existingPlayer was handed over). Go straight to native — this is the
+      // honest fresh-open cost of real Wayland HDR output. SDR and X11 never
+      // set this flag (native buys nothing there); they open embedded below,
+      // and only escalate to native if the source turns out to be PQ/HLG on
+      // Wayland (see `_maybeEscalateLinuxNative`).
+      if (await _startLinuxNativeSession(widget.stream)) return;
+      _logPlayback('native linux player unavailable; using embedded fallback');
     }
 
     // Adopted-handoff path that failed to launch natively: the preview's shared
@@ -686,6 +847,287 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  Future<void> _finishLinuxNativePlayback(LinuxNativeSession session) async {
+    if (_linuxNativeClosing || _linuxNativeSession != session || !mounted) {
+      return;
+    }
+    // The standalone window can be closed directly. Capture its final IPC
+    // position before dropping the session reference or the embedded player
+    // fallback will have no useful state to persist.
+    try {
+      await _persistPlaybackPosition();
+    } catch (error) {
+      _logPlayback('warn native Linux position save failed: $error');
+    }
+    if (!mounted || _linuxNativeSession != session) return;
+    await _linuxNativeControlSub?.cancel();
+    await _linuxNativePlaybackSub?.cancel();
+    if (!mounted || _linuxNativeSession != session) return;
+    _linuxNativeControlSub = null;
+    _linuxNativePlaybackSub = null;
+    _linuxNativeSession = null;
+    ResourceCounters.decLinuxNativeSessions();
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop(_didWindowsHotSwap);
+    } else {
+      setState(() => _nativePlaybackLaunched = false);
+    }
+  }
+
+  /// Drives the live reconnect watchdog from the native mpv process's
+  /// drop/stall/resume signals. Feeds the same `_buffering` flag the
+  /// embedded/Windows watchdog uses, so `_pollLiveReconnect`'s 8s stall
+  /// threshold, attempt-scaled backoff, counter reset and "Reconnecting…"
+  /// clearing all apply unchanged; a hard drop additionally forces an
+  /// immediate first retry (mirroring the embedded error path).
+  void _handleLinuxNativePlaybackSignal(LinuxNativePlaybackSignal signal) {
+    if (!mounted || _linuxNativeSession == null || _linuxNativeClosing) return;
+    switch (signal) {
+      case LinuxNativePlaybackSignal.dropped:
+        // VOD keeps the terminal-frame contract (no auto-reconnect): mpv's
+        // --keep-open holds the last frame; Back exits cleanly.
+        if (!_isLive) return;
+        _buffering = true;
+        unawaited(_reconnectLive(force: true));
+      case LinuxNativePlaybackSignal.stalled:
+        // Initial buffering before the first file-loaded is startup latency,
+        // not a mid-play stall — feeding it to the watchdog made slow HLS
+        // warmups eat a pointless reload at the 8s threshold.
+        if (!_isLive || !_linuxNativeStarted) return;
+        _buffering = true;
+      case LinuxNativePlaybackSignal.resumed:
+        _buffering = false;
+        _markLinuxNativeStarted();
+    }
+  }
+
+  /// First load/playback signal from the native mpv: only now swap this route
+  /// to the native-playback build. Until then the route keeps rendering the
+  /// adopted (already paused — see _open) preview engine's frozen last frame,
+  /// so the handoff shows freeze-frame → native video with no black gap.
+  void _markLinuxNativeStarted() {
+    if (_linuxNativeStarted || _linuxNativeSession == null) return;
+    _linuxNativeStarted = true;
+    if (mounted) setState(() => _nativePlaybackLaunched = true);
+  }
+
+  /// Launches the standalone native mpv session for [stream] and wires all its
+  /// signals (control events, drop/stall/resume reconnect signals, the exit
+  /// handler, the blackout deferral, colorimetry probe) plus its resource
+  /// counter. Returns true when the session started (this screen now drives it),
+  /// false when the native path was unavailable and the caller should fall back
+  /// to the embedded surface. Reused by both the direct open ([preferLinuxNative])
+  /// and the embedded→native escalation ([_maybeEscalateLinuxNative]).
+  /// [resumeOverride] replaces the widget's static resume point when the
+  /// caller knows a fresher position (the escalation passes the embedded
+  /// player's live position so VOD doesn't rewind by the embedded phase).
+  Future<bool> _startLinuxNativeSession(
+    StreamInfo stream, {
+    Duration? resumeOverride,
+  }) async {
+    final native = await LinuxNativeSession.start(
+      stream: stream,
+      title: widget.title,
+      sourceName: widget.sourceName,
+      epgNow: widget.epgNow,
+      epgNext: widget.epgNext,
+      canFavorite: _canFavorite,
+      favorite: _favorite,
+      liveSynced: _liveSynced,
+      aspectLabel: _aspectModes[_aspectModeIndex].label,
+      resumeFrom: resumeOverride ?? widget.playback?.resumeFrom,
+    );
+    if (native == null) return false;
+    if (!mounted || _linuxNativeClosing) {
+      // The route was popped (or teardown began) while mpv was spawning and
+      // connecting its IPC socket — a window of several seconds. Adopting the
+      // session into a dead State would orphan a fullscreen mpv process:
+      // dispose() has already run and saw a null session, and the exit-code
+      // handler bails on !mounted without cleaning up. Kill it here instead;
+      // the counter was never incremented, so balance holds.
+      unawaited(native.dispose());
+      return false;
+    }
+    _linuxNativeSession = native;
+    ResourceCounters.incLinuxNativeSessions();
+    _linuxNativeClosing = false;
+    _linuxNativeControlSub = native.controlEvents.listen(
+      _handleLinuxNativeControl,
+    );
+    // Live auto-reconnect: the embedded/Windows watchdog watches media_kit
+    // streams, but here the native mpv process plays and the embedded _player
+    // is idle — so drive _buffering (and a fast first retry) off mpv's
+    // drop/stall/resume IPC signals instead.
+    _linuxNativePlaybackSub = native.playbackEvents.listen(
+      _handleLinuxNativePlaybackSignal,
+    );
+    // Handoff blackout deferral: this route keeps rendering the embedded
+    // surface's frozen last frame until the native mpv reports its file
+    // loaded/playing — _markLinuxNativeStarted then swaps to the
+    // native-playback build, right as mpv's window (created at file load,
+    // --force-window=yes) appears already bearing video. A fallback timer
+    // covers a native process that never signals.
+    _linuxNativeStarted = false;
+    unawaited(
+      native.exitCode.then((code) {
+        _logPlayback(
+          'linux native process exited code=$code '
+          'instance=${identityHashCode(this)}',
+        );
+        return _finishLinuxNativePlayback(native);
+      }),
+    );
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 10), () {
+        if (mounted && _linuxNativeSession == native) {
+          _markLinuxNativeStarted();
+        }
+      }),
+    );
+    _logPlayback(
+      'native hdr player launched platform=linux backend=${native.backend.name} '
+      'mpv=${native.mpvVersionLabel} context=${native.gpuContextLabel} '
+      'vo=gpu-next hwdec=auto-safe',
+    );
+    // Give mpv a moment to open the stream and start decoding before reading
+    // back the output colorimetry — video-target-params is only populated once
+    // the render pipeline has produced a frame.
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (!mounted || _linuxNativeSession != native) return;
+        unawaited(_probeLinuxNativeHdr(native));
+      }),
+    );
+    return true;
+  }
+
+  /// Linux embedded→native escalation, driven off the embedded player's
+  /// [VideoParams] stream. The default Linux fullscreen path is embedded
+  /// media_kit (seamless, one provider connection); the native mpv window buys
+  /// nothing for SDR and nothing at all on X11 (no HDR output there). But a
+  /// real PQ/HLG source on Wayland *does* want native mpv's HDR passthrough, so
+  /// the first time the embedded player reports HDR colorimetry — and only if
+  /// the native path is actually usable ([LinuxNativeSession.nativeLikelyAvailable]
+  /// is Wayland-gated) — escalate exactly once: re-resolve fresh (Stalker tokens
+  /// are single-use and the embedded engine holds the connection), stop the
+  /// embedded playback to free that connection, and launch native. One-shot:
+  /// never re-escalates, never de-escalates. Mirrors Android's "default engine,
+  /// escalate only when the stream needs it".
+  Future<void> _maybeEscalateLinuxNative(VideoParams params) async {
+    if (!_usesLinuxNativeSurface) return;
+    // Already native (direct open or a prior escalation), or one already
+    // resolved/in-flight — nothing to do.
+    if (widget.preferLinuxNative) return;
+    if (_linuxNativeSession != null || _linuxEscalated || _linuxEscalating) {
+      return;
+    }
+    if (!isHdrColorimetry(
+      gamma: params.gamma,
+      primaries: params.primaries,
+      matrix: params.colormatrix,
+    )) {
+      return;
+    }
+    _linuxEscalating = true;
+    // Only escalate when the native path can actually run (Wayland + a host mpv
+    // >= 0.40). On X11 / below the floor this is false, so we stay embedded.
+    if (!await LinuxNativeSession.nativeLikelyAvailable()) {
+      _linuxEscalating = false;
+      return;
+    }
+    // Re-check the one-shot guards after the await — a teardown or a competing
+    // videoParams event may have raced in.
+    if (!mounted || _linuxNativeSession != null || _linuxEscalated) {
+      _linuxEscalating = false;
+      return;
+    }
+    _linuxEscalated = true; // one-shot: never re-escalate
+    _logPlayback(
+      'linux native escalation: PQ/HLG source on Wayland — switching '
+      'embedded → native mpv',
+    );
+    // Fresh resolve: the embedded engine holds the (possibly single-use)
+    // connection/token, so native must open a freshly resolved URL.
+    final fresh = await _freshLiveStream();
+    if (!mounted) {
+      _linuxEscalating = false;
+      return;
+    }
+    // Free the provider connection before native opens (single-connection
+    // portals refuse a second), then launch native with the fresh stream.
+    // For VOD/catch-up, carry the embedded player's actual position across
+    // the switch — the widget's resumeFrom predates the embedded phase, and
+    // stop() discards the live position.
+    final embeddedPosition = _isLive ? null : _player.state.position;
+    await _player.stop();
+    final started = await _startLinuxNativeSession(
+      fresh,
+      resumeOverride:
+          (embeddedPosition != null && embeddedPosition > Duration.zero)
+          ? embeddedPosition
+          : null,
+    );
+    if (!started && mounted) {
+      // Native was predicted available but failed to launch — resume embedded
+      // playback (honest SDR tone-mapped fallback) rather than leaving a
+      // stopped player behind a black surface.
+      _logPlayback('linux native escalation failed; staying embedded');
+      await _player.open(
+        Media(
+          fresh.url,
+          httpHeaders: fresh.headers.isEmpty ? null : fresh.headers,
+        ),
+      );
+    }
+    _linuxEscalating = false;
+  }
+
+  Future<void> _handleLinuxNativeControl(String command) async {
+    final session = _linuxNativeSession;
+    if (session == null) return;
+    switch (command) {
+      case 'back':
+        await _exitAndPop();
+      case 'playPause':
+        // Route through _togglePlayback (not a direct 'cycle pause' send) so
+        // the live _liveSynced=false transition and overlay-state push run
+        // the same as every other play/pause trigger.
+        await _togglePlayback();
+      case 'seekBack':
+        _seekBy(-10);
+      case 'seekForward':
+        _seekBy(10);
+      case 'mute':
+        await session.command(const ['cycle', 'mute']);
+      case 'goLive':
+        await _goToLive();
+      case 'favorite':
+        _toggleFavorite();
+        await _pushLinuxOverlayState();
+      case 'audio':
+        await session.command(const ['cycle', 'audio']);
+      case 'subtitle':
+        await session.command(const ['cycle', 'sub']);
+      case 'aspect':
+        // Dart owns the label sequence (shared with the Windows overlay via
+        // _aspectModes/_aspectModeIndex) so the overlay always shows the mode
+        // mpv actually ended up in, rather than mpv cycling its own
+        // 'video-aspect-override' values out of step with a hardcoded label.
+        _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
+        final mode = _aspectModes[_aspectModeIndex];
+        await session.command(['set_property', 'panscan', mode.panscan]);
+        await session.command([
+          'set_property',
+          'video-aspect-override',
+          mode.aspect,
+        ]);
+        _logPlayback('native linux aspect mode=${mode.label}');
+        await _pushLinuxOverlayState();
+      case 'fullscreen':
+        await session.command(const ['cycle', 'fullscreen']);
+    }
+  }
+
   void _showNativeControls({bool scheduleHide = true}) {
     if (!_usesWindowsNativeSurface) return;
     if (mounted && !_nativeControlsVisible) {
@@ -758,10 +1200,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         break;
       case 'playPause':
         final wasPlaying = _player.state.playing;
-        if (_isLive && wasPlaying) {
-          _liveSynced = false; // pausing live -> behind
-        }
-        await _player.playOrPause();
+        await _togglePlayback();
         if (wasPlaying) _showNativeControls(scheduleHide: false);
         break;
       case 'seekBack':
@@ -784,17 +1223,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // Live IPTV streams are usually non-seekable ("Cannot seek in this
         // stream"), so reopen the source instead of seeking — reconnecting drops
         // the buffer and resumes at the live edge.
-        if (_isLive) {
-          await _player.open(
-            Media(
-              widget.stream.url,
-              httpHeaders: widget.stream.headers.isEmpty
-                  ? null
-                  : widget.stream.headers,
-            ),
-          );
-          _liveSynced = true;
-        }
+        await _goToLive();
         break;
       case 'info':
         // The native overlay owns the info-panel open state; refresh so it
@@ -821,7 +1250,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_stalledSinceMs == 0) _stalledSinceMs = now;
-    if (now - _stalledSinceMs >= _kStallReconnectMs) {
+    if (now - _stalledSinceMs >= kReconnectStallMs) {
       unawaited(_reconnectLive(force: false));
     }
   }
@@ -831,11 +1260,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _reconnectLive({required bool force}) async {
     if (!_isLive || !mounted) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final attemptGap = ((_reconnectAttempt + 1) * _kStallReconnectMs).clamp(
-      0,
-      _kMaxBackoffMs,
+    final minGap = reconnectMinGapMs(
+      priorAttempts: _reconnectAttempt,
+      force: force,
     );
-    final minGap = force ? _kStallReconnectMs : attemptGap;
     if (_lastReconnectMs != 0 && now - _lastReconnectMs < minGap) return;
     _reconnectAttempt++;
     _lastReconnectMs = now;
@@ -847,26 +1275,80 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     _logPlayback('live reconnect attempt=$_reconnectAttempt force=$force');
     try {
-      await _player.open(
-        Media(
-          widget.stream.url,
-          httpHeaders: widget.stream.headers.isEmpty
-              ? null
-              : widget.stream.headers,
-        ),
-      );
+      final stream = await _freshLiveStream();
+      if (!mounted) return;
+      final linuxSession = _linuxNativeSession;
+      if (linuxSession != null) {
+        // The native mpv process owns playback (the embedded _player is idle),
+        // so reload the source in mpv — same live-edge `loadfile replace` as
+        // "Go to live", with headers refreshed alongside the (possibly
+        // re-resolved) URL.
+        await linuxSession.command(
+          LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
+        );
+        await linuxSession.command(['loadfile', stream.url, 'replace']);
+      } else {
+        await _player.open(
+          Media(
+            stream.url,
+            httpHeaders: stream.headers.isEmpty ? null : stream.headers,
+          ),
+        );
+      }
     } catch (error) {
       _logPlayback('live reconnect failed: ${_redactPlayback('$error')}');
     }
+  }
+
+  /// The stream to use for a live reload: freshly re-resolved when the caller
+  /// provided [PlayerScreen.resolveAgain] (Stalker tokens are single-use — see
+  /// its doc), the original resolved stream otherwise or on resolve failure.
+  Future<StreamInfo> _freshLiveStream() async {
+    final resolve = widget.resolveAgain;
+    if (resolve == null) return widget.stream;
+    try {
+      final fresh = await resolve();
+      if (fresh != null) return fresh;
+    } catch (error) {
+      _logPlayback('re-resolve failed: ${_redactPlayback('$error')}');
+    }
+    return widget.stream;
   }
 
   void _onReconnectingChanged() {
     if (_usesWindowsNativeSurface) {
       if (_reconnecting) _showNativeControls(scheduleHide: false);
       unawaited(_syncWindowsNativeControlState());
+    } else if (_linuxNativeSession != null) {
+      // The native mpv overlay draws its own "Reconnecting…" chip from the
+      // pushed state; the embedded Flutter chip (below) is hidden behind the
+      // mpv window on this path.
+      unawaited(_pushLinuxOverlayState());
     } else if (mounted) {
       setState(() {});
     }
+  }
+
+  /// Pushes the current overlay state to the native mpv Lua overlay, including
+  /// the live-reconnect indicator. Centralises the (otherwise repeated) full
+  /// `updateOverlayState` argument list for the state the reconnect watchdog
+  /// mutates.
+  Future<void> _pushLinuxOverlayState() async {
+    final session = _linuxNativeSession;
+    if (session == null) return;
+    await session.updateOverlayState(
+      title: widget.title,
+      sourceName: widget.sourceName,
+      epgNow: widget.epgNow,
+      epgNext: widget.epgNext,
+      canFavorite: _canFavorite,
+      favorite: _favorite,
+      isLive: _isLive,
+      liveSynced: _liveSynced,
+      aspectLabel: _aspectModes[_aspectModeIndex].label,
+      reconnecting: _reconnecting,
+      hdr10Plus: _hdr10Plus,
+    );
   }
 
   // Coalesces continuous-stream control-state syncs (see initState) to 2 Hz.
@@ -1111,21 +1593,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
     };
   }
 
-  String _dynamicRangeLabel(VideoParams params) {
-    final gamma = params.gamma?.toLowerCase() ?? '';
-    final primaries = params.primaries?.toLowerCase() ?? '';
-    final matrix = params.colormatrix?.toLowerCase() ?? '';
-    if (matrix.contains('dolby') || gamma.contains('dolby')) {
-      return 'Dolby Vision';
-    }
-    if (gamma.contains('pq')) return _hdr10Plus ? 'HDR10+ · PQ' : 'HDR10 · PQ';
-    if (gamma.contains('hlg')) return 'HLG';
-    if (primaries.contains('2020')) return 'HDR · BT.2020';
-    if (gamma.isEmpty && primaries.isEmpty) return '';
-    return 'SDR';
-  }
+  String _dynamicRangeLabel(VideoParams params) => _dynamicRangeLabelFrom(
+    gamma: params.gamma,
+    primaries: params.primaries,
+    matrix: params.colormatrix,
+  );
 
-  /// Best-effort HDR10+ detection for the Windows/mpv path (see [_hdr10Plus]).
+  /// Shared by [_dynamicRangeLabel] (embedded/Windows, from media_kit's
+  /// [VideoParams]) and [_probeLinuxNativeHdr] (native Linux, from
+  /// [LinuxHdrColorimetry] read over mpv's own IPC socket) — same label
+  /// vocabulary, same PQ/HLG/BT.2020/Dolby Vision precedence either way.
+  /// Delegates to the pure top-level [dynamicRangeLabelFrom], threading this
+  /// screen's live [_hdr10Plus] state so both PQ variants render correctly.
+  String _dynamicRangeLabelFrom({
+    String? gamma,
+    String? primaries,
+    String? matrix,
+  }) => dynamicRangeLabelFrom(
+    gamma: gamma,
+    primaries: primaries,
+    matrix: matrix,
+    hdr10Plus: _hdr10Plus,
+  );
+
+  /// Best-effort HDR10+ detection for the Windows/embedded mpv path (see
+  /// [_hdr10Plus]). The native Linux path is probed separately by
+  /// [_probeLinuxNativeHdr] — the native mpv process is a different OS
+  /// process from the embedded [_player], so its video params never reach
+  /// `_player.stream.videoParams` in the first place.
   ///
   /// mpv exposes no "has HDR10+" flag, so we read the ST2094-40 per-scene
   /// dynamic-metadata sub-properties. These are non-zero only when the stream
@@ -1133,7 +1628,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   /// not synthesised by `hdr-compute-peak`, so they don't false-positive on plain
   /// HDR10. Any missing property / error leaves us at "HDR10 · PQ".
   Future<void> _probeHdr10Plus(VideoParams params) async {
-    if (!Platform.isWindows) return;
+    if (!Platform.isWindows && !Platform.isLinux) return;
+    if (_linuxNativeSession != null) return;
     final gamma = params.gamma?.toLowerCase() ?? '';
     if (!gamma.contains('pq')) {
       // Not PQ -> can't be HDR10+. Clear any stale detection from a prior stream.
@@ -1157,6 +1653,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _hdr10Plus = true;
           _logPlayback('hdr10+ detected via $prop=$value');
           unawaited(_syncWindowsNativeControlState());
+          // The embedded Linux overlay reads the label through
+          // _dynamicRangeLabel — rebuild so the badge upgrades immediately
+          // instead of on its next scheduled refresh.
+          if (mounted) setState(() {});
           break;
         }
       }
@@ -1164,6 +1664,40 @@ class _PlayerScreenState extends State<PlayerScreen> {
       // Property unavailable on this mpv build -> stay at HDR10 (conservative).
     } finally {
       _probingHdr10Plus = false;
+    }
+  }
+
+  /// Native-Linux counterpart to [_probeHdr10Plus]. Called once, shortly
+  /// after [LinuxNativeSession.start] launches, since there's no equivalent
+  /// of media_kit's `videoParams` stream to trigger on: the native mpv
+  /// process is a separate OS process, so its output never reaches the
+  /// embedded [_player]. Reads the output colorimetry over the session's own
+  /// IPC socket (preferring the post-render `video-target-params`, so a
+  /// tone-mapped-to-SDR stream is reported honestly) and logs it to
+  /// diagnostics either way, so exported logs show whether HDR actually
+  /// engaged — then upgrades PQ to HDR10+ if real ST2094-40 scene metadata is
+  /// present, mirroring the Windows heuristic in [_probeHdr10Plus].
+  Future<void> _probeLinuxNativeHdr(LinuxNativeSession session) async {
+    if (_linuxNativeSession != session) return;
+    final colorimetry = await session.hdrColorimetry();
+    if (_linuxNativeSession != session) return;
+    final dynamicRange = _dynamicRangeLabelFrom(
+      gamma: colorimetry.gamma,
+      primaries: colorimetry.primaries,
+      matrix: colorimetry.colormatrix,
+    );
+    _logPlayback(
+      'linux native colorimetry gamma=${colorimetry.gamma} '
+      'primaries=${colorimetry.primaries} sigPeak=${colorimetry.sigPeak} '
+      'dynamicRange=$dynamicRange',
+    );
+    final gamma = colorimetry.gamma?.toLowerCase() ?? '';
+    if (gamma.contains('pq') && colorimetry.hasHdr10PlusMetadata) {
+      _hdr10Plus = true;
+      _logPlayback('hdr10+ detected via video-target-params scene metadata');
+      // The Lua badge can't read scene metadata itself — ship the upgrade to
+      // the overlay now that it's known.
+      await _pushLinuxOverlayState();
     }
   }
 
@@ -1243,16 +1777,71 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return _nativePlaybackLaunched
         ? _nativePlaybackOverlay()
         : PlayerVideoSurface(
+            key: _embeddedSurfaceKey,
+            player: _player,
             controller: _controller,
             title: widget.title,
+            sourceName: widget.sourceName,
             epgNow: widget.epgNow,
             epgNext: widget.epgNext,
             isLive: _isLive,
             canFavorite: _canFavorite,
             favorite: _favorite,
+            liveSynced: _liveSynced,
+            dynamicRangeLabel: _dynamicRangeLabel,
             onBack: _back,
             onToggleFavorite: _toggleFavorite,
+            onPlayPause: _togglePlayback,
+            onGoLive: _goToLive,
+            onCycleAspect: _cycleNativeAspect,
           );
+  }
+
+  Future<void> _goToLive() async {
+    if (!_isLive) return;
+    final stream = await _freshLiveStream();
+    if (!mounted) return;
+    if (_linuxNativeSession != null) {
+      final session = _linuxNativeSession!;
+      await session.command(
+        LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
+      );
+      await session.command(['loadfile', stream.url, 'replace']);
+      if (mounted) setState(() => _liveSynced = true);
+      await _pushLinuxOverlayState();
+      return;
+    }
+    await _player.open(
+      Media(
+        stream.url,
+        httpHeaders: stream.headers.isEmpty ? null : stream.headers,
+      ),
+    );
+    if (mounted) setState(() => _liveSynced = true);
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_linuxNativeSession != null) {
+      final session = _linuxNativeSession!;
+      // Mirror the embedded branch below: pausing a synced live stream drops
+      // sync, so the overlay's "Go to live" affordance and LIVE pill greying
+      // must follow. The native session has no local mirror of mpv's
+      // playing/paused state, so ask mpv directly (before toggling) rather
+      // than guessing.
+      if (_isLive && _liveSynced) {
+        final paused = await session.getPropertyBool('pause');
+        if (paused == false && mounted) {
+          setState(() => _liveSynced = false);
+        }
+      }
+      await session.command(const ['cycle', 'pause']);
+      if (_isLive) await _pushLinuxOverlayState();
+      return;
+    }
+    if (_isLive && _player.state.playing && mounted) {
+      setState(() => _liveSynced = false);
+    }
+    await _player.playOrPause();
   }
 
   Future<void> _configureNativePlayer(
@@ -1386,8 +1975,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  /// Persist the embedded player's current VOD position. Not used while the
-  /// Android native Activity plays (its position arrives via `nativeClosed`).
+  /// Persist the embedded or Linux-native player's current VOD position. The
+  /// Android native Activity reports its position via `nativeClosed` instead.
   ///
   /// Returns the write's Future so exit paths can await it — the "Continue
   /// watching" rail is reloaded right after this route pops, and `pop()`'s
@@ -1400,6 +1989,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final playback = widget.playback;
     if (playback == null || _isLive) return;
     if (Platform.isAndroid && _nativePlaybackLaunched) return;
+    final linuxSession = _linuxNativeSession;
+    if (linuxSession != null) {
+      final linuxState = await linuxSession.playbackState();
+      if (linuxState == null) return;
+      await playback.db.savePlaybackPosition(
+        playback.sourceId,
+        playback.kind,
+        playback.itemId,
+        position: linuxState.position,
+        duration: linuxState.duration,
+      );
+      return;
+    }
     final position = _player.state.position;
     final duration = _player.state.duration;
     if (duration <= Duration.zero) return;
@@ -1414,6 +2016,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    _logPlayback('player dispose instance=${identityHashCode(this)}');
     final token = _hdrToken;
     if (token != null) {
       _hdrOwner.release(token);
@@ -1437,8 +2040,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (Platform.isWindows && _windowsNativeSurface != null) {
       _scheduleWindowsNativeTeardown();
     }
+    unawaited(_teardownLinuxNative());
     _disposePlayerNonBlocking();
     super.dispose();
+  }
+
+  /// Tears down the Linux-native session state: marks closing, cancels the
+  /// IPC subscriptions, and — only if this call is the one that still owns a
+  /// live session (_exitAndPop, _finishLinuxNativePlayback, or dispose may
+  /// each get here first) — disposes it and decrements its counter, so no
+  /// path can double-decrement. Sole teardown implementation; `dispose()`
+  /// fire-and-forgets it, `_exitAndPop` awaits it.
+  Future<void> _teardownLinuxNative() async {
+    _linuxNativeClosing = true;
+    final controlSub = _linuxNativeControlSub;
+    final playbackSub = _linuxNativePlaybackSub;
+    _linuxNativeControlSub = null;
+    _linuxNativePlaybackSub = null;
+    final linuxSession = _linuxNativeSession;
+    _linuxNativeSession = null;
+    await controlSub?.cancel();
+    await playbackSub?.cancel();
+    if (linuxSession != null) {
+      await linuxSession.dispose();
+      ResourceCounters.decLinuxNativeSessions();
+    }
   }
 
   void _disposePlayerNonBlocking() {
@@ -1465,6 +2091,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // Await the final position write before popping — see the doc comment on
     // _persistPlaybackPosition for why this can't be fire-and-forget here.
     await _persistPlaybackPosition();
+    await _teardownLinuxNative();
     if (Platform.isWindows && _nativePlaybackLaunched) {
       await _prepareWindowsNativeExit();
       _scheduleWindowsNativeTeardown(prepared: true);
@@ -1483,6 +2110,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _seekBy(int seconds) {
     if (_isLive) return; // live has no meaningful timeline to seek
+    if (_linuxNativeSession != null) {
+      unawaited(_linuxNativeSession!.command(['seek', seconds, 'relative']));
+      return;
+    }
     final pos = _player.state.position + Duration(seconds: seconds);
     _player.seek(pos < Duration.zero ? Duration.zero : pos);
   }
@@ -1499,19 +2130,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
           },
           const SingleActivator(LogicalKeyboardKey.space): () {
             _handlePlaybackInput();
-            _player.playOrPause();
+            unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.select): () {
             _handlePlaybackInput();
-            _player.playOrPause();
+            unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.enter): () {
             _handlePlaybackInput();
-            _player.playOrPause();
+            unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () {
             _handlePlaybackInput();
-            _player.playOrPause();
+            unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.mediaPlay): () {
             _handlePlaybackInput();
@@ -1531,7 +2162,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           },
           const SingleActivator(LogicalKeyboardKey.keyF): () {
             _handlePlaybackInput();
-            _toggleNativeFullscreen();
+            if (Platform.isLinux) {
+              _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
+            } else {
+              _toggleNativeFullscreen();
+            }
           },
           const SingleActivator(LogicalKeyboardKey.keyM): () {
             _handlePlaybackInput();

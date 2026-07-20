@@ -14,6 +14,7 @@ import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
+import '../player/linux_native_session.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
@@ -25,6 +26,112 @@ import 'live_preview_controller.dart';
 import 'live_tab_view.dart';
 import 'media_tab_controller.dart';
 import 'media_tab_view.dart';
+
+/// The ways [_ChannelListScreenState._openLivePlayer] can reconcile a running
+/// live preview with a fullscreen open, decided purely from state so the
+/// branching is unit-testable without a widget tree or a real platform.
+/// Pinned by `test/fullscreen_handoff_test.dart`.
+///
+/// - [adoptNative]: Android's fullscreen Activity adopts the running shared
+///   ExoPlayer engine (`SharedEngine`) — seamless, preview left playing.
+/// - [adoptEmbedded]: the fullscreen [PlayerScreen] adopts the preview's
+///   media_kit engine directly and keeps it playing through the handoff —
+///   seamless on every non-Android platform, including Linux for **SDR streams
+///   and all of X11** (the native mpv window buys nothing there). The one
+///   exception is a **Wayland HDR** source (see [stopResolveFresh]).
+/// - [stopResolveFresh]: a same-channel handoff where Linux's native mpv
+///   process is about to be used — only for a **Wayland HDR** source
+///   (`linuxNativeLikely` is Wayland-gated and `streamLikelyHdr` is true), the
+///   one case where the native window earns its cost (real HDR passthrough).
+///   The native mpv can't adopt a running engine, so the preview must be
+///   *stopped* outright — pausing it would leave its provider connection open
+///   (a single-connection portal then sees two), and the preview's
+///   already-resolved stream carries a spent single-use Stalker `play_token` —
+///   so the channel is re-resolved fresh too. SDR/X11 stay [adoptEmbedded].
+/// - [pausePreview]: a same-channel handoff that isn't adopted and doesn't
+///   need [stopResolveFresh]'s connection teardown (chiefly Android falling
+///   back to its embedded media_kit preview) — paused and resumed on return.
+/// - [stopPreview]: a different-channel preview (last-channel zap,
+///   EPG-grid play) — stopped outright so it neither doubles audio nor a
+///   provider connection; not restarted on return.
+/// - [none]: no preview is running that needs reconciling.
+enum FullscreenHandoff {
+  adoptNative,
+  adoptEmbedded,
+  stopResolveFresh,
+  pausePreview,
+  stopPreview,
+  none,
+}
+
+/// Pure decision function behind [FullscreenHandoff] — see there for what
+/// each outcome means and why. [linuxNativeLikely] is the Wayland-gated
+/// native-worth-using predicate ([LinuxNativeSession.nativeLikelyAvailable];
+/// already false off Linux and on X11). [streamLikelyHdr] is true when the
+/// preview is rendering a PQ/HLG/Dolby-Vision source — the only case where the
+/// native mpv window earns its non-seamless fresh-resolve cost. Together they
+/// select [FullscreenHandoff.stopResolveFresh] *only* for Wayland+HDR; every
+/// other Linux same-channel handoff (SDR, or X11) stays the seamless
+/// [FullscreenHandoff.adoptEmbedded]. (A source that starts SDR then turns out
+/// HDR still escalates later, inside `PlayerScreen._maybeEscalateLinuxNative`.)
+FullscreenHandoff decideFullscreenHandoff({
+  required bool reusePreview,
+  required bool sameChannelPreview,
+  required bool previewHasStream,
+  required bool isAndroid,
+  required bool nativePreviewActive,
+  required bool linuxNativeLikely,
+  required bool previewPlaying,
+  bool streamLikelyHdr = false,
+}) {
+  final adoptPreview = reusePreview && sameChannelPreview && previewHasStream;
+  if (adoptPreview && isAndroid && nativePreviewActive) {
+    return FullscreenHandoff.adoptNative;
+  }
+  if (adoptPreview && !isAndroid && linuxNativeLikely && streamLikelyHdr) {
+    return FullscreenHandoff.stopResolveFresh;
+  }
+  if (adoptPreview && !isAndroid) {
+    return FullscreenHandoff.adoptEmbedded;
+  }
+  if (!previewPlaying) return FullscreenHandoff.none;
+  if (sameChannelPreview) return FullscreenHandoff.pausePreview;
+  return FullscreenHandoff.stopPreview;
+}
+
+/// Every downstream boolean [_ChannelListScreenState._openLivePlayer] needs
+/// from a [FullscreenHandoff], derived here instead of re-tested against the
+/// raw inputs at the call site — a duplicate formula there previously could
+/// (and once did) desync from the actual decision when preview state changed
+/// across an `await`. Pinned by `test/fullscreen_handoff_test.dart`.
+extension FullscreenHandoffDerived on FullscreenHandoff {
+  /// The fullscreen player adopts a still-running preview engine — Android's
+  /// shared native engine or the embedded media_kit one — and the preview
+  /// keeps playing straight through the handoff.
+  bool get seamless =>
+      this == FullscreenHandoff.adoptNative ||
+      this == FullscreenHandoff.adoptEmbedded;
+
+  /// [PlayerScreen] should adopt the preview's embedded media_kit
+  /// [Player]/`VideoController` directly. Never true on Android — that's
+  /// [adoptsNativePreview] instead.
+  bool get adoptsEmbeddedPreview => this == FullscreenHandoff.adoptEmbedded;
+
+  /// Android's fullscreen Activity should adopt the running shared native
+  /// preview engine.
+  bool get adoptsNativePreview => this == FullscreenHandoff.adoptNative;
+
+  /// Linux native mpv is about to take over: the preview must be stopped and
+  /// the channel re-resolved fresh (a spent play_token) rather than adopted.
+  bool get stopsAndResolvesFresh => this == FullscreenHandoff.stopResolveFresh;
+
+  /// A same-channel, non-adopted handoff: pause the preview and resume it on
+  /// return.
+  bool get pausesPreview => this == FullscreenHandoff.pausePreview;
+
+  /// A different-channel preview: stop it outright, not restarted on return.
+  bool get stopsPreview => this == FullscreenHandoff.stopPreview;
+}
 
 /// Lists a source's channels with in-memory search + category filtering, plus
 /// now/next EPG (when the source provides it).
@@ -198,6 +305,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (state != AppLifecycleState.paused) return;
     if (_resolving) return;
     if (_preview.channelId != null) {
+      DiagnosticsLog.instance.add('library', 'lifecycle paused: preview stop');
       unawaited(_preview.stop(clearSelection: true));
     }
   }
@@ -316,6 +424,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // Debounce for 500ms (desktop mouse/keyboard).
     _previewTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
+      // Never (re)start a preview while a fullscreen open/playback is in
+      // flight (_resolving spans the whole player push): the Linux native
+      // path stops the preview to free its provider connection, and a hover
+      // re-arm here would open a second connection behind the player.
+      if (_resolving) return;
+      // Already previewing (or resolving) this exact channel — a hover
+      // re-arm would pointlessly burn another create_link (tokens are
+      // single-use; portals may rate-limit).
+      if (_preview.channelId == channel.id &&
+          (_preview.stream != null || _preview.loading)) {
+        return;
+      }
       final isWide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
       if (isWide && _tab == ContentKind.live) {
         _preview.start(channel);
@@ -556,6 +676,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               epgNext: _live.next[channel.id],
               favoriteInitial: _isFavorite(ContentKind.live, channel.id),
               onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
+              // Live reloads (reconnect watchdog, "Go to live") re-resolve
+              // through the source: Stalker create_link tokens are
+              // single-use, so the originally resolved URL is dead after any
+              // portal-side kill.
+              resolveAgain: () => widget.repo.resolve(channel),
             ),
           ),
         );
@@ -587,8 +712,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// *adopts* the running preview engine instead of resolving/opening fresh:
   /// on Android the native Activity takes over the shared ExoPlayer engine
   /// (only the video surface moves — audio and buffer never stop); elsewhere
-  /// the same media_kit [Player] is handed to [PlayerScreen]. Seamless either
-  /// way, so the preview is *not* paused around an adopted handoff.
+  /// the same media_kit [Player] is handed to [PlayerScreen]. On Linux that
+  /// covers SDR and all of X11; only a **Wayland HDR** source instead takes
+  /// the non-seamless native mpv path (it can't adopt anything — see
+  /// [FullscreenHandoff.stopResolveFresh]). Seamless adoption leaves the
+  /// preview playing, not paused, around the handoff.
   ///
   /// [resumePreviewOnReturn] is false for the phone sheet (no panel to return
   /// to): the preview is stopped once fullscreen exits instead of resumed.
@@ -601,55 +729,135 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    final adoptPreview =
-        reusePreview &&
-        _preview.channelId == channel.id &&
-        _preview.stream != null;
-    // Android + native preview engine: the fullscreen Activity adopts it.
-    final adoptNative =
-        adoptPreview && Platform.isAndroid && _preview.nativeActive;
-    final previewWasMuted = adoptPreview && _preview.isMuted;
+    var playbackStream = stream;
+    // Set only while the Wayland+HDR stop-and-resolve-fresh path below has
+    // torn the preview down but not yet completed the fullscreen push — if
+    // resolve() or route setup throws in that window, the catch block
+    // restarts the same preview so the pane doesn't sit dead until an
+    // unrelated selection change.
+    var restorePreviewOnFailure = false;
+    // Assigned once `decision` is known (inside the try, after the await
+    // below) — declared here so the catch block can still read it.
+    var previewWasMuted = false;
     try {
       DiagnosticsLog.instance.add(
         'library',
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _notePlayedChannel(channel.id);
-      // An adopted engine keeps playing straight through the handoff (that's
-      // the seamless part). Any *non*-seamless fullscreen opens its own playback
-      // pipeline, so a preview left running would double the audio behind it.
-      final seamless = adoptPreview && (adoptNative || !Platform.isAndroid);
-      final previewPlaying =
-          _preview.channelId != null || _preview.nativeActive;
-      final sameChannelPreview = _preview.channelId == channel.id;
+      // Linux's native mpv process is a separate OS process that can't adopt
+      // a running preview engine (only Android's shared engine and the
+      // Windows/embedded media_kit hot-swap can) — probe (cheap, cached
+      // after the first call) whether the native path will actually be used
+      // before deciding whether this handoff can stay seamless.
+      final linuxNative =
+          Platform.isLinux && await LinuxNativeSession.nativeLikelyAvailable();
+      // Preview state is read exactly once, here — after every await that
+      // precedes the decision — and every downstream boolean is derived from
+      // `decision` alone. A previous version recomputed an "adoptPreview"
+      // local from preview state read *before* the await above while
+      // `decision` read it after; a preview-state change mid-await (e.g. the
+      // native engine reporting mid-flight that a channel is unsupported)
+      // could desync the two, risking double audio or a second provider
+      // connection. Reading once also fixed a latent bug: the old duplicate
+      // formula ignored the isAndroid gate baked into `decideFullscreenHandoff`,
+      // so an Android same-channel *fallback* preview (native engine not
+      // active) — correctly decided as pausePreview — was nonetheless treated
+      // as adoptable at the `existingPlayer`/restore-mute call sites below.
+      final previewChannelId = _preview.channelId;
+      final previewNativeActive = _preview.nativeActive;
+      final previewHasStream = _preview.stream != null;
+      final previewMuted = _preview.isMuted;
+      final previewPlaying = previewChannelId != null || previewNativeActive;
+      final sameChannelPreview = previewChannelId == channel.id;
+      // Read the preview engine's current colorimetry: only a Wayland *HDR*
+      // source justifies the native mpv path's non-seamless fresh-resolve cost
+      // (SDR/X11 stay embedded/seamless). The embedded preview player carries
+      // media_kit's videoParams; guard on hasEmbeddedPlayer so we never
+      // lazily spin one up (and it's always false on Android's native preview).
+      final streamLikelyHdr = _preview.hasEmbeddedPlayer
+          ? isHdrColorimetry(
+              gamma: _preview.player.state.videoParams.gamma,
+              primaries: _preview.player.state.videoParams.primaries,
+              matrix: _preview.player.state.videoParams.colormatrix,
+            )
+          : false;
+      final decision = decideFullscreenHandoff(
+        reusePreview: reusePreview,
+        sameChannelPreview: sameChannelPreview,
+        previewHasStream: previewHasStream,
+        isAndroid: Platform.isAndroid,
+        nativePreviewActive: previewNativeActive,
+        linuxNativeLikely: linuxNative,
+        previewPlaying: previewPlaying,
+        streamLikelyHdr: streamLikelyHdr,
+      );
+      final adoptNative = decision.adoptsNativePreview;
+      final linuxNativeStopResolve = decision.stopsAndResolvesFresh;
       // Same channel (a media_kit-fallback preview going native-fullscreen):
       // pause and resume on return. A *different* channel (the "last channel"
       // zap / EPG-grid play, which resolve fresh with reusePreview: false and so
       // never adopt the engine previewing whatever else): stop it outright — not
       // just pause — so we neither double the audio nor hold a second provider
       // connection open (single-connection accounts would refuse the new stream).
-      final pausedPreview = !seamless && previewPlaying && sameChannelPreview;
-      final stoppedPreview = !seamless && previewPlaying && !sameChannelPreview;
+      final pausedPreview = decision.pausesPreview;
+      final stoppedPreview = decision.stopsPreview;
+      // Fullscreen always plays at full volume; used to restore a muted
+      // (desktop auto-hover) preview once we return. True for every decision
+      // that adopts the running engine (seamlessly or via the Wayland+HDR
+      // stop-and-resolve-fresh path) — not for a merely paused/stopped one.
+      previewWasMuted =
+          (decision.seamless || decision.stopsAndResolvesFresh) &&
+          previewMuted;
+      DiagnosticsLog.instance.add(
+        'library',
+        'fullscreen open decision=${decision.name} linuxNative=$linuxNative '
+            'hdr=$streamLikelyHdr',
+      );
       if (stoppedPreview) {
         await _preview.stop();
       } else if (pausedPreview) {
         await _preview.pause();
+      } else if (linuxNativeStopResolve) {
+        // The native mpv process opens its own provider connection — a
+        // merely-paused media_kit engine would still hold its connection
+        // open (a single-connection portal then sees two, fighting each
+        // other in a create_link storm), and the preview's already-resolved
+        // stream carries a spent single-use Stalker play_token — so stop
+        // outright and re-resolve fresh instead of reusing `stream`.
+        await _preview.stop();
+        // If resolve() or the route setup below throws before the push goes
+        // through, the catch block restarts this same preview — otherwise it
+        // would sit dead (channelId set, stream null) until an unrelated
+        // selection change.
+        restorePreviewOnFailure = true;
+        playbackStream = await widget.repo.resolve(channel);
       }
       // Context-independent on purpose — nothing in the player derives from
       // the route builder's element.
       Widget buildPlayer() => PlayerScreen(
         title: channel.name,
-        stream: stream,
+        stream: playbackStream,
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: (adoptPreview && !adoptNative) ? _preview.player : null,
-        existingController: (adoptPreview && !adoptNative)
+        existingPlayer: decision.adoptsEmbeddedPreview
+            ? _preview.player
+            : null,
+        existingController: decision.adoptsEmbeddedPreview
             ? _preview.controller
             : null,
         adoptNativePreview: adoptNative,
+        // Wayland+HDR: open straight to native mpv (the preview was stopped and
+        // `playbackStream` re-resolved fresh above). SDR/X11 open embedded and
+        // escalate to native later only if the source turns out to be HDR.
+        preferLinuxNative: linuxNativeStopResolve,
         favoriteInitial: _isFavorite(ContentKind.live, channel.id),
         onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
+        // Live reloads (reconnect watchdog, "Go to live") re-resolve through
+        // the source: Stalker create_link tokens are single-use, so the
+        // originally resolved URL is dead after any portal-side kill.
+        resolveAgain: () => widget.repo.resolve(channel),
       );
       // The adopted native handoff pushes a *transparent, non-animated* route:
       // PlayerScreen stays see-through while the native Activity launches, so
@@ -665,6 +873,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             )
           : MaterialPageRoute<bool>(builder: (_) => buildPlayer());
       final hotSwapped = await navigator.push<bool>(route) ?? false;
+      // The push (and whatever PlayerScreen did while up) completed — a
+      // failure past this point isn't the stop-and-resolve-fresh setup
+      // failing, so the catch block no longer needs to restart the preview.
+      restorePreviewOnFailure = false;
+      DiagnosticsLog.instance.add(
+        'library',
+        'fullscreen returned hotSwapped=$hotSwapped mounted=$mounted '
+            'previewStream=${_preview.stream != null}',
+      );
       if (!mounted) return;
       if (hotSwapped) {
         // The fullscreen player re-pointed this player's video output at the
@@ -674,10 +891,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       } else if (!resumePreviewOnReturn) {
         // Phone sheet handoff: nothing shows the preview after fullscreen.
         await _preview.stop(clearSelection: true);
-      } else if (adoptPreview && _preview.stream != null) {
+      } else if (linuxNativeStopResolve) {
+        // Same-channel native-stop is the one stop case that restarts: the
+        // preview was stopped only to free the connection/token for native
+        // mpv, not because the user left the channel.
+        await _preview.start(channel, muted: previewWasMuted);
+      } else if (decision.seamless && _preview.stream != null) {
         await _preview.play();
-        // Fullscreen always plays at full volume; restore a muted (desktop
-        // auto-hover) preview instead of leaving it blaring once we return.
         if (previewWasMuted) await _preview.setMuted(true);
       } else if (pausedPreview && _preview.stream != null) {
         // A same-channel non-adopted fullscreen paused the preview above; resume
@@ -687,6 +907,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       }
       _restoreListFocusAfterPlayback();
     } catch (e) {
+      if (restorePreviewOnFailure) {
+        DiagnosticsLog.instance.add(
+          'library',
+          'fullscreen stop-resolve failed — restarting preview '
+              'channel=${channel.id}',
+        );
+        try {
+          await _preview.start(channel, muted: previewWasMuted);
+        } catch (_) {}
+      }
       messenger.showSnackBar(
         SnackBar(content: Text('Could not play: ${redactText('$e')}')),
       );
@@ -699,6 +929,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// flow (used by zap and the EPG grid).
   Future<void> _playChannelFullscreen(Channel channel) async {
     if (_resolving) return;
+    // Set before the resolve (not just before the push): _openLivePlayer's
+    // own guard only takes effect once it's called, and resolve() itself can
+    // take a while (Stalker create_link), leaving a window for a second
+    // activation to slip past the `if (_resolving) return` above and
+    // double-push. _openLivePlayer's finally resets this once it runs; the
+    // finally below only fires (i.e. `_resolving` is still true) when
+    // resolve() itself threw before ever reaching it.
+    setState(() => _resolving = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
       final stream = await widget.repo.resolve(channel);
@@ -708,6 +946,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       messenger.showSnackBar(
         SnackBar(content: Text('Could not play: ${redactText('$e')}')),
       );
+    } finally {
+      if (mounted && _resolving) setState(() => _resolving = false);
     }
   }
 

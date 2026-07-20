@@ -51,6 +51,10 @@ class ReleaseInfo {
   final Uri? windowsAsset;
   final ReleaseArtifact? windowsArtifact;
 
+  /// Direct download of the x86-64 Linux AppImage.
+  final Uri? linuxAsset;
+  final ReleaseArtifact? linuxArtifact;
+
   const ReleaseInfo({
     required this.version,
     required this.tagName,
@@ -61,14 +65,16 @@ class ReleaseInfo {
     this.androidArtifact,
     this.windowsAsset,
     this.windowsArtifact,
+    this.linuxAsset,
+    this.linuxArtifact,
   });
 
   /// The download URL for the running platform, or null if this release ships
-  /// no matching asset (e.g. on macOS/Linux, where only the browser fallback
-  /// applies).
+  /// no matching asset (e.g. on macOS, where only the browser fallback applies).
   Uri? assetForCurrentPlatform() {
     if (Platform.isAndroid) return androidAsset;
     if (Platform.isWindows) return windowsAsset;
+    if (Platform.isLinux) return linuxAsset;
     return null;
   }
 
@@ -76,12 +82,14 @@ class ReleaseInfo {
   int? sizeForCurrentPlatform() {
     if (Platform.isAndroid) return androidArtifact?.byteSize;
     if (Platform.isWindows) return windowsArtifact?.byteSize;
+    if (Platform.isLinux) return linuxArtifact?.byteSize;
     return null;
   }
 
   ReleaseArtifact? artifactForCurrentPlatform() {
     if (Platform.isAndroid) return androidArtifact;
     if (Platform.isWindows) return windowsArtifact;
+    if (Platform.isLinux) return linuxArtifact;
     return null;
   }
 }
@@ -172,6 +180,7 @@ class UpdateService {
     }
     final android = manifest.artifacts['android'];
     final windows = manifest.artifacts['windows-x64'];
+    final linux = manifest.artifacts['linux-x86_64'];
     final info = ReleaseInfo(
       version: manifest.version,
       tagName: discovery.tagName,
@@ -186,6 +195,10 @@ class UpdateService {
           ? null
           : _artifactUrl(discovery.tagName, windows.filename),
       windowsArtifact: windows,
+      linuxAsset: linux == null
+          ? null
+          : _artifactUrl(discovery.tagName, linux.filename),
+      linuxArtifact: linux,
     );
     DiagnosticsLog.instance.add('update', 'Verified release ${info.tagName}');
     return info;

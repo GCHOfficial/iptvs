@@ -15,7 +15,8 @@ import 'update_service.dart';
 /// Outcome of kicking off a platform install.
 enum InstallOutcome {
   /// The OS installer (Android) or update helper (Windows) was launched. On
-  /// Windows the caller should now exit the app so `iptvs.exe` unlocks.
+  /// desktop platforms the caller should now exit so the running binary can
+  /// be replaced.
   launched,
 
   /// Android only: the app lacks the "install unknown apps" permission — the
@@ -30,7 +31,8 @@ enum InstallOutcome {
 /// Downloads a release asset and hands it to the platform's install path:
 /// Android fires the system package-installer via the `iptvs/updates`
 /// MethodChannel; Windows writes a detached PowerShell helper that swaps the
-/// portable folder and relaunches. Everything else falls back to the browser.
+/// portable folder and relaunches; Linux atomically replaces the running
+/// AppImage and relaunches it. Everything else falls back to the browser.
 class UpdateInstaller {
   static const _channel = MethodChannel('iptvs/updates');
   final HttpClient _http;
@@ -48,7 +50,14 @@ class UpdateInstaller {
   /// targets). Elsewhere the flow degrades to opening the release page.
   static bool get isSupported =>
       DistributionConfig.directUpdaterEnabled &&
-      (Platform.isAndroid || Platform.isWindows);
+      (Platform.isAndroid ||
+          Platform.isWindows ||
+          (Platform.isLinux && _runningAppImage != null));
+
+  static String? get _runningAppImage {
+    final value = Platform.environment['APPIMAGE']?.trim();
+    return value == null || value.isEmpty ? null : value;
+  }
 
   /// Streams [url] to a file in the temp dir, reporting fractional progress
   /// (0..1) as chunks arrive. Returns the written file. GitHub asset URLs 302
@@ -132,6 +141,10 @@ class UpdateInstaller {
         await _launchWindowsUpdater(file);
         return InstallOutcome.launched;
       }
+      if (Platform.isLinux) {
+        await _launchLinuxUpdater(file);
+        return InstallOutcome.launched;
+      }
     } catch (e) {
       DiagnosticsLog.instance.add('update', 'Install failed: $e');
     }
@@ -195,8 +208,69 @@ class UpdateInstaller {
     );
   }
 
+  /// Stages the verified AppImage beside the running one, then starts a
+  /// detached helper which waits for this process, atomically swaps the files,
+  /// relaunches, and restores the previous AppImage if launch fails.
+  Future<void> _launchLinuxUpdater(File appImage) async {
+    final configuredPath = _runningAppImage;
+    if (configuredPath == null) {
+      throw const FileSystemException('Not running from an AppImage');
+    }
+    final target = File(configuredPath);
+    if (!await target.exists()) {
+      throw const FileSystemException('Running AppImage is missing');
+    }
+    final targetPath = await target.resolveSymbolicLinks();
+    final stage = File('$targetPath.update-new-$pid');
+    if (await stage.exists()) await stage.delete();
+    await appImage.copy(stage.path);
+    await Process.run('chmod', ['0755', stage.path]);
+
+    final dir = await getTemporaryDirectory();
+    final script = File(p.join(dir.path, 'iptvs_update.sh'));
+    await script.writeAsString(linuxUpdateScript);
+    await Process.run('chmod', ['0700', script.path]);
+    await Process.start(
+      '/bin/sh',
+      [script.path, '$pid', stage.path, targetPath],
+      mode: ProcessStartMode.detached,
+      workingDirectory: dir.path,
+    );
+  }
+
   void close() => _http.close(force: true);
 }
+
+/// Detached AppImage replacement helper. Paths are passed as positional
+/// arguments (not interpolated), so spaces and shell metacharacters stay data.
+const String linuxUpdateScript = r'''#!/bin/sh
+set -eu
+old_pid="$1"
+stage="$2"
+target="$3"
+backup="$target.update-backup"
+
+while kill -0 "$old_pid" 2>/dev/null; do
+  sleep 1
+done
+
+rm -f "$backup"
+mv "$target" "$backup"
+if mv "$stage" "$target" && chmod 0755 "$target"; then
+  "$target" >/dev/null 2>&1 &
+  new_pid=$!
+  sleep 3
+  if kill -0 "$new_pid" 2>/dev/null; then
+    rm -f "$backup"
+    exit 0
+  fi
+fi
+
+rm -f "$target"
+mv "$backup" "$target"
+chmod 0755 "$target"
+"$target" >/dev/null 2>&1 &
+''';
 
 /// Revalidates a previously downloaded APK before resuming installation.
 ///

@@ -3,7 +3,7 @@
 [![Build](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml/badge.svg)](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-A cross-platform **IPTV player** for Windows and Android (including **Android TV**),
+A cross-platform **IPTV player** for Windows, Linux, and Android (including **Android TV**),
 built with Flutter and libmpv. It connects to your own IPTV provider, caches its
 channel/VOD/EPG data locally, enriches movie/series metadata from public APIs, and
 plays streams with **true HDR** — handling HEVC / AC-3 / MPEG-TS that a plain video
@@ -35,9 +35,10 @@ element can't.
   a per-source settings screen so they vanish from browsing.
 - **Resilient live playback** — auto-reconnect with backoff when a live stream
   stalls or drops, plus a "Go to live" control.
-- **Native overlays** — a Windows (D3D11) and Android (Compose) player overlay at
-  parity: play/pause, ±10s, scrubber, audio/subtitle/speed menus, aspect cycle,
-  resolution/HDR/FPS/clock badges, and an info panel.
+- **Player overlays** — Windows (D3D11), Android (Compose), and Linux (Flutter/libmpv)
+  expose the same controls: play/pause, ±10s, scrubber/live EPG, go-to-live,
+  audio/subtitle/speed menus, aspect cycle, favorite, resolution/HDR/FPS/clock
+  badges, and an info panel.
 - **Optional web panel** — manage your sources from a browser as one or more **profiles**
   (separate setups on one account), and pull a profile onto each device by entering a short
   pairing code (or push a device's set back up), with **no login on the TV**. Off unless
@@ -49,13 +50,15 @@ element can't.
 |----------|--------|
 | Windows (x64) | Supported — native D3D11 HDR path |
 | Android phone / **Android TV** | Supported — single universal APK |
-| Linux / macOS / iOS | Builds via Flutter; not a focus / untested |
+| Linux x86-64 | Supported — AppImage, libmpv hardware decode, signed GitHub-direct updates |
+| macOS / iOS | Builds via Flutter; not a focus / untested |
 
 ## Download
 
-Grab the latest Windows zip and Android APK from the
+Grab the latest Linux AppImage, Windows zip, and Android APK from the
 [**Releases**](https://github.com/GCHOfficial/iptvs/releases) page. The APK installs
-on both phones and Android TV.
+on both phones and Android TV. The AppImage is portable and updates itself from
+the same signed GitHub release channel when launched from a writable location.
 
 ## Build from source
 
@@ -64,6 +67,7 @@ Requires the **Flutter `3.44.5`** stable toolchain (the version CI pins).
 ```bash
 flutter pub get
 flutter run -d windows
+flutter run -d linux
 flutter run -d android --flavor development \
   --dart-define=DISTRIBUTION_CHANNEL=development
 ```
@@ -77,6 +81,10 @@ Platform notes:
 - **Windows** fetches a libplacebo/Dolby-Vision `libmpv-2.dll` automatically at
   CMake configure time (hash-verified); drop your own in `windows/libmpv/` to
   override. See [`windows/libmpv/README.md`](windows/libmpv/README.md).
+- **Linux** ships a native `mpv`/libplacebo presenter for Wayland and X11 with
+  an mpv GPU-rendered IPTV-specific overlay matching the Windows control
+  contract. It falls back to the shared Flutter/libmpv overlay when native
+  presentation is unavailable; HDR remains display-stack dependent.
 
 CI expectation: `flutter analyze` is clean and `flutter test` is green.
 

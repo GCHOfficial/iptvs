@@ -8,6 +8,7 @@ const int kMaxReleaseManifestBytes = 64 * 1024;
 const int kMaxReleaseSignatureBytes = 1024;
 const int kMaxAndroidUpdateBytes = 512 * 1024 * 1024;
 const int kMaxWindowsUpdateBytes = 1024 * 1024 * 1024;
+const int kMaxLinuxUpdateBytes = 1024 * 1024 * 1024;
 
 /// One installable file described by an authenticated release manifest.
 class ReleaseArtifact {
@@ -28,18 +29,25 @@ class ReleaseArtifact {
     final filename = json['filename'];
     final byteSize = json['byte_size'];
     final sha256 = json['sha256'];
-    if (platform is! String || !{'android', 'windows-x64'}.contains(platform)) {
+    if (platform is! String ||
+        !{'android', 'windows-x64', 'linux-x86_64'}.contains(platform)) {
       throw const FormatException('Unsupported release platform');
     }
-    final expectedFilename = platform == 'android'
-        ? 'iptvs-$version-android.apk'
-        : 'iptvs-$version-windows-x64.zip';
+    final expectedFilename = switch (platform) {
+      'android' => 'iptvs-$version-android.apk',
+      'windows-x64' => 'iptvs-$version-windows-x64.zip',
+      'linux-x86_64' => 'iptvs-$version-linux-x86_64.AppImage',
+      _ => throw const FormatException('Unsupported release platform'),
+    };
     if (filename is! String || filename != expectedFilename) {
       throw const FormatException('Unexpected release filename');
     }
-    final maximum = platform == 'android'
-        ? kMaxAndroidUpdateBytes
-        : kMaxWindowsUpdateBytes;
+    final maximum = switch (platform) {
+      'android' => kMaxAndroidUpdateBytes,
+      'windows-x64' => kMaxWindowsUpdateBytes,
+      'linux-x86_64' => kMaxLinuxUpdateBytes,
+      _ => throw const FormatException('Unsupported release platform'),
+    };
     if (byteSize is! int || byteSize <= 0 || byteSize > maximum) {
       throw const FormatException('Invalid release artifact size');
     }
