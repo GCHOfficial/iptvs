@@ -159,6 +159,50 @@ void main() {
     );
   });
 
+  test(
+    'ignores artifacts for unknown future platforms and keeps the known ones',
+    () async {
+      // Regression: 0.1.38 added a `linux-x86_64` artifact, and every ≤0.1.37
+      // client's parser threw 'Unsupported release platform' on it, rejecting
+      // the whole manifest and bricking auto-update on every platform. A client
+      // must parse the platforms it knows and skip the rest.
+      final bytes = Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'schema': 1,
+            'version': '1.4.2',
+            'minimum_version': '1.0.0',
+            'artifacts': [
+              {
+                'platform': 'android',
+                'filename': 'iptvs-1.4.2-android.apk',
+                'byte_size': 12345,
+                'sha256': List.filled(64, 'a').join(),
+              },
+              {
+                // A platform this build has never heard of.
+                'platform': 'macos-arm64',
+                'filename': 'iptvs-1.4.2-macos-arm64.dmg',
+                'byte_size': 999,
+                'sha256': List.filled(64, 'b').join(),
+              },
+            ],
+          }),
+        ),
+      );
+      final signed = await _sign(bytes);
+
+      final manifest = await verifier.verify(
+        manifestBytes: bytes,
+        signatureBase64: signed.signature,
+        publicKeyBase64: signed.publicKey,
+      );
+
+      expect(manifest.artifacts.keys, ['android']);
+      expect(manifest.artifacts['android']?.filename, 'iptvs-1.4.2-android.apk');
+    },
+  );
+
   test('rejects uppercase or malformed SHA-256 values', () async {
     for (final digest in [List.filled(64, 'A').join(), 'xyz']) {
       final bytes = _manifestBytes(sha256: digest);

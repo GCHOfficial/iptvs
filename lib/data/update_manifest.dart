@@ -10,6 +10,15 @@ const int kMaxAndroidUpdateBytes = 512 * 1024 * 1024;
 const int kMaxWindowsUpdateBytes = 1024 * 1024 * 1024;
 const int kMaxLinuxUpdateBytes = 1024 * 1024 * 1024;
 
+/// Platforms this build knows how to install. The manifest parser ignores
+/// artifacts for any platform outside this set (see [ReleaseManifest.parse]),
+/// so adding a new platform to a future manifest never breaks older clients.
+const Set<String> kKnownReleasePlatforms = {
+  'android',
+  'windows-x64',
+  'linux-x86_64',
+};
+
 /// One installable file described by an authenticated release manifest.
 class ReleaseArtifact {
   const ReleaseArtifact({
@@ -29,8 +38,7 @@ class ReleaseArtifact {
     final filename = json['filename'];
     final byteSize = json['byte_size'];
     final sha256 = json['sha256'];
-    if (platform is! String ||
-        !{'android', 'windows-x64', 'linux-x86_64'}.contains(platform)) {
+    if (platform is! String || !kKnownReleasePlatforms.contains(platform)) {
       throw const FormatException('Unsupported release platform');
     }
     final expectedFilename = switch (platform) {
@@ -102,10 +110,18 @@ class ReleaseManifest {
       if (raw is! Map) {
         throw const FormatException('Invalid release artifact');
       }
-      final artifact = ReleaseArtifact.fromJson(
-        Map<String, dynamic>.from(raw),
-        version,
-      );
+      final map = Map<String, dynamic>.from(raw);
+      // Forward compatibility: silently ignore artifacts for platforms this
+      // build doesn't recognize, so a manifest that adds a future platform
+      // still parses cleanly on older clients (they simply find no asset for
+      // it). Do this before fromJson, whose strict validation would otherwise
+      // throw 'Unsupported release platform' and reject the whole manifest —
+      // the exact regression that broke every ≤0.1.37 client when 0.1.38 first
+      // shipped a `linux-x86_64` entry.
+      if (!kKnownReleasePlatforms.contains(map['platform'])) {
+        continue;
+      }
+      final artifact = ReleaseArtifact.fromJson(map, version);
       if (artifacts.containsKey(artifact.platform)) {
         throw const FormatException('Duplicate release platform');
       }
