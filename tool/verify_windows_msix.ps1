@@ -57,6 +57,16 @@ try {
     }
   }
 
+  $VCLibs = $Manifest.SelectSingleNode(
+    '/f:Package/f:Dependencies/f:PackageDependency[@Name="Microsoft.VCLibs.140.00.UWPDesktop"]',
+    $Namespace
+  )
+  if ($null -eq $VCLibs -or
+      $VCLibs.GetAttribute('MinVersion') -cne '14.0.24217.0' -or
+      $VCLibs.GetAttribute('Publisher') -cne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
+    throw 'MSIX does not declare the expected Microsoft Visual C++ desktop runtime framework dependency.'
+  }
+
   $Application = $Manifest.SelectSingleNode('/f:Package/f:Applications/f:Application', $Namespace)
   if ($Application.GetAttribute('Executable') -cne 'iptvs.exe' -or
       $Application.GetAttribute('EntryPoint') -cne 'Windows.FullTrustApplication') {
@@ -85,7 +95,7 @@ try {
     }
   }
 
-  Write-Host "Verified Microsoft Store MSIX identity, version, capabilities, and runtime payload: $ResolvedPackagePath"
+  Write-Host "Verified Microsoft Store MSIX identity, version, VCLibs dependency, capabilities, and runtime payload: $ResolvedPackagePath"
 } finally {
   if (Test-Path $UnpackDirectory) {
     Remove-Item $UnpackDirectory -Recurse -Force

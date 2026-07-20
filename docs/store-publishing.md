@@ -224,6 +224,13 @@ Partner Center marks the product live.
 
 ### Required application changes
 
+- Declare the Store-provided `Microsoft.VCLibs.140.00.UWPDesktop` framework in
+  the MSIX manifest. Flutter's Windows runner and native playback libraries use
+  the Visual C++ runtime; the Store installs the declared framework alongside
+  the app.
+- Keep the exact Visual C++ Redistributable disclosure within the first two
+  lines of the Partner Center description. The canonical, copy-ready listing
+  and reviewer notes live in `assets/store/microsoft-store/listing.md`.
 - The manual **Microsoft Store MSIX** workflow builds an unsigned x64 package
   from the Flutter Release payload using the exact Partner Center identity.
   `tool/package_windows_msix.ps1` creates the manifest and required logo sizes;
@@ -281,13 +288,18 @@ Partner Center marks the product live.
   labelled protocol test fixtures, not app-owned programming. The app links to
   remote media and does not redistribute it; reconfirm the Mux endpoint terms
   before a production Store submission if those fixtures remain enabled there.
+- [x] Address certification policy 10.2.4.1 from the 2026-07-20 report for
+  product `9P8KK9T379WN`: declare the Store VCLibs framework in the MSIX and put
+  the Microsoft Visual C++ Redistributable disclosure first in the canonical
+  Partner Center description.
 
 The public Store support and privacy contact is `gchofficial@gmail.com`.
 
 ### Build and submission procedure
 
 Run **Microsoft Store MSIX** manually with the next monotonically increasing
-three-part version (`1.0.0` for the first submission). The workflow compiles with
+three-part version (`1.0.1` after the certified `1.0.0` submission). The
+workflow compiles with
 `DISTRIBUTION_CHANNEL=microsoftStore`, omits the GitHub update key, packages the
 Release directory, verifies the package by unpacking it, and uploads an unsigned
 `iptvs-<version>-windows-store-x64.msix` CI artifact for Partner Center. The
@@ -296,14 +308,17 @@ to GitHub Releases or distribute it for ordinary sideloading.
 
 Before submission:
 
-1. Download the workflow artifact and upload only the `.msix` to the reserved
+1. Replace the Partner Center description with the exact copy in
+   `assets/store/microsoft-store/listing.md`; do not place text before its
+   dependency disclosure.
+2. Download the workflow artifact and upload only the `.msix` to the reserved
    **IPTVS Player** product in Partner Center.
-2. Record the workflow run and submitted version here.
-3. Run the Windows App Certification Kit against a locally test-signed copy of
+3. Record the workflow run and submitted version here.
+4. Run the Windows App Certification Kit against a locally test-signed copy of
    the same Release package, then retain the report. Test signing is for WACK
    and local installation only; it must not alter the submitted artifact.
-4. Complete the package flight matrix below using the Store-delivered package.
-5. After certification, download/install through Microsoft Store and verify the
+5. Complete the package flight matrix below using the Store-delivered package.
+6. After certification, download/install through Microsoft Store and verify the
    package identity and Microsoft signature with `Get-AppxPackage` and
    `Get-AuthenticodeSignature` before public rollout.
 
