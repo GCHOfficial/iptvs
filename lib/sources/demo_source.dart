@@ -577,7 +577,8 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
   }
 
   @override
-  Future<DateTime?> subscriptionExpiry() async => null;
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      const SubscriptionExpiry.unknown();
 
   @override
   Future<void> dispose() async {}

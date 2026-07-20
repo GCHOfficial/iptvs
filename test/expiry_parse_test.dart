@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/sources/expiry.dart';
+import 'package:iptvs/sources/source.dart';
 
 void main() {
   group('parseExpiryValue', () {
@@ -35,6 +36,34 @@ void main() {
     });
   });
 
+  group('parseSubscriptionExpiryValue', () {
+    test('recognises explicit unlimited provider values', () {
+      for (final value in ['Unlimited', 'never', 'lifetime', 'no_expiry']) {
+        expect(
+          parseSubscriptionExpiryValue(value).kind,
+          SubscriptionExpiryKind.unlimited,
+          reason: value,
+        );
+      }
+    });
+
+    test('keeps missing and malformed metadata unknown', () {
+      for (final value in [null, '', '0', 'null', 'not a date']) {
+        expect(
+          parseSubscriptionExpiryValue(value).kind,
+          SubscriptionExpiryKind.unknown,
+          reason: '$value',
+        );
+      }
+    });
+
+    test('retains a parsed date', () {
+      final expiry = parseSubscriptionExpiryValue('2026-09-01');
+      expect(expiry.kind, SubscriptionExpiryKind.dated);
+      expect(expiry.date, DateTime(2026, 9, 1));
+    });
+  });
+
   group('extractExpiryFromText', () {
     test('bare ISO date', () {
       expect(extractExpiryFromText('2026-09-01'), DateTime(2026, 9, 1));
@@ -66,6 +95,12 @@ void main() {
   });
 
   group('expiryFromStalkerFields', () {
+    test('recognises an unlimited named field', () {
+      expect(
+        subscriptionExpiryFromStalkerFields({'end_date': 'Unlimited'}).kind,
+        SubscriptionExpiryKind.unlimited,
+      );
+    });
     test('prefers the named fields over phone', () {
       final dt = expiryFromStalkerFields({
         'end_date': '2026-06-19',
@@ -152,7 +187,10 @@ void main() {
 
     test('returns null for an unparseable URL or value', () {
       expect(expiryFromPlaylistUrl(''), isNull);
-      expect(expiryFromPlaylistUrl('http://host/list.m3u?exp=not-a-date'), isNull);
+      expect(
+        expiryFromPlaylistUrl('http://host/list.m3u?exp=not-a-date'),
+        isNull,
+      );
       expect(expiryFromPlaylistUrl('http://host/list.m3u?exp=0'), isNull);
     });
   });

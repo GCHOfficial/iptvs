@@ -26,6 +26,28 @@ enum CapabilityAvailability { supported, unavailable, unknown }
 
 enum ResolutionCapability { providerDefined, playlistDefined, fixed, unknown }
 
+enum SubscriptionExpiryKind { dated, unlimited, unknown }
+
+/// Provider-reported subscription lifetime. A nullable [DateTime] cannot
+/// distinguish an explicit non-expiring account from absent/unparseable
+/// metadata, so source implementations return this three-state value.
+@immutable
+class SubscriptionExpiry {
+  final SubscriptionExpiryKind kind;
+  final DateTime? date;
+
+  const SubscriptionExpiry._(this.kind, this.date);
+
+  const SubscriptionExpiry.dated(DateTime date)
+    : this._(SubscriptionExpiryKind.dated, date);
+  const SubscriptionExpiry.unlimited()
+    : this._(SubscriptionExpiryKind.unlimited, null);
+  const SubscriptionExpiry.unknown()
+    : this._(SubscriptionExpiryKind.unknown, null);
+
+  bool get isUnlimited => kind == SubscriptionExpiryKind.unlimited;
+}
+
 /// Provider-owned capability summary used by source-management UX. `unknown`
 /// is intentional: a saved M3U URL cannot truthfully advertise attributes that
 /// are only discoverable after downloading its playlist.
@@ -480,10 +502,10 @@ abstract class Source {
   /// Release any held resources.
   Future<void> dispose() async {}
 
-  /// The subscription's expiry date, or null when the provider doesn't expose
-  /// one (M3U/Demo) or it can't be determined. Implementations must redact any
-  /// URL that reaches a log or error.
-  Future<DateTime?> subscriptionExpiry() async => null;
+  /// The subscription's dated, unlimited, or unknown expiry state.
+  /// Implementations must redact any URL that reaches a log or error.
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      const SubscriptionExpiry.unknown();
 }
 
 /// Optional capability a [Source] can additionally implement to stream a

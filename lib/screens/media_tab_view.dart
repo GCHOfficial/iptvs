@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
@@ -23,6 +24,39 @@ String _positionLabel(Duration position) {
   return hours > 0
       ? '$hours:${two(minutes)}:${two(seconds)}'
       : '$minutes:${two(seconds)}';
+}
+
+/// Grid density for poster catalogues. Android's TV render targets commonly
+/// expose a desktop-sized logical viewport, so the old fixed 4/6-column rule
+/// produced enormous cards and only one or two visible rows. Compact mode uses
+/// a bounded target card width instead, while desktop keeps its established
+/// breakpoints.
+@immutable
+class MediaGridMetrics {
+  final int columns;
+  final double spacing;
+  final EdgeInsets padding;
+
+  const MediaGridMetrics._({
+    required this.columns,
+    required this.spacing,
+    required this.padding,
+  });
+
+  factory MediaGridMetrics.forWidth(double width, {bool compact = false}) {
+    if (!compact) {
+      return MediaGridMetrics._(
+        columns: width >= 1280 ? 6 : 4,
+        spacing: 12,
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+      );
+    }
+    return MediaGridMetrics._(
+      columns: (width / 180).floor().clamp(5, 10),
+      spacing: 8,
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+    );
+  }
 }
 
 /// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
@@ -164,19 +198,22 @@ class MediaTabView extends StatelessWidget {
             ],
           );
         }
-        final columns = constraints.maxWidth >= 1280 ? 6 : 4;
+        final grid = MediaGridMetrics.forWidth(
+          constraints.maxWidth,
+          compact: defaultTargetPlatform == TargetPlatform.android,
+        );
         return CustomScrollView(
           controller: scrollController,
           scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
           slivers: [
             ?railSliver,
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
+              padding: grid.padding,
               sliver: SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: columns,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
+                  crossAxisCount: grid.columns,
+                  crossAxisSpacing: grid.spacing,
+                  mainAxisSpacing: grid.spacing,
                   childAspectRatio: 0.64,
                 ),
                 delegate: SliverChildBuilderDelegate((context, i) {

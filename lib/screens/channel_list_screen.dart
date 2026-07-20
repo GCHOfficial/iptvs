@@ -99,6 +99,25 @@ FullscreenHandoff decideFullscreenHandoff({
   return FullscreenHandoff.stopPreview;
 }
 
+/// Native Linux discovery may spawn/version-check an external mpv process on
+/// its first call. Pay that cost only when its result can change the handoff:
+/// a same-channel HDR preview that would otherwise be adopted embedded.
+/// Non-preview opens and SDR previews go straight through; if an initially SDR
+/// stream later reports HDR, [PlayerScreen] still performs its one-shot
+/// embedded-to-native escalation.
+bool shouldProbeLinuxNativeForHandoff({
+  required bool isLinux,
+  required bool reusePreview,
+  required bool sameChannelPreview,
+  required bool previewHasStream,
+  required bool streamLikelyHdr,
+}) =>
+    isLinux &&
+    reusePreview &&
+    sameChannelPreview &&
+    previewHasStream &&
+    streamLikelyHdr;
+
 /// Every downstream boolean [_ChannelListScreenState._openLivePlayer] needs
 /// from a [FullscreenHandoff], derived here instead of re-tested against the
 /// raw inputs at the call site — a duplicate formula there previously could
@@ -667,8 +686,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         if (!mounted) return;
         _notePlayedChannel(channel.id);
         await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => PlayerScreen(
+          PageRouteBuilder(
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => PlayerScreen(
               title: channel.name,
               stream: stream,
               sourceName: widget.repo.source.name,
@@ -745,13 +766,28 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _notePlayedChannel(channel.id);
-      // Linux's native mpv process is a separate OS process that can't adopt
-      // a running preview engine (only Android's shared engine and the
-      // Windows/embedded media_kit hot-swap can) — probe (cheap, cached
-      // after the first call) whether the native path will actually be used
-      // before deciding whether this handoff can stay seamless.
+      // Native discovery can require an external mpv version probe on its
+      // first call. The result only matters for a same-channel HDR preview;
+      // probing for SDR or a non-adoptable preview added avoidable latency to
+      // ordinary opens after the Linux native path was introduced.
+      final initialSameChannelPreview = _preview.channelId == channel.id;
+      final initialPreviewHasStream = _preview.stream != null;
+      final initialStreamLikelyHdr = _preview.hasEmbeddedPlayer
+          ? isHdrColorimetry(
+              gamma: _preview.player.state.videoParams.gamma,
+              primaries: _preview.player.state.videoParams.primaries,
+              matrix: _preview.player.state.videoParams.colormatrix,
+            )
+          : false;
+      final shouldProbeLinux = shouldProbeLinuxNativeForHandoff(
+        isLinux: Platform.isLinux,
+        reusePreview: reusePreview,
+        sameChannelPreview: initialSameChannelPreview,
+        previewHasStream: initialPreviewHasStream,
+        streamLikelyHdr: initialStreamLikelyHdr,
+      );
       final linuxNative =
-          Platform.isLinux && await LinuxNativeSession.nativeLikelyAvailable();
+          shouldProbeLinux && await LinuxNativeSession.nativeLikelyAvailable();
       // Preview state is read exactly once, here — after every await that
       // precedes the decision — and every downstream boolean is derived from
       // `decision` alone. A previous version recomputed an "adoptPreview"
@@ -807,8 +843,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // that adopts the running engine (seamlessly or via the Wayland+HDR
       // stop-and-resolve-fresh path) — not for a merely paused/stopped one.
       previewWasMuted =
-          (decision.seamless || decision.stopsAndResolvesFresh) &&
-          previewMuted;
+          (decision.seamless || decision.stopsAndResolvesFresh) && previewMuted;
       DiagnosticsLog.instance.add(
         'library',
         'fullscreen open decision=${decision.name} linuxNative=$linuxNative '
@@ -841,9 +876,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
         epgNow: _live.now[channel.id],
         epgNext: _live.next[channel.id],
-        existingPlayer: decision.adoptsEmbeddedPreview
-            ? _preview.player
-            : null,
+        existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
         existingController: decision.adoptsEmbeddedPreview
             ? _preview.controller
             : null,
@@ -864,14 +897,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // this screen (with the preview's frozen last frame) remains visible
       // until the Activity's first frame — no black flash (see
       // PlayerScreen._transparentHandoff).
-      final route = adoptNative
-          ? PageRouteBuilder<bool>(
-              opaque: false,
-              transitionDuration: Duration.zero,
-              reverseTransitionDuration: Duration.zero,
-              pageBuilder: (_, _, _) => buildPlayer(),
-            )
-          : MaterialPageRoute<bool>(builder: (_) => buildPlayer());
+      // Start opening immediately. The default Material route animates for
+      // ~300 ms while the player is already resolving/decoding, which makes
+      // preview→fullscreen feel slower on every platform and delays the first
+      // visible frame behind an opaque transition. Native Android adoption
+      // remains transparent; ordinary routes are opaque but non-animated.
+      final route = PageRouteBuilder<bool>(
+        opaque: !adoptNative,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => buildPlayer(),
+      );
       final hotSwapped = await navigator.push<bool>(route) ?? false;
       // The push (and whatever PlayerScreen did while up) completed — a
       // failure past this point isn't the stop-and-resolve-fresh setup

@@ -208,8 +208,8 @@ class M3uSource
       throw UnsupportedError('M3U source only exposes playlist channels');
 
   @override
-  Future<DateTime?> subscriptionExpiry() async =>
-      expiryFromPlaylistUrl(playlistUrl);
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      subscriptionExpiryFromPlaylistUrl(playlistUrl);
 
   @override
   Future<void> dispose() async => _http.close(force: true);

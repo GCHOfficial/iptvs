@@ -1145,7 +1145,8 @@ class _FakeSource implements Source {
       throw UnsupportedError('not playable');
 
   @override
-  Future<DateTime?> subscriptionExpiry() async => null;
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      const SubscriptionExpiry.unknown();
 
   @override
   Future<void> dispose() async {}

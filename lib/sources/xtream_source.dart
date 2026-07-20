@@ -413,14 +413,14 @@ class XtreamSource
   }
 
   @override
-  Future<DateTime?> subscriptionExpiry() async {
+  Future<SubscriptionExpiry> subscriptionExpiry() async {
     final info = await _api({});
     final user = info is Map ? info['user_info'] : null;
     if (user is Map) {
-      final parsed = parseExpiryValue(user['exp_date']);
-      if (parsed != null) return parsed;
+      final parsed = parseSubscriptionExpiryValue(user['exp_date']);
+      if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
     }
-    return parseExpiryValue(playlistExpiryHint);
+    return parseSubscriptionExpiryValue(playlistExpiryHint);
   }
 
   @override

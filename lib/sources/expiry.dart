@@ -1,3 +1,29 @@
+import 'source.dart';
+
+/// Parses both dated and explicitly non-expiring provider values. Empty/null
+/// metadata remains unknown; common lifetime labels are explicit unlimited
+/// values. A numeric zero stays unknown because panels also use it as a
+/// missing-value placeholder (and a saved playlist hint may still have a date).
+SubscriptionExpiry parseSubscriptionExpiryValue(Object? value) {
+  if (value == null) return const SubscriptionExpiry.unknown();
+  final raw = value.toString().trim();
+  if (raw.isEmpty || raw.toLowerCase() == 'null') {
+    return const SubscriptionExpiry.unknown();
+  }
+  final normalised = raw.toLowerCase().replaceAll(RegExp(r'[\s_-]+'), ' ');
+  if (normalised == 'unlimited' ||
+      normalised == 'never' ||
+      normalised == 'lifetime' ||
+      normalised == 'no expiry' ||
+      normalised == 'never expires') {
+    return const SubscriptionExpiry.unlimited();
+  }
+  final date = parseExpiryValue(raw);
+  return date == null
+      ? const SubscriptionExpiry.unknown()
+      : SubscriptionExpiry.dated(date);
+}
+
 /// Parses a subscription-expiry value as emitted by IPTV panels: Xtream sends a
 /// Unix `exp_date` (seconds, possibly null/empty/"0"/"null" for an unlimited
 /// account), Stalker sends ISO-style date strings. Handles Unix timestamps
@@ -18,8 +44,9 @@ DateTime? parseExpiryValue(Object? value) {
   }
 
   // ISO-8601, or `YYYY-MM-DD HH:MM:SS` (normalise the space to `T`).
-  final normalised =
-      raw.contains(' ') && !raw.contains('T') ? raw.replaceFirst(' ', 'T') : raw;
+  final normalised = raw.contains(' ') && !raw.contains('T')
+      ? raw.replaceFirst(' ', 'T')
+      : raw;
   final dt = DateTime.tryParse(normalised);
   if (dt != null) return _sane(dt);
 
@@ -31,21 +58,29 @@ DateTime? parseExpiryValue(Object? value) {
 /// tariff, then falls back to a date embedded in `phone` — a common MAG-panel
 /// quirk where the end date is stuffed into the phone field.
 DateTime? expiryFromStalkerFields(Map<dynamic, dynamic> js) {
+  return subscriptionExpiryFromStalkerFields(js).date;
+}
+
+SubscriptionExpiry subscriptionExpiryFromStalkerFields(
+  Map<dynamic, dynamic> js,
+) {
   for (final key in const [
     'end_date',
     'expire_billing_date',
     'subscription_expire',
     'exp_date',
   ]) {
-    final parsed = parseExpiryValue(js[key]);
-    if (parsed != null) return parsed;
+    final parsed = parseSubscriptionExpiryValue(js[key]);
+    if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
   }
   final tariff = js['tariff'];
   if (tariff is Map) {
-    final parsed = parseExpiryValue(tariff['expire_date']);
-    if (parsed != null) return parsed;
+    final parsed = parseSubscriptionExpiryValue(tariff['expire_date']);
+    if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
   }
-  return extractExpiryFromText(js['phone']);
+  final embedded = extractExpiryFromText(js['phone']);
+  if (embedded != null) return SubscriptionExpiry.dated(embedded);
+  return parseSubscriptionExpiryValue(js['phone']);
 }
 
 /// Extracts a date embedded in free-form text — some MAG portals stuff the
@@ -94,17 +129,23 @@ DateTime? extractExpiryFromText(Object? value) {
 /// aren't consistent. Returns null when the URL is unparseable or no
 /// recognised param carries a usable value.
 DateTime? expiryFromPlaylistUrl(String url) {
+  return subscriptionExpiryFromPlaylistUrl(url).date;
+}
+
+SubscriptionExpiry subscriptionExpiryFromPlaylistUrl(String url) {
   final uri = Uri.tryParse(url);
-  if (uri == null || uri.queryParameters.isEmpty) return null;
+  if (uri == null || uri.queryParameters.isEmpty) {
+    return const SubscriptionExpiry.unknown();
+  }
   // Xtream playlist links are commonly labelled `exp`, while some panels
   // copy the player API field name verbatim as `exp_date`.
   const keys = {'exp', 'exp_date', 'expiry', 'expire', 'expires'};
   for (final entry in uri.queryParameters.entries) {
     if (!keys.contains(entry.key.toLowerCase())) continue;
-    final parsed = parseExpiryValue(entry.value);
-    if (parsed != null) return parsed;
+    final parsed = parseSubscriptionExpiryValue(entry.value);
+    if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
   }
-  return null;
+  return const SubscriptionExpiry.unknown();
 }
 
 /// Guards against epoch/garbage values producing absurd years.

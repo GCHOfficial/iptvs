@@ -17,6 +17,41 @@ import 'package:iptvs/screens/channel_list_screen.dart';
 /// A source that starts SDR and turns out HDR still escalates later, inside
 /// `PlayerScreen._maybeEscalateLinuxNative`.
 void main() {
+  group('Linux native discovery gate', () {
+    test('probes only for an adoptable same-channel HDR preview', () {
+      expect(
+        shouldProbeLinuxNativeForHandoff(
+          isLinux: true,
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          streamLikelyHdr: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('ordinary and SDR opens never pay the native discovery cost', () {
+      for (final values in [
+        (reuse: false, same: true, stream: true, hdr: true),
+        (reuse: true, same: false, stream: true, hdr: true),
+        (reuse: true, same: true, stream: false, hdr: true),
+        (reuse: true, same: true, stream: true, hdr: false),
+      ]) {
+        expect(
+          shouldProbeLinuxNativeForHandoff(
+            isLinux: true,
+            reusePreview: values.reuse,
+            sameChannelPreview: values.same,
+            previewHasStream: values.stream,
+            streamLikelyHdr: values.hdr,
+          ),
+          isFalse,
+        );
+      }
+    });
+  });
+
   group('decideFullscreenHandoff', () {
     test('Android native preview adopts seamlessly', () {
       expect(

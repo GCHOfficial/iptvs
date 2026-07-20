@@ -8,10 +8,10 @@ void main() {
 
     expect(metrics.scale, 0.75);
     expect(metrics.previewHeight, 142.5);
-    expect(metrics.previewWidth, 190);
-    expect(metrics.categoryPaneWidth, 190);
-    expect(metrics.channelRowExtent(false), 64);
-    expect(metrics.channelRowExtent(true), 108);
+    expect(metrics.previewWidth, 187.5);
+    expect(metrics.categoryPaneWidth, 180);
+    expect(metrics.channelRowExtent(false), 56);
+    expect(metrics.channelRowExtent(true), 88);
     expect(metrics.categoryRowExtent, 40);
   });
 
@@ -33,9 +33,9 @@ void main() {
       compactWideLayout: true,
     );
 
-    expect(metrics.scale, 0.75);
-    expect(metrics.previewHeight, 142.5);
-    expect(metrics.channelRowExtent(false), 64);
+    expect(metrics.scale, 0.625);
+    expect(metrics.previewHeight, 120);
+    expect(metrics.channelRowExtent(false), 56);
   });
 
   test('phone layout is not density-scaled', () {

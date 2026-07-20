@@ -199,17 +199,18 @@ void main() {
     expect(find.text('Channel 1'), findsOneWidget);
 
     // Walk down far enough that the top of the list is scrolled away.
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
+    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
     expect(
-      find.text('Channel 1'),
+      find.text('Channel 1').hitTestable(),
       findsNothing,
       reason: 'the cursor drove the list past its first rows',
     );
     expect(focusLabel(), 'live.channels');
 
-    // Two more presses take the cursor past the last row (index 11) — it wraps
+    // One more press takes the cursor past the last row (index 11) — it wraps
     // back to the top. This is the one infinite motion in the tab.
-    await pressTimes(tester, LogicalKeyboardKey.arrowDown, 2);
+    await press(tester, LogicalKeyboardKey.arrowDown);
+    await settle(tester);
     expect(
       find.text('Channel 1'),
       findsOneWidget,
@@ -431,8 +432,8 @@ void main() {
       expect(focusLabel(), 'live.channels');
 
       // Walk the cursor down the list so the top of the list scrolls away.
-      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
-      expect(find.text('Channel 1'), findsNothing);
+      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
+      expect(find.text('Channel 1').hitTestable(), findsNothing);
 
       // Rung 1: Back returns the cursor to the first channel (still in the list).
       await back(tester);
@@ -761,10 +762,10 @@ void main() {
       await settle(tester);
       expect(focusLabel(), 'live.channels');
 
-      // Walk the cursor down the list, then onto row 10's star, so both peels
+      // Walk the cursor down the list, then onto row 11's star, so both peels
       // are observable (the row cursor must survive the first Back).
-      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 10);
-      expect(find.text('Channel 1'), findsNothing);
+      await pressTimes(tester, LogicalKeyboardKey.arrowDown, 11);
+      expect(find.text('Channel 1').hitTestable(), findsNothing);
       await press(tester, LogicalKeyboardKey.arrowRight);
       await settle(tester);
 
@@ -773,7 +774,7 @@ void main() {
       await back(tester);
       expect(focusLabel(), 'live.channels');
       expect(
-        find.text('Channel 1'),
+        find.text('Channel 1').hitTestable(),
         findsNothing,
         reason: 'peeling the star column must not reset the row cursor',
       );
@@ -1025,7 +1026,8 @@ class _EpgSource implements Source {
       throw UnsupportedError('not playable');
 
   @override
-  Future<DateTime?> subscriptionExpiry() async => null;
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      const SubscriptionExpiry.unknown();
 
   @override
   Future<void> dispose() async {}
@@ -1111,7 +1113,8 @@ class _ManySource implements Source {
       throw UnsupportedError('not playable');
 
   @override
-  Future<DateTime?> subscriptionExpiry() async => null;
+  Future<SubscriptionExpiry> subscriptionExpiry() async =>
+      const SubscriptionExpiry.unknown();
 
   @override
   Future<void> dispose() async {}

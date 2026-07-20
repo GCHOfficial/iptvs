@@ -73,10 +73,12 @@ first result.
 
 Wide-layout geometry is also platform- and height-aware. Android TV images can expose either a
 960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot identify the
-required density. Android wide layouts use the compact 0.75 scale; other platforms scale from
-0.75–1.0 only when their viewport is short. Minimum row and D-pad target sizes are preserved and
-`MediaQuery` text scaling is not overridden. Phone portrait layouts retain the normal scale. The
-960×540 and 1920×1080 metric regressions pin both Android TV viewport forms.
+required density. Android wide layouts use a compact 0.625 geometry scale, with 56/88 px live
+rows, a 120 px preview, and movie/series grids sized from a bounded ~180 px poster target (5–10
+columns). Other platforms scale from 0.75–1.0 only when their viewport is short. Category rows
+retain a 40 px D-pad target and `MediaQuery` text scaling is not overridden. Phone portrait
+layouts retain the normal scale. Metric regressions pin both Android TV viewport forms and the
+poster column counts at 960, 1280, and 1920 px.
 
 - **Movement rules (deliberately asymmetric).** **Down wraps** at the end of the channel list and
   of the category list — the *only* infinite motion in the tab. **Up never wraps**: at the first

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/sources/m3u_source.dart';
+import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
 void main() {
@@ -162,7 +163,7 @@ http://stream.invalid/two
         sourceId: 'm3u-test',
         playlistUrl: 'http://host/get.php?username=u&password=p&exp=2026-09-01',
       );
-      expect(await source.subscriptionExpiry(), DateTime(2026, 9, 1));
+      expect((await source.subscriptionExpiry()).date, DateTime(2026, 9, 1));
     });
 
     test(
@@ -172,7 +173,10 @@ http://stream.invalid/two
           sourceId: 'm3u-test',
           playlistUrl: 'http://host/get.php?username=u&password=p',
         );
-        expect(await source.subscriptionExpiry(), isNull);
+        expect(
+          (await source.subscriptionExpiry()).kind,
+          SubscriptionExpiryKind.unknown,
+        );
       },
     );
   });

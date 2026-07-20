@@ -96,17 +96,17 @@ class LiveLayoutMetrics {
     final isWide = size.width >= kWideLayoutMinWidth;
     final scale = isWide
         ? compactWideLayout
-              ? 0.75
+              ? 0.625
               : (size.height / 720).clamp(0.75, 1.0)
         : 1.0;
     return LiveLayoutMetrics._(
       scale: scale,
-      previewHeight: (190 * scale).clamp(140, 190),
-      previewWidth: (250 * scale).clamp(190, 250),
-      categoryPaneWidth: (240 * scale).clamp(190, 240),
-      channelRowExtentPlain: (kChannelRowExtentPlain * scale).clamp(64, 72),
+      previewHeight: (190 * scale).clamp(120, 190),
+      previewWidth: (250 * scale).clamp(170, 250),
+      categoryPaneWidth: (240 * scale).clamp(180, 240),
+      channelRowExtentPlain: (kChannelRowExtentPlain * scale).clamp(56, 72),
       channelRowExtentWithEpg: (kChannelRowExtentWithEpg * scale).clamp(
-        108,
+        88,
         112,
       ),
       categoryRowExtent: (kCategoryRowExtent * scale).clamp(40, 44),
@@ -807,7 +807,7 @@ class _LivePreviewPanel extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
+                      SizedBox(height: compact ? 2 : 8),
                       if (current != null)
                         Text(
                           '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
@@ -1357,6 +1357,7 @@ class _ChannelTile extends StatelessWidget {
       MediaQuery.sizeOf(context),
       compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
     );
+    final dense = metrics.scale < 0.7;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1473,7 +1474,11 @@ class _ChannelTile extends StatelessWidget {
                                 ),
                               ],
                             ),
-                            if (upcoming != null)
+                            // The 88 px Android-TV row keeps the current show,
+                            // range and progress visible, but moves "Next" to
+                            // the preview panel/semantics instead of overflowing
+                            // the fixed selection-model extent.
+                            if (upcoming != null && !dense)
                               Padding(
                                 padding: const EdgeInsets.only(top: 4),
                                 child: Text(
@@ -1494,7 +1499,8 @@ class _ChannelTile extends StatelessWidget {
                     // Always-visible favorite star: a touch target on every row,
                     // and the D-pad's intra-row favorite column when
                     // [favoriteCursor] holds the cursor. Sized well inside the
-                    // fixed itemExtents (72 / 112), so the row never overflows.
+                    // fixed itemExtents (including compact 56 / 88), so the row
+                    // never overflows.
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: onToggleFavorite,
