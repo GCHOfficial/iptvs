@@ -107,8 +107,9 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   implement this one interface and change nothing else. Read the doc comments here first.
 - **`lib/sources/*_source.dart`** — provider implementations: `stalker_source.dart` (MAG portal,
   the largest/most intricate), `xtream_source.dart`, `m3u_source.dart`, `demo_source.dart` (used
-  by tests). `Source.subscriptionExpiry()` feeds the sources screen's expiry badge; shared parsing
-  in `expiry.dart`. Stalker tries `account_info`/`get_main_info` first (the canonical action,
+  by tests). `Source.subscriptionExpiry()` feeds the sources screen's expiry badge as an explicit
+  dated/unlimited/unknown value (never collapse unlimited into unknown); shared parsing lives in
+  `expiry.dart`. Stalker tries `account_info`/`get_main_info` first (the canonical action,
   wrapped so a portal that doesn't support it falls through rather than aborting the chain), then
   `get_profile` — MAG portals stuff the end date into odd fields on either, classically `phone`.
   M3U playlists carry no expiry metadata themselves, so `expiryFromPlaylistUrl` best-effort-reads

@@ -10,15 +10,20 @@ void main() {
         username: 'u',
         password: 'p',
         playlistExpiryHint: '2026-09-01T00:00:00.000',
-        debugApi: (_) async => {'user_info': {'exp_date': '0'}},
+        debugApi: (_) async => {
+          'user_info': {'exp_date': '0'},
+        },
       );
-      expect(await source.subscriptionExpiry(), DateTime(2026, 9, 1));
+      expect((await source.subscriptionExpiry()).date, DateTime(2026, 9, 1));
       await source.dispose();
     });
 
     test('extracts creds from get.php query params', () {
-      final c = xtreamCredentialsFromUrl(Uri.parse(
-          'http://panel.example.com:8080/get.php?username=u1&password=p1&type=m3u_plus'));
+      final c = xtreamCredentialsFromUrl(
+        Uri.parse(
+          'http://panel.example.com:8080/get.php?username=u1&password=p1&type=m3u_plus',
+        ),
+      );
       expect(c, isNotNull);
       expect(c!.host, 'http://panel.example.com:8080');
       expect(c.username, 'u1');
@@ -27,7 +32,8 @@ void main() {
 
     test('extracts creds from userInfo form', () {
       final c = xtreamCredentialsFromUrl(
-          Uri.parse('http://u2:p2@host.tv/get.php'));
+        Uri.parse('http://u2:p2@host.tv/get.php'),
+      );
       expect(c, isNotNull);
       expect(c!.host, 'http://host.tv');
       expect(c.username, 'u2');
@@ -35,13 +41,17 @@ void main() {
     });
 
     test('returns null without credentials', () {
-      expect(xtreamCredentialsFromUrl(Uri.parse('http://host.tv/list.m3u')),
-          isNull);
+      expect(
+        xtreamCredentialsFromUrl(Uri.parse('http://host.tv/list.m3u')),
+        isNull,
+      );
     });
 
     test('returns null for empty host', () {
-      expect(xtreamCredentialsFromUrl(Uri.parse('?username=u&password=p')),
-          isNull);
+      expect(
+        xtreamCredentialsFromUrl(Uri.parse('?username=u&password=p')),
+        isNull,
+      );
     });
   });
 }

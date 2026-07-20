@@ -175,14 +175,15 @@ for a Wayland HDR stream per the table above. There are **two decision points**:
 - *Ahead of time, from a same-channel preview.* `channel_list_screen.dart`'s
   `_openLivePlayer` reads the preview engine's current colorimetry
   (`_preview.player.state.videoParams`, guarded on `hasEmbeddedPlayer`) through
-  the pure `isHdrColorimetry` helper and passes it, plus the Wayland-gated
-  `LinuxNativeSession.nativeLikelyAvailable()`, into `decideFullscreenHandoff`
-  (`FullscreenHandoff`, pinned by `test/fullscreen_handoff_test.dart`). The
-  preview state feeding the decision is **read exactly once, after every
-  preceding `await`**, and every downstream boolean (`existingPlayer` gating,
+  the pure `isHdrColorimetry` helper. Native availability discovery can spawn
+  an external mpv version check on its first call, so
+  `shouldProbeLinuxNativeForHandoff` permits it only for an adoptable
+  same-channel HDR preview; SDR previews, direct opens, zaps, and EPG-grid
+  opens never pay that pre-route cost. When a probe is needed, preview state is
+  read again after the await before the final `decideFullscreenHandoff`
+  decision. Every downstream boolean (`existingPlayer` gating,
   pause/stop/restore-mute behavior) derives from the returned enum via the
-  `FullscreenHandoffDerived` getters — never from a re-test of the raw inputs,
-  which once desynced from the decision across an await. Only
+  `FullscreenHandoffDerived` getters — never from stale pre-await values. Only
   **Wayland + HDR** yields `FullscreenHandoff.stopResolveFresh`; SDR and X11
   yield `adoptEmbedded` (seamless media_kit adoption — the preview `Player` is
   handed to `PlayerScreen` and kept playing, one provider connection). For
@@ -391,6 +392,12 @@ The Android handoff is made visually seamless twice over: `HdrPlayerTheme` sets
 black frame), and the adopted case pushes `PlayerScreen` as a **non-opaque zero-transition route**
 that stays transparent (`_transparentHandoff`) so the channel list — with the preview
 TextureView's frozen last frame — remains visible until the Activity's first frame.
+
+Non-adopted fullscreen routes also use an opaque zero-duration transition. The player
+starts resolving/opening as soon as the route is installed instead of spending the
+default Material transition (~300 ms) behind an already-loading video surface; this
+keeps preview-to-fullscreen and direct opens consistent across Android, Windows, Linux,
+and other embedded builds.
 
 **Only a *seamless adopted* handoff leaves the preview playing.** Any *other* fullscreen open
 launches its own pipeline (a fresh native Activity / media_kit / Windows surface), so a preview

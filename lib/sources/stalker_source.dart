@@ -740,7 +740,7 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
   }
 
   @override
-  Future<DateTime?> subscriptionExpiry() async {
+  Future<SubscriptionExpiry> subscriptionExpiry() async {
     // account_info/get_main_info is the canonical action, so it's tried
     // first — but not every portal supports it, and a failure here must fall
     // through to the profile-based fallbacks below rather than aborting the
@@ -753,8 +753,8 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
       });
       final js = r['js'];
       if (js is Map) {
-        final parsed = expiryFromStalkerFields(js);
-        if (parsed != null) return parsed;
+        final parsed = subscriptionExpiryFromStalkerFields(js);
+        if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
       }
     } on Exception catch (e) {
       _debug('account_info:get_main_info unavailable: $e');
@@ -763,11 +763,11 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
     // STB profile.
     try {
       final profile = await _getProfile();
-      if (profile is Map) return expiryFromStalkerFields(profile);
+      if (profile is Map) return subscriptionExpiryFromStalkerFields(profile);
     } on Exception {
       // Best-effort fallback — the badge shows "Expiry unknown".
     }
-    return null;
+    return const SubscriptionExpiry.unknown();
   }
 
   @override

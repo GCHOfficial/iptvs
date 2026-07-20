@@ -347,7 +347,7 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
-  DateTime? _expiry;
+  SubscriptionExpiry _expiry = const SubscriptionExpiry.unknown();
   CatchupCapability _catchup = CatchupCapability.unsupported;
   SourceCapabilities _capabilities = const SourceCapabilities(
     epg: CapabilityAvailability.unknown,
@@ -640,7 +640,7 @@ class _SourceCardState extends State<_SourceCard> {
 class _ExpiryBadge extends StatelessWidget {
   final bool loading;
   final bool failed;
-  final DateTime? expiry;
+  final SubscriptionExpiry expiry;
   const _ExpiryBadge({
     required this.loading,
     required this.failed,
@@ -662,7 +662,10 @@ class _ExpiryBadge extends StatelessWidget {
     if (failed) {
       return _chip(Icons.error_outline, 'Expiry unavailable', AppColors.textLo);
     }
-    final e = expiry;
+    if (expiry.isUnlimited) {
+      return _chip(Icons.all_inclusive_rounded, 'Unlimited', AppColors.textLo);
+    }
+    final e = expiry.date;
     if (e == null) {
       return _chip(Icons.help_outline, 'Expiry unknown', AppColors.textLo);
     }
