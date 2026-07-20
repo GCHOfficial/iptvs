@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=IPTVS Player
+Comment=Cross-platform IPTV player
+Exec=iptvs
+Icon=com.gchofficial.iptvs
+Categories=AudioVideo;Video;Player;
+Terminal=false
+StartupWMClass=com.gchofficial.iptvs
+Keywords=IPTV;TV;Video;Player;

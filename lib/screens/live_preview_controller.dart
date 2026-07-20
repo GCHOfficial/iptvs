@@ -11,6 +11,7 @@ import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../player/channel_owner.dart';
 import '../player/mpv_options.dart';
+import '../player/player_screen.dart' show kReconnectStallMs, reconnectMinGapMs;
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
 
@@ -87,13 +88,12 @@ class LivePreviewController extends ChangeNotifier {
   // setProperty). On a weak TV box the default `auto-safe` silently drops to
   // software decode, playing 4K HEVC in slow-motion at ~100% CPU. Android-only;
   // other platforms keep media_kit's default.
-  VideoController get controller =>
-      _controller ??= VideoController(
-        player,
-        configuration: Platform.isAndroid
-            ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
-            : const VideoControllerConfiguration(),
-      );
+  VideoController get controller => _controller ??= VideoController(
+    player,
+    configuration: Platform.isAndroid
+        ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
+        : const VideoControllerConfiguration(),
+  );
 
   StreamSubscription<VideoParams>? _hwdecProbe;
   bool _loggedHwdec = false;
@@ -124,14 +124,67 @@ class LivePreviewController extends ChangeNotifier {
         unawaited(_logPreviewHwdec(platform));
       });
     }
+    // media_kit maps mpv's `eof-reached` to `completed: true` — a clean
+    // server-side EOF, distinct from a player error. Nothing else here
+    // recovers from it (the fullscreen watchdogs are per-PlayerScreen, not
+    // preview-owned), so the preview would otherwise sit dead until an
+    // unrelated selection change. See [_handleCompleted].
+    _completedSub = player.stream.completed.listen(_handleCompleted);
     return player;
+  }
+
+  /// Recovers from a clean EOF on the embedded preview player by re-starting
+  /// the same channel (never a different one — the preview only ever plays
+  /// what the user explicitly chose). Re-resolves rather than reopening the
+  /// stale URL: provider tokens (Stalker `create_link`) are single-use.
+  /// Rate-limited and capped by the shared reconnect min-gap policy so a
+  /// stream stuck bouncing at EOF doesn't loop forever.
+  void _handleCompleted(bool completed) {
+    if (!completed || _disposed || nativeActive || _pausedByApp) return;
+    final channel = _activeChannel;
+    // Not (or no longer) previewing this channel — including mid-`start()`
+    // resolves, where `loading` is true — so there's nothing to recover.
+    if (channel == null || channelId != channel.id || loading) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // A completed landing well after the last restart is a fresh incident
+    // (the restart held for a full stall window), not a continuation of a
+    // stuck loop — forget the earlier attempts.
+    if (_lastEofRestartMs != 0 && now - _lastEofRestartMs >= kReconnectStallMs) {
+      _eofRestartAttempts = 0;
+    }
+    if (_eofRestartAttempts >= _maxConsecutiveEofRestarts) {
+      DiagnosticsLog.instance.add(
+        'library',
+        'preview eof giving up channel=${channel.name} '
+            'attempts=$_eofRestartAttempts',
+      );
+      _set(() {
+        loading = false;
+        error = 'Stream ended';
+      });
+      return;
+    }
+    final minGap = reconnectMinGapMs(
+      priorAttempts: _eofRestartAttempts,
+      force: false,
+    );
+    if (_lastEofRestartMs != 0 && now - _lastEofRestartMs < minGap) return;
+    _eofRestartAttempts++;
+    _lastEofRestartMs = now;
+    DiagnosticsLog.instance.add(
+      'library',
+      'preview eof restart channel=${channel.name} '
+          'attempt=$_eofRestartAttempts',
+    );
+    unawaited(start(channel, muted: muted));
   }
 
   Future<void> _logPreviewHwdec(NativePlayer platform) async {
     if (_loggedHwdec) return;
     try {
       final hwdec = (await platform.getProperty('hwdec-current')).trim();
-      if (hwdec.isEmpty || hwdec == 'no') return; // decoder not up yet / software
+      // Decoder not up yet, or a software fallback — nothing to log.
+      if (hwdec.isEmpty || hwdec == 'no') return;
       _loggedHwdec = true;
       unawaited(_hwdecProbe?.cancel());
       _hwdecProbe = null;
@@ -149,6 +202,25 @@ class LivePreviewController extends ChangeNotifier {
 
   int _requestId = 0;
   bool _disposed = false;
+
+  /// The channel [start] most recently targeted — kept so a clean server-side
+  /// EOF can restart the *same* channel (never any other; "preview is
+  /// deliberate and locked"). Cleared by [stop]/[discardPlayer] so an
+  /// app-initiated stop never triggers a restart.
+  Channel? _activeChannel;
+
+  /// True while the app (not a genuine EOF) has paused the preview around a
+  /// fullscreen handoff — an EOF landing in this window is ignored.
+  bool _pausedByApp = false;
+
+  /// Consecutive automatic EOF-restart attempts for the current incident, and
+  /// when the last one fired — caps a stuck stream from looping forever and
+  /// resets once a restart holds for a full stall window (a fresh incident).
+  int _eofRestartAttempts = 0;
+  int _lastEofRestartMs = 0;
+  static const int _maxConsecutiveEofRestarts = 3;
+
+  StreamSubscription<bool>? _completedSub;
 
   void _set(VoidCallback fn) {
     if (_disposed) return;
@@ -168,6 +240,14 @@ class LivePreviewController extends ChangeNotifier {
     // change). The request id makes the stale attempt's completions no-ops.
     final requestId = ++_requestId;
     this.muted = muted;
+    if (_activeChannel?.id != channel.id) {
+      // A genuinely new selection, not an EOF-triggered restart of the same
+      // channel — forget any earlier incident's restart bookkeeping.
+      _eofRestartAttempts = 0;
+      _lastEofRestartMs = 0;
+    }
+    _activeChannel = channel;
+    _pausedByApp = false;
     _set(() {
       channelId = channel.id;
       loading = true;
@@ -289,7 +369,9 @@ class LivePreviewController extends ChangeNotifier {
         });
       case 'error':
         // Native engine error text can carry the stream URL — scrub it.
-        final message = redactText((args?['message'] as String?) ?? 'stream error');
+        final message = redactText(
+          (args?['message'] as String?) ?? 'stream error',
+        );
         _set(() {
           loading = false;
           error = message;
@@ -301,6 +383,10 @@ class LivePreviewController extends ChangeNotifier {
   /// Stop the preview player. [clearSelection] also drops the previewing
   /// channel (used when leaving the live view / closing the phone sheet).
   Future<void> stop({bool clearSelection = false}) async {
+    // App-initiated stop — never auto-restart on the EOF this may itself
+    // trigger (media_kit's `stop()` reports `completed: false`, but clear the
+    // target anyway so a straggling event can't act on it).
+    _activeChannel = null;
     if (nativeActive) {
       nativeActive = false;
       await _stopNative();
@@ -320,6 +406,7 @@ class LivePreviewController extends ChangeNotifier {
   /// Pause/resume the preview player around fullscreen playback (no-ops if the
   /// player was never created).
   Future<void> pause() async {
+    _pausedByApp = true;
     if (nativeActive) {
       try {
         await _nativeChannel.invokeMethod('pause');
@@ -330,6 +417,7 @@ class LivePreviewController extends ChangeNotifier {
   }
 
   Future<void> play() async {
+    _pausedByApp = false;
     if (nativeActive) {
       try {
         await _nativeChannel.invokeMethod('play');
@@ -368,6 +456,9 @@ class LivePreviewController extends ChangeNotifier {
     unawaited(_hwdecProbe?.cancel());
     _hwdecProbe = null;
     _loggedHwdec = false;
+    unawaited(_completedSub?.cancel());
+    _completedSub = null;
+    _activeChannel = null;
     _player = null;
     _controller = null;
     channelId = null;
@@ -393,6 +484,8 @@ class LivePreviewController extends ChangeNotifier {
       unawaited(_stopNative());
     }
     unawaited(_hwdecProbe?.cancel());
+    unawaited(_completedSub?.cancel());
+    _activeChannel = null;
     final player = _player;
     if (player != null) {
       unawaited(

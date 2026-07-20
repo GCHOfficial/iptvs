@@ -7,13 +7,23 @@ import 'package:media_kit/media_kit.dart';
 /// network timeout, and transparent reconnect on transient HTTP drops. Shared by
 /// the fullscreen player and the live preview player so both get the same
 /// resilience.
+///
+/// `reconnect_at_eof` must stay out of `stream-lavf-o`: an HLS live stream's
+/// manifest is a *finite* HTTP resource, and with that flag ffmpeg (verified on
+/// FFmpeg 8 / mpv 0.41) treats its EOF as an error and reconnects forever, so
+/// the demuxer probe never completes and the stream never opens at all. A clean
+/// server-side end-of-stream on an infinite TS instead surfaces as mpv
+/// `eof-reached`, which media_kit maps to `completed=true` *and*
+/// `buffering=false` — so the buffering-gated stall watchdog can't see it. The
+/// embedded/Windows path therefore treats a *live* `completed` as a drop and
+/// reconnects (the `stream.completed` listener in `player_screen.dart`,
+/// `shouldReconnectOnCompleted`); the Linux-native path gets the equivalent
+/// `end-file` eof/error drop over IPC (`LinuxNativePlaybackSignal.dropped`).
 const Map<String, String> kLiveMpvOptions = {
   'cache-on-disk': 'no',
   'demuxer-max-back-bytes': '0',
   'network-timeout': '15',
-  'stream-lavf-o':
-      'reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,'
-      'reconnect_delay_max=5',
+  'stream-lavf-o': 'reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
   'demuxer-lavf-analyzeduration': '3',
   'demuxer-lavf-probesize': '10000000',
   'demuxer-lavf-o':

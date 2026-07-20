@@ -1,7 +1,8 @@
 # In-app updates — full detail
 
 The app self-updates from its own **GitHub Releases** (`GCHOfficial/iptvs`; the `release.yml`
-pipeline attaches `iptvs-<ver>-android.apk`, `iptvs-<ver>-windows-x64.zip`, and a detached
+pipeline attaches `iptvs-<ver>-android.apk`, `iptvs-<ver>-windows-x64.zip`,
+`iptvs-<ver>-linux-x86_64.AppImage`, and a detached
 Ed25519-signed manifest to a `v<ver>` tag).
 The compact rules live in CLAUDE.md; read this before changing the update flow, the release
 pipeline, or the update dialog.
@@ -74,7 +75,11 @@ the final install step is the only platform-specific part.
   staged directory into place, and restores/relaunches the backup when the replacement cannot
   start. The app then `exit(0)`s so `iptvs.exe` unlocks. This can only be executed end to end
   against a **packaged Release folder** on Windows, not `flutter run`; it requires a user-writable,
-  unelevated install directory.
+unelevated install directory. **Linux** copies the verified AppImage beside the
+running `APPIMAGE`, then a detached POSIX helper waits for our PID, atomically
+swaps the file, relaunches it, and restores the backup if startup fails. Linux
+in-app updates are available only from a writable AppImage; `flutter run` and
+system-installed binaries fall back to the release page.
 - **`lib/screens/update_flow.dart`** — `runUpdateCheck(context, manual:)` drives prompt →
   download → install (the "Update available" dialog with **Skip this version / Later / Update**,
   and the progress dialog). Entry points: a **manual** "Check for updates" `FocusableCard` on

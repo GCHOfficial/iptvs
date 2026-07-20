@@ -22,7 +22,7 @@ work is considered done.
 
 ## What this is
 
-`iptvs` is a cross-platform Flutter IPTV player (Windows, Android incl. Android TV, plus the
+`iptvs` is a cross-platform Flutter IPTV player (Windows, Linux AppImage, Android incl. Android TV, plus the
 usual Flutter targets). It connects to user-configured IPTV providers, caches their
 channel/VOD/EPG data locally, enriches movie/series metadata from public APIs, and plays streams
 with libmpv (via `media_kit`) so it handles HEVC / AC-3 / MPEG-TS that an HTML video element
@@ -48,7 +48,11 @@ committed for non-distributable debug builds. Release builds fail closed unless 
 environment variables are present, and the release workflow verifies the resulting certificate;
 see `docs/android-signing.md` before touching package identity or signing.
 Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
-exact platform filename, size, and SHA-256; see `docs/updates.md` before changing release assets.
+exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
+running AppImage via a detached helper. See `docs/updates.md` before changing release assets.
+The Linux AppImage does **not** bundle mpv (CI installs `mpv`/`libmpv-dev` only for the embedded
+fallback build/link) — native Linux playback runtime-discovers and version-gates the host's mpv
+(>= 0.40 required); see `docs/player.md`.
 
 ## Orchestration workflow
 
@@ -289,7 +293,13 @@ best-effort dev-era repair paths outside the claim.
 `player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with native-HDR paths on
 Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when ExoPlayer can't
 decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR) and Windows (native
-HWND surface, mpv d3d11). Other platforms: embedded `media_kit_video`, HDR tone-mapped to SDR.
+HWND surface, mpv d3d11). Linux: embedded `media_kit_video`/libmpv (with the shared Flutter
+overlay) is the default fullscreen path, and a host-discovered (not bundled), version-gated
+(>= 0.40, 0.41 recommended) native mpv window with an IPTVS-specific GPU/OSD Lua overlay is used
+**only for an HDR stream on Wayland** (X11 has no HDR output path, and SDR gains nothing from the
+non-adoptable native process) — same-channel-preview HDR is decided ahead in `_openLivePlayer`,
+otherwise `PlayerScreen` escalates embedded→native once on PQ/HLG detection. Other platforms:
+embedded `media_kit_video`, HDR tone-mapped to SDR.
 **Read docs/player.md before touching playback, preview, or overlay code.** Non-negotiables:
 
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
@@ -309,15 +319,25 @@ HWND surface, mpv d3d11). Other platforms: embedded `media_kit_video`, HDR tone-
   **favorite star** in both overlays; the native one round-trips state via Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
-  keeps the manual error/Retry overlay. Two independent watchdogs (Kotlin for Android native,
-  Dart for Windows/embedded).
+  keeps the manual error/Retry overlay. Three independent watchdogs (Kotlin for Android native;
+  Dart for Windows/embedded; Dart-over-IPC for Linux native mpv), sharing one timing policy
+  (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy`). A **clean server-side EOF** maps
+  to media_kit `completed=true`/`buffering=false` — invisible to the buffering-gated stall poll —
+  so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
+  legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
+  policy (`reconnect_at_eof` must stay out of `kLiveMpvOptions` — it hangs HLS on FFmpeg 8). Live
+  reloads **re-resolve** via
+  `PlayerScreen.resolveAgain` when wired (Stalker `play_token`s are single-use — a stale URL can
+  never reconnect after a portal-side kill).
 - Playback headers go to both `Media(httpHeaders:)` and mpv `user-agent`/`referrer` properties;
-  all playback logs go through `_logPlayback` (redacted).
+  all playback logs go through `_logPlayback` (redacted). mpv's `http-header-fields` is a
+  comma-parsed list — never naively join it: Linux sends a native JSON array over IPC, Android
+  encodes items with mpv `%n%` raw-length quoting (`MpvOptionEncoding`).
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in
   the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
-  channel-owner claims), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
+  channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
   `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays` — all release-inert
   (`kDebugMode`/`BuildConfig.DEBUG`/`#ifndef NDEBUG`) and merged by `ResourceCounters.snapshot()`
   via a `debugCounters` method on the existing HDR channel. Counters must return to zero after an

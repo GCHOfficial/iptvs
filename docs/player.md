@@ -129,6 +129,223 @@ into a compact frameless always-on-top window docked bottom-right — draggable 
 (manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,
 mutually exclusive with fullscreen, restoring the saved placement on exit/`prepareExit`.
 
+## Linux
+
+**The embedded `media_kit`/libmpv surface is the default Linux fullscreen path;
+the standalone native mpv window is used only for HDR streams on Wayland.**
+This mirrors Android's "default engine, escalate only when the stream needs it".
+The native path (`LinuxNativeSession`, a standalone mpv process found on the
+host, not bundled — see "Host mpv discovery + version gate" below — over a
+private Unix JSON-IPC socket, `vo=gpu-next` + compositor colour-space
+signalling) is a *separate OS process*: it can never adopt a running preview
+engine, so every entry/exit costs a fresh Stalker `create_link` + stream
+reopen (a visible black beat). That cost only earns itself for **real HDR
+output**, which on Linux exists **only on Wayland** — X11 has no HDR output
+path at all (X11 playback is always tone-mapped SDR), and for SDR the native
+window renders nothing the seamless embedded path can't. So:
+
+| Backend | Stream | Fullscreen path |
+| --- | --- | --- |
+| X11 | any | **embedded** (native buys nothing — no HDR output) |
+| Wayland | SDR | **embedded**, seamless engine adoption (both directions instant, one provider connection) |
+| Wayland | HDR (source gamma PQ/HLG/DV) | **native mpv** — the fresh-resolve handoff is the honest cost of real HDR passthrough |
+
+The policy predicate is `LinuxNativeSession.nativeLikelyAvailable()` (cached),
+now **Wayland-gated**: it runs the executable/overlay-script detection and mpv
+version gate *and* requires a Wayland session, so it returns false on X11.
+`LinuxNativeSession.start()` itself is left backend-agnostic (it still launches
+on X11 if called explicitly) — the Wayland restriction is a *policy* choice in
+`nativeLikelyAvailable`, not a capability of the session.
+
+When the native path launches it stays pinned to `x11egl` on X11 (the flag is
+irrelevant there now, since the policy never uses X11 native — but `start()`
+keeps it for the force-native case); on Wayland the `--gpu-context` flag is
+omitted so mpv chooses its own context (0.41+ prefers the Vulkan `waylandvk`
+context over EGL — a more-tested HDR path than forcing one).
+`linux/mpv/iptvs_overlay.lua` renders the app-specific controls inside mpv's
+own GPU/OSD surface, so the title, EPG, badges, favourite, seek/live controls,
+audio/subtitle/speed/aspect actions, stream information and fullscreen behavior
+remain available without placing a second compositor window above HDR video.
+
+**Preview→fullscreen handoff (HDR-escalation only).** Because the native mpv
+process can never adopt a running preview engine (unlike Android's shared
+ExoPlayer engine or the Windows/embedded media_kit hot-swap), it's chosen only
+for a Wayland HDR stream per the table above. There are **two decision points**:
+
+- *Ahead of time, from a same-channel preview.* `channel_list_screen.dart`'s
+  `_openLivePlayer` reads the preview engine's current colorimetry
+  (`_preview.player.state.videoParams`, guarded on `hasEmbeddedPlayer`) through
+  the pure `isHdrColorimetry` helper and passes it, plus the Wayland-gated
+  `LinuxNativeSession.nativeLikelyAvailable()`, into `decideFullscreenHandoff`
+  (`FullscreenHandoff`, pinned by `test/fullscreen_handoff_test.dart`). The
+  preview state feeding the decision is **read exactly once, after every
+  preceding `await`**, and every downstream boolean (`existingPlayer` gating,
+  pause/stop/restore-mute behavior) derives from the returned enum via the
+  `FullscreenHandoffDerived` getters — never from a re-test of the raw inputs,
+  which once desynced from the decision across an await. Only
+  **Wayland + HDR** yields `FullscreenHandoff.stopResolveFresh`; SDR and X11
+  yield `adoptEmbedded` (seamless media_kit adoption — the preview `Player` is
+  handed to `PlayerScreen` and kept playing, one provider connection). For
+  `stopResolveFresh` the preview is **stopped outright, not paused** (a paused
+  media_kit engine still holds its provider connection open, and a real Stalker
+  portal kills one side of the resulting double connection, with preview and
+  native fighting in a `create_link` storm) and the channel is **re-resolved
+  fresh** (the preview's already-resolved stream carries a spent single-use
+  Stalker `play_token`). `PlayerScreen` is then pushed with **no adopted
+  engine** (`existingPlayer`/`existingController` null) and `preferLinuxNative:
+  true`, so `_open` goes straight to `_startLinuxNativeSession` with the fresh
+  stream. On return — route didn't hot-swap, screen still mounted — the preview
+  is restarted on the same channel (`_preview.start(channel, muted:
+  previewWasMuted)`); the `adoptEmbedded` return instead resumes the still-live
+  adopted engine (`_preview.play()`), and a different-channel stop stays
+  not-restarted.
+
+- *At play time, with no preview knowledge* (zap, EPG-grid play, VOD, narrow
+  layout — anything that reaches `PlayerScreen` with `preferLinuxNative: false`).
+  These **open embedded first**, then escalate **once** if the embedded player
+  reports a PQ/HLG source on Wayland: `PlayerScreen._maybeEscalateLinuxNative`
+  (off the `videoParams` stream) re-resolves fresh (`resolveAgain`, falling back
+  to `widget.stream`), stops the embedded playback to free the provider
+  connection, and launches the same `_startLinuxNativeSession`. For VOD/catch-up
+  the embedded player's **current position is captured before the stop** and
+  passed as the native session's resume point (`resumeOverride`), so escalation
+  continues where the embedded phase reached instead of rewinding to the
+  original `resumeFrom`. One-shot
+  (`_linuxEscalated`, re-entry-guarded by `_linuxEscalating`): never
+  re-escalates, never de-escalates; if the (predicted-available) native launch
+  fails it reopens the fresh stream embedded (honest tone-mapped SDR). X11 /
+  below-the-version-floor never reach here — `nativeLikelyAvailable()` is false.
+
+Either way the native launch runs through the single reusable
+`_startLinuxNativeSession(stream)` (control/playback signal wiring, exit
+handler, resource counter `incLinuxNativeSessions`, colorimetry probe). The
+spawn + IPC connect can take several seconds, so after its `await` the method
+re-checks `mounted`/`_linuxNativeClosing`: a route popped mid-launch disposes
+the just-started session immediately instead of adopting it (no orphaned
+fullscreen mpv, and the counter — never incremented on that path — stays
+balanced). The
+visible gap during a native handoff/escalation is stream-open latency: the
+blackout deferral (`_markLinuxNativeStarted`, gated on the session's first
+`file-loaded`/`playback-restart` signal, 10s fallback timer) holds the route on
+the embedded surface's last frame until mpv actually has video. The same gate
+keeps initial buffering out of the live stall watchdog — only post-start
+`paused-for-cache` stalls feed the 8s reconnect threshold (a drop still forces
+an immediate retry). The live reconnect watchdog keys off `_linuxNativeSession
+!= null` throughout: pre-escalation it reloads via the embedded `_player`,
+post-escalation via mpv's `loadfile replace`; the single `_reconnectTimer`
+(created for any live playback) is reused across the switch, so counters stay
+balanced.
+
+**Back and orphan safety, in the overlay itself:** `iptvs_overlay.lua`'s ESC
+and `MBTN_BACK` bindings (`handle_back`) implement the same single-press
+peel as the rest of the app (menu → info → hide-overlay → exit): they close
+an open list-menu, else close the info panel, else hide the overlay chrome,
+and only `emit('back')` to Dart (which exits the player) once there's
+nothing local left to peel. The on-screen back *arrow button* skips this and
+always exits directly, matching the embedded overlay's back-arrow parity.
+Separately, a `mp.add_periodic_timer(5, …)` watchdog (`check_parent_alive`)
+reads `/proc/self/stat`'s ppid every 5s and calls `mp.command('quit')` once
+it reads `1` (reparented to init — the Flutter app died without the mpv
+child ever being told). This lives in Lua rather than Dart because a SIGKILL
+of the Flutter process is nothing `dart:io` can observe or react to, and
+`dart:io` has no way to arrange `PR_SET_PDEATHSIG` on the child before it's
+spawned either — the mpv process itself, still alive, is the only thing that
+can notice its parent is gone. Without it, a killed app would leave mpv
+running as an orphaned fullscreen window indefinitely.
+
+**Live reloads re-resolve:** Stalker `create_link` URLs carry
+single-use/short-lived `play_token`s, so after any portal-side kill the
+originally resolved URL is permanently dead. The reconnect watchdog and "Go
+to live" therefore re-resolve through `PlayerScreen.resolveAgain` (wired by
+the channel list to `repo.resolve(channel)`; falls back to the original URL
+when absent or failing) and refresh `http-header-fields` alongside the new
+URL. The native mpv also runs `--ytdl=no` — a dead-URL open failure should
+surface as an `end-file` error for the watchdog, not trigger mpv's
+youtube-dl fallback.
+
+### Host mpv discovery + version gate
+
+The AppImage does **not** bundle mpv (CI stopped setting `MPV_BINARY`;
+`package_linux_appimage.sh`'s `MPV_BINARY` block is now purely an optional
+knob for anyone packaging with a hand-picked build). `LinuxNativeSession
+.findExecutable()` looks for a binary bundled next to the running executable
+first, then falls back to the host's system mpv (`/usr/bin/mpv`,
+`/usr/local/bin/mpv`). Whichever is found, `LinuxNativeSession.start` runs
+`<mpv> --version`, parses it with the version-tolerant `parseMpvVersion`
+(handles upstream `mpv v0.41.0`, distro-patched `mpv 0.37.0-1ubuntu4`, and git
+snapshots), and **requires >= 0.40** (`mpvSupportsNativeHdr`) — Wayland HDR
+pass-through was added in mpv 0.40; below that (or on an unparseable/missing
+binary) `start` returns null and playback falls back to the embedded
+media_kit/libmpv SDR path, with a redacted diagnostics log explaining why.
+**0.41 is recommended**: `--target-colorspace-hint` was added in 0.41 and
+defaults to `auto` there (so the flag is omitted); passing the string
+`"auto"` on 0.40 makes mpv exit nonzero at launch (0.40 only understands
+`yes`/`no`), so 0.40 gets `--target-colorspace-hint=yes` explicitly
+(`mpvColorspaceHintArgs`). This whole gate (parsing, version compare, arg
+selection) is pure logic pinned by `test/linux_mpv_version_test.dart`.
+
+The HDR badge (and the info panel's "Dynamic range" row) reads
+`video-target-params` — the colorimetry *after* mpv's render pipeline,
+tone-mapping included — rather than the source-side `video-params`: if a
+PQ/HLG source got tone-mapped down to SDR (e.g. on X11, or an
+untested-Wayland-HDR path), the badge honestly shows SDR instead of a false
+HDR claim. Dolby Vision detection still consults source-side `video-params`,
+since DV metadata doesn't reliably carry through the target-params render
+path. `LinuxNativeSession.hdrColorimetry()` mirrors this over IPC for
+diagnostics/HDR10+ purposes (see below): it reads `video-target-params/*`
+sub-properties first and falls back to `video-params/*` when the target one
+comes back null.
+
+HDR10+ detection on this path (`PlayerScreen._probeLinuxNativeHdr`, run once
+shortly after native launch, since the native mpv process is a separate OS
+process whose output never reaches the embedded `_player`'s `videoParams`
+stream) reads the ST2094-40 per-scene sub-properties
+(`video-target-params/scene-max-r|g|b`, `scene-avg`, falling back to the
+`video-params/*` equivalents) the same way the Windows path does — non-zero
+only with real dynamic metadata — and upgrades PQ to "HDR10+ · PQ". The
+resulting colorimetry (gamma/primaries/sig-peak) is logged to diagnostics
+either way, so exported logs show whether HDR actually engaged. **Dart is the
+single label authority**: `dynamicRangeLabelFrom` (player_screen.dart) renders
+every surface's badge — the Windows overlay via `_streamInfoPayload`, the
+embedded Linux overlay via an injected `dynamicRangeLabel` callback (the
+overlay file can't import player_screen without a cycle), and the native Lua
+overlay via an `hdr10Plus` field on the `iptvs-state` payload, pushed when the
+probe upgrades (Lua derives PQ/HLG from mpv properties but can't judge the
+scene metadata's semantics itself).
+
+The overlay is a from-scratch ASS-events renderer at parity with the embedded
+Linux fallback (`_LinuxPlayerControls` in `player_overlay.dart`), not a
+generic mpv skin: text renders in bundled **Inter** and icons as glyphs from
+bundled **Material Icons** (`linux/mpv/fonts/`, installed by
+`tool/package_linux_appimage.sh` into `usr/share/iptvs/fonts/` and pointed at
+by libass via mpv's `--osd-fonts-dir` launch option — the overlay is an OSD
+surface, not burned-in subtitles, so `--osd-fonts-dir` is the option that
+actually applies, not `--sub-fonts-dir`); every color is a BGR ASS constant
+derived from `lib/theme.dart`'s `AppColors` tokens; every geometry value and
+font size routes through a `scale = osd_height / 1080` factor so the overlay
+renders at the same physical size on HiDPI/4K outputs instead of shrinking;
+and the **favorite star** and the **LIVE pill** (in the live-progress row,
+not the badge cluster) are drawn, matching the embedded overlay. The
+`iptvs-state` IPC payload (`LinuxNativeSession.updateOverlayState`) carries an
+`aspectLabel` field — Dart is the single source of truth for the aspect-mode
+label sequence (shared with the Windows overlay's `_aspectModes`), pushed
+through after every cycle so the Lua button never has to guess which mode
+mpv actually landed in. Rendering is throttled: `time-pos`/`duration` are
+deliberately **not** observed (mpv fires time-pos near frame rate, and each
+observation rebuilt the whole ASS scene for a value only the VOD seek bar
+reads — live progress renders from `os.time()`); instead a 4 Hz ticker runs
+**only while the chrome is visible**, so a hidden overlay does no periodic
+work, and discrete changes (pause, tracks, state messages) still render
+immediately. The embedded Flutter overlay applies the same idea: its
+position `StreamBuilder` wraps only the VOD seek bar and time label
+(`_positionRebuild`), not the whole control surface.
+
+If the native executable, overlay script, display backend, or IPC startup is
+unavailable — including a host mpv below the 0.40 version floor, or an
+unparseable `--version` output — Linux falls back to embedded media_kit/libmpv
+with the equivalent Flutter overlay. That path requests `hwdec=auto-safe` and
+tone-maps HDR to SDR.
+
 ## Other platforms / fallback
 
 Embedded `media_kit_video` controls, with mpv asked to tone-map HDR into SDR.
@@ -205,19 +422,73 @@ companion) to move the *main* task back.
 A live stream that stalls (buffering) or drops (error/EOF) is reconnected by **reloading the
 source** with capped backoff (≈8s stall threshold, ≤30s between attempts), surfacing a
 "Reconnecting…" indicator until playback resumes — VOD is untouched (it keeps the manual
-error/Retry overlay). Two independent watchdogs because the two platforms play through different
-stacks: Android in `HdrPlayerActivity` (its 500ms progress ticker watches `PlayerUiState`;
-ExoPlayer network errors that leave it idle trigger an immediate reconnect); Windows/embedded in
-`player_screen.dart` (a 1s `Timer` watching media_kit's buffering/error streams — the Dart
-`_player` only plays on these paths). The same **reload** is how "Go to live" works, since live
-IPTV is typically non-seekable. The Android watchdog's timing policy (stall/ended thresholds,
-attempt-scaled capped backoff) is the pure `ReconnectPolicy` object
-(`android/.../player/ReconnectPolicy.kt`), pinned by the plain-JUnit `ReconnectPolicyTest`.
+error/Retry overlay). On the Dart watchdogs a reload **re-resolves the stream first** when the
+caller wired `PlayerScreen.resolveAgain` (Stalker `create_link` tokens are single-use, so a
+portal-side kill leaves the original URL permanently dead; falls back to the original URL when
+unwired or the resolve fails). **Three independent watchdogs** because the platforms play through
+different stacks:
+
+- **Android** in `HdrPlayerActivity` (its 500ms progress ticker watches `PlayerUiState`;
+  ExoPlayer network errors that leave it idle trigger an immediate reconnect).
+- **Windows/embedded** in `player_screen.dart` (a 1s `Timer` watching media_kit's buffering/error
+  streams — the Dart `_player` only plays on these paths). A **clean server-side EOF** needs its
+  own trigger here: mpv maps it to `eof-reached`, which media_kit surfaces as `completed=true`
+  *and* `buffering=false` — invisible to the buffering-gated stall poll, and `reconnect_at_eof`
+  can't compensate (it hangs HLS manifest reads on FFmpeg 8; see `mpv_options.dart`). So a
+  `stream.completed` listener treats a *live* `completed` as a drop (pure decision:
+  `shouldReconnectOnCompleted`, pinned in `test/reconnect_policy_test.dart`) — VOD completing is
+  a legitimate end of playback and is left alone, and app-initiated `stop()` resets
+  `completed` to false so teardown/handoffs never trip it.
+- **Linux native** in `player_screen.dart` too, but the mpv process is a *separate OS process*
+  whose media_kit `_player` is idle, so the watchdog is driven off mpv's JSON-IPC signals
+  (`LinuxNativeSession.playbackEvents`, a `LinuxNativePlaybackSignal` stream). `end-file` with
+  reason `error`/`eof` is a **drop** (a user quit / Dart dispose reports reason `quit`/`stop` and
+  is deliberately *not* surfaced, so exiting never triggers a reconnect); an observed
+  `paused-for-cache=yes` is a **stall** (mpv reports the cache-induced pause here, never a user
+  pause — unlike `core-idle` — so it's a clean stall signal); `file-loaded`/`playback-restart`
+  is a **resume** (deliberately *not* `paused-for-cache=no`, which mpv briefly reports at
+  `end-file` and would race a drop). A drop/stall sets the same `_buffering` flag the embedded
+  watchdog uses (so `_pollLiveReconnect`'s 8s threshold, attempt-scaled backoff, counter reset
+  and chip-clearing all apply unchanged) and a drop additionally forces an immediate first retry.
+  This matters because with `--keep-open=yes --idle=yes` a dropped stream would otherwise freeze
+  on the last frame indefinitely, and mpv's own network-timeout before an `end-file error` can be
+  ~60s — the `paused-for-cache` stall path lets the watchdog reconnect at the 8s threshold
+  instead of waiting for that. The reload is a `loadfile <url> replace` on the native session
+  (same URL the embedded watchdog reopens, same call "Go to live" uses).
+
+The **live preview** gets the same clean-EOF resilience in miniature: `LivePreviewController`
+listens to its player's `completed` stream and auto-restarts the *same* channel (a fresh
+`start()`, i.e. a fresh resolve — tokens are single-use), rate-limited by the shared
+`reconnectMinGapMs` policy and capped at 3 consecutive immediate EOFs before surfacing "Stream
+ended". It only ever restarts the channel the user already chose (the "preview is deliberate and
+locked" rule), and an app-initiated stop/pause (`_activeChannel` cleared / `_pausedByApp`) never
+triggers it.
+
+The reconnect **timing policy** — stall threshold, attempt-scaled capped backoff — is shared
+Dart (`reconnectMinGapMs` in `player_screen.dart`, used by the embedded and Linux paths and the
+preview's EOF restart), mirroring the Android pure `ReconnectPolicy` object
+(`android/.../player/ReconnectPolicy.kt`);
+pinned by `test/reconnect_policy_test.dart` (Dart) and the plain-JUnit `ReconnectPolicyTest`
+(Kotlin). The same **reload** is how "Go to live" works, since live IPTV is typically
+non-seekable. The Linux reconnect reuses the already-counted `_reconnectTimer`
+(`ResourceCounters.reconnectTimers`, created for any live playback) — no extra timer — so
+open/close cycles stay balanced.
+
+**Native VOD terminal behavior**: the Linux native path has no error/Retry overlay (mpv owns the
+surface). A VOD stream that errors/ends does *not* auto-reconnect (contract); mpv's
+`--keep-open=yes` holds the last frame and Back (ESC / overlay back → `quit`) exits cleanly. A
+terminal VOD error therefore looks like a frozen last frame from which Back returns to the list.
 
 ## Headers and logging
 
 Playback headers (e.g. a MAG `User-Agent` / `Referer` for Stalker) are passed both to
-`Media(httpHeaders:)` and set as mpv `user-agent`/`referrer` properties. All playback logs go
+`Media(httpHeaders:)` and set as mpv `user-agent`/`referrer` properties. mpv's
+`http-header-fields` is a comma-separated *string* list, so a header value containing a literal
+comma (the default MAG user-agent's `(KHTML, like Gecko)`) must never be naively joined: the
+Linux native session sends the headers as a **native JSON array** over IPC
+(`buildHeaderFieldsCommand`), and Android's `MpvController.applyHeaders` encodes each item with
+mpv's `%n%` **raw-length quoting** (UTF-8 byte counts; `MpvOptionEncoding`, pinned by
+`MpvOptionEncodingTest`) since the libmpv AAR only exposes string setters. All playback logs go
 through `_logPlayback`, which redacts URLs via `_redactPlayback`.
 
 ## MethodChannel handler ownership
@@ -257,7 +528,15 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   `dispose()`: `discardPlayer` after a Windows hot-swap, or the controller's own `dispose`),
   `reconnectTimers` (the 1s live watchdog), `channelOwners` (`ChannelHandlerOwner.claim`/`release`
   — release decrements unconditionally since every claimant releases exactly once, even
-  superseded).
+  superseded), `linuxNativeSessions` (`LinuxNativeSession` — incremented when `_open` assigns a
+  successfully started session; each of the three teardown routes — `_finishLinuxNativePlayback`
+  (process exited on its own), `_exitAndPop` (user-initiated Back), and `dispose()` (last-resort)
+  — decrements only if it's the one that actually finds the session non-null and nulls it, so
+  whichever teardown path runs first is the sole decrementer. The latter two share one
+  implementation, `_teardownLinuxNative`, which claims the session synchronously before its first
+  `await` so overlapping teardowns can't double-decrement; a fourth, pre-adoption abort — the
+  route popped while `LinuxNativeSession.start` was still connecting — disposes the session
+  without ever incrementing).
 - **Kotlin** (`android/.../player/DebugCounters.kt`, `BuildConfig.DEBUG`-gated `AtomicInteger`s):
   `exoEngines`/`mpvEngines` (constructor ↔ now-idempotent `release()`), `previewViews`
   (`PreviewPlatformView` init/dispose), `progressTickers` (launch ↔ `invokeOnCompletion`),

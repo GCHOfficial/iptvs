@@ -155,3 +155,50 @@ jobs:
           name: iptvs-windows-x64
           path: iptvs-windows-x64.zip
           if-no-files-found: error
+
+  build-linux:
+    name: Build Linux AppImage
+    needs: [analyze-test, changes]
+    if: needs.changes.outputs.code == 'true'
+    # The AppImage no longer bundles mpv (Noble's system mpv is 0.37, which has
+    # no Wayland HDR and exits on --target-colorspace-hint=auto, added in 0.41)
+    # — LinuxNativeSession discovers and version-gates the *host's* mpv at
+    # runtime (>=0.40 required, 0.41 recommended) and falls back to the
+    # embedded media_kit/libmpv SDR path otherwise. `mpv` stays installed here
+    # only so the embedded fallback build has libmpv-dev to link against.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev mpv
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - name: Build release (Linux x86-64)
+        run: flutter build linux --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+      - name: Fetch pinned linuxdeploy
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
+          echo '4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a  '${RUNNER_TEMP}'/linuxdeploy-x86_64.AppImage' | sha256sum --check
+          chmod +x "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/appimagetool-x86_64.AppImage" https://github.com/AppImage/AppImageKit/releases/download/12/appimagetool-x86_64.AppImage
+          echo 'd918b4df547b388ef253f3c9e7f6529ca81a885395c31f619d9aaf7030499a13  '${RUNNER_TEMP}'/appimagetool-x86_64.AppImage' | sha256sum --check
+          chmod +x "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/runtime-x86_64" https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          echo '2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  '${RUNNER_TEMP}'/runtime-x86_64' | sha256sum --check
+      - name: Package AppImage smoke artifact
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
+          APPIMAGETOOL: ${{ runner.temp }}/appimagetool-x86_64.AppImage
+          APPIMAGE_RUNTIME_FILE: ${{ runner.temp }}/runtime-x86_64
+        run: ./tool/package_linux_appimage.sh 0.0.0 build/linux/x64/release/bundle
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: iptvs-linux-x86_64
+          path: iptvs-0.0.0-linux-x86_64.AppImage
+          if-no-files-found: error

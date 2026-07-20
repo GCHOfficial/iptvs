@@ -337,6 +337,7 @@ this gate complete from source inspection.
 GitHub direct Android  -> signed APK, in-app authenticated updater
 Google Play Android    -> signed AAB upload, Play-managed delivery
 GitHub direct Windows  -> ZIP, authenticated in-app updater
+GitHub direct Linux    -> x86-64 AppImage, authenticated in-app updater
 Microsoft Store        -> MSIX, Store signing and Store-managed updates
 ```
 
@@ -354,7 +355,7 @@ to decide who owns updates.
 
 GitHub beta builds are prereleases with the same signed-manifest and artifact
 checks as stable direct builds. They use a separate Android application ID and,
-on Windows, the portable distribution rather than Store MSIX identity. Store
+on Windows/Linux, the portable distribution rather than Store/MSIX identity. Store
 users remain on Store-managed production updates. This deliberately avoids an
 unsafe app toggle between incompatible installer/signing authorities.
 

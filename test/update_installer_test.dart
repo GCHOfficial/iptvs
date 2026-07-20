@@ -156,4 +156,19 @@ void main() {
       expect(script, contains('Updated application exited during startup'));
     });
   });
+
+  group('Linux AppImage update script', () {
+    test('waits for the app and swaps whole files', () {
+      expect(linuxUpdateScript, contains('kill -0 "\$old_pid"'));
+      expect(linuxUpdateScript, contains('mv "\$target" "\$backup"'));
+      expect(linuxUpdateScript, contains('mv "\$stage" "\$target"'));
+      expect(linuxUpdateScript, contains('chmod 0755 "\$target"'));
+    });
+
+    test('restores and relaunches the previous AppImage on failure', () {
+      expect(linuxUpdateScript, contains('rm -f "\$target"'));
+      expect(linuxUpdateScript, contains('mv "\$backup" "\$target"'));
+      expect(linuxUpdateScript, contains('"\$target" >/dev/null 2>&1 &'));
+    });
+  });
 }
