@@ -35,6 +35,27 @@ prereleases. Development, Google Play, and Microsoft Store builds do not run or
 show the GitHub updater. Store test tracks/flights are reserved for submission
 validation; ongoing beta users install the separate GitHub-direct distribution.
 
+## Adding a release platform (forward-compatibility)
+
+The manifest lists one artifact per platform, and a client parses the whole list. A build only
+knows the platforms in `kKnownReleasePlatforms`; since the skip-unknown parser landed it *ignores*
+the rest, but **builds that predate that parser threw and rejected the entire manifest** on the
+first unknown platform. That is exactly how 0.1.38 broke auto-update everywhere: it was the first
+release to add a `linux-x86_64` artifact, and every ≤0.1.37 client (strict `{android, windows-x64}`
+parser) crashed parsing it — on Windows and Android too, not just Linux.
+
+Rules when introducing a new platform artifact into the manifest:
+
+- **Never add a new platform key to the manifest while a meaningful population still runs a build
+  whose parser predates the skip-unknown behaviour.** Those clients cannot be fixed remotely — the
+  broken parser is baked in and auto-update is the thing that's down.
+- **Rescue path for an already-broken cohort:** cut a new release whose manifest lists *only* the
+  platform keys the stuck parser accepts (for the 0.1.38 incident: `android` + `windows-x64` only).
+  `/latest` then serves a manifest they can parse, landing them on a build with the tolerant parser.
+  Cost: the newly-added platform gets no auto-update for that release and must update manually once
+  (its installs are new and already have the tolerant parser, which treats a missing entry as "no
+  asset", not a crash). Restore the full manifest once the old cohort has drained.
+
 ## Layering
 
 Layered like everything else — a shared Dart service does the network check + version compare;
@@ -42,8 +63,15 @@ the final install step is the only platform-specific part.
 
 - **`lib/data/update_manifest.dart`** — strict signed-manifest schema and Ed25519 verification.
   The exact signed bytes bind version, minimum version, platform, exact filename, byte size,
-  and SHA-256. Unknown or duplicate platforms, malformed hashes, and values beyond the platform
-  ceilings fail closed.
+  and SHA-256. Duplicate platforms, malformed hashes, and values beyond the platform ceilings
+  fail closed. **Unknown platforms are skipped, not rejected** (`kKnownReleasePlatforms`): the
+  parse loop ignores any artifact whose platform this build doesn't recognize, so a manifest
+  that adds a future platform still parses on older clients (they just find no asset for it).
+  This is deliberate — the original fail-closed behaviour bricked auto-update on *every*
+  platform for all ≤0.1.37 clients the moment 0.1.38 first shipped a `linux-x86_64` artifact
+  (their parser threw `Unsupported release platform` and rejected the whole manifest). **Adding
+  a new release platform to the manifest is therefore only safe once the population of clients
+  predating this skip-unknown parser has drained** — see below.
 - **`lib/data/update_service.dart`** — `ReleaseInfo` and `UpdateService.fetchLatest()` (GETs
   `releases/latest`, locates only the exact manifest/signature assets, verifies the signature,
   and derives artifact URLs on the approved GitHub host; **GitHub 403s without a
