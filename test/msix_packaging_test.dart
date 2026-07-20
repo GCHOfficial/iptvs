@@ -18,9 +18,28 @@ void main() {
     expect(manifest, contains('Executable="iptvs.exe"'));
     expect(manifest, contains('EntryPoint="Windows.FullTrustApplication"'));
     expect(manifest, contains('<rescap:Capability Name="runFullTrust" />'));
+    expect(manifest, contains('Name="Microsoft.VCLibs.140.00.UWPDesktop"'));
+    expect(manifest, contains('MinVersion="14.0.24217.0"'));
     expect(
       RegExp(r'<(?:\w+:)?Capability\b').allMatches(manifest),
       hasLength(1),
+    );
+  });
+
+  test('Store listing leads with the certified dependency disclosure', () {
+    final listing = File(
+      'assets/store/microsoft-store/listing.md',
+    ).readAsLinesSync();
+    final descriptionStart = listing.indexOf('## Store description');
+    expect(descriptionStart, greaterThanOrEqualTo(0));
+    expect(
+      listing[descriptionStart + 2],
+      'Requires the Microsoft Visual C++ Redistributable. Microsoft Store '
+      'installs this dependency automatically.',
+    );
+    expect(
+      listing[descriptionStart + 3],
+      startsWith('IPTVS Player is a media player'),
     );
   });
 

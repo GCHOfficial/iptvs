@@ -119,9 +119,9 @@ Select **All functionality is available without special access**. Reviewer
 instructions:
 
 > No login or paid IPTV credentials are required for review. Launch the app,
-> create or select a local profile, choose Add source, select Demo, and save.
-> The bundled Demo source exercises browsing and playback. Cloud sync is an
-> optional feature and is not required to use the app.
+> create or select a local profile, and the preselected Demo source opens
+> automatically. The bundled Demo source exercises browsing and playback.
+> Cloud sync is an optional feature and is not required to use the app.
 
 If Play later requires testing the web panel, provide a dedicated reviewer
 email flow through the Console's private instructions. Never put credentials in

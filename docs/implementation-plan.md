@@ -907,6 +907,10 @@ channel/media catalogs, streamed batches only for EPG, additive `LoadToken` canc
 - [x] Use four-part MSIX versions with the fourth component set to `0`.
   Packaging accepts exactly three numeric inputs with a non-zero major
   component and emits `<input>.0`; the first submission uses `1.0.0.0`.
+- [x] Remediate the 2026-07-20 certification policy 10.2.4.1 required fix:
+  declare `Microsoft.VCLibs.140.00.UWPDesktop` in the MSIX and keep the Visual
+  C++ Redistributable disclosure in the first two lines of the canonical Store
+  description. The next package version is `1.0.1.0`.
 - [ ] Validate the packaged app writes only to supported app-data/cache locations.
 - [ ] Run Windows App Certification Kit against the packaged Release build.
 - [ ] Test Store flighting install, upgrade, rollback, uninstall, secure storage,
@@ -1051,6 +1055,7 @@ Add one short entry when a PR starts, changes scope, becomes blocked, or complet
 | 2026-07-16 | PR 14/16 review fixes | Implemented | Corrected M3U header/per-entry catch-up propagation, added real IANA/DST conversion and user-visible overrides, preferred reported provider timezones, replaced inferred capability labels with provider-owned unknown/supported states, advanced profile snapshot revisions for source/metadata mutations, split streamed provider/database timings, and redacted diagnostics at insertion/display/export. Analyze clean; 367 tests pass with 14 expected skips. The new cloud migration still requires normal deployment/live verification. |
 | 2026-07-17 | Demo catalogue | Implemented | Expanded the credential-free demo source into a capability fixture: six live-tab rows, generated now/next + archive guide, four Blender open-movie movie entries with artwork/licence metadata, two series hierarchies, HLS/fMP4/HEVC/MP4 fixtures, category/search filtering, and 5 focused catalogue tests. Existing hierarchy/focus tests remain green; full suite is the next validation step. |
 | 2026-07-17 | Linux feedback | Implemented | Closed a 5 px embedded-player `RenderFlex` overflow when EPG now and next were both present at short desktop heights by compacting them into one ellipsized top-bar line. Analyzer and focused navigation/catalogue tests pass. |
+| 2026-07-20 | Microsoft Store certification | Required fix implemented | The `1.0.0` submission passed with a policy 10.2.4.1 follow-up for the undisclosed Microsoft Visual C++ Redistributable. Added the Store-provided VCLibs framework dependency to the manifest and verifier, pinned the required disclosure as the first two description lines, corrected reviewer demo instructions, and selected `1.0.1.0` for the next submission. |
 
 ## Removal checklist
 

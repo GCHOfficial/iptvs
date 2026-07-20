@@ -116,4 +116,35 @@ void main() {
       throwsUnsupportedError,
     );
   });
+
+  test('every advertised playable row has a secure stream mapping', () async {
+    for (final channel in await source.channels()) {
+      final stream = await source.resolve(channel);
+      expect(stream.url, startsWith('https://'), reason: channel.name);
+    }
+
+    for (final movie in await source.mediaItems(ContentKind.movie)) {
+      final stream = await source.resolveMedia(movie);
+      expect(stream.url, startsWith('https://'), reason: movie.title);
+    }
+
+    for (final series in await source.mediaItems(ContentKind.series)) {
+      final seasons = await source.mediaItems(
+        ContentKind.season,
+        parent: series,
+      );
+      expect(seasons, isNotEmpty, reason: series.title);
+      for (final season in seasons) {
+        final episodes = await source.mediaItems(
+          ContentKind.episode,
+          parent: season,
+        );
+        expect(episodes, isNotEmpty, reason: season.title);
+        for (final episode in episodes) {
+          final stream = await source.resolveMedia(episode);
+          expect(stream.url, startsWith('https://'), reason: episode.title);
+        }
+      }
+    }
+  });
 }
