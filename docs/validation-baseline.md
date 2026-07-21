@@ -43,7 +43,13 @@ get the same treatment plus streaming: `parseXmltvBatched`
 (`lib/sources/xmltv.dart`) yields bounded `Programme` batches with a single
 in-flight batch at a time, feeding `AppDatabase.replaceEpgStream` so a large
 guide commits incrementally inside one transaction instead of holding the
-entire parsed guide in memory. All three keep the existing inline path below
+entire parsed guide in memory. **Scope of that claim:** it covers the *parsed*
+guide only. The worker still materializes the whole guide as source text —
+`utf8.decode` over the fully-buffered response body produces one UTF-16 `String`
+before `toXmlEvents()` sees it — so worker peak holds the compressed bytes, the
+decoded bytes, and a ~2×-sized string copy at once (`kEpgWorkload` permits
+128 MiB body / 512 MiB decoded). The 598 MB max-RSS row below is consistent with
+that being the dominant term, not the `Programme` batches. All three keep the existing inline path below
 their isolate thresholds (256 KB for Xtream/Stalker JSON, 64 KB for XMLTV) —
 isolate spawn overhead isn't worth it for the many small calls. Disk-backed M3U
 parsing is explicitly deferred: `ChannelListScreen` and its controllers hold
@@ -180,10 +186,30 @@ SQLite baseline with 50,000 channels and 100,000 programmes:
 
 | Operation | Duration |
 |---|---:|
-| Replace channel library | 540 ms |
-| Read and map channels | 195 ms |
-| Replace EPG | 708 ms |
-| Current/next query | 469 ms |
+| Replace channel library | 1,848 ms |
+| Read and map channels | 3,433 ms |
+| Replace EPG | 666 ms |
+| Current/next query | 428 ms |
+
+**Superseded numbers — read before comparing against anything older.** Until the
+fixture was corrected, the channel rows carried only `extra: {'tvgId': …}`. No
+`extra` key matched `_secretLocatorFields`, so `protectSecretLocators` produced an
+empty locator map, `SecretLocatorVault.encrypt` returned `''` on the empty-input
+short-circuit, and `restoreSecretLocators` returned early on the way back — the
+run measured **zero AES-GCM operations**. That is not what any real source does:
+M3U stores `extra['url']` and Stalker stores `extra['cmd']`, both locator fields,
+so both encrypt on write and decrypt on read, once per row. (Xtream live stores
+only `{streamId, tvgId}` and genuinely is exempt, which is why the gap stayed
+invisible.) The fixture now seeds a `url`, and the previously recorded
+**540 ms replace / 195 ms read** became **1,848 ms / 3,433 ms** — the read
+regressing 17.6×. Treat the old figures as measuring an unrepresentative
+workload rather than as evidence of a regression since.
+
+The read cost is larger than per-row crypto alone accounts for: `readChannels`
+resolves `Future.wait` over one future per row, so 50,000 concurrent futures'
+scheduling compounds the per-row `jsonDecode` + AES-GCM open. Both halves are on
+the UI isolate and on the *common* cold-start path (`LibraryRepository` serves
+from cache whenever it is fresh).
 
 These are comparison values, not release budgets. In particular, the parser
 tests call synchronous parsing functions directly and therefore do not measure

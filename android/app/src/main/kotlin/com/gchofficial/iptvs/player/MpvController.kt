@@ -63,12 +63,10 @@ class MpvController(
             setOptionString("sub-auto", "no")
             // Network resiliency for live streams: bound stalls and let ffmpeg
             // transparently reconnect transient HTTP drops (the host watchdog
-            // reloads if a stall outlasts this).
-            setOptionString("network-timeout", "10")
-            setOptionString(
-                "stream-lavf-o",
-                "reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,reconnect_delay_max=5",
-            )
+            // reloads if a stall outlasts this). See [MpvLiveOptions] for why
+            // `reconnect_at_eof` must stay out of `stream-lavf-o`.
+            setOptionString("network-timeout", MpvLiveOptions.NETWORK_TIMEOUT)
+            setOptionString("stream-lavf-o", MpvLiveOptions.STREAM_LAVF_O)
             applyHeaders(this, headers)
             init()
         }
