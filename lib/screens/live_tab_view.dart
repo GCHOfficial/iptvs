@@ -265,7 +265,7 @@ class LiveTabView extends StatelessWidget {
     BuildContext context, {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
-    final wide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+    final wide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
     return Focus(
       focusNode: channelsFocusNode,
       autofocus: true,
@@ -961,7 +961,7 @@ class CatchupSheet extends StatelessWidget {
     return SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.7,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.7,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1158,7 +1158,7 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
         // pulled the OS notification shade) and clipped the lower controls
         // off with no way to scroll to them. Mirrors CatchupSheet.
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.85,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.85,
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -1462,7 +1462,13 @@ class _ChannelTile extends StatelessWidget {
                                   child: ClipRRect(
                                     borderRadius: BorderRadius.circular(3),
                                     child: LinearProgressIndicator(
-                                      value: progress,
+                                      // Not `progress`: a null value means
+                                      // *indeterminate*, so a programme with a
+                                      // bad duration would animate this row
+                                      // forever and keep the frame pipeline
+                                      // awake. The preview panel already guards
+                                      // this by not drawing the bar at all.
+                                      value: progress ?? 0,
                                       minHeight: 3,
                                       backgroundColor: AppColors.line,
                                       valueColor:
