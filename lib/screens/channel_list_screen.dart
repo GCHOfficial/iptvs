@@ -349,6 +349,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
       _visibleKey = null;
       _visibleCache = null;
+      _channelsByIdKey = null;
+      _channelsByIdCache = null;
       _focus.resetChannelSelection();
       _loadLive();
       _live.startEpgRefresh();
@@ -455,19 +457,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           (_preview.stream != null || _preview.loading)) {
         return;
       }
-      final isWide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+      final isWide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
       if (isWide && _tab == ContentKind.live) {
         _preview.start(channel);
       }
     });
   }
 
-  Channel? _findChannelById(String id) {
-    for (final c in _live.channels) {
-      if (c.id == id) return c;
-    }
-    return null;
-  }
+  Channel? _findChannelById(String id) => _channelsById[id];
 
   void _restoreListFocusAfterPlayback() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -615,6 +612,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   List<Channel>? _visibleCache;
   (String?, String, List<Channel>, Set<String>, SourceConfig)? _visibleKey;
 
+  // Preview and last-played resolution look channels up by id on every body
+  // rebuild — which is every D-pad press — and they search the *unfiltered*
+  // catalogue, so an unmemoized scan is O(N) per keypress on a large portal.
+  // Keyed on the channel list's identity, like _visibleCache above: the
+  // controller reassigns a fresh list on change.
+  Map<String, Channel>? _channelsByIdCache;
+  List<Channel>? _channelsByIdKey;
+
+  Map<String, Channel> get _channelsById {
+    final channels = _live.channels;
+    if (identical(_channelsByIdKey, channels)) return _channelsByIdCache!;
+    _channelsByIdKey = channels;
+    return _channelsByIdCache = {for (final c in channels) c.id: c};
+  }
+
   List<Channel> get _visible {
     final key = (
       _categoryId,
@@ -673,7 +685,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
-    final isWide = MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+    final isWide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
     if (!isWide) {
       // On small screens, bypass preview and go fullscreen immediately
       setState(() => _resolving = true);
@@ -1360,7 +1372,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// The two-column (TV/desktop) layout, which is the only one with a category
   /// sidebar and preview panel. The coordinator routes the D-pad off this.
   bool _isWide() =>
-      mounted && MediaQuery.of(context).size.width >= kWideLayoutMinWidth;
+      mounted && MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
 
   LiveLayoutMetrics get _liveLayoutMetrics => LiveLayoutMetrics.forSize(
     mounted ? MediaQuery.sizeOf(context) : const Size(1280, 720),
@@ -1694,7 +1706,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           onSearchCellKeyEvent: _focus.handleSearchCellKey,
           categoryControl:
               (_tab == ContentKind.live &&
-                  MediaQuery.of(context).size.width >= kWideLayoutMinWidth)
+                  MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth)
               ? null
               : (_tab == ContentKind.live
                     ? ChannelCategoryDropdown(
@@ -1884,8 +1896,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// back to the last-played channel and finally the first visible one.
   Channel? _resolvePreviewChannel(List<Channel> visible) {
     if (visible.isEmpty) return null;
-    Channel? byId(String? id) =>
-        id == null ? null : _live.channels.where((c) => c.id == id).firstOrNull;
+    Channel? byId(String? id) => id == null ? null : _channelsById[id];
     if (_deliberatePreview) {
       // When a preview is actively running (or loading), lock the panel to
       // that channel.  D-pad focus moves away without disrupting it.

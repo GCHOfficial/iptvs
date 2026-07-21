@@ -13,19 +13,31 @@ import 'theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
-  // Optional cloud source panel: only initialised when build-time Supabase
-  // config is present, otherwise the app runs fully offline as before.
-  if (CloudConfig.isConfigured) {
-    await Supabase.initialize(
-      url: CloudConfig.url,
-      publishableKey: CloudConfig.anonKey,
-      authOptions: FlutterAuthClientOptions(localStorage: SecureLocalStorage()),
-    );
-  }
-  final db = await AppDatabase.open();
   final store = SourceStore();
-  await migrateAllSourceIdentities(db, await store.list());
+  // Cloud init, opening the database and reading the source list are mutually
+  // independent — only the identity migration below needs the database and the
+  // sources together. Starting them at once costs the longest of the three
+  // keychain/disk round trips instead of their sum, all of which is on the path
+  // to the first frame. A failure here still aborts boot; it arrives wrapped in
+  // a ParallelWaitError rather than on its own.
+  final (db, sources, _) = await (
+    AppDatabase.open(),
+    store.list(),
+    _initialiseCloud(),
+  ).wait;
+  await migrateAllSourceIdentities(db, sources);
   runApp(IptvApp(db: db, store: store));
+}
+
+/// Optional cloud source panel: only initialised when build-time Supabase
+/// config is present, otherwise the app runs fully offline as before.
+Future<void> _initialiseCloud() async {
+  if (!CloudConfig.isConfigured) return;
+  await Supabase.initialize(
+    url: CloudConfig.url,
+    publishableKey: CloudConfig.anonKey,
+    authOptions: FlutterAuthClientOptions(localStorage: SecureLocalStorage()),
+  );
 }
 
 class IptvApp extends StatelessWidget {
