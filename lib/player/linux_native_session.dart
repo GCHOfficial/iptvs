@@ -180,8 +180,10 @@ class LinuxNativeSession {
   bool _ipcErrorLogged = false;
   int _requestId = 0;
 
-  /// Last-known `time-pos`/`duration`, kept fresh by an IPC property
-  /// observer (see [_start]) rather than only read on demand. [playbackState]
+  /// Last-known `time-pos`/`duration`, kept fresh without a live read:
+  /// `duration` by an IPC property observer (see [_start]), `time-pos` by the
+  /// VOD-only 1 Hz [_startPositionPoll] (observing it would deliver a
+  /// per-video-frame JSON firehose on the main isolate). [playbackState]
   /// falls back to these when a live `get_property` read fails — the mpv
   /// *process* commonly exits (window closed, ESC/MBTN_BACK `quit`) before
   /// `_finishLinuxNativePlayback` gets to persist the final position, so a
@@ -462,9 +464,14 @@ class LinuxNativeSession {
     // `end-file`/`file-loaded`/`playback-restart` events to IPC clients without
     // any subscription, but property-changes require an explicit observe.
     await command(const ['observe_property', 9002, 'paused-for-cache']);
-    // Keep a last-known position/duration cache (see _lastPositionSeconds)
-    // so a post-exit playbackState() read has something to fall back to.
-    await command(const ['observe_property', 9003, 'time-pos']);
+    // Keep a last-known position/duration cache (see _lastPositionSeconds) so a
+    // post-exit playbackState() read has something to fall back to. `duration`
+    // is observed (it changes once per file); `time-pos` is deliberately **not**
+    // — mpv fires it at video frame rate, i.e. 25-60 socket lines + jsonDecode
+    // per second on the main isolate, for a value only the VOD resume point
+    // reads. Same rule the Lua overlay already follows (docs/player.md). VOD
+    // instead polls it at [_positionPollInterval]; live never persists a
+    // position at all, so it polls nothing.
     await command(const ['observe_property', 9004, 'duration']);
     await command(buildHeaderFieldsCommand(stream.headers));
     await command(['set_property', 'force-media-title', title]);
@@ -499,6 +506,42 @@ class LinuxNativeSession {
       liveSynced: liveSynced,
       aspectLabel: aspectLabel,
     );
+    if (!stream.isLive) _startPositionPoll();
+  }
+
+  /// Low-frequency refresh of [_lastPositionSeconds], replacing the per-frame
+  /// `time-pos` property observation. 1 Hz is as fresh as the cache ever needs
+  /// to be: it only matters when the mpv *process* has already exited and
+  /// `playbackState()`'s live read comes back empty, and it feeds a resume
+  /// point, not a scrubber.
+  static const Duration _positionPollInterval = Duration(seconds: 1);
+  Timer? _positionPollTimer;
+  bool _pollingPosition = false;
+
+  /// Starts the VOD-only position poll. Not resource-counted: its lifetime is
+  /// strictly bounded by this session (cancelled in [dispose]), which is itself
+  /// counted as `ResourceCounters.linuxNativeSessions` — the same reasoning as
+  /// `player_screen.dart`'s VOD position-persist timer.
+  void _startPositionPoll() {
+    _positionPollTimer?.cancel();
+    _positionPollTimer = Timer.periodic(_positionPollInterval, (_) async {
+      // _getProperty times out after 1s, so a wedged socket could otherwise
+      // stack overlapping reads at the poll interval.
+      if (_disposed || _socket == null || _pollingPosition) return;
+      _pollingPosition = true;
+      try {
+        final data = await _getProperty('time-pos');
+        final (position, duration) = applyPlaybackPropertyChange(
+          (_lastPositionSeconds, _lastDurationSeconds),
+          'time-pos',
+          data,
+        );
+        _lastPositionSeconds = position;
+        _lastDurationSeconds = duration;
+      } finally {
+        _pollingPosition = false;
+      }
+    });
   }
 
   Future<void> updateOverlayState({
@@ -785,6 +828,9 @@ class LinuxNativeSession {
           // is deliberately ignored — see [LinuxNativePlaybackSignal.resumed].
           _emitPlayback(LinuxNativePlaybackSignal.stalled);
         } else if (name == 'time-pos' || name == 'duration') {
+          // `time-pos` isn't observed any more (see [_start]) — only `duration`
+          // arrives here — but the shared update seam stays name-driven so the
+          // poll and the observer keep one code path.
           final (position, duration) = applyPlaybackPropertyChange(
             (_lastPositionSeconds, _lastDurationSeconds),
             name,
@@ -846,6 +892,8 @@ class LinuxNativeSession {
 
   Future<void> dispose() async {
     if (_disposed) return;
+    _positionPollTimer?.cancel();
+    _positionPollTimer = null;
     try {
       if (_socket != null) {
         await _send(
