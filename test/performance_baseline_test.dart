@@ -238,7 +238,15 @@ void main() {
               name: 'Channel $i',
               number: i + 1,
               categoryId: 'group-${i % categories.length}',
-              extra: {'tvgId': 'channel.$i'},
+              // `url` is a secret-locator field, so the write encrypts it and the
+              // read decrypts it. Without a locator field the vault short-circuits
+              // and the run measures zero crypto — which is not what any real M3U
+              // (`url`) or Stalker (`cmd`) source does. See the note in
+              // docs/validation-baseline.md.
+              extra: {
+                'tvgId': 'channel.$i',
+                'url': 'http://baseline.invalid/live/acct/tok/$i.ts',
+              },
             ),
             growable: false,
           );
