@@ -34,6 +34,37 @@ back to the embedded `media_kit` surface if unavailable. The native player is a 
   `jniLibs.pickFirsts` keeps this `libmpv.so` over media_kit's (verify it has
   `pl_dovi_metadata`).
 
+**Buffer policy (time-to-first-frame).** `ExoPlayerEngine` builds its `ExoPlayer` with an explicit
+`DefaultLoadControl` fed from the pure `ExoBufferPolicy` object (same file, pinned by
+`ExoBufferPolicyTest`). Without it media3's defaults apply, and
+`DEFAULT_BUFFER_FOR_PLAYBACK_MS = 2500` means **2.5s of black on every Android open** — zap,
+EPG-grid play, *and* preview start, since `SharedEngine.openPreview` runs the same engine — plus
+5s after every rebuffer. The tuned values are 1000 ms to start, 2000 ms to resume after an
+underrun, a 15s/50s sustained window, and `prioritizeTimeOverSizeThresholds = true` (IPTV bitrates
+vary too much between providers for a byte-based threshold to give a predictable startup budget).
+The start/resume thresholds are a **floor, not a target**: a stream that can't reach the resume
+threshold sits in `STATE_BUFFERING`, and 8s of that (`ReconnectPolicy.STALL_RECONNECT_MS`) makes
+the Activity's watchdog reload the source — so pushing them toward the stall threshold would turn
+ordinary underruns into a reconnect loop. The ≥4x margin between them is what the JUnit test pins,
+along with the ordering `DefaultLoadControl.Builder` asserts at build time.
+
+**The Dart embedded media_kit surface is a fallback only on Android.** `MainActivity`'s
+`iptvs/native_hdr_player` `open` handler always replies `true` — engine selection, including the
+mpv fallback, happens *inside* `HdrPlayerActivity` — so `_tryOpenNativeHdrPlayer` returns false
+only when the channel itself fails (`MissingPluginException`, the 10s timeout, a
+`PlatformException`). `PlayerScreen._nativePlaybackLaunched` therefore starts **true on Android as
+well as Windows**, and `_playbackSurface` checks it *before* touching `_controller`: on the happy
+path the `VideoController` and the `Video` widget tree are never built at all. That matters
+because constructing an `AndroidVideoController` costs an `Utils.IsEmulator` channel round-trip, a
+decoder query, a SurfaceTexture/ANativeWindow allocation and ~10 mpv property sets, all on the
+main isolate during exactly the frames that decide time-to-first-frame. `_controller` is `late`
+for this reason — **reading it is what constructs it** — so nothing may read it before the
+fallback is genuinely taking over. The fallback branch in `_open` calls `_ensureEmbeddedController()`
+(forcing the lazy build *before* `_configureNativePlayer` applies the embedded mpv options, since
+`VideoController` creation sets `vo`/`hwdec` itself) and then flips the flag to false. The
+media_kit `Player` itself stays eager (it's what `initState` wires every stream listener to) and
+so its `ResourceCounters.mediaKitPlayers` accounting is unchanged.
+
 Both engines drive the same engine-agnostic `PlayerUiState` and respond to the same
 `PlayerCallbacks`; the overlay (`PlayerControls`, `ListMenu`, `InfoPanel`, `PlayerTheme`,
 `PlayerUiState`) is at parity with the Windows overlay — play/pause, ±10s, mute/volume, scrubber,
@@ -341,6 +372,20 @@ immediately. The embedded Flutter overlay applies the same idea: its
 position `StreamBuilder` wraps only the VOD seek bar and time label
 (`_positionRebuild`), not the whole control surface.
 
+**The same rule binds the Dart IPC client**, which is a second consumer of the
+same firehose: `LinuxNativeSession` observes `user-data/iptvs-control`,
+`paused-for-cache` and `duration`, but **never `time-pos`** — observing it
+delivered 25-60 socket lines + `jsonDecode` per second onto the main isolate for
+the whole native session, to keep a cache that only matters *after* the mpv
+process exits (`playbackState()` prefers a live `get_property` read whenever the
+socket is alive). Instead a **1 Hz poll, started only for VOD**
+(`_startPositionPoll`, re-entrancy-guarded, cancelled in `dispose`) refreshes it
+through the same `applyPlaybackPropertyChange` seam the observer path uses; live
+never persists a position, so it polls nothing. The poll timer is deliberately
+*not* in `ResourceCounters` — its lifetime is strictly bounded by the session,
+which is already counted as `linuxNativeSessions` (same reasoning as
+`player_screen.dart`'s VOD position-persist timer).
+
 If the native executable, overlay script, display backend, or IPC startup is
 unavailable — including a host mpv below the 0.40 version floor, or an
 unparseable `--version` output — Linux falls back to embedded media_kit/libmpv
@@ -543,7 +588,12 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   implementation, `_teardownLinuxNative`, which claims the session synchronously before its first
   `await` so overlapping teardowns can't double-decrement; a fourth, pre-adoption abort — the
   route popped while `LinuxNativeSession.start` was still connecting — disposes the session
-  without ever incrementing).
+  without ever incrementing). Two player-owned `Timer`s are deliberately *outside* this set
+  because a counted owner already bounds them: `PlayerScreen`'s 30s VOD position-persist timer
+  (bounded by the route) and `LinuxNativeSession`'s 1 Hz VOD position poll (bounded by the
+  session, itself counted as `linuxNativeSessions`). The `Player`'s `VideoController` is likewise
+  uncounted — it has no independent teardown (disposing the `Player` releases it) — and on Android
+  is now built lazily, only if the embedded fallback actually renders.
 - **Kotlin** (`android/.../player/DebugCounters.kt`, `BuildConfig.DEBUG`-gated `AtomicInteger`s):
   `exoEngines`/`mpvEngines` (constructor ↔ now-idempotent `release()`), `previewViews`
   (`PreviewPlatformView` init/dispose), `progressTickers` (launch ↔ `invokeOnCompletion`),

@@ -19,12 +19,62 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.util.Locale
+
+/**
+ * Buffering policy for [ExoPlayerEngine] — the numbers media3's
+ * `DefaultLoadControl` would otherwise default to are tuned for on-demand video,
+ * not for zapping around live IPTV.
+ *
+ * The one that matters is [BUFFER_FOR_PLAYBACK_MS]: media3 defaults it to
+ * **2500 ms**, so *every* Android open (channel zap, EPG-grid play, and the
+ * `SharedEngine` preview, which runs through this same engine) shows 2.5 s of
+ * black before the first frame, and 5 s (`DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_
+ * REBUFFER_MS`) after every rebuffer.
+ *
+ * **Floor, not a target.** These start thresholds must stay well under
+ * [ReconnectPolicy.STALL_RECONNECT_MS] (8 s), because a stream that can't reach
+ * the resume threshold keeps ExoPlayer in `STATE_BUFFERING`, and once that lasts
+ * 8 s the Activity's watchdog reloads the source. Set the resume threshold too
+ * close to it and a genuine underrun turns into a reconnect loop instead of a
+ * short rebuffer. Roughly 1 s to start / 2 s to resume keeps a ≥4x margin while
+ * still holding enough media to ride out normal jitter, and the *sustained*
+ * cushion ([MIN_BUFFER_MS]/[MAX_BUFFER_MS]) is what actually absorbs network
+ * variance once playing. Pinned by `ExoBufferPolicyTest`.
+ */
+object ExoBufferPolicy {
+    /** Below this much buffered media the loader resumes filling. */
+    const val MIN_BUFFER_MS = 15_000
+
+    /** Ceiling on how far ahead the loader buffers. */
+    const val MAX_BUFFER_MS = 50_000
+
+    /** Buffered media required before playback *starts* (media3 default: 2500). */
+    const val BUFFER_FOR_PLAYBACK_MS = 1_000
+
+    /** Buffered media required to resume after an underrun (media3 default: 5000). */
+    const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_000
+
+    /**
+     * Judge the buffer by duration rather than by allocated bytes: IPTV bitrates
+     * vary wildly between providers/channels, and a byte-based threshold makes
+     * time-to-first-frame a function of the bitrate instead of a fixed budget.
+     */
+    const val PRIORITIZE_TIME_OVER_SIZE = true
+
+    /**
+     * Hard floor for [BUFFER_FOR_PLAYBACK_MS]/[BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS]
+     * — going below this trades a barely-perceptible startup win for constant
+     * micro-rebuffering, which is what actually feeds the stall watchdog.
+     */
+    const val MIN_PLAYBACK_BUFFER_FLOOR_MS = 750
+}
 
 /**
  * Default [PlaybackEngine]: ExoPlayer/MediaCodec hardware decode into a
@@ -191,8 +241,21 @@ class ExoPlayerEngine(
             }
         }.setEnableDecoderFallback(true)
 
+        // Without this the media3 DefaultLoadControl defaults apply, which hold
+        // the first frame back by 2.5s on every open — see [ExoBufferPolicy].
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                ExoBufferPolicy.MIN_BUFFER_MS,
+                ExoBufferPolicy.MAX_BUFFER_MS,
+                ExoBufferPolicy.BUFFER_FOR_PLAYBACK_MS,
+                ExoBufferPolicy.BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+            )
+            .setPrioritizeTimeOverSizeThresholds(ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE)
+            .build()
+
         player = ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .build()
             .also {
                 playerView.player = it

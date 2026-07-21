@@ -251,6 +251,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  /// The embedded (texture) video output. **Deliberately `late`**: reading it
+  /// is what constructs it, and constructing a [VideoController] is not free —
+  /// on Android it means an `Utils.IsEmulator` channel round-trip, a decoder
+  /// query, a SurfaceTexture/ANativeWindow allocation and ~10 mpv property
+  /// sets, all on the main isolate during the exact frames that decide
+  /// time-to-first-frame. Android's happy path never renders this surface (the
+  /// native HDR Activity owns playback), so nothing must read this field until
+  /// the embedded fallback is actually taking over — see
+  /// [_ensureEmbeddedController] and the ordering in [_playbackSurface].
   late final VideoController? _controller = _usesWindowsNativeSurface
       ? null
       : (widget.existingController ??
@@ -263,6 +272,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 hwdec: Platform.isLinux ? 'auto-safe' : null,
               ),
             ));
+
+  /// Forces the lazily-built [_controller] into existence. Called on the
+  /// embedded-fallback path *before* [_configureNativePlayer] applies the
+  /// embedded mpv options, because [VideoController] creation sets `vo`/`hwdec`
+  /// itself (see `kEmbeddedAndroidVideoOptions`) — keeping it ahead of the
+  /// option sweep preserves the ordering the embedded path has always had.
+  VideoController? _ensureEmbeddedController() => _controller;
   final GlobalKey<PlayerVideoSurfaceState> _embeddedSurfaceKey = GlobalKey();
 
   /// False when [_player] was adopted from an existing preview — it's owned by
@@ -295,7 +311,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _lastReconnectMs = 0;
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
-  late bool _nativePlaybackLaunched = _usesWindowsNativeSurface;
+
+  /// True while a *native* surface owns playback, so [_playbackSurface] renders
+  /// a bare black fill instead of the embedded media_kit surface.
+  ///
+  /// Starts true on Windows (which always opens on its native HWND) **and on
+  /// Android**: `MainActivity` answers the `open` call `true` unconditionally —
+  /// engine selection, including the mpv fallback, happens inside
+  /// `HdrPlayerActivity` — so the Dart embedded path is only ever reached when
+  /// the *channel* itself fails (`MissingPluginException`, the 10s timeout, a
+  /// `PlatformException`). Starting true means the happy path never builds a
+  /// [VideoController] or a `Video` widget tree at all. The fallback branch in
+  /// [_open] sets it back to false (and calls [_ensureEmbeddedController]) so
+  /// the embedded path still works when the native launch really did fail.
+  late bool _nativePlaybackLaunched =
+      _usesWindowsNativeSurface || Platform.isAndroid;
   // Android adopted-handoff: set once the native launch failed and the
   // embedded fallback is taking over (ends the transparent handoff window).
   bool _nativeLaunchFailed = false;
@@ -606,6 +636,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return;
       }
     } else if (mounted) {
+      // The embedded surface is taking over (on Android: the native channel
+      // itself failed). Build the VideoController now, before the mpv options
+      // below land — its creation sets `vo`/`hwdec` itself, and on Android it
+      // was deliberately skipped until this point.
+      _ensureEmbeddedController();
       setState(() {
         _nativePlaybackLaunched = false;
         _nativeLaunchFailed = true;
@@ -1773,28 +1808,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // route below (channel list + frozen preview frame) shows through instead
     // of a black flash.
     if (_transparentHandoff) return const SizedBox.expand();
+    // Order matters: the native check comes first so the happy path never
+    // *reads* `_controller` — reading it is what constructs it (see the field's
+    // doc comment). Only once the embedded surface is genuinely going to render
+    // do we pay for a VideoController.
+    if (_nativePlaybackLaunched) return _nativePlaybackOverlay();
     if (_controller == null) return _nativePlaybackOverlay();
-    return _nativePlaybackLaunched
-        ? _nativePlaybackOverlay()
-        : PlayerVideoSurface(
-            key: _embeddedSurfaceKey,
-            player: _player,
-            controller: _controller,
-            title: widget.title,
-            sourceName: widget.sourceName,
-            epgNow: widget.epgNow,
-            epgNext: widget.epgNext,
-            isLive: _isLive,
-            canFavorite: _canFavorite,
-            favorite: _favorite,
-            liveSynced: _liveSynced,
-            dynamicRangeLabel: _dynamicRangeLabel,
-            onBack: _back,
-            onToggleFavorite: _toggleFavorite,
-            onPlayPause: _togglePlayback,
-            onGoLive: _goToLive,
-            onCycleAspect: _cycleNativeAspect,
-          );
+    return PlayerVideoSurface(
+      key: _embeddedSurfaceKey,
+      player: _player,
+      controller: _controller,
+      title: widget.title,
+      sourceName: widget.sourceName,
+      epgNow: widget.epgNow,
+      epgNext: widget.epgNext,
+      isLive: _isLive,
+      canFavorite: _canFavorite,
+      favorite: _favorite,
+      liveSynced: _liveSynced,
+      dynamicRangeLabel: _dynamicRangeLabel,
+      onBack: _back,
+      onToggleFavorite: _toggleFavorite,
+      onPlayPause: _togglePlayback,
+      onGoLive: _goToLive,
+      onCycleAspect: _cycleNativeAspect,
+    );
   }
 
   Future<void> _goToLive() async {
