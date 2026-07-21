@@ -155,6 +155,34 @@ void main() {
       );
       expect(script, contains('Updated application exited during startup'));
     });
+
+    test('records a transcript so a failed helper is diagnosable', () {
+      expect(script, contains('Start-Transcript'));
+      expect(script, contains("'iptvs_update.log'"));
+    });
+  });
+
+  group('Windows updater launch', () {
+    // Regression: the helper's first act is Wait-Process on the GUI app's PID,
+    // so it is blocked when the app exits. Launched as a bare detached console
+    // child it was torn down at that moment — no staging folder was ever made
+    // and the update silently no-opped. It must be spawned via `cmd /c start`
+    // so it owns a console and outlives the app.
+    final launch = windowsUpdaterLaunch(r'C:\Temp\iptvs_update.ps1');
+
+    test('routes through cmd /c start, not a bare powershell', () {
+      expect(launch.executable, 'cmd.exe');
+      expect(launch.arguments.first, '/c');
+      expect(launch.arguments[1], 'start');
+    });
+
+    test('runs the helper script hidden without a profile', () {
+      expect(launch.arguments, containsAllInOrder(<String>['start', '/min']));
+      expect(launch.arguments, contains('powershell.exe'));
+      expect(launch.arguments, containsAllInOrder(<String>['-File', r'C:\Temp\iptvs_update.ps1']));
+      expect(launch.arguments, containsAllInOrder(<String>['-WindowStyle', 'Hidden']));
+      expect(launch.arguments, contains('-NoProfile'));
+    });
   });
 
   group('Linux AppImage update script', () {
