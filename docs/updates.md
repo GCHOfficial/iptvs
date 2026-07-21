@@ -97,13 +97,19 @@ the final install step is the only platform-specific part.
   permission call completes only when Android returns from settings, allowing the same APK to be
   retried without a second download. Any later resume rechecks the cache-owned path, exact byte
   length, and SHA-256 before native package/signer verification runs again; **Windows**
-  (no native C++) writes a detached PowerShell helper (`windowsUpdateScript`) that waits for our
+  (no native C++) writes a PowerShell helper (`windowsUpdateScript`) that waits for our
   PID, rejects absolute/escaping/link archive entries, extracts into a new sibling staging
   directory, checks the expected executable, moves the old installation to a backup, swaps the
   staged directory into place, and restores/relaunches the backup when the replacement cannot
-  start. The app then `exit(0)`s so `iptvs.exe` unlocks. This can only be executed end to end
-  against a **packaged Release folder** on Windows, not `flutter run`; it requires a user-writable,
-unelevated install directory. **Linux** copies the verified AppImage beside the
+  start. The app then `exit(0)`s so `iptvs.exe` unlocks. **The helper is spawned via `cmd /c
+  start` (`windowsUpdaterLaunch`), not a bare detached `powershell.exe`.** Its first act is
+  `Wait-Process` on our GUI PID, so it is blocked when the app exits; a bare detached console
+  child of a GUI process was torn down at that moment before creating any staging folder — the
+  app closed and the update silently no-opped. `start` launches it as an independent,
+  console-owning process that outlives the app. The helper also opens a `Start-Transcript`
+  (`%TEMP%\iptvs_update.log`) so a failed run is diagnosable instead of invisible. This can only
+  be executed end to end against a **packaged Release folder** on Windows, not `flutter run`; it
+  requires a user-writable, unelevated install directory. **Linux** copies the verified AppImage beside the
 running `APPIMAGE`, then a detached POSIX helper waits for our PID, atomically
 swaps the file, relaunches it, and restores the backup if startup fails. Linux
 in-app updates are available only from a writable AppImage; `flutter run` and

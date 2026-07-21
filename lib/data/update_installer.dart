@@ -176,8 +176,8 @@ class UpdateInstaller {
   }
 
   /// Writes a PowerShell helper that waits for this process to exit, unzips the
-  /// new build over the install folder, and relaunches — then starts it
-  /// detached so it survives the app quitting. The caller must then `exit(0)`.
+  /// new build over the install folder, and relaunches — then starts it so it
+  /// survives the app quitting. The caller must then `exit(0)`.
   Future<void> _launchWindowsUpdater(File zip) async {
     final exePath = Platform.resolvedExecutable;
     final installDir = File(exePath).parent.path;
@@ -192,17 +192,10 @@ class UpdateInstaller {
         exeName: exeName,
       ),
     );
+    final launch = windowsUpdaterLaunch(script.path);
     await Process.start(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        script.path,
-      ],
+      launch.executable,
+      launch.arguments,
       mode: ProcessStartMode.detached,
       workingDirectory: dir.path,
     );
@@ -326,6 +319,37 @@ class _DigestSink implements Sink<Digest> {
   void close() {}
 }
 
+/// How the Windows update helper is spawned. Routed through `cmd /c start`
+/// rather than launching `powershell.exe` directly, detached.
+///
+/// The helper's first act is `Wait-Process` on this (GUI) app's PID: it blocks
+/// until the app exits, then swaps the install folder. A bare detached console
+/// child of a GUI process does not survive that parent exit reliably — it was
+/// torn down while still blocked in `Wait-Process`, so no staging folder was
+/// ever created and the update silently no-opped (the app closed and nothing
+/// happened). `start` launches PowerShell as an independent, console-owning
+/// process via the shell, so it outlives the app and runs to completion.
+/// Pure so the invocation is unit-testable.
+({String executable, List<String> arguments}) windowsUpdaterLaunch(
+  String scriptPath,
+) => (
+  executable: 'cmd.exe',
+  arguments: <String>[
+    '/c',
+    'start',
+    '', // start's first quoted token is the (empty) window title.
+    '/min',
+    'powershell.exe',
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-WindowStyle',
+    'Hidden',
+    '-File',
+    scriptPath,
+  ],
+);
+
 /// The Windows self-update helper script. It validates every archive path,
 /// extracts into a new sibling staging directory, verifies the expected
 /// executable, swaps whole directories, and restores the backup when launch
@@ -349,6 +373,11 @@ String windowsUpdateScript({
 \$backupDir = Join-Path \$parentDir ('.iptvs-update-backup-' + \$token)
 \$backupCreated = \$false
 \$swapped = \$false
+
+# Record what the (otherwise invisible) detached helper does, so a failed
+# self-update leaves a diagnosable trail instead of silently no-opping.
+\$logPath = Join-Path ([System.IO.Path]::GetTempPath()) 'iptvs_update.log'
+try { Start-Transcript -Path \$logPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
 
 try { Wait-Process -Id $pid -Timeout 60 } catch {}
 Start-Sleep -Milliseconds 800

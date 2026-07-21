@@ -358,7 +358,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 Self-updates from GitHub Releases (`GCHOfficial/iptvs`): shared Dart service
 (`update_service.dart`, pure version compare, unit-tested) + keychain prefs (`update_store.dart`)
 + per-platform installer (`update_installer.dart`: Android system installer via FileProvider;
-Windows detached PowerShell swap + `exit(0)`). `update_flow.dart` drives prompt → download →
+Windows PowerShell swap + `exit(0)`, spawned via `cmd /c start` — `windowsUpdaterLaunch` — not a
+bare detached `powershell.exe`, which a GUI parent's exit killed mid-`Wait-Process` before any
+work, silently no-opping the update). `update_flow.dart` drives prompt → download →
 install; Android persists a verified pending APK, retries it after unknown-source settings, and
 offers to resume it after OEM installer/settings detours with repeat cache hash + native
 package/signer checks. Dialogs are D-pad-safe (primary action autofocuses; the update dialog traps focus).
