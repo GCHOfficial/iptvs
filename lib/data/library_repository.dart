@@ -810,6 +810,27 @@ class LibraryRepository {
   MediaItem mergeExternalMetadata(MediaItem item, ExternalMetadata metadata) =>
       _mergeMetadata(item, metadata);
 
+  /// Max metadata lookups in flight at once during [enrichMediaMetadata].
+  ///
+  /// Each lookup is 1-2 sequential HTTP round trips (a search call, plus a
+  /// cache-miss write), so a plain serial loop over `_autoEnrichLimit` (40,
+  /// see `media_tab_controller.dart`) items at a realistic ~250ms provider
+  /// RTT took 15-20s before posters appeared. A fixed worker pool pulling
+  /// from a shared queue keeps concurrency bounded and cheap (the
+  /// `HttpClient`s are already reused per metadata-client instance, so
+  /// connections are pooled) without ever `Future.wait`-ing the whole list —
+  /// that would open thousands of sockets on a 250k-item catalog and get the
+  /// user rate-limited or banned by the provider.
+  ///
+  /// This is a single constant rather than per-provider because
+  /// [metadataProviders] can mix a visual provider (TMDB/TVDB) with a
+  /// `ratingsOnly` one (MDBList, which rate-limits harder); per-provider caps
+  /// would mean threading a limit through `MetadataProvider` itself, which
+  /// ripples well beyond this method. A shared, conservative cap keeps the
+  /// stricter provider safe at the cost of some possible headroom on the
+  /// looser one.
+  static const _enrichConcurrency = 4;
+
   Future<List<MediaItem>> enrichMediaMetadata(
     List<MediaItem> items, {
     int? limit,
@@ -820,18 +841,42 @@ class LibraryRepository {
       return items;
     }
     final out = [...items];
-    var checked = 0;
+    final targets = <int>[];
     for (var i = 0; i < out.length; i++) {
-      if (limit != null && checked >= limit) break;
+      if (limit != null && targets.length >= limit) break;
       final item = out[i];
       if (item.kind != ContentKind.movie &&
           item.kind != ContentKind.series &&
           item.kind != ContentKind.episode) {
         continue;
       }
-      checked++;
-      out[i] = await _applyExternalMetadata(item, action: 'prefetch');
+      targets.add(i);
     }
+    var nextTarget = 0;
+    Future<void> worker() async {
+      while (nextTarget < targets.length) {
+        final index = targets[nextTarget++];
+        try {
+          out[index] = await _applyExternalMetadata(
+            out[index],
+            action: 'prefetch',
+          );
+        } catch (error) {
+          // _applyExternalMetadata already swallows per-provider (network)
+          // failures internally; this is a defensive backstop (e.g. a local
+          // cache read/write error) so one item's failure can't strand the
+          // rest of the pool or leave enrichMediaMetadata hanging.
+          _logMetadata(
+            'prefetch error ${out[index].kind.name}:${out[index].id}: $error',
+          );
+        }
+      }
+    }
+
+    final workerCount = targets.length < _enrichConcurrency
+        ? targets.length
+        : _enrichConcurrency;
+    await Future.wait(List.generate(workerCount, (_) => worker()));
     await db.updateMediaDisplayFields(source.id, out);
     return out;
   }
