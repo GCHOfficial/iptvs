@@ -203,6 +203,158 @@ void main() {
     });
   });
 
+  // Cached models keep their playback locator SEALED (`extra['secretLocator']`)
+  // and are only revealed at the Source boundary — see CLAUDE.md "Sealed
+  // playback locators". These tests pin both halves: reads never decrypt, and
+  // every write path that round-trips an already-sealed model preserves the
+  // ciphertext instead of dropping the locator on the floor.
+  group('AppDatabase sealed locators', () {
+    const url = 'http://provider.invalid/live/acct/tok/1.ts';
+
+    test('channels read back sealed and reveal on demand', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'Src', const [], const [
+        Channel(id: 'ch1', name: 'One', extra: {'url': url, 'tvgId': 'one'}),
+      ]);
+
+      final sealed = (await db.readChannels('src1')).single;
+      expect(sealed.extra, isNot(contains('url')));
+      expect(sealed.extra['secretLocator'], isA<String>());
+      expect(sealed.extra['tvgId'], 'one');
+
+      expect((await db.revealChannel(sealed)).extra['url'], url);
+
+      // Writing the SEALED model straight back must not lose the locator:
+      // protectSecretLocators finds no plaintext locator field and has to fall
+      // through to preserving the existing ciphertext. This design leans on
+      // that branch on every refresh.
+      await db.replaceLibrary('src1', 'Src', const [], [sealed]);
+      final again = (await db.readChannels('src1')).single;
+      expect(again.extra['secretLocator'], sealed.extra['secretLocator']);
+      expect((await db.revealChannel(again)).extra['url'], url);
+      await db.close();
+    });
+
+    test('media items survive every write path while sealed', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const kind = ContentKind.movie;
+      const category = MediaCategory(id: 'c1', title: 'Action', kind: kind);
+
+      await db.replaceMediaLibrary(
+        'src1',
+        kind,
+        const [category],
+        const [
+          MediaItem(
+            id: 'm1',
+            title: 'Alpha',
+            kind: kind,
+            // `name` is the provider title that
+            // resetEnrichedMediaDisplayFields restores from — it lives in the
+            // same (sealed) extra blob as the locator.
+            extra: {'cmd': url, 'stream_id': '7', 'name': 'Alpha'},
+          ),
+        ],
+        loadedPages: 1,
+        totalPages: 1,
+      );
+
+      var sealed = (await db.readMediaItems('src1', kind)).single;
+      expect(sealed.extra, isNot(contains('cmd')));
+      expect(sealed.extra['stream_id'], '7');
+      final ciphertext = sealed.extra['secretLocator'] as String;
+      expect((await db.revealMediaItem(sealed)).extra['cmd'], url);
+
+      Future<MediaItem> reread() async => (await db.readMediaItems(
+        'src1',
+        kind,
+      )).firstWhere((i) => i.id == 'm1');
+
+      // replaceMediaLibrary with the sealed model.
+      await db.replaceMediaLibrary(
+        'src1',
+        kind,
+        const [category],
+        [sealed],
+        loadedPages: 1,
+        totalPages: 1,
+      );
+      sealed = await reread();
+      expect(sealed.extra['secretLocator'], ciphertext);
+
+      // updateMediaDisplayFields (the metadata-merge write path).
+      await db.updateMediaDisplayFields('src1', [
+        sealed.copyWith(title: 'Alpha (enriched)'),
+      ]);
+      sealed = await reread();
+      expect(sealed.title, 'Alpha (enriched)');
+      expect(sealed.extra['secretLocator'], ciphertext);
+
+      // appendMediaItems (pagination).
+      await db.appendMediaItems(
+        'src1',
+        kind,
+        const [
+          MediaItem(
+            id: 'm2',
+            title: 'Beta',
+            kind: kind,
+            extra: {'cmd': 'http://provider.invalid/vod/2.mkv'},
+          ),
+        ],
+        loadedPages: 2,
+        totalPages: 2,
+      );
+      final appended = (await db.readMediaItems(
+        'src1',
+        kind,
+      )).firstWhere((i) => i.id == 'm2');
+      expect(appended.extra, isNot(contains('cmd')));
+      expect(
+        (await db.revealMediaItem(appended)).extra['cmd'],
+        'http://provider.invalid/vod/2.mkv',
+      );
+
+      // resetEnrichedMediaDisplayFields rewrites titles straight off the
+      // sealed row — it must not strip the locator.
+      await db.resetEnrichedMediaDisplayFields(sourceId: 'src1');
+      sealed = await reread();
+      expect(sealed.title, 'Alpha');
+      expect(sealed.extra['secretLocator'], ciphertext);
+      expect((await db.revealMediaItem(sealed)).extra['cmd'], url);
+      await db.close();
+    });
+
+    test('a bulk read decrypts nothing; one reveal decrypts once', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [],
+        List.generate(
+          2000,
+          (i) => Channel(
+            id: 'ch$i',
+            name: 'Channel $i',
+            number: i,
+            extra: {'url': '$url?i=$i'},
+          ),
+        ),
+      );
+
+      // Counting, never wall-clock: a regression that reintroduces read-time
+      // decryption shows up here deterministically.
+      final before = db.vault.decryptCount;
+      final channels = await db.readChannels('src1');
+      expect(channels, hasLength(2000));
+      expect(db.vault.decryptCount, before);
+
+      await db.revealChannel(channels.first);
+      expect(db.vault.decryptCount, before + 1);
+      await db.close();
+    });
+  });
+
   group('AppDatabase favorites', () {
     test('adds, reads, and removes favorites per source and kind', () async {
       final db = await AppDatabase.openAt(dbPath());

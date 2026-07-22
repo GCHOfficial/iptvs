@@ -69,6 +69,12 @@ class AppDatabase {
   final SecretLocatorVault _vault;
   AppDatabase._(this._db, this._vault);
 
+  /// The locator vault backing this cache. Exposed so tests can assert on
+  /// [SecretLocatorVault.decryptCount] — reading the cache must decrypt
+  /// nothing; only [revealChannel]/[revealMediaItem] may.
+  @visibleForTesting
+  SecretLocatorVault get vault => _vault;
+
   /// Current schema version. Bump this and add an [onUpgrade] branch whenever
   /// the schema changes.
   ///
@@ -876,26 +882,31 @@ class AppDatabase {
       whereArgs: [sourceId],
       orderBy: 'number, name',
     );
-    // Sequential, not `Future.wait(rows.map(...))`: fanning 50k futures out
-    // into one `Future.wait` dominated the read (scheduler + list churn for
-    // work that is CPU-bound anyway). The loop does the same total work with
-    // one future at a time.
-    final out = <Channel>[];
-    for (final row in rows) {
-      out.add(await _readChannelRow(row));
-    }
-    return out;
+    // Synchronous mapping, no crypto: the returned channels keep their locator
+    // SEALED in `extra['secretLocator']`. Decrypting 250k rows to play one of
+    // them was the dominant cost of a cached start; `revealChannel` opens the
+    // one model that is about to be played instead. See CLAUDE.md "Sealed
+    // playback locators".
+    return [
+      for (final row in rows) _channelFromRow(row, _decodeExtra(row['extra'])),
+    ];
   }
 
-  Future<Channel> _readChannelRow(Map<String, Object?> row) async {
-    // Decode + decrypt first, then build the model ONCE. Building a `Channel`
-    // and then rebuilding it with the decrypted `extra` doubled the model
-    // allocation on every cached row.
-    final extra = await restoreSecretLocators(
-      _decodeExtra(row['extra']),
-      _vault,
+  /// Decrypts the sealed playback locator on a cached [channel] so it can be
+  /// handed to the owning [Source]. A no-op for a channel that already carries
+  /// plaintext locators (one straight off the provider), so it is always safe
+  /// to call. Only [LibraryRepository] should need this.
+  Future<Channel> revealChannel(Channel channel) async {
+    if (!hasSealedLocator(channel.extra)) return channel;
+    return Channel(
+      id: channel.id,
+      name: channel.name,
+      logo: channel.logo,
+      categoryId: channel.categoryId,
+      number: channel.number,
+      archiveDays: channel.archiveDays,
+      extra: await restoreSecretLocators(channel.extra, _vault),
     );
-    return _channelFromRow(row, extra);
   }
 
   // ── movies / series / generic media ──────────────────────────────────────
@@ -1011,28 +1022,23 @@ class AppDatabase {
     return _readMediaItems(rows, kind);
   }
 
-  /// Sequential by design — see the note in [readChannels].
-  Future<List<MediaItem>> _readMediaItems(
+  /// Synchronous, no crypto — items stay sealed. See [readChannels].
+  static List<MediaItem> _readMediaItems(
     List<Map<String, Object?>> rows,
     ContentKind kind,
-  ) async {
-    final out = <MediaItem>[];
-    for (final row in rows) {
-      out.add(await _readMediaItem(row, kind));
-    }
-    return out;
-  }
+  ) => [
+    for (final row in rows)
+      _mediaItemFromRow(row, kind, _decodeExtra(row['extra'])),
+  ];
 
-  Future<MediaItem> _readMediaItem(
-    Map<String, Object?> row,
-    ContentKind kind,
-  ) async {
-    // Decode + decrypt first, build the model once (see [_readChannelRow]).
-    final extra = await restoreSecretLocators(
-      _decodeExtra(row['extra']),
-      _vault,
+  /// The [MediaItem] counterpart of [revealChannel]: decrypts the sealed
+  /// playback locator so the model can be handed to the owning [Source]. A
+  /// no-op when the item already carries plaintext locators.
+  Future<MediaItem> revealMediaItem(MediaItem item) async {
+    if (!hasSealedLocator(item.extra)) return item;
+    return item.copyWith(
+      extra: await restoreSecretLocators(item.extra, _vault),
     );
-    return _mediaItemFromRow(row, kind, extra);
   }
 
   /// Builds the model from [r] with an already-decoded [extra] — see
@@ -1322,11 +1328,11 @@ class AppDatabase {
     if (rows.isEmpty) return;
     final batch = _db.batch();
     for (final row in rows) {
-      final item = await _readMediaItem(
-        row,
-        ContentKind.values.byName(row['kind'] as String),
-      );
-      final raw = item.extra;
+      // `raw` stays SEALED: none of the display fields below live in the
+      // locator set, and re-running `protectSecretLocators` over a sealed map
+      // finds no plaintext locators and preserves the existing ciphertext
+      // verbatim (`existingEncrypted`). So this rewrite never decrypts.
+      final raw = _decodeExtra(row['extra']);
       final title =
           _firstString(raw, [
             'providerTitle',
@@ -1334,7 +1340,7 @@ class AppDatabase {
             'name',
             'title',
           ]) ??
-          item.title;
+          row['title'] as String;
       final protectedExtra = await protectSecretLocators(raw, _vault);
       batch.update(
         'media_items',

@@ -171,6 +171,27 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   stream id, etc.). Keep provider details out of the shared models and out of the UI.
 - **Resolve streams at play time, never ahead.** Stalker `create_link` URLs are short-lived.
   `Source.resolve` / `resolveMedia` are called right before playback.
+- **Sealed playback locators: models come out of the cache encrypted; only `LibraryRepository`
+  reveals them.** `protectSecretLocators` encrypts the locator fields of `extra` (`url`, `cmd`,
+  `streamUrl`, …) into `extra['secretLocator']` on write; `readChannels`/`readMediaItems`/
+  `readMediaItemsByIds` map rows **synchronously with no crypto** and hand back *sealed* models
+  (decrypting a 250k-channel library to play one channel was the dominant cold-start cost — see
+  docs/validation-baseline.md). `AppDatabase.revealChannel`/`revealMediaItem` decrypt one model,
+  and are called at exactly these **reveal points** in `library_repository.dart`: `resolve`,
+  `resolveArchive`, `resolveMedia`, `mediaDetails`, and the **`parent` argument** of `loadMedia`
+  and `loadMoreMedia` (`StalkerSource._seasonPlaybackHints` reads a *cached* season's
+  `extra['cmd']` to build playable episodes — the easiest one to miss). Reveal is a no-op on an
+  already-plaintext model, so it's always safe to add one. Missing a reveal point makes that
+  content silently unplayable, so every `Source` site that consumes a locator field carries a
+  release-inert `assert(!hasSealedLocator(...))` (`m3u_source` resolve/resolveArchive,
+  `stalker_source` resolve/resolveMedia/`_seasonPlaybackHints`) — keep that assert when adding a
+  locator-consuming path. Write paths must survive a *sealed* model round-tripping back through
+  them (`protectSecretLocators` preserves the existing ciphertext when it finds no plaintext
+  locator); `resetEnrichedMediaDisplayFields` relies on this. On-disk format is unchanged — this
+  is a model-lifetime contract, not a schema one. Pinned by `test/sealed_locator_reveal_test.dart`,
+  the "AppDatabase sealed locators" group in `test/persistence_test.dart` (including a
+  `SecretLocatorVault.decryptCount` assertion that a bulk read decrypts *nothing*), and
+  `test/secret_locator_vault_test.dart`.
 - **Async publishes are generation-guarded.** `MediaTabController`, `LiveController`, and
   `HomeShell._loadActive` each hold a monotonic `_loadGeneration`: only dataset-replacing ops
   (`load`, `setCategory`) bump it and publish results only if still current; subordinate ops

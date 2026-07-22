@@ -258,12 +258,19 @@ class LibraryRepository {
     );
   }
 
-  Future<StreamInfo> resolve(Channel channel) => source.resolve(channel);
+  /// Reveal point (see [db.revealChannel] and CLAUDE.md "Sealed playback
+  /// locators"): cached channels carry their locator encrypted, so it is
+  /// decrypted here — one model, at play time — before crossing into the
+  /// [Source].
+  Future<StreamInfo> resolve(Channel channel) async =>
+      source.resolve(await db.revealChannel(channel));
 
   /// Resolve a past [programme] on [channel] into a catch-up stream. Resolved at
-  /// play time (archive URLs are short-lived, like live).
-  Future<StreamInfo> resolveArchive(Channel channel, Programme programme) =>
-      source.resolveArchive(channel, programme);
+  /// play time (archive URLs are short-lived, like live). Reveal point.
+  Future<StreamInfo> resolveArchive(
+    Channel channel,
+    Programme programme,
+  ) async => source.resolveArchive(await db.revealChannel(channel), programme);
 
   Future<MediaLibrarySnapshot> loadMedia(
     ContentKind kind, {
@@ -273,6 +280,13 @@ class LibraryRepository {
   }) async {
     final token = loadToken;
     await source.connect();
+    // Reveal point, and the easiest one to miss: `parent` is a *cached* model
+    // (a season the user drilled into), so its locator is sealed, and
+    // `StalkerSource._seasonPlaybackHints` reads `parent.extra['cmd']` to give
+    // every episode it builds a playable command. Reassigning the parameter
+    // rather than introducing a local guarantees no downstream use here can
+    // keep hold of the sealed one. See CLAUDE.md "Sealed playback locators".
+    if (parent != null) parent = await db.revealMediaItem(parent);
     final parentId = parent?.id;
     if (!forceRefresh) {
       final sync = await db.mediaSyncState(
@@ -447,6 +461,9 @@ class LibraryRepository {
   }) async {
     final token = loadToken;
     await source.connect();
+    // Reveal point — same reason as in [loadMedia]: `parent` reaches
+    // `source.mediaItemsPage(parent:)`, which reads its locator.
+    if (parent != null) parent = await db.revealMediaItem(parent);
     final parentId = parent?.id;
     final sync = await db.mediaSyncState(
       source.id,
@@ -541,7 +558,11 @@ class LibraryRepository {
   }
 
   Future<MediaItem> mediaDetails(MediaItem item) async {
-    final details = await source.mediaDetails(item);
+    // Reveal point. Defensive rather than strictly required today (no
+    // `mediaDetails` implementation reads a locator field), but the result is
+    // merged back into the cache, so a sealed input here would round-trip a
+    // stale blob through `protectSecretLocators`.
+    final details = await source.mediaDetails(await db.revealMediaItem(item));
     if (!_supportsMetadata(details)) {
       return details;
     }
@@ -890,5 +911,7 @@ class LibraryRepository {
     return source.searchMedia(kind, query, categoryId: categoryId);
   }
 
-  Future<StreamInfo> resolveMedia(MediaItem item) => source.resolveMedia(item);
+  /// Reveal point — see [resolve].
+  Future<StreamInfo> resolveMedia(MediaItem item) async =>
+      source.resolveMedia(await db.revealMediaItem(item));
 }
