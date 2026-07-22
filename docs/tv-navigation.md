@@ -101,6 +101,20 @@ poster column counts at 960, 1280, and 1920 px.
   return. Since the cursor is drawn from `hasFocus` and a focus change rebuilds nothing on its
   own, the coordinator **notifies on focus change** (it listens to its own nodes); without that
   the accent stayed stuck in the channel list after Left/Back moved the D-pad to the categories.
+- **Notification granularity.** That focus-change notify, plus one per cursor move, used to run
+  through a single aggregate listener wrapping the *entire* live body — so one Down press
+  rebuilt the sidebar, the whole preview panel (gradient, nested `LayoutBuilder`, video/image
+  `Stack`, EPG text) and the channel list, when two rows had changed. Under key auto-repeat that
+  was the dominant per-frame cost on weak Android TV silicon. The coordinator is still the single
+  owner of the selection state, but it publishes **narrow slices** — `channelSelection`,
+  `categorySelection`, `previewRegion`, `digitEntry` — and each pane subscribes to the one it
+  draws. Each pane's *focus node* is folded into its own slice, so a handover still repaints both
+  sides (the losing pane's node fires too). Every mutation also pulses the aggregate
+  `notifyListeners()`, so whole-coordinator listeners are unaffected. `ChannelListScreen`
+  therefore keeps `_focus` **out** of `_bodyListenable`, and the preview channel is resolved
+  through a callback inside the preview pane's own rebuild rather than passed down as a value.
+  Pinned by the `notification granularity` group in `test/live_focus_coordinator_test.dart` —
+  if those collapse back to "everything notifies everything", the split has silently regressed.
 - A fixed row height means the tallest row (name + `Now ·` + progress + `Next ·`) must *fit*
   `kChannelRowExtentWithEpg`, or it overflows. Every source in the tests except `_EpgSource`
   returns an empty EPG, so that one test is the only thing guarding it — keep it.
