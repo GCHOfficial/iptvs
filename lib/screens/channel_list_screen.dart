@@ -356,6 +356,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _bodyListenable = Listenable.merge([_dataListenable, _preview]);
       _visibleKey = null;
       _visibleCache = null;
+      _visibleMediaKey = null;
+      _visibleMediaCache = null;
       _channelsByIdKey = null;
       _channelsByIdCache = null;
       _focus.resetChannelSelection();
@@ -665,7 +667,48 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }).toList();
   }
 
+  // Memoized filtered media list, for the same reason as [_visible]: it is read
+  // from both `_statusText` and `_buildBody`, which each listen to
+  // `_dataListenable`, so a single notification re-filtered and re-allocated it
+  // twice. Metadata enrichment is the worst case — the media controller
+  // notifies once per 20-item chunk, and every live/favorites notification used
+  // to pay for it too. Key fields compare by identity (MediaLibrarySnapshot,
+  // List, Set and SourceConfig don't override ==) and the controller reassigns
+  // fresh collections on every mutation (`_replaceItems` copies the snapshot and
+  // the search results), so a stale hit is impossible.
+  List<MediaItem>? _visibleMediaCache;
+  (
+    ContentKind,
+    MediaTabController,
+    String?, // controller.categoryId
+    String, // trimmed query (the lowercased form is derived from it)
+    String?, // controller.searchQuery
+    MediaLibrarySnapshot?,
+    List<MediaItem>, // controller.searchResults
+    Set<String>, // favorites for this kind
+    SourceConfig, // hidden categories
+  )?
+  _visibleMediaKey;
+
   List<MediaItem> _visibleMedia(ContentKind kind) {
+    final controller = _media(kind);
+    final key = (
+      kind,
+      controller,
+      controller.categoryId,
+      _query.trim(),
+      controller.searchQuery,
+      controller.snapshot,
+      controller.searchResults,
+      _favoriteIds(kind),
+      widget.config,
+    );
+    if (_visibleMediaKey == key) return _visibleMediaCache!;
+    _visibleMediaKey = key;
+    return _visibleMediaCache = _computeVisibleMedia(kind);
+  }
+
+  List<MediaItem> _computeVisibleMedia(ContentKind kind) {
     final controller = _media(kind);
     final q = _query.trim().toLowerCase();
     final favoritesView = controller.categoryId == kFavoritesCategoryId;
