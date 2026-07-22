@@ -108,6 +108,37 @@ void main() {
       expect(progs.every((p) => p.channelId == 'ch1'), isTrue);
       expect(progs.first.title, 'P0');
     });
+
+    test('non-ASCII titles survive the parser chunk boundaries', () async {
+      // The guide is fed to the XML parser in 256 KiB pieces rather than as one
+      // decoded string (bounding peak memory on a large guide). That is only
+      // correct because the UTF-8 decoder carries an incomplete multi-byte
+      // sequence into the next chunk and the XML decoder carries a split tag —
+      // so push a guide well past several boundaries with multi-byte titles
+      // throughout, and with padding chosen so characters land *on* the
+      // boundaries rather than near them.
+      final many = StringBuffer();
+      // 'é' is 2 bytes, '中' 3, '𝄞' 4 — one of these straddles any given offset.
+      const titles = ['Café', '中文节目', 'Sinfonía 𝄞', 'Ω mega'];
+      const count = 8000;
+      for (var i = 0; i < count; i++) {
+        many.write(
+          programme('tvg.one', title: '${titles[i % titles.length]} $i'),
+        );
+      }
+      final bytes = xmltv(many.toString());
+      // Comfortably several chunks, so boundaries fall mid-title repeatedly.
+      expect(bytes.length, greaterThan(3 * 256 * 1024));
+
+      final progs = await parseXmltv(bytes, {'tvg.one': 'ch1'});
+
+      expect(progs, hasLength(count));
+      for (var i = 0; i < progs.length; i++) {
+        expect(progs[i].title, '${titles[i % titles.length]} $i');
+      }
+      // Mojibake from a mis-split sequence shows up as U+FFFD.
+      expect(progs.any((p) => p.title.contains('�')), isFalse);
+    });
   });
 
   group('MagIdentity', () {
