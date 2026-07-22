@@ -10,6 +10,7 @@ import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/stalker_source.dart';
 import 'package:iptvs/sources/xmltv.dart';
 import 'package:iptvs/sources/xtream_source.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'support/workload_fixtures.dart';
 
@@ -108,28 +109,31 @@ void main() {
       // production isolate round trip, so a regression in isolate spawn/copy
       // overhead is visible separately from the underlying parse cost.
 
-      test('Xtream live one-pass decodeLiveChannelsBytes 250000 items', () async {
-        const itemCount = 250000;
-        final bytes = WorkloadFixtures.xtreamLiveJson(itemCount);
+      test(
+        'Xtream live one-pass decodeLiveChannelsBytes 250000 items',
+        () async {
+          const itemCount = 250000;
+          final bytes = WorkloadFixtures.xtreamLiveJson(itemCount);
 
-        final inlineWatch = Stopwatch()..start();
-        final inlineResult = decodeLiveChannelsBytes(bytes);
-        inlineWatch.stop();
-        expect(inlineResult, hasLength(itemCount));
+          final inlineWatch = Stopwatch()..start();
+          final inlineResult = decodeLiveChannelsBytes(bytes);
+          inlineWatch.stop();
+          expect(inlineResult, hasLength(itemCount));
 
-        final isolateWatch = Stopwatch()..start();
-        final isolateResult = await compute(decodeLiveChannelsBytes, bytes);
-        isolateWatch.stop();
-        expect(isolateResult, hasLength(itemCount));
+          final isolateWatch = Stopwatch()..start();
+          final isolateResult = await compute(decodeLiveChannelsBytes, bytes);
+          isolateWatch.stop();
+          expect(isolateResult, hasLength(itemCount));
 
-        _report('xtream-live-onepass', {
-          'items': itemCount,
-          'inputBytes': bytes.length,
-          'inlineMs': inlineWatch.elapsedMilliseconds,
-          'isolateRoundTripMs': isolateWatch.elapsedMilliseconds,
-          'maxRssBytes': ProcessInfo.maxRss,
-        });
-      });
+          _report('xtream-live-onepass', {
+            'items': itemCount,
+            'inputBytes': bytes.length,
+            'inlineMs': inlineWatch.elapsedMilliseconds,
+            'isolateRoundTripMs': isolateWatch.elapsedMilliseconds,
+            'maxRssBytes': ProcessInfo.maxRss,
+          });
+        },
+      );
 
       test('Xtream VOD one-pass decodeMediaItemsBytes 250000 items', () async {
         const itemCount = 250000;
@@ -304,6 +308,81 @@ void main() {
             'channelReadMs': readWatch.elapsedMilliseconds,
             'epgWriteMs': epgWatch.elapsedMilliseconds,
             'nowNextMs': queryWatch.elapsedMilliseconds,
+            'maxRssBytes': ProcessInfo.maxRss,
+          });
+        } finally {
+          await db?.close();
+          if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
+        }
+      });
+
+      // The workload above seeds exactly two programmes per channel, so both
+      // halves of `nowNext` match almost every row they scan — the best case
+      // for any plan, and blind to the cost this workload isolates. A real
+      // guide is ~48 programmes per channel across a couple of days, where the
+      // "now" query's discarded candidates and the "next" query's sort
+      // dominate. Reported alongside the legacy SQL so the win is reproducible
+      // rather than asserted.
+      test('SQLite now/next on a realistic guide shape', () async {
+        const channelCount = 5000;
+        const perChannel = 48; // 240k programmes, ~2 days of guide.
+        // Pinned back onto the pre-change index so this measures the old plan
+        // even though `idx_prog_now` now exists.
+        const legacyNowSql =
+            'SELECT channel_id, title, start, stop, description FROM programmes '
+            'INDEXED BY idx_prog_source_start '
+            'WHERE source_id = ? AND start <= ? AND stop > ?';
+        const legacyNextSql =
+            'SELECT channel_id, title, MIN(start) AS start, stop, description '
+            'FROM programmes WHERE source_id = ? AND start > ? '
+            'GROUP BY channel_id';
+
+        final tempDir = Directory.systemTemp.createTempSync('iptvs_baseline');
+        AppDatabase? db;
+        try {
+          final path = '${tempDir.path}/nownext.db';
+          db = await AppDatabase.openAt(path);
+          final firstStart = DateTime.utc(2026, 1, 1);
+          await db.replaceEpg('baseline-source', <Programme>[
+            for (var c = 0; c < channelCount; c++)
+              for (var i = 0; i < perChannel; i++)
+                Programme(
+                  channelId: 'channel-$c',
+                  start: firstStart.add(Duration(hours: i)),
+                  stop: firstStart.add(Duration(hours: i + 1)),
+                  title: 'Programme $c-$i',
+                ),
+          ]);
+          // Mid-guide, the shape the 60s refresh timer actually sees.
+          final at = firstStart.add(
+            const Duration(hours: perChannel ~/ 2, minutes: 30),
+          );
+
+          final watch = Stopwatch()..start();
+          final result = await db.nowNext('baseline-source', at);
+          watch.stop();
+          expect(result.now, hasLength(channelCount));
+          expect(result.next, hasLength(channelCount));
+
+          // `singleInstance` hands back the AppDatabase's own connection, so
+          // the legacy SQL runs against exactly the same cache and page state.
+          // Deliberately not closed here — `db.close()` owns it.
+          final shared = await databaseFactoryFfi.openDatabase(path);
+          final t = at.millisecondsSinceEpoch;
+          final legacyNowWatch = Stopwatch()..start();
+          await shared.rawQuery(legacyNowSql, ['baseline-source', t, t]);
+          legacyNowWatch.stop();
+          final legacyNextWatch = Stopwatch()..start();
+          await shared.rawQuery(legacyNextSql, ['baseline-source', t]);
+          legacyNextWatch.stop();
+
+          _report('sqlite-nownext-realistic', {
+            'channels': channelCount,
+            'programmes': channelCount * perChannel,
+            'nowNextMs': watch.elapsedMilliseconds,
+            // Legacy = pre-idx_prog_now "now" and unpinned "next".
+            'legacyNowMs': legacyNowWatch.elapsedMilliseconds,
+            'legacyNextMs': legacyNextWatch.elapsedMilliseconds,
             'maxRssBytes': ProcessInfo.maxRss,
           });
         } finally {

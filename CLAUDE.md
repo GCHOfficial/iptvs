@@ -290,21 +290,37 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 12` (v9: `favorites` table, deliberately separate from
+`AppDatabase` is at `schemaVersion = 13` (v9: `favorites` table, deliberately separate from
 `channels`/`media_items` so a refresh never drops favorites; v10: `channels.archive_days` →
 `Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching; v12:
 `idx_prog_source_start(source_id, start)` on `programmes` for the source+time now/next lookup —
-channel-scoped guide/catch-up queries keep using `idx_prog_lookup`). When
+channel-scoped guide/catch-up queries keep using `idx_prog_lookup`; v13:
+`idx_prog_now(source_id, start, stop, channel_id)`, the *covering* index for the now/next "now"
+query — `stop` is in the index so the `stop > ?` term is decided without a table lookup per
+candidate row). The two `nowNext` halves are index-pinned by design: "now" is served by
+`idx_prog_now`, and "next" carries an explicit **`INDEXED BY idx_prog_lookup`** because the
+planner otherwise picks `idx_prog_source_start` and sorts every future programme through a temp
+B-tree (measured 952 ms vs 98 ms on a 960k-programme guide; `ANALYZE`, which production never
+runs, picks the pinned index on its own). That pin is a hard dependency — dropping or renaming
+`idx_prog_lookup` makes the query fail outright — so the v13 branch re-asserts it, and
+`explainNowQueryPlan`/`explainNextQueryPlan` pin both plans in `persistence_test.dart`. When
 changing the schema: bump `schemaVersion`, add an
 `onUpgrade` branch, make new tables/columns idempotent (`CREATE TABLE IF NOT EXISTS`, the
-`_isDuplicateColumn` guard). **Design trap:** upgrading from before v3 calls `_createMediaTables`,
+`_isDuplicateColumn` guard) — **and keep every branch re-entrant**: there is no `onDowngrade`
+handler, so an older build opened against a newer file silently re-stamps the version down
+without undoing anything, and upgrading again re-runs the branches over a schema that already
+has their changes. **Design trap:** upgrading from before v3 calls `_createMediaTables`,
 which builds the *current* media schema, so later `oldV >= 3` ALTER branches are intentionally
 skipped for those users — therefore **any table `_createMediaTables` doesn't create must also
 have an `oldV < N` repair branch**, or fresh installs miss it (the v7 `external_metadata` bug:
 created only in an `oldV >= 3 && oldV < 7` branch, fresh installs crashed on every metadata
 query; v8 fixed it both ways). `AppDatabase.openAt(path)` is the `@visibleForTesting` seam used
-by `test/persistence_test.dart`. **Supported upgrades are the publicly shipped schemas only**
-(8–11 → current; tag ranges in docs/validation-baseline.md), pinned by
+by `test/persistence_test.dart`. Connection tuning lives in `onConfigure` (WAL, `synchronous =
+NORMAL`, an 8 MB `cache_size`); `sqflite` runs it outside the migration transaction, which is
+what makes `journal_mode` legal there. `temp_store` is deliberately left at the default —
+`readChannels` sorts by `number, name` unindexed, so `MEMORY` would move an unbounded sorter
+into RAM on a 250k-channel source. **Supported upgrades are the publicly shipped schemas only**
+(8–12 → current; tag ranges in docs/validation-baseline.md), pinned by
 `test/released_schema_fixtures_test.dart` — per released version: fixture → migrate →
 pragma-based schema parity with a fresh install → seeded-data checks → stable second open. Keep
 that suite green (and extend the fixtures) whenever the schema changes; pre-v8 branches are
