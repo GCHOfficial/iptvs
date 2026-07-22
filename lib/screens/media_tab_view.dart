@@ -699,9 +699,12 @@ class _MediaListTile extends StatelessWidget {
                       ],
                     ),
                   ],
-                  if (sourceHintLabels(item).isNotEmpty) ...[
+                  // Parsed once per tile build: the pattern binds the list so
+                  // the emptiness test and the widget share one parse.
+                  if (sourceHintLabels(item) case final hints
+                      when hints.isNotEmpty) ...[
                     const SizedBox(height: 6),
-                    _SourceHints(item: item),
+                    _SourceHints(hints: hints),
                   ],
                   if (item.description != null) ...[
                     const SizedBox(height: 6),
@@ -830,9 +833,10 @@ class _MediaGridTile extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textLo, fontSize: 12),
               ),
-            if (sourceHintLabels(item).isNotEmpty) ...[
+            if (sourceHintLabels(item) case final hints
+                when hints.isNotEmpty) ...[
               const SizedBox(height: 5),
-              _SourceHints(item: item, compact: true),
+              _SourceHints(hints: hints, compact: true),
             ],
           ],
         ),
@@ -841,15 +845,18 @@ class _MediaGridTile extends StatelessWidget {
   }
 }
 
+/// Renders already-parsed hint labels. It deliberately takes the parsed list
+/// rather than the `MediaItem`: `sourceHintLabels` is not cheap (regexes + the
+/// language alias table) and every call site already has to test the result for
+/// emptiness, so parsing here too would double the cost on every tile build.
 class _SourceHints extends StatelessWidget {
-  final MediaItem item;
+  final List<String> hints;
   final bool compact;
 
-  const _SourceHints({required this.item, this.compact = false});
+  const _SourceHints({required this.hints, this.compact = false});
 
   @override
   Widget build(BuildContext context) {
-    final hints = sourceHintLabels(item);
     if (hints.isEmpty) return const SizedBox.shrink();
     return Wrap(
       spacing: 5,
@@ -1222,9 +1229,10 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                     ],
                   ),
                 ],
-                if (sourceHintLabels(_item).isNotEmpty) ...[
+                if (sourceHintLabels(_item) case final hints
+                    when hints.isNotEmpty) ...[
                   const SizedBox(height: 10),
-                  _SourceHints(item: _item),
+                  _SourceHints(hints: hints),
                 ],
                 if (providerSourceTitle(_item) case final sourceTitle?) ...[
                   const SizedBox(height: 10),
