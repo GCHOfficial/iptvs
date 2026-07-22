@@ -63,6 +63,14 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   double get _totalWidth =>
       _windowEnd.difference(_windowStart).inMinutes * _pxPerMinute;
 
+  /// The hour ruler is ~50 `Positioned`/`Align`/`Text` ticks whose geometry
+  /// depends only on the `late final` window bounds — yet it used to be rebuilt
+  /// from scratch on every `setState`, i.e. on every D-pad press. Built once and
+  /// handed back by identity, so the element tree skips the whole subtree; the
+  /// shared `_hOffset` translate lives in a `ValueListenableBuilder` *inside* it,
+  /// so panning still repaints without rebuilding a single tick.
+  late final Widget _hourHeaderWidget = _buildHourHeader();
+
   /// Shared horizontal offset for the header + every row.
   final ValueNotifier<double> _hOffset = ValueNotifier(0);
   final ScrollController _vController = ScrollController();
@@ -398,7 +406,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
                   _panTo(_hOffset.value - details.delta.dx),
               child: Column(
                 children: [
-                  _hourHeader(),
+                  _hourHeaderWidget,
                   const Divider(height: 1, color: AppColors.line),
                   Expanded(
                     child: widget.channels.isEmpty
@@ -569,7 +577,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     );
   }
 
-  Widget _hourHeader() {
+  Widget _buildHourHeader() {
     final hours = <Widget>[];
     var tick = _windowStart;
     while (tick.isBefore(_windowEnd)) {
@@ -668,6 +676,28 @@ double _cellWidth(
   return width < 24 ? 24 : width;
 }
 
+/// One programme's paint geometry plus its (constant) semantics label.
+///
+/// All four values depend only on the row's programme list, the fixed time
+/// window and the channel name — none of them change while the row is panned.
+/// They used to be recomputed inside the row's `ValueListenableBuilder`, which
+/// re-runs at 60 fps for the whole duration of a pan: two `DateTime.difference`
+/// calls and a four-part interpolated string per *cell* per *frame*. Computing
+/// them once per row build moves that work off the pan path entirely.
+class _CellLayout {
+  final Programme programme;
+  final double left;
+  final double width;
+  final String semanticsLabel;
+
+  const _CellLayout({
+    required this.programme,
+    required this.left,
+    required this.width,
+    required this.semanticsLabel,
+  });
+}
+
 class _ChannelRow extends StatelessWidget {
   /// Subtle full-row lift behind the selected channel (sits over the scaffold
   /// ink; the cells keep their own fills on top).
@@ -709,8 +739,34 @@ class _ChannelRow extends StatelessWidget {
   DateTime _clampStart(Programme p) =>
       p.start.isBefore(windowStart) ? windowStart : p.start;
 
+  /// Pan-invariant geometry + labels for every programme on the row, computed
+  /// once per row build (a discrete setState — a key press, a load) rather than
+  /// per pan frame. Index-parallel to [programmes] by construction.
+  List<_CellLayout> _layouts() {
+    final total = programmes.length;
+    return [
+      for (var i = 0; i < total; i++)
+        _CellLayout(
+          programme: programmes[i],
+          left: _left(_clampStart(programmes[i])),
+          width: _cellWidth(
+            programmes[i],
+            windowStart,
+            windowEnd,
+            nextStart: i + 1 < total ? programmes[i + 1].start : null,
+          ),
+          semanticsLabel:
+              '${programmes[i].title}, ${channel.name}, '
+              '${_EpgGridScreenState._hm(programmes[i].start)} to '
+              '${_EpgGridScreenState._hm(programmes[i].stop)}, '
+              '${i + 1} of $total',
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
+    final layouts = _layouts();
     // A full-row lift plus an accent bar in the channel column marks the active
     // channel across the whole width — so it's clear *which* row the cursor is on
     // even when the selected cell sits far along the timeline. A ColoredBox (no
@@ -791,22 +847,19 @@ class _ChannelRow extends StatelessWidget {
                   const buffer = 240.0;
                   final from = offset - buffer;
                   final to = offset + timelineWidth + buffer;
+                  // One clock read per row per frame instead of one per cell —
+                  // and it makes currentness consistent across the whole row.
+                  final now = DateTime.now();
                   final cells = <Widget>[];
                   // The selected cell is appended last so it paints above any
                   // residual overlap (e.g. the 24px minimum width).
                   Widget? selectedCell;
-                  for (var i = 0; i < programmes.length; i++) {
-                    final p = programmes[i];
-                    final left = _left(_clampStart(p));
-                    final width = _cellWidth(
-                      p,
-                      windowStart,
-                      windowEnd,
-                      nextStart: i + 1 < programmes.length
-                          ? programmes[i + 1].start
-                          : null,
-                    );
+                  for (var i = 0; i < layouts.length; i++) {
+                    final layout = layouts[i];
+                    final left = layout.left;
+                    final width = layout.width;
                     if (left + width < from || left > to) continue;
+                    final p = layout.programme;
                     final cell = Positioned(
                       left: left - offset,
                       width: width,
@@ -814,10 +867,10 @@ class _ChannelRow extends StatelessWidget {
                       bottom: 2,
                       child: _ProgrammeCell(
                         programme: p,
-                        channelName: channel.name,
-                        position: i + 1,
-                        total: programmes.length,
+                        semanticsLabel: layout.semanticsLabel,
                         selected: i == selectedIndex,
+                        isCurrent: !p.start.isAfter(now) && p.stop.isAfter(now),
+                        isPast: !p.stop.isAfter(now),
                         onTap: () => onTapProgramme(p),
                       ),
                     );
@@ -845,18 +898,24 @@ class _ChannelRow extends StatelessWidget {
 /// implicit animation. Focus/selection lives in the parent grid.
 class _ProgrammeCell extends StatelessWidget {
   final Programme programme;
-  final String channelName;
-  final int position;
-  final int total;
+
+  /// Precomputed by the row (see [_CellLayout]) — the format is pinned by
+  /// `test/epg_grid_test.dart`: `'$title, $channel, $hm to $hm, $n of $total'`.
+  final String semanticsLabel;
   final bool selected;
+
+  /// Airing state, resolved once per row build from a single clock read rather
+  /// than a `DateTime.now()` per cell per frame.
+  final bool isCurrent;
+  final bool isPast;
   final VoidCallback onTap;
 
   const _ProgrammeCell({
     required this.programme,
-    required this.channelName,
-    required this.position,
-    required this.total,
+    required this.semanticsLabel,
     required this.selected,
+    required this.isCurrent,
+    required this.isPast,
     required this.onTap,
   });
 
@@ -870,13 +929,8 @@ class _ProgrammeCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final isCurrent =
-        !programme.start.isAfter(now) && programme.stop.isAfter(now);
-    final isPast = !programme.stop.isAfter(now);
     return Semantics(
-      label:
-          '${programme.title}, $channelName, ${_EpgGridScreenState._hm(programme.start)} to ${_EpgGridScreenState._hm(programme.stop)}, $position of $total',
+      label: semanticsLabel,
       button: true,
       selected: selected,
       onTap: onTap,
