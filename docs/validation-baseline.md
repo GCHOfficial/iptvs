@@ -43,13 +43,21 @@ get the same treatment plus streaming: `parseXmltvBatched`
 (`lib/sources/xmltv.dart`) yields bounded `Programme` batches with a single
 in-flight batch at a time, feeding `AppDatabase.replaceEpgStream` so a large
 guide commits incrementally inside one transaction instead of holding the
-entire parsed guide in memory. **Scope of that claim:** it covers the *parsed*
-guide only. The worker still materializes the whole guide as source text —
-`utf8.decode` over the fully-buffered response body produces one UTF-16 `String`
-before `toXmlEvents()` sees it — so worker peak holds the compressed bytes, the
-decoded bytes, and a ~2×-sized string copy at once (`kEpgWorkload` permits
-128 MiB body / 512 MiB decoded). The 598 MB max-RSS row below is consistent with
-that being the dominant term, not the `Programme` batches. All three keep the existing inline path below
+entire parsed guide in memory. The guide's *source text* is bounded too: both
+XMLTV workers feed `toXmlEvents()` a chunked `Stream<String>` (256 KiB pieces,
+`_xmlChunkBytes`) instead of one `utf8.decode` of the whole body, which used to
+materialise a UTF-16 copy roughly twice the decoded size and hold it live beside
+the compressed and decoded bytes for the entire parse. Measured effect on the
+100,000-programme gzip workload: **peak RSS 598 MB → 260 MB**, parse 1,024 ms →
+871 ms. This is only correct because both stages buffer across chunk
+boundaries — `Utf8Decoder` carries an incomplete multi-byte sequence into the
+next chunk, and the `xml` package's event decoder keeps a `carry` string for a
+tag split across chunks; a naive per-chunk `utf8.decode` would corrupt any
+non-ASCII character straddling a boundary. Pinned by the "non-ASCII titles
+survive the parser chunk boundaries" test in `test/widget_test.dart`. What is
+still *not* streamed is the HTTP body itself — it is fully buffered before the
+worker starts (`kEpgWorkload` permits 128 MiB body / 512 MiB decoded), which is
+the remaining memory term. All three keep the existing inline path below
 their isolate thresholds (256 KB for Xtream/Stalker JSON, 64 KB for XMLTV) —
 isolate spawn overhead isn't worth it for the many small calls. Disk-backed M3U
 parsing is explicitly deferred: `ChannelListScreen` and its controllers hold
@@ -176,7 +184,7 @@ earlier workloads in the same test process.
 | M3U | 10,000 | 1.63 MB | 42 ms | 167 MB |
 | M3U | 50,000 | 8.35 MB | 124 ms | 215 MB |
 | M3U | 250,000 | 42.51 MB | 493 ms | 460 MB |
-| XMLTV gzip | 100,000 programmes | 0.93 MB compressed | 1,024 ms | 598 MB |
+| XMLTV gzip | 100,000 programmes | 0.93 MB compressed | 871 ms | 260 MB |
 | Xtream live JSON | 50,000 | 9.60 MB | 58 ms | Cumulative |
 | Xtream VOD JSON | 50,000 | 8.25 MB | 55 ms | Cumulative |
 | Xtream series JSON | 50,000 | 6.65 MB | 47 ms | Cumulative |

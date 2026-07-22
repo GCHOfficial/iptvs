@@ -19,6 +19,40 @@ import 'source.dart';
 /// offload.
 const _isolateXmltvThreshold = 64 * 1024;
 
+/// Bytes handed to the XML event parser at a time.
+///
+/// The parser is fed a *chunked* stream rather than one big string: decoding a
+/// 100 MB guide with `utf8.decode` would materialise a UTF-16 copy roughly
+/// twice the decoded byte size, held live alongside the compressed and decoded
+/// bytes for the whole parse — the dominant term in the worker's peak RSS, and
+/// an OOM candidate on a 2 GiB TV box. Chunking bounds that copy to one chunk
+/// at a time. 256 KiB is large enough that per-chunk overhead is noise.
+const _xmlChunkBytes = 256 * 1024;
+
+/// Feed [data] to the XML parser in bounded pieces.
+///
+/// Correctness note: this is only safe because both stages buffer across chunk
+/// boundaries. [Utf8Decoder] in chunked mode carries an incomplete multi-byte
+/// sequence into the next chunk, and the `xml` package's event decoder keeps a
+/// `carry` string so a tag or attribute split across two chunks still parses.
+/// Splitting the bytes naively into separate `utf8.decode` calls would corrupt
+/// any non-ASCII character that straddles a boundary — which is most of a
+/// real-world guide's programme titles.
+Stream<String> _decodeChunked(Uint8List data) {
+  Stream<List<int>> chunks() async* {
+    for (var i = 0; i < data.length; i += _xmlChunkBytes) {
+      final end = i + _xmlChunkBytes;
+      yield Uint8List.sublistView(
+        data,
+        i,
+        end < data.length ? end : data.length,
+      );
+    }
+  }
+
+  return chunks().transform(const Utf8Decoder(allowMalformed: true));
+}
+
 /// Parse XMLTV [bytes] (gzip-aware) into [Programme]s, keeping only programmes
 /// whose XMLTV `channel` id maps — via [tvgIdToChannelId] — to one of our
 /// channels. Used by M3U and Xtream sources.
@@ -46,10 +80,8 @@ Future<List<Programme>> _parseXmltvBytes(
   final data = isGzipBytes(bytes)
       ? decodeGzipBounded(bytes, kEpgWorkload.maximumDecodedBytes)
       : bytes;
-  final xmlString = utf8.decode(data, allowMalformed: true);
-
   final out = <Programme>[];
-  await Stream<String>.value(xmlString)
+  await _decodeChunked(data)
       .toXmlEvents()
       .normalizeEvents()
       .selectSubtreeEvents((e) => e.name == 'programme')
@@ -207,10 +239,8 @@ void _parseXmltvBatchedWorker(
     final data = isGzipBytes(bytes)
         ? decodeGzipBounded(bytes, kEpgWorkload.maximumDecodedBytes)
         : bytes;
-    final xmlString = utf8.decode(data, allowMalformed: true);
-
     var batch = <Programme>[];
-    final nodes = Stream<String>.value(xmlString)
+    final nodes = _decodeChunked(data)
         .toXmlEvents()
         .normalizeEvents()
         .selectSubtreeEvents((e) => e.name == 'programme')
