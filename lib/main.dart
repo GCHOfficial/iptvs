@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -10,8 +12,26 @@ import 'data/source_store.dart';
 import 'screens/profile_pick_screen.dart';
 import 'theme.dart';
 
+/// Decoded-image cache ceiling applied on Android (phone and TV).
+///
+/// Flutter's default is 100 MB / 1000 images. On a 1 GB Android TV box that is
+/// a large slice of the whole heap, and browsing a poster grid fills it — the
+/// resulting GC pressure shows up as dropped frames on weak silicon, and on the
+/// smallest boxes as an OOM kill. Images are already decoded at display size
+/// (`imageCacheSize`, DPR clamped to 3), so 32 MB is roughly four screenfuls of
+/// the grid's ~180 px posters: the visible page never has to re-decode itself,
+/// which is the failure mode a too-small cap would cause (continuous re-decode
+/// is worse than the pressure it saves). Desktop deliberately keeps Flutter's
+/// default — RAM is plentiful there and the bigger cache genuinely pays off
+/// when scrolling back through a large catalogue.
+const int kAndroidImageCacheBytes = 32 << 20;
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    PaintingBinding.instance.imageCache.maximumSizeBytes =
+        kAndroidImageCacheBytes;
+  }
   MediaKit.ensureInitialized();
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
