@@ -29,6 +29,37 @@ List<String> sourceHintLabels(MediaItem item, {bool includeWeak = false}) =>
         .map((hint) => hint.label)
         .toList();
 
+// Hot-path statics. `sourceHints` runs once per media tile per build — a grid
+// fling builds 30–60 tiles — so every `RegExp` it used to compile inline, and
+// the alias-owner index it used to rebuild over the ~60-language table, is
+// hoisted here. Top-level `final`s are lazily initialised, so nothing is paid
+// on a run that never parses a hint. All of these are read-only after
+// construction; `RegExp` carries no per-call state, so sharing them is safe.
+final _markerBracketPattern = RegExp(r'[\[(]([^\])]+)[\])]');
+final _multiPattern = RegExp(r'\b(MULTI|MULTIAUDIO|MULTI-AUDIO)\b');
+final _dualPattern = RegExp(r'\b(DUAL|DUALAUDIO|DUAL-AUDIO)\b');
+final _dubPattern = RegExp(r'\b(DUB|DUBBED|DUBLAT|DUBLADO)\b');
+final _subPattern = RegExp(
+  r'\b(SUB|SUBS|SUBBED|SUBTITLE|SUBTITLES|VOST|VOSTFR|VOSE)\b',
+);
+final _audioPattern = RegExp(
+  r'\b(AUDIO|AUD|DUB|DUBBED|DUAL|MULTI|MULTIAUDIO|MULTI-AUDIO)\b',
+);
+final _tokenPattern = RegExp(r'[A-Z0-9]+');
+
+/// alias -> the languages claiming it. An alias claimed by more than one
+/// language is ambiguous and never matches (e.g. `UK` is both English-weak and
+/// Ukrainian-strong).
+final Map<String, Set<String>> _aliasOwners = () {
+  final owners = <String, Set<String>>{};
+  for (final entry in _languages.entries) {
+    for (final alias in [...entry.value.strong, ...entry.value.weak]) {
+      owners.putIfAbsent(alias, () => <String>{}).add(entry.key);
+    }
+  }
+  return owners;
+}();
+
 List<SourceHint> sourceHints(MediaItem item) {
   final providerTitle = providerSourceTitle(item);
   final explicitFields = [
@@ -42,9 +73,9 @@ List<SourceHint> sourceHints(MediaItem item) {
   final markerFields = <String>[];
   if (providerTitle != null) {
     markerFields.addAll(
-      RegExp(
-        r'[\[(]([^\])]+)[\])]',
-      ).allMatches(providerTitle).map((m) => m.group(1) ?? ''),
+      _markerBracketPattern
+          .allMatches(providerTitle)
+          .map((m) => m.group(1) ?? ''),
     );
     final pipe = providerTitle.indexOf('|');
     if (pipe > 0 && pipe <= 24) {
@@ -71,27 +102,19 @@ List<SourceHint> sourceHints(MediaItem item) {
 
   bool has(Pattern pattern) => pattern.allMatches(text).isNotEmpty;
 
-  final hasMulti = has(RegExp(r'\b(MULTI|MULTIAUDIO|MULTI-AUDIO)\b'));
-  final hasDual = has(RegExp(r'\b(DUAL|DUALAUDIO|DUAL-AUDIO)\b'));
-  final hasDub = has(RegExp(r'\b(DUB|DUBBED|DUBLAT|DUBLADO)\b'));
-  final hasSub = has(
-    RegExp(r'\b(SUB|SUBS|SUBBED|SUBTITLE|SUBTITLES|VOST|VOSTFR|VOSE)\b'),
-  );
-  final hasAudio = has(
-    RegExp(r'\b(AUDIO|AUD|DUB|DUBBED|DUAL|MULTI|MULTIAUDIO|MULTI-AUDIO)\b'),
-  );
+  final hasMulti = has(_multiPattern);
+  final hasDual = has(_dualPattern);
+  final hasDub = has(_dubPattern);
+  final hasSub = has(_subPattern);
+  final hasAudio = has(_audioPattern);
 
   if (hasMulti) addLabel('Multi audio');
   if (hasDual) addLabel('Dual audio');
   if (hasDub) addLabel('Dubbed');
 
-  final tokens = _sourceHintTokens(fields);
-  final aliasOwners = <String, Set<String>>{};
-  for (final entry in _languages.entries) {
-    for (final alias in [...entry.value.strong, ...entry.value.weak]) {
-      aliasOwners.putIfAbsent(alias, () => <String>{}).add(entry.key);
-    }
-  }
+  // `text` is already `fields.toUpperCase()`, which is what the tokenizer wants.
+  final tokens = _sourceHintTokens(text);
+  final aliasOwners = _aliasOwners;
   final matchedLanguages =
       <({String language, SourceHintConfidence confidence})>[];
   for (final entry in _languages.entries) {
@@ -128,9 +151,10 @@ List<SourceHint> sourceHints(MediaItem item) {
   return hints;
 }
 
-Set<String> _sourceHintTokens(String fields) {
+/// [upperFields] must already be upper-cased (the caller holds it as `text`).
+Set<String> _sourceHintTokens(String upperFields) {
   final tokens = <String>{};
-  for (final match in RegExp(r'[A-Z0-9]+').allMatches(fields.toUpperCase())) {
+  for (final match in _tokenPattern.allMatches(upperFields)) {
     final token = match.group(0);
     if (token != null && token.isNotEmpty) tokens.add(token);
   }
