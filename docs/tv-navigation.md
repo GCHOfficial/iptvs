@@ -208,7 +208,22 @@ pinned by the route-scoped test in `test/epg_grid_test.dart`.
 Overlong guide entries (a programme whose bad runtime overlaps the next one) are **visually
 clamped at the next programme's start** in `_cellWidth`, and the selected cell is appended last to
 its row's `Stack` so its highlight always paints on top — the detail bar still shows the real
-times. The selected cell **and** its channel row are accent-highlighted (a solid accent-tinted
+times.
+
+**Pan-frame budget.** The whole grid pans by moving one shared `_hOffset`
+`ValueNotifier`, so every visible row's `ValueListenableBuilder` re-runs at 60 fps for the
+duration of a pan. Nothing that is *invariant across a pan* may be computed inside that builder:
+each programme's `(left, width)` and its semantics label are precomputed once per row build into
+`_CellLayout` (index-parallel to the row's programme list, built in `_ChannelRow.build`), and the
+airing state (`isCurrent`/`isPast`) comes from **one** `DateTime.now()` per row per frame, passed
+down to the cells rather than read per cell. The hour ruler depends only on the `late final`
+window bounds, so it is built once (`_hourHeaderWidget`) and returned by identity — the element
+tree then skips the ~50 tick widgets on every `setState`. Keep the builder's output shape
+unchanged when touching this: `test/epg_grid_test.dart` pins the exact `Positioned.width` values
+(240 for the clamped overlong cell), the selected cell being appended **last** to the row `Stack`,
+and the label format `'$title, $channel, $hm to $hm, $n of $total'`.
+
+The selected cell **and** its channel row are accent-highlighted (a solid accent-tinted
 cell fill + bold title, plus a full-row lift and an accent bar beside the channel name) so the
 cursor reads clearly from across the room — the fix for the "looks like nothing's selected /
 screen isn't working" report; the bottom detail bar gives the synopsis its own **multi-line** row
