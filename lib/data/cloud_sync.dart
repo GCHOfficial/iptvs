@@ -331,17 +331,22 @@ class CloudSync {
 
     // Clear existing favorites for the cloud-managed sources, then apply the
     // profile's set (so a pull mirrors the profile, last-write-wins).
+    //
+    // Both halves are set-wise, not row-wise: a per-row `setFavorite` is its
+    // own implicit transaction, so mirroring a profile used to cost one commit
+    // (and one desktop fsync) per favorite, twice over. The visible result is
+    // unchanged — same rows cleared, same rows written, clears still all
+    // ordered before writes so a cleared source that reappears in the payload
+    // keeps its favorites.
     for (final uuid in managed) {
       final config = byUuid[uuid];
       if (config == null) continue;
       await migrateSourceIdentity(db, config);
-      final sourceId = config.id;
       for (final kind in _favoriteKinds) {
-        for (final itemId in await db.readFavoriteIds(sourceId, kind)) {
-          await db.setFavorite(sourceId, kind, itemId, false);
-        }
+        await db.clearFavorites(config.id, kind);
       }
     }
+    final incoming = <String, Map<ContentKind, List<String>>>{};
     for (final entry in favorites) {
       final fav = Map<String, dynamic>.from(entry as Map);
       final config = byUuid[fav['source_id']];
@@ -357,7 +362,12 @@ class CloudSync {
               !isStableM3uChannelId(itemId)
           ? stableM3uChannelId(itemId)
           : itemId;
-      await db.setFavorite(config.id, kind, stableItemId, true);
+      ((incoming[config.id] ??= {})[kind] ??= []).add(stableItemId);
+    }
+    for (final bySource in incoming.entries) {
+      for (final byKind in bySource.value.entries) {
+        await db.setFavorites(bySource.key, byKind.key, byKind.value);
+      }
     }
   }
 
