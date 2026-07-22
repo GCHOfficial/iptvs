@@ -184,12 +184,42 @@ earlier workloads in the same test process.
 
 SQLite baseline with 50,000 channels and 100,000 programmes:
 
-| Operation | Duration |
+| Operation | Duration (as recorded) | After sealed locators |
+|---|---:|---:|
+| Replace channel library | 1,848 ms | 1,856 ms |
+| Read and map channels | 3,433 ms | 143 ms |
+| Replace EPG | 666 ms | 669 ms |
+| Current/next query | 428 ms | 421 ms |
+
+**`channelReadMs` no longer includes any crypto.** `readChannels` returns models
+whose playback locator is still *sealed* (`extra['secretLocator']`);
+`LibraryRepository` reveals exactly the one model that is about to reach a
+`Source` (CLAUDE.md "Sealed playback locators"). So the right-hand column
+measures SQLite + `jsonDecode` + model construction only — it is **not**
+comparable to the left-hand column as a like-for-like crypto measurement, and a
+future change that reintroduces read-time decryption will not show up as a
+number regression here but as a failure of the counting assertion in
+`test/persistence_test.dart` ("a bulk read decrypts nothing"). The write side
+still encrypts once per row, which is why `libraryWriteMs` is unmoved.
+
+The 3,433 → 143 ms drop came in two independently revertable steps, both
+measured on the same host and fixture:
+
+| Step | `channelReadMs` |
 |---|---:|
-| Replace channel library | 1,848 ms |
-| Read and map channels | 3,433 ms |
-| Replace EPG | 666 ms |
-| Current/next query | 428 ms |
+| As recorded above (re-measured on the current tree) | 4,188 ms |
+| Sequential read loop, single model construction, memoizable AES key | 1,436 ms |
+| Sealed locators (no read-time decryption) | 143 ms |
+
+The first step changed no contract: `Future.wait` over one future per row was
+the largest single component (dropping it also cut the baseline process's peak
+RSS from ~983 MB to ~292 MB), `_readChannelRow` was building each `Channel`
+twice, and `SecretLocatorVault` was wrapping its key bytes in a bare `SecretKey`
+that `cryptography`'s AES round-key expansion cannot memoize against. That last
+one is invisible to host tests — their secure-storage-less fallback branch
+already built the key through `newSecretKey()` and got the memoization — so it
+only pays off on device, and the 4,188 ms figure understates what production was
+paying before it.
 
 **Superseded numbers — read before comparing against anything older.** Until the
 fixture was corrected, the channel rows carried only `extra: {'tvgId': …}`. No
@@ -205,11 +235,16 @@ invisible.) The fixture now seeds a `url`, and the previously recorded
 regressing 17.6×. Treat the old figures as measuring an unrepresentative
 workload rather than as evidence of a regression since.
 
-The read cost is larger than per-row crypto alone accounts for: `readChannels`
-resolves `Future.wait` over one future per row, so 50,000 concurrent futures'
-scheduling compounds the per-row `jsonDecode` + AES-GCM open. Both halves are on
+The read cost was larger than per-row crypto alone accounted for: `readChannels`
+resolved `Future.wait` over one future per row, so 50,000 concurrent futures'
+scheduling compounded the per-row `jsonDecode` + AES-GCM open. Both halves ran on
 the UI isolate and on the *common* cold-start path (`LibraryRepository` serves
-from cache whenever it is fresh).
+from cache whenever it is fresh) — which is why this path was worth the two-step
+rework recorded above. Measured decomposition at the time: AES-GCM was only
+~11% of the 3.4 s, the `Future.wait` fan-out ~40%, and the double model
+construction plus decrypt-wrapper churn most of the remainder. No schema change
+was needed or made (`schemaVersion` stays 12); the on-disk `extra` format is
+byte-identical before and after.
 
 These are comparison values, not release budgets. In particular, the parser
 tests call synchronous parsing functions directly and therefore do not measure

@@ -63,4 +63,31 @@ void main() {
       expect(restored['url'], 'https://example.invalid/live?token=secret');
     },
   );
+
+  test('hasSealedLocator distinguishes cached from plaintext models', () async {
+    final vault = SecretLocatorVault();
+    final sealed = await protectSecretLocators({
+      'url': 'https://example.invalid/live?token=secret',
+    }, vault);
+
+    expect(hasSealedLocator(sealed), isTrue);
+    // Plaintext straight off a provider, an item with no locator at all, and
+    // an empty/absent blob all read as "nothing to reveal".
+    expect(hasSealedLocator(const {'url': 'https://example.invalid/x'}), false);
+    expect(hasSealedLocator(const {'tvgId': 'news.1'}), isFalse);
+    expect(hasSealedLocator(const {}), isFalse);
+    expect(hasSealedLocator(const {secretLocatorKey: ''}), isFalse);
+
+    // Revealing something that was never sealed returns the same map, and the
+    // vault never opens anything.
+    const plain = {'url': 'https://example.invalid/x'};
+    expect(vault.decryptCount, 0);
+    expect(identical(await restoreSecretLocators(plain, vault), plain), isTrue);
+    expect(vault.decryptCount, 0);
+
+    expect(await restoreSecretLocators(sealed, vault), {
+      'url': 'https://example.invalid/live?token=secret',
+    });
+    expect(vault.decryptCount, 1);
+  });
 }

@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
+import '../data/secret_locator_vault.dart' show hasSealedLocator;
 import 'expiry.dart';
 import 'source.dart';
 
@@ -254,6 +255,11 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
+    assert(
+      !hasSealedLocator(channel.extra),
+      'sealed locator reached StalkerSource.resolve — reveal it in '
+      'LibraryRepository first',
+    );
     final cmd = _liveCommand(channel);
     if (cmd == null || cmd.isEmpty) {
       throw StalkerException('Channel "${channel.name}" has no cmd to resolve');
@@ -694,6 +700,11 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
 
   @override
   Future<StreamInfo> resolveMedia(MediaItem item) async {
+    assert(
+      !hasSealedLocator(item.extra),
+      'sealed locator reached StalkerSource.resolveMedia — reveal it in '
+      'LibraryRepository first',
+    );
     if (item.kind != ContentKind.movie && item.kind != ContentKind.episode) {
       throw StalkerException('${item.kind.name} is not directly playable yet');
     }
@@ -1357,6 +1368,14 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
   }
 
   Map<String, dynamic> _seasonPlaybackHints(MediaItem season) {
+    // [season] is routinely a *cached* model handed in as `mediaItems(parent:)`
+    // — the exact case where a missed reveal in LibraryRepository would leave
+    // every episode built here without a `cmd`, i.e. silently unplayable.
+    assert(
+      !hasSealedLocator(season.extra),
+      'sealed locator reached StalkerSource._seasonPlaybackHints — reveal the '
+      '`parent` in LibraryRepository first',
+    );
     final out = <String, dynamic>{};
     final cmd = season.extra['cmd'];
     if (cmd != null) out['cmd'] = cmd;

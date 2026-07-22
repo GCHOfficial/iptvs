@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Encrypts provider-owned playback locators before they enter the SQLite
@@ -18,6 +19,13 @@ class SecretLocatorVault {
   final FlutterSecureStorage _storage;
   SecretKey? _key;
   bool generatedNewKey = false;
+
+  /// How many blobs this vault has actually decrypted. Reading the cache must
+  /// not decrypt anything (locators stay sealed until the `Source` boundary),
+  /// so tests assert this stays at 0 across a bulk read and steps by exactly
+  /// one per reveal. Counting, not timing — no wall-clock assertions.
+  @visibleForTesting
+  int decryptCount = 0;
 
   Future<SecretKey> _secretKey() async {
     final cached = _key;
@@ -66,6 +74,7 @@ class SecretLocatorVault {
 
   Future<Map<String, String>> decrypt(String encoded) async {
     if (encoded.isEmpty) return const {};
+    decryptCount++;
     final box = SecretBox.fromConcatenation(
       base64Url.decode(encoded),
       nonceLength: 12,
@@ -94,6 +103,20 @@ const _secretLocatorFields = {
   'episode_url',
   'link',
 };
+
+/// Whether [extra] still carries the *sealed* locator blob — i.e. it came
+/// straight out of the SQLite cache and has not been revealed yet.
+///
+/// Cached [Channel]/[MediaItem] models deliberately stay sealed: reading a
+/// 250k-channel library must not run 250k AES-GCM opens. `LibraryRepository`
+/// reveals one model at a time at the `Source` boundary (see CLAUDE.md
+/// "Sealed playback locators"), and the `Source` implementations that consume
+/// a locator field `assert` on this so a missed reveal point fails loudly in
+/// debug instead of silently making that content unplayable.
+bool hasSealedLocator(Map<String, dynamic> extra) {
+  final value = extra[secretLocatorKey];
+  return value is String && value.isNotEmpty;
+}
 
 Future<Map<String, dynamic>> protectSecretLocators(
   Map<String, dynamic> extra,

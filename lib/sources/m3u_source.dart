@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import '../data/load_token.dart';
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
+import '../data/secret_locator_vault.dart' show hasSealedLocator;
 import 'expiry.dart';
 import 'source.dart';
 import 'source_identity.dart';
@@ -98,6 +99,11 @@ class M3uSource
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
+    assert(
+      !hasSealedLocator(channel.extra),
+      'sealed locator reached M3uSource.resolve — reveal it in '
+      'LibraryRepository first',
+    );
     final url = channel.extra['url']?.toString();
     if (url == null || url.isEmpty) {
       throw StateError('Channel "${channel.name}" has no stream URL');
@@ -113,6 +119,11 @@ class M3uSource
     Channel channel,
     Programme programme,
   ) async {
+    assert(
+      !hasSealedLocator(channel.extra),
+      'sealed locator reached M3uSource.resolveArchive — reveal it in '
+      'LibraryRepository first',
+    );
     final template =
         channel.extra['catchupSource']?.toString() ??
         catchupCapability.template;
