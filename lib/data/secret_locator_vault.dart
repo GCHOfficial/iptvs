@@ -42,7 +42,15 @@ class SecretLocatorVault {
     }
     final bytes = base64Url.decode(encoded);
     if (bytes.length != 32) throw const FormatException('Invalid cache key');
-    return _key = SecretKey(bytes);
+    // `newSecretKeyFromBytes` — NOT the `SecretKey(bytes)` constructor. Both
+    // wrap the identical key material (so ciphertext and every previously
+    // written blob are unaffected), but the algorithm-built key is the private
+    // `_DartAesSecretKeyData` subtype that AES round-key expansion memoizes
+    // against; a bare `SecretKey` re-expands the key schedule on every single
+    // encrypt/decrypt. The `_fallbackKey` branches above already get this for
+    // free (they go through `newSecretKey()`), which is why host tests never
+    // saw the cost the real platform path was paying.
+    return _key = await _algorithm.newSecretKeyFromBytes(bytes);
   }
 
   Future<void> ensureKey() => _secretKey().then((_) {});

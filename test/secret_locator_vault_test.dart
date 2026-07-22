@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/secret_locator_vault.dart';
@@ -6,6 +9,27 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  test('decrypts ciphertext written by the pre-memoization key path', () async {
+    // The vault builds its key with `AesGcm.newSecretKeyFromBytes` (round-key
+    // memoization) instead of the bare `SecretKey(bytes)` constructor it used
+    // to. Same key material, so anything already on disk must still open —
+    // this pins that, using the old constructor to produce the ciphertext.
+    final keyBytes = List<int>.generate(32, (i) => (i * 7 + 3) & 0xFF);
+    FlutterSecureStorage.setMockInitialValues({
+      SecretLocatorVault.keyName: base64UrlEncode(keyBytes),
+    });
+    final legacyBox = await AesGcm.with256bits().encrypt(
+      utf8.encode(jsonEncode({'url': 'https://example.invalid/live?t=old'})),
+      secretKey: SecretKey(keyBytes),
+    );
+
+    final vault = SecretLocatorVault();
+    expect(await vault.decrypt(base64UrlEncode(legacyBox.concatenation())), {
+      'url': 'https://example.invalid/live?t=old',
+    });
+    expect(vault.generatedNewKey, isFalse);
+  });
 
   test('round-trips locators while keeping ciphertext opaque', () async {
     final vault = SecretLocatorVault();

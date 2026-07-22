@@ -876,21 +876,26 @@ class AppDatabase {
       whereArgs: [sourceId],
       orderBy: 'number, name',
     );
-    return Future.wait(rows.map(_readChannelRow));
+    // Sequential, not `Future.wait(rows.map(...))`: fanning 50k futures out
+    // into one `Future.wait` dominated the read (scheduler + list churn for
+    // work that is CPU-bound anyway). The loop does the same total work with
+    // one future at a time.
+    final out = <Channel>[];
+    for (final row in rows) {
+      out.add(await _readChannelRow(row));
+    }
+    return out;
   }
 
   Future<Channel> _readChannelRow(Map<String, Object?> row) async {
-    final channel = _rowToChannel(row);
-    final extra = await restoreSecretLocators(channel.extra, _vault);
-    return Channel(
-      id: channel.id,
-      name: channel.name,
-      logo: channel.logo,
-      categoryId: channel.categoryId,
-      number: channel.number,
-      archiveDays: channel.archiveDays,
-      extra: extra,
+    // Decode + decrypt first, then build the model ONCE. Building a `Channel`
+    // and then rebuilding it with the decrypted `extra` doubled the model
+    // allocation on every cached row.
+    final extra = await restoreSecretLocators(
+      _decodeExtra(row['extra']),
+      _vault,
     );
+    return _channelFromRow(row, extra);
   }
 
   // ── movies / series / generic media ──────────────────────────────────────
@@ -986,7 +991,7 @@ class AppDatabase {
       whereArgs: args,
       orderBy: 'display_order, title',
     );
-    return Future.wait(rows.map((r) => _readMediaItem(r, kind)));
+    return _readMediaItems(rows, kind);
   }
 
   /// The cached media items among [ids] (any order). Used to materialize the
@@ -1003,39 +1008,56 @@ class AppDatabase {
       where: 'source_id = ? AND kind = ? AND id IN ($placeholders)',
       whereArgs: [sourceId, kind.name, ...ids],
     );
-    return Future.wait(rows.map((r) => _readMediaItem(r, kind)));
+    return _readMediaItems(rows, kind);
+  }
+
+  /// Sequential by design — see the note in [readChannels].
+  Future<List<MediaItem>> _readMediaItems(
+    List<Map<String, Object?>> rows,
+    ContentKind kind,
+  ) async {
+    final out = <MediaItem>[];
+    for (final row in rows) {
+      out.add(await _readMediaItem(row, kind));
+    }
+    return out;
   }
 
   Future<MediaItem> _readMediaItem(
     Map<String, Object?> row,
     ContentKind kind,
   ) async {
-    final item = _rowToMediaItem(row, kind);
-    return item.copyWith(
-      extra: await restoreSecretLocators(item.extra, _vault),
+    // Decode + decrypt first, build the model once (see [_readChannelRow]).
+    final extra = await restoreSecretLocators(
+      _decodeExtra(row['extra']),
+      _vault,
     );
+    return _mediaItemFromRow(row, kind, extra);
   }
 
-  static MediaItem _rowToMediaItem(Map<String, Object?> r, ContentKind kind) =>
-      MediaItem(
-        id: r['id'] as String,
-        title: r['title'] as String,
-        kind: kind,
-        parentId: r['parent_id'] as String?,
-        categoryId: r['category_id'] as String?,
-        poster: r['poster'] as String?,
-        backdrop: r['backdrop'] as String?,
-        description: r['description'] as String?,
-        year: r['year'] as String?,
-        rating: _readDouble(r['rating']),
-        durationSeconds: _readInt(r['duration_seconds']),
-        seasonNumber: _readInt(r['season_number']),
-        episodeNumber: _readInt(r['episode_number']),
-        providerId: r['provider_id'] as String?,
-        extra: r['extra'] != null
-            ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
-            : const {},
-      );
+  /// Builds the model from [r] with an already-decoded [extra] — see
+  /// [_channelFromRow].
+  static MediaItem _mediaItemFromRow(
+    Map<String, Object?> r,
+    ContentKind kind,
+    Map<String, dynamic> extra,
+  ) => MediaItem(
+    id: r['id'] as String,
+    title: r['title'] as String,
+    kind: kind,
+    parentId: r['parent_id'] as String?,
+    categoryId: r['category_id'] as String?,
+    poster: r['poster'] as String?,
+    backdrop: r['backdrop'] as String?,
+    description: r['description'] as String?,
+    year: r['year'] as String?,
+    rating: _readDouble(r['rating']),
+    durationSeconds: _readInt(r['duration_seconds']),
+    seasonNumber: _readInt(r['season_number']),
+    episodeNumber: _readInt(r['episode_number']),
+    providerId: r['provider_id'] as String?,
+    extra: extra,
+  );
 
   static int? _readInt(Object? value) {
     if (value is int) return value;
@@ -1438,16 +1460,24 @@ class AppDatabase {
         ),
       );
 
-  static Channel _rowToChannel(Map<String, Object?> r) => Channel(
+  static Map<String, dynamic> _decodeExtra(Object? raw) => raw == null
+      ? const {}
+      : (jsonDecode(raw as String) as Map).cast<String, dynamic>();
+
+  /// Builds the model from [r] with an already-decoded [extra], so callers
+  /// that need to transform `extra` (decrypt/reveal) do it before construction
+  /// instead of building a second [Channel] to swap the map in.
+  static Channel _channelFromRow(
+    Map<String, Object?> r,
+    Map<String, dynamic> extra,
+  ) => Channel(
     id: r['id'] as String,
     name: r['name'] as String,
     number: r['number'] as int?,
     logo: r['logo'] as String?,
     categoryId: r['category_id'] as String?,
     archiveDays: (r['archive_days'] as int?) ?? 0,
-    extra: r['extra'] != null
-        ? (jsonDecode(r['extra'] as String) as Map).cast<String, dynamic>()
-        : const {},
+    extra: extra,
   );
 
   /// Replace all cached channels/categories for a source in one transaction.
