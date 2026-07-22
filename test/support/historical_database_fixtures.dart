@@ -1,7 +1,7 @@
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 /// Schema versions present in public repository tags.
-const releasedSchemaVersions = [8, 9, 10, 11];
+const releasedSchemaVersions = [8, 9, 10, 11, 12];
 
 /// Creates a small, seeded database with the fresh-install schema used by a
 /// tagged release. SQL is kept in source form so fixture changes are reviewable.
@@ -32,6 +32,11 @@ Future<void> createReleasedDatabaseFixture(String path, int version) async {
         }
         if (version >= 11) {
           for (final statement in _v11Schema) {
+            await db.execute(statement);
+          }
+        }
+        if (version >= 12) {
+          for (final statement in _v12Schema) {
             await db.execute(statement);
           }
         }
@@ -277,4 +282,8 @@ const _v11Schema = [
   ''',
   'CREATE INDEX idx_positions_source_updated '
       'ON playback_positions(source_id, updated_at)',
+];
+
+const _v12Schema = [
+  'CREATE INDEX idx_prog_source_start ON programmes(source_id, start)',
 ];

@@ -87,7 +87,14 @@ class AppDatabase {
   /// below never shipped in a tagged release; they are kept as best-effort
   /// repair paths for development-era installs and are exercised only by the
   /// v1/v7 regression tests in `test/persistence_test.dart`.
-  static const schemaVersion = 12;
+  ///
+  /// Re-entrancy rule: `sqflite` is opened without an `onDowngrade` handler, so
+  /// running an *older* build against a newer file silently re-stamps the
+  /// version down without undoing anything. Upgrading again re-runs every
+  /// branch in between over a schema that may already have the change, so each
+  /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
+  /// `_isDuplicateColumn` guard).
+  static const schemaVersion = 13;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -130,6 +137,7 @@ class AppDatabase {
       path,
       options: OpenDatabaseOptions(
         version: schemaVersion,
+        onConfigure: _configure,
         onCreate: (db, _) async {
           await db.execute('''
           CREATE TABLE sources (
@@ -232,10 +240,61 @@ class AppDatabase {
               'ON programmes(source_id, start)',
             );
           }
+          if (oldV < 13) {
+            // The `nowNext` "now" query also filters on `stop`, which
+            // `idx_prog_source_start` doesn't carry — so every candidate row
+            // cost a table lookup just to be discarded. This covering index
+            // decides the whole predicate from the index entry. Created by
+            // `_createProgrammes` too, so `IF NOT EXISTS` makes this a no-op
+            // on the `onCreate`/`oldV < 2` paths and a real repair elsewhere.
+            await db.execute(
+              'CREATE INDEX IF NOT EXISTS idx_prog_now '
+              'ON programmes(source_id, start, stop, channel_id)',
+            );
+            // The "next" query pins `INDEXED BY idx_prog_lookup` (see
+            // `_nextQuery`), which is a hard dependency: without the index the
+            // query fails outright. Every supported upgrade path already has
+            // it; re-asserting it here costs one no-op DDL and removes the
+            // failure mode entirely.
+            await db.execute(
+              'CREATE INDEX IF NOT EXISTS idx_prog_lookup '
+              'ON programmes(source_id, channel_id, start)',
+            );
+          }
         },
       ),
     );
     return AppDatabase._(db, vault);
+  }
+
+  /// Connection tuning, applied before the version check so it also covers
+  /// `onCreate`/`onUpgrade`. `sqflite_common` runs `onConfigure` *outside* the
+  /// migration transaction (`database_mixin.dart`, "first configure it"),
+  /// which is what makes `journal_mode` legal here — it cannot be changed
+  /// inside a transaction.
+  ///
+  /// Only the desktop FFI backend is really being fixed: it runs raw sqlite
+  /// defaults, notably a 2 MB page cache against a cache file that a
+  /// 250k-channel portal drives past a gigabyte. Android's framework already
+  /// enables compatibility WAL, so there the pragmas are near no-ops.
+  static Future<void> _configure(Database db) async {
+    // Concurrent reads during a write, and far cheaper commits. `setJournalMode`
+    // exists because Android's `execSQL` rejects a value-returning pragma
+    // unless WAL is declared in the manifest; it falls back to `rawQuery`.
+    await db.setJournalMode('WAL');
+    // WAL + NORMAL is durable across an app crash; only an OS crash or power
+    // loss can cost the most recent commits. This database is a rebuildable
+    // provider cache plus small user state (favorites, resume positions), so
+    // that trade is the same one the Android framework makes by default.
+    await db.execute('PRAGMA synchronous = NORMAL');
+    // 8 MB of page cache (negative = KiB) instead of sqlite's 2 MB default.
+    await db.execute('PRAGMA cache_size = -8000');
+    // Deliberately NOT setting `temp_store = MEMORY`: `readChannels` sorts by
+    // `number, name` with no index to serve it, so a 250k-channel source would
+    // move an unbounded sorter into RAM on exactly the low-memory TV boxes
+    // that can least afford it. Pinning the `nowNext` "next" query on
+    // `idx_prog_lookup` already removed the one hot temp B-tree this would
+    // have helped.
   }
 
   Future<void> _migrateLegacyCacheSecrets() async {
@@ -321,6 +380,11 @@ class AppDatabase {
     );
     await db.execute(
       'CREATE INDEX idx_prog_source_start ON programmes(source_id, start)',
+    );
+    // Covering index for the `nowNext` "now" query — see `_nowQuery`.
+    await db.execute(
+      'CREATE INDEX idx_prog_now '
+      'ON programmes(source_id, start, stop, channel_id)',
     );
   }
 
@@ -609,7 +673,50 @@ class AppDatabase {
   /// preserving cached channels, EPG references, and live favorites in one
   /// transaction. Equivalent locators intentionally collapse to one channel;
   /// their EPG rows and favorite state are retained under the shared identity.
+  ///
+  /// Runs on every boot for every M3U source (from `migrateAllSourceIdentities`
+  /// before first paint, and again from `HomeShell`), so the already-migrated
+  /// case — which is every case after the first — has to be cheap. The probes
+  /// below settle it with three indexed `LIMIT 1` lookups instead of reading
+  /// the whole `channels` table and scanning `favorites` and `programmes`.
+  /// True when any `channels`, `favorites`, or `programmes` row for [sourceId]
+  /// still carries a pre-migration (raw locator) M3U key.
+  ///
+  /// Each probe is an existence check the covering index can answer on its own:
+  /// `channels` and `favorites` both have a composite primary key whose
+  /// auto-index carries the id column, and `programmes` has
+  /// `idx_prog_lookup(source_id, channel_id, start)`. So the already-migrated
+  /// case never touches a table row — where the migration body below would
+  /// otherwise read every channel's `extra` blob and JSON-decode it.
+  ///
+  /// The `channels` probe uses `GLOB` rather than `LIKE` because `LIKE` is
+  /// ASCII-case-insensitive in SQLite while `isStableM3uChannelId` is a
+  /// case-sensitive `startsWith`; `GLOB` matches the Dart predicate exactly.
+  /// The other two mirror the `NOT LIKE` predicates the body itself uses, so
+  /// probe and body can never disagree about which rows need work.
+  Future<bool> _hasLegacyM3uIds(String sourceId) async {
+    Future<bool> any(String sql, List<Object?> args) async =>
+        (await _db.rawQuery(sql, args)).isNotEmpty;
+
+    return await any(
+          'SELECT 1 FROM channels WHERE source_id = ? '
+          "AND id NOT GLOB 'm3u-channel:*' LIMIT 1",
+          [sourceId],
+        ) ||
+        await any(
+          'SELECT 1 FROM favorites WHERE source_id = ? AND kind = ? '
+          "AND item_id NOT LIKE 'm3u-channel:%' LIMIT 1",
+          [sourceId, ContentKind.live.name],
+        ) ||
+        await any(
+          'SELECT 1 FROM programmes WHERE source_id = ? '
+          "AND channel_id NOT LIKE 'm3u-channel:%' LIMIT 1",
+          [sourceId],
+        );
+  }
+
   Future<void> migrateM3uChannelIds(String sourceId) async {
+    if (!await _hasLegacyM3uIds(sourceId)) return;
     await _db.transaction((txn) async {
       final mappings = <String, String>{};
       final channelRows = await txn.query(
@@ -820,6 +927,44 @@ class AppDatabase {
       );
     }
     return favorite;
+  }
+
+  /// Removes every favorite of [kind] for [sourceId] in one statement.
+  ///
+  /// Exists for the cloud pull, which mirrors the profile: it used to read the
+  /// existing ids back and call [setFavorite] once per row, each of those its
+  /// own implicit transaction (and its own fsync on desktop).
+  Future<void> clearFavorites(String sourceId, ContentKind kind) async {
+    await _db.delete(
+      'favorites',
+      where: 'source_id = ? AND kind = ?',
+      whereArgs: [sourceId, kind.name],
+    );
+  }
+
+  /// Marks [itemIds] as favorites of [kind] for [sourceId] in a single
+  /// transaction. Same row semantics as [setFavorite] with `favorite: true`
+  /// (upsert, `created_at` = now), just not one transaction per id.
+  Future<void> setFavorites(
+    String sourceId,
+    ContentKind kind,
+    Iterable<String> itemIds,
+  ) async {
+    final ids = itemIds.toList();
+    if (ids.isEmpty) return;
+    final createdAt = DateTime.now().millisecondsSinceEpoch;
+    await _db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final itemId in ids) {
+        batch.insert('favorites', {
+          'source_id': sourceId,
+          'kind': kind.name,
+          'item_id': itemId,
+          'created_at': createdAt,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      await batch.commit(noResult: true);
+    });
   }
 
   // ── channels / categories ───────────────────────────────────────────────
@@ -1677,12 +1822,38 @@ class AppDatabase {
   /// The "now" half of [nowNext]: every programme airing at a given instant
   /// across a source's channels. Keyed on `(source_id, start)` with no
   /// `channel_id` constraint — a per-source scan of all channels' programmes
-  /// at once — so it's served by `idx_prog_source_start`, not the
+  /// at once — so it is served by the covering `idx_prog_now`
+  /// `(source_id, start, stop, channel_id)` index, not the
   /// `(source_id, channel_id, start)` lookup index used by
-  /// `programmesForChannel(s)`.
+  /// `programmesForChannel(s)`. `stop` sits *in* the index precisely so the
+  /// `stop > ?` term is decided from the index entry: with only
+  /// `idx_prog_source_start(source_id, start)` every candidate row (roughly
+  /// half a guide) needed a table lookup just to be discarded.
   static const _nowQuery =
       'SELECT channel_id, title, start, stop, description FROM programmes '
       'WHERE source_id = ? AND start <= ? AND stop > ?';
+
+  /// The "next" half of [nowNext].
+  ///
+  /// `INDEXED BY idx_prog_lookup` is load-bearing, not decoration. Left to
+  /// itself the planner drives this off `idx_prog_source_start`, which orders
+  /// by `start` and therefore has to materialise a `USE TEMP B-TREE FOR GROUP
+  /// BY` over every future programme in the guide. `idx_prog_lookup`'s
+  /// `(source_id, channel_id, start)` ordering delivers the groups already
+  /// sorted, so the aggregation streams. Measured on a 960k-programme guide:
+  /// 952 ms unpinned vs 98 ms pinned — and running `ANALYZE` makes the planner
+  /// choose `idx_prog_lookup` on its own, so the hint is what a
+  /// statistics-informed planner would have picked anyway. Production never
+  /// runs `ANALYZE`, hence the explicit pin.
+  ///
+  /// `INDEXED BY` is a hard requirement: dropping or renaming
+  /// `idx_prog_lookup` makes this query fail with "no query solution" rather
+  /// than silently deoptimise. The v13 upgrade branch re-asserts the index for
+  /// that reason, and `explainNextQueryPlan` pins the plan in tests.
+  static const _nextQuery =
+      'SELECT channel_id, title, MIN(start) AS start, stop, description '
+      'FROM programmes INDEXED BY idx_prog_lookup '
+      'WHERE source_id = ? AND start > ? GROUP BY channel_id';
 
   /// Current and next programme per channel at time [at].
   Future<({Map<String, Programme> now, Map<String, Programme> next})> nowNext(
@@ -1699,21 +1870,75 @@ class AppDatabase {
     }
 
     // SQLite returns the row matching MIN(start) for the bare columns.
-    final nextRows = await _db.rawQuery(
-      'SELECT channel_id, title, MIN(start) AS start, stop, description '
-      'FROM programmes WHERE source_id = ? AND start > ? GROUP BY channel_id',
-      [sourceId, t],
-    );
+    final nextRows = await _db.rawQuery(_nextQuery, [sourceId, t]);
     for (final r in nextRows) {
       next[r['channel_id'] as String] = _rowToProgramme(r);
     }
     return (now: now, next: next);
   }
 
+  /// The windowed counterpart of [nowNext]: now/next for an explicit list of
+  /// [channelIds] instead of every channel the source has cached.
+  ///
+  /// Deliberately **not** wired into the live tab yet. [nowNext] returns a map
+  /// covering every channel, and the live list reads it by channel id for
+  /// arbitrary rows, so swapping in a windowed map would silently blank the
+  /// EPG on rows outside the window — correcting that needs scroll-driven
+  /// refresh in the UI. This exists so that change can be made later without
+  /// also having to design the query.
+  ///
+  /// Both halves are `channel_id`-constrained, so both run on
+  /// `idx_prog_lookup` and touch only the requested channels' index ranges.
+  /// Ids are queried in chunks to stay under SQLite's bound-variable limit;
+  /// duplicates and unknown ids are harmless (they simply contribute nothing).
+  Future<({Map<String, Programme> now, Map<String, Programme> next})>
+  nowNextForChannels(
+    String sourceId,
+    List<String> channelIds,
+    DateTime at,
+  ) async {
+    final now = <String, Programme>{};
+    final next = <String, Programme>{};
+    if (channelIds.isEmpty) return (now: now, next: next);
+    final t = at.millisecondsSinceEpoch;
+
+    for (var offset = 0; offset < channelIds.length; offset += _idChunk) {
+      final chunk = channelIds.sublist(
+        offset,
+        (offset + _idChunk).clamp(0, channelIds.length),
+      );
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+      final currentRows = await _db.rawQuery(
+        'SELECT channel_id, title, start, stop, description FROM programmes '
+        'WHERE source_id = ? AND channel_id IN ($placeholders) '
+        'AND start <= ? AND stop > ?',
+        [sourceId, ...chunk, t, t],
+      );
+      for (final r in currentRows) {
+        now[r['channel_id'] as String] = _rowToProgramme(r);
+      }
+      final nextRows = await _db.rawQuery(
+        'SELECT channel_id, title, MIN(start) AS start, stop, description '
+        'FROM programmes WHERE source_id = ? AND channel_id IN ($placeholders) '
+        'AND start > ? GROUP BY channel_id',
+        [sourceId, ...chunk, t],
+      );
+      for (final r in nextRows) {
+        next[r['channel_id'] as String] = _rowToProgramme(r);
+      }
+    }
+    return (now: now, next: next);
+  }
+
+  /// Bound-variable budget per `IN (...)` query. SQLite's default
+  /// `SQLITE_MAX_VARIABLE_NUMBER` is 999 on older builds; 500 leaves room for
+  /// the surrounding `source_id`/time parameters everywhere this is used.
+  static const _idChunk = 500;
+
   /// Test seam: runs `EXPLAIN QUERY PLAN` for the `nowNext` "now" query with
   /// the same SQL and args, returning each row's `detail` column — lets a
-  /// test assert the query is served by `idx_prog_source_start` without
-  /// depending on the full plan string shape.
+  /// test assert which index serves it without depending on the full plan
+  /// string shape.
   @visibleForTesting
   Future<List<String>> explainNowQueryPlan(String sourceId, DateTime at) async {
     final t = at.millisecondsSinceEpoch;
@@ -1721,6 +1946,22 @@ class AppDatabase {
       sourceId,
       t,
       t,
+    ]);
+    return rows.map((r) => r['detail'] as String).toList();
+  }
+
+  /// Test seam for the "next" half of [nowNext]. The regression this guards is
+  /// invisible from results alone: a plan that falls back to
+  /// `idx_prog_source_start` still returns the right rows, just an order of
+  /// magnitude slower via a temp B-tree.
+  @visibleForTesting
+  Future<List<String>> explainNextQueryPlan(
+    String sourceId,
+    DateTime at,
+  ) async {
+    final rows = await _db.rawQuery('EXPLAIN QUERY PLAN $_nextQuery', [
+      sourceId,
+      at.millisecondsSinceEpoch,
     ]);
     return rows.map((r) => r['detail'] as String).toList();
   }

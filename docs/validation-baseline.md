@@ -102,9 +102,10 @@ fixtures:
 | `v0.1.8`–`v0.1.10` | 9 |
 | `v0.1.11`–`v0.1.15` | 10 |
 | `v0.1.16`–`v0.1.34` | 11 |
-| `v0.1.35`+ | 12 (current) |
+| `v0.1.35`+ | 12 |
+| unreleased | 13 (current) |
 
-The supported upgrade claim covers exactly these released schemas (8–11 → 12).
+The supported upgrade claim covers exactly these released schemas (8–12 → 13).
 Versions 1 and 7 remain useful regression fixtures because they cover the full
 upgrade chain and the historical missing-`external_metadata` repair, but they
 never shipped in a tagged release and sit outside the supported claim. The
@@ -118,6 +119,40 @@ indexes, and foreign keys (pragma-based, so `ALTER`-added columns compare
 structurally), seeded favorites/positions/EPG/metadata are validated after the
 upgrade, and each migrated fixture is opened a second time to prove stable
 startup. Re-run that suite before changing the migration contract.
+
+Schema 13 adds `idx_prog_now(source_id, start, stop, channel_id)`. It is an
+index-only addition — no table, column, or row semantics change — so the v12
+fixture is the v11 fixture plus `idx_prog_source_start`, and the v12→13 upgrade
+is a single `CREATE INDEX IF NOT EXISTS`. Because the app opens the database
+without an `onDowngrade` handler, running an older build against a newer file
+re-stamps the version down without reverting anything; every `onUpgrade` branch
+must therefore be safe to re-run, and `persistence_test.dart` covers that for
+the v13 branch specifically.
+
+### now/next query cost
+
+The `sqlite-library-epg` workload seeds exactly two programmes per channel, so
+both halves of `nowNext` match nearly every row they scan — the best case for
+any query plan, and blind to the scan cost the live tab actually pays every 60
+seconds. `sqlite-nownext-realistic` (5000 channels x 48 programmes, ~2 days of
+guide) exists to measure that, and reports the pre-change SQL alongside the
+current implementation so the comparison stays reproducible:
+
+| Metric | Legacy plan | Current |
+|---|---:|---:|
+| "now" query | 109 ms | — |
+| "next" query | 127 ms | — |
+| `nowNext` (both halves, incl. `Programme` construction) | — | 66 ms |
+
+The gap widens with guide size: on a 960k-programme guide the same comparison
+measured 296 ms → 49 ms for "now" (covering index) and 962 ms → 96 ms for
+"next" (`INDEXED BY idx_prog_lookup`, which removes a `USE TEMP B-TREE FOR
+GROUP BY` over every future programme).
+
+The cost side is EPG ingestion: a third `programmes` index makes
+`sqlite-library-epg`'s `epgWriteMs` rise from ~668 ms to ~750 ms (+12%) at
+100k programmes, and grows the cache file proportionally. Accepted — the write
+happens on a refresh schedule, the read happens every minute.
 
 ## Reference environments
 

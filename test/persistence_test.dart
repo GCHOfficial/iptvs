@@ -863,35 +863,42 @@ void main() {
   });
 
   group('AppDatabase EPG index', () {
-    Future<bool> indexExists(String path) async {
+    Future<Set<String>> programmeIndexes(String path) async {
       // A fresh connection to inspect sqlite_master. `openDatabase` here is
       // singleInstance by default, so it must run *after* the AppDatabase
       // connection to the same path has been closed — otherwise it hands
       // back (and then closes) that very same shared connection.
       final raw = await databaseFactoryFfi.openDatabase(path);
       final rows = await raw.rawQuery(
-        "SELECT name FROM sqlite_master WHERE type='index' AND "
-        "name='idx_prog_source_start'",
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND tbl_name='programmes'",
       );
       await raw.close();
-      return rows.isNotEmpty;
+      return {for (final r in rows) r['name'] as String};
     }
 
-    test('idx_prog_source_start exists on a fresh database', () async {
+    test('the EPG indexes exist on a fresh database', () async {
       final path = dbPath();
       final db = await AppDatabase.openAt(path);
       await db.close();
-      expect(await indexExists(path), isTrue);
+      expect(
+        await programmeIndexes(path),
+        containsAll([
+          'idx_prog_lookup',
+          'idx_prog_source_start',
+          'idx_prog_now',
+        ]),
+      );
     });
 
     test(
-      'a v11 database gains idx_prog_source_start on upgrade, keeping seeded EPG',
+      'a v11 database gains the EPG indexes on upgrade, keeping seeded EPG',
       () async {
         final path = dbPath();
         await createReleasedDatabaseFixture(path, 11);
 
         final db = await AppDatabase.openAt(path);
-        // The fixture's seeded programme survived the v11->v12 upgrade.
+        // The fixture's seeded programme survived the upgrade to current.
         final progs = await db.programmesForChannel(
           'released-source',
           'channel-1',
@@ -901,32 +908,158 @@ void main() {
         expect(progs.map((p) => p.title), ['Fixture Programme']);
         await db.close();
 
-        expect(await indexExists(path), isTrue);
+        expect(
+          await programmeIndexes(path),
+          containsAll([
+            'idx_prog_lookup',
+            'idx_prog_source_start',
+            'idx_prog_now',
+          ]),
+        );
       },
     );
 
-    test('a large now-next query is served by idx_prog_source_start', () async {
-      final db = await AppDatabase.openAt(dbPath());
+    test('a v12 database gains idx_prog_now on upgrade', () async {
+      final path = dbPath();
+      await createReleasedDatabaseFixture(path, 12);
+      expect(await programmeIndexes(path), isNot(contains('idx_prog_now')));
+
+      final db = await AppDatabase.openAt(path);
+      await db.close();
+
+      expect(await programmeIndexes(path), contains('idx_prog_now'));
+    });
+
+    // Re-entrancy: an older build opened against a newer file silently
+    // re-stamps the version down (no `onDowngrade` handler), so the upgrade
+    // branches run again over a schema that already has their changes.
+    test(
+      're-running the v13 branch over the current schema is a no-op',
+      () async {
+        final path = dbPath();
+        final db = await AppDatabase.openAt(path);
+        await db.close();
+        final before = await programmeIndexes(path);
+
+        final raw = await databaseFactoryFfi.openDatabase(path);
+        await raw.setVersion(12);
+        await raw.close();
+
+        final reopened = await AppDatabase.openAt(path);
+        await reopened.close();
+        expect(await programmeIndexes(path), before);
+      },
+    );
+
+    group('now/next query plans', () {
+      late AppDatabase db;
       final firstStart = DateTime.utc(2026, 1, 1);
-      const channelCount = 2000;
-      const perChannel = 10; // ~20k programmes total.
-      final programmes = <Programme>[
-        for (var c = 0; c < channelCount; c++)
-          for (var i = 0; i < perChannel; i++)
+      final at = firstStart.add(const Duration(minutes: 30));
+
+      setUp(() async {
+        db = await AppDatabase.openAt(dbPath());
+        const channelCount = 2000;
+        const perChannel = 10; // ~20k programmes total.
+        await db.replaceEpg('perf-source', <Programme>[
+          for (var c = 0; c < channelCount; c++)
+            for (var i = 0; i < perChannel; i++)
+              Programme(
+                channelId: 'channel-$c',
+                start: firstStart.add(Duration(hours: i)),
+                stop: firstStart.add(Duration(hours: i + 1)),
+                title: 'P$c-$i',
+              ),
+        ]);
+      });
+
+      tearDown(() => db.close());
+
+      test('the "now" half is served by the covering idx_prog_now', () async {
+        final plan = await db.explainNowQueryPlan('perf-source', at);
+        expect(plan.any((d) => d.contains('idx_prog_now')), isTrue);
+      });
+
+      // Without the `INDEXED BY` pin the planner drives this off
+      // `idx_prog_source_start` and has to sort every future programme into a
+      // temp B-tree — same rows out, an order of magnitude slower. Results
+      // alone can't catch that, so the plan is the assertion.
+      test(
+        'the "next" half streams off idx_prog_lookup with no temp B-tree',
+        () async {
+          final plan = await db.explainNextQueryPlan('perf-source', at);
+          expect(plan.any((d) => d.contains('idx_prog_lookup')), isTrue);
+          expect(plan.any((d) => d.contains('TEMP B-TREE')), isFalse);
+        },
+      );
+    });
+  });
+
+  group('AppDatabase.nowNextForChannels', () {
+    // Additive/windowed counterpart of `nowNext`, not yet wired into the UI.
+    final firstStart = DateTime.utc(2026, 1, 1);
+
+    Future<AppDatabase> seeded() async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceEpg('src', <Programme>[
+        for (final c in ['a', 'b', 'c'])
+          for (var i = 0; i < 4; i++)
             Programme(
-              channelId: 'channel-$c',
+              channelId: c,
               start: firstStart.add(Duration(hours: i)),
               stop: firstStart.add(Duration(hours: i + 1)),
-              title: 'P$c-$i',
+              title: '$c-$i',
             ),
-      ];
-      await db.replaceEpg('perf-source', programmes);
+      ]);
+      return db;
+    }
 
-      final plan = await db.explainNowQueryPlan(
-        'perf-source',
-        firstStart.add(const Duration(minutes: 30)),
-      );
-      expect(plan.any((d) => d.contains('idx_prog_source_start')), isTrue);
+    test('matches nowNext restricted to the requested channels', () async {
+      final db = await seeded();
+      final at = firstStart.add(const Duration(minutes: 30));
+      final full = await db.nowNext('src', at);
+      final windowed = await db.nowNextForChannels('src', ['a', 'c'], at);
+
+      expect(windowed.now.keys, unorderedEquals(['a', 'c']));
+      expect(windowed.next.keys, unorderedEquals(['a', 'c']));
+      for (final id in ['a', 'c']) {
+        expect(windowed.now[id]!.title, full.now[id]!.title);
+        expect(windowed.next[id]!.title, full.next[id]!.title);
+        expect(windowed.now[id]!.start, full.now[id]!.start);
+        expect(windowed.next[id]!.start, full.next[id]!.start);
+      }
+      await db.close();
+    });
+
+    test('empty ids, unknown ids, and duplicates are harmless', () async {
+      final db = await seeded();
+      final at = firstStart.add(const Duration(minutes: 30));
+      final empty = await db.nowNextForChannels('src', const [], at);
+      expect(empty.now, isEmpty);
+      expect(empty.next, isEmpty);
+
+      final mixed = await db.nowNextForChannels('src', ['a', 'a', 'zz'], at);
+      expect(mixed.now.keys, ['a']);
+      expect(mixed.next.keys, ['a']);
+      await db.close();
+    });
+
+    test('chunks past the bound-variable limit', () async {
+      final db = await seeded();
+      final at = firstStart.add(const Duration(minutes: 30));
+      // Well over the 500-id chunk so the loop runs several times.
+      final ids = ['b', for (var i = 0; i < 1200; i++) 'filler-$i'];
+      final result = await db.nowNextForChannels('src', ids, at);
+      expect(result.now.keys, ['b']);
+      expect(result.next.keys, ['b']);
+      await db.close();
+    });
+
+    test('past the end of the guide there is no next', () async {
+      final db = await seeded();
+      final at = firstStart.add(const Duration(hours: 3, minutes: 30));
+      final result = await db.nowNextForChannels('src', ['a'], at);
+      expect(result.now['a']!.title, 'a-3');
+      expect(result.next, isEmpty);
       await db.close();
     });
   });
@@ -1044,6 +1177,142 @@ void main() {
         await db.close();
       },
     );
+
+    // `migrateM3uChannelIds` runs for every M3U source on every boot, twice
+    // (main.dart before first paint, then HomeShell). The already-migrated
+    // case has to cost nothing.
+    test('an already-migrated M3U source performs no writes', () async {
+      final path = dbPath();
+      final db = await AppDatabase.openAt(path);
+      const locator = 'http://example.invalid/live/1.ts';
+      final stableId = stableM3uChannelId(locator);
+      final now = DateTime.now();
+      await db.replaceLibrary('m3u-src', 'M3U', const [], const [
+        Channel(
+          id: locator,
+          name: 'Channel',
+          extra: {'url': locator, 'tvgId': 'channel.one'},
+        ),
+      ]);
+      await db.replaceEpg('m3u-src', [
+        Programme(
+          channelId: locator,
+          start: now.subtract(const Duration(minutes: 5)),
+          stop: now.add(const Duration(minutes: 25)),
+          title: 'Now',
+        ),
+      ]);
+      await db.setFavorite('m3u-src', ContentKind.live, locator, true);
+
+      // `singleInstance` is on by default, so opening the same path while the
+      // AppDatabase holds it hands back that very connection — which is what
+      // makes `total_changes()` (a per-connection counter) observe the
+      // migration's writes. Deliberately not closed: `db.close()` owns it.
+      final shared = await databaseFactoryFfi.openDatabase(path);
+      Future<int> totalChanges() async =>
+          (await shared.rawQuery('SELECT total_changes() AS n')).first['n']
+              as int;
+
+      // Positive control: the first pass really does write. Without it a
+      // regression that stopped `shared` being the same connection would make
+      // the no-write assertion below pass vacuously.
+      final beforeFirst = await totalChanges();
+      await db.migrateM3uChannelIds('m3u-src');
+      final afterFirst = await totalChanges();
+      expect(afterFirst, greaterThan(beforeFirst));
+      expect((await db.readChannels('m3u-src')).single.id, stableId);
+
+      // Second pass: everything is already stable, so the probes short-circuit
+      // and nothing is written.
+      await db.migrateM3uChannelIds('m3u-src');
+      expect(await totalChanges(), afterFirst);
+
+      // …and the data is still intact.
+      expect((await db.readChannels('m3u-src')).single.id, stableId);
+      expect(await db.readFavoriteIds('m3u-src', ContentKind.live), {stableId});
+      expect((await db.nowNext('m3u-src', now)).now[stableId]?.title, 'Now');
+      await db.close();
+    });
+
+    test('a legacy favorite alone still triggers the migration', () async {
+      // The channel cache can be empty (or already stable) while favorites and
+      // EPG still carry legacy keys — the probe has to look at all three.
+      final db = await AppDatabase.openAt(dbPath());
+      const locator = 'http://example.invalid/live/2.ts';
+      await db.setFavorite('m3u-src', ContentKind.live, locator, true);
+
+      await db.migrateM3uChannelIds('m3u-src');
+
+      expect(await db.readFavoriteIds('m3u-src', ContentKind.live), {
+        stableM3uChannelId(locator),
+      });
+      await db.close();
+    });
+
+    test('a legacy programme key alone still triggers the migration', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      const locator = 'http://example.invalid/live/3.ts';
+      final now = DateTime.now();
+      await db.replaceEpg('m3u-src', [
+        Programme(
+          channelId: locator,
+          start: now.subtract(const Duration(minutes: 5)),
+          stop: now.add(const Duration(minutes: 25)),
+          title: 'Now',
+        ),
+      ]);
+
+      await db.migrateM3uChannelIds('m3u-src');
+
+      expect(
+        (await db.nowNext(
+          'm3u-src',
+          now,
+        )).now[stableM3uChannelId(locator)]?.title,
+        'Now',
+      );
+      await db.close();
+    });
+  });
+
+  group('AppDatabase batched favorites', () {
+    test('clearFavorites removes only the given source and kind', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.setFavorite('a', ContentKind.live, '1', true);
+      await db.setFavorite('a', ContentKind.movie, '2', true);
+      await db.setFavorite('b', ContentKind.live, '3', true);
+
+      await db.clearFavorites('a', ContentKind.live);
+
+      expect(await db.readFavoriteIds('a', ContentKind.live), isEmpty);
+      expect(await db.readFavoriteIds('a', ContentKind.movie), {'2'});
+      expect(await db.readFavoriteIds('b', ContentKind.live), {'3'});
+      await db.close();
+    });
+
+    test('setFavorites matches per-row setFavorite', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.setFavorites('a', ContentKind.live, ['1', '2', '2', '3']);
+      expect(await db.readFavoriteIds('a', ContentKind.live), {'1', '2', '3'});
+
+      // Upsert, exactly like setFavorite(..., true) on an existing row.
+      await db.setFavorites('a', ContentKind.live, ['3', '4']);
+      expect(await db.readFavoriteIds('a', ContentKind.live), {
+        '1',
+        '2',
+        '3',
+        '4',
+      });
+
+      await db.setFavorites('a', ContentKind.live, const []);
+      expect(await db.readFavoriteIds('a', ContentKind.live), {
+        '1',
+        '2',
+        '3',
+        '4',
+      });
+      await db.close();
+    });
   });
 
   group('LibraryRepository', () {
