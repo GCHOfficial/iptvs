@@ -10,7 +10,7 @@ import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
-import 'live_focus_coordinator.dart' show ChannelRowColumn;
+import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 
 // ── Shared EPG wording ───────────────────────────────────────────────────────
@@ -133,6 +133,14 @@ class LiveLayoutMetrics {
 /// D-pad note: the two lists are **selection models**, not collections of focus
 /// nodes. Each has a single [FocusNode] and highlights the row at its selected
 /// index; rows themselves are not focusable (they stay tappable for touch).
+///
+/// Rebuild note: the three panes each sit in their **own** [ListenableBuilder]
+/// over a narrow slice of [LiveFocusCoordinator]
+/// ([LiveFocusCoordinator.categorySelection] / `previewRegion` /
+/// `channelSelection`). That is why the cursor state is read live off [focus]
+/// rather than passed in as a snapshot: one D-pad press must repaint only the
+/// pane(s) that actually changed, not the whole live body. See
+/// docs/tv-navigation.md.
 class LiveTabView extends StatelessWidget {
   final bool loading;
   final String? error;
@@ -140,8 +148,10 @@ class LiveTabView extends StatelessWidget {
 
   final List<Channel> visible;
 
-  /// Resolved preview target (null only when [visible] is empty).
-  final Channel? previewChannel;
+  /// Resolves the preview target (null only when [visible] is empty). A
+  /// callback, not a value: on a TV remote the panel follows the channel
+  /// cursor, so it must be re-resolved inside the preview pane's own rebuild.
+  final Channel? Function() resolvePreviewChannel;
   final Map<String, Programme> now;
   final Map<String, Programme> next;
 
@@ -152,14 +162,11 @@ class LiveTabView extends StatelessWidget {
   /// Scroll controller for the category sidebar; the coordinator drives it.
   final ScrollController categoryScrollController;
 
-  /// The channel list's single D-pad node + the row its cursor sits on.
-  final FocusNode channelsFocusNode;
-  final int selectedChannelIndex;
-  final KeyEventResult Function(FocusNode, KeyEvent) onChannelsKey;
-
-  /// The intra-row column the channel cursor sits on: the row body or the
-  /// trailing favorite star (see [ChannelRowColumn]).
-  final ChannelRowColumn channelColumn;
+  /// The live tab's selection model: both lists' single D-pad nodes, their
+  /// selected indices, the intra-row [ChannelRowColumn], the key handlers, and
+  /// the narrow listenables the three panes subscribe to. Owned (created and
+  /// disposed) by the screen; read-only here.
+  final LiveFocusCoordinator focus;
 
   /// Uniform channel row height (see [channelRowExtentFor]) — must match what
   /// the coordinator uses for its scroll math.
@@ -178,10 +185,6 @@ class LiveTabView extends StatelessWidget {
   /// the preview panel instead, so long-press does nothing there.
   final ValueChanged<Channel> onPreviewChannel;
 
-  /// Touch/mouse: move the D-pad cursor onto a tapped row before acting on it,
-  /// so the cursor and the pointer never disagree.
-  final ValueChanged<int> onSelectChannelIndex;
-
   /// Opens catch-up for a channel (called only for archive-capable channels).
   final ValueChanged<Channel> onCatchup;
 
@@ -191,22 +194,7 @@ class LiveTabView extends StatelessWidget {
   /// cursor sits — Back moves the cursor without changing the filter.
   final String? selectedCategoryId;
 
-  /// The category sidebar's single D-pad node + the row its cursor sits on.
-  final FocusNode categoriesFocusNode;
-  final int selectedCategoryIndex;
-  final KeyEventResult Function(FocusNode, KeyEvent) onCategoriesKey;
-
   final ValueChanged<String?> onCategorySelected;
-
-  /// Touch/mouse: move the category cursor onto a tapped row.
-  final ValueChanged<int> onSelectCategoryIndex;
-
-  /// Routed focus nodes + D-pad handler for the preview panel's Favorite /
-  /// Catch-up controls (the top of the channel column on the wide layout).
-  final FocusNode previewFavoriteFocusNode;
-  final FocusNode previewCatchupFocusNode;
-  final KeyEventResult Function(bool fromCatchup, KeyEvent event)
-  onPreviewControlKey;
 
   /// Built lazily (only when the wide preview panel actually renders) so no
   /// video output — native platform view or media_kit texture — is created
@@ -221,17 +209,14 @@ class LiveTabView extends StatelessWidget {
     required this.error,
     required this.onRetry,
     required this.visible,
-    required this.previewChannel,
+    required this.resolvePreviewChannel,
     required this.now,
     required this.next,
     required this.deliberate,
     required this.resolving,
     required this.scrollController,
     required this.categoryScrollController,
-    required this.channelsFocusNode,
-    required this.selectedChannelIndex,
-    required this.onChannelsKey,
-    required this.channelColumn,
+    required this.focus,
     required this.channelRowExtent,
     required this.categoryRowExtent,
     required this.lastPlayedChannelId,
@@ -240,82 +225,92 @@ class LiveTabView extends StatelessWidget {
     required this.onToggleFavorite,
     required this.onPlayChannel,
     required this.onPreviewChannel,
-    required this.onSelectChannelIndex,
     required this.onCatchup,
     required this.categories,
     required this.selectedCategoryId,
-    required this.categoriesFocusNode,
-    required this.selectedCategoryIndex,
-    required this.onCategoriesKey,
     required this.onCategorySelected,
-    required this.onSelectCategoryIndex,
-    required this.previewFavoriteFocusNode,
-    required this.previewCatchupFocusNode,
-    required this.onPreviewControlKey,
     required this.previewVideoBuilder,
     required this.previewLoading,
     required this.previewError,
   });
 
-  /// The channel list. One [Focus] owns the whole list's D-pad ([onChannelsKey]);
-  /// rows are plain, non-focusable widgets highlighted at [selectedChannelIndex].
-  /// `itemExtent` keeps rows uniform so the coordinator's `index * extent` scroll
-  /// math is exact.
+  /// Touch/mouse: move the D-pad cursor onto a tapped row before acting on it,
+  /// so the cursor and the pointer never disagree.
+  void _selectChannelIndex(int i) => focus.selectChannel(i, reveal: false);
+
+  /// The channel list. One [Focus] owns the whole list's D-pad
+  /// ([LiveFocusCoordinator.handleChannelsKey]); rows are plain, non-focusable
+  /// widgets highlighted at the coordinator's selected index. `itemExtent` keeps
+  /// rows uniform so the coordinator's `index * extent` scroll math is exact.
+  ///
+  /// The [ListenableBuilder] sits *inside* the [Focus] (so the node and its
+  /// autofocus are never churned) and subscribes only to
+  /// [LiveFocusCoordinator.channelSelection]: a category-cursor move or a digit
+  /// keypress must not rebuild these rows.
   Widget _buildChannelList(
-    BuildContext context, {
+    BuildContext context,
+    LiveLayoutMetrics metrics, {
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
     final wide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
     return Focus(
-      focusNode: channelsFocusNode,
+      focusNode: focus.channelsFocusNode,
       autofocus: true,
-      onKeyEvent: onChannelsKey,
-      child: ListView.builder(
-        controller: scrollController,
-        padding: padding,
-        itemExtent: channelRowExtent,
-        itemCount: visible.length,
-        semanticChildCount: visible.length,
-        itemBuilder: (context, i) {
-          final c = visible[i];
-          return IndexedSemantics(
-            index: i,
-            child: _ChannelTile(
-              channel: c,
-              now: now[c.id],
-              next: next[c.id],
-              favorite: isFavorite(c.id),
-              enabled: !resolving,
-              position: i + 1,
-              total: visible.length,
-              // The cursor is drawn even when the list doesn't own the D-pad —
-              // subdued rather than accented — so you can always see where you'll
-              // land when you come back, while the *accent* clearly marks which
-              // pane the D-pad is actually in.
-              cursor: i == selectedChannelIndex,
-              favoriteCursor:
-                  i == selectedChannelIndex &&
-                  channelColumn == ChannelRowColumn.favorite,
-              listFocused: channelsFocusNode.hasFocus,
-              previewing: c.id == previewChannelId,
-              onTap: () {
-                onSelectChannelIndex(i);
-                onPlayChannel(c);
-              },
-              onToggleFavorite: () {
-                onSelectChannelIndex(i);
-                onToggleFavorite(c.id);
-              },
-              // Phone: long-press opens the audible preview sheet (it carries
-              // Play, favorite and catch-up). Wide layouts already have the
-              // preview panel, so long-press does nothing there.
-              onLongPress: wide
-                  ? null
-                  : () {
-                      onSelectChannelIndex(i);
-                      onPreviewChannel(c);
-                    },
-            ),
+      onKeyEvent: focus.handleChannelsKey,
+      child: ListenableBuilder(
+        listenable: focus.channelSelection,
+        builder: (context, _) {
+          final selected = focus.selectedChannelIndex;
+          final onFavoriteColumn =
+              focus.channelColumn == ChannelRowColumn.favorite;
+          final listFocused = focus.channelsFocusNode.hasFocus;
+          return ListView.builder(
+            controller: scrollController,
+            padding: padding,
+            itemExtent: channelRowExtent,
+            itemCount: visible.length,
+            semanticChildCount: visible.length,
+            itemBuilder: (context, i) {
+              final c = visible[i];
+              return IndexedSemantics(
+                index: i,
+                child: _ChannelTile(
+                  channel: c,
+                  now: now[c.id],
+                  next: next[c.id],
+                  favorite: isFavorite(c.id),
+                  enabled: !resolving,
+                  position: i + 1,
+                  total: visible.length,
+                  metrics: metrics,
+                  // The cursor is drawn even when the list doesn't own the
+                  // D-pad — subdued rather than accented — so you can always see
+                  // where you'll land when you come back, while the *accent*
+                  // clearly marks which pane the D-pad is actually in.
+                  cursor: i == selected,
+                  favoriteCursor: i == selected && onFavoriteColumn,
+                  listFocused: listFocused,
+                  previewing: c.id == previewChannelId,
+                  onTap: () {
+                    _selectChannelIndex(i);
+                    onPlayChannel(c);
+                  },
+                  onToggleFavorite: () {
+                    _selectChannelIndex(i);
+                    onToggleFavorite(c.id);
+                  },
+                  // Phone: long-press opens the audible preview sheet (it
+                  // carries Play, favorite and catch-up). Wide layouts already
+                  // have the preview panel, so long-press does nothing there.
+                  onLongPress: wide
+                      ? null
+                      : () {
+                          _selectChannelIndex(i);
+                          onPreviewChannel(c);
+                        },
+                ),
+              );
+            },
           );
         },
       ),
@@ -352,16 +347,18 @@ class LiveTabView extends StatelessWidget {
         ),
       );
     }
-    final preview = previewChannel!;
+    // Computed once here rather than per row in [_ChannelTile.build]: it is the
+    // same value for every row (it only reads the window size), and resolving it
+    // per row also made every row a MediaQuery dependent.
+    final metrics = LiveLayoutMetrics.forSize(
+      MediaQuery.sizeOf(context),
+      compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+    );
     return LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxWidth < kWideLayoutMinWidth) {
-          return _buildChannelList(context);
+          return _buildChannelList(context, metrics);
         }
-        final metrics = LiveLayoutMetrics.forSize(
-          MediaQuery.sizeOf(context),
-          compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
-        );
         return Padding(
           padding: EdgeInsets.fromLTRB(
             metrics.outerPadding,
@@ -373,48 +370,41 @@ class LiveTabView extends StatelessWidget {
             children: [
               SizedBox(
                 width: metrics.categoryPaneWidth,
-                child: _LiveCategoryPane(
-                  categories: categories,
-                  selectedCategoryId: selectedCategoryId,
-                  selectedIndex: selectedCategoryIndex,
-                  focusNode: categoriesFocusNode,
-                  onKey: onCategoriesKey,
-                  scrollController: categoryScrollController,
-                  onSelected: onCategorySelected,
-                  onSelectIndex: onSelectCategoryIndex,
-                  rowExtent: categoryRowExtent,
+                // Only the category cursor + the sidebar's own focus repaint
+                // this pane; walking the channel list must not.
+                child: ListenableBuilder(
+                  listenable: focus.categorySelection,
+                  builder: (context, _) => _LiveCategoryPane(
+                    categories: categories,
+                    selectedCategoryId: selectedCategoryId,
+                    selectedIndex: focus.selectedCategoryIndex,
+                    focusNode: focus.categoriesFocusNode,
+                    onKey: focus.handleCategoriesKey,
+                    scrollController: categoryScrollController,
+                    onSelected: onCategorySelected,
+                    onSelectIndex: (i) =>
+                        focus.selectCategory(i, reveal: false),
+                    rowExtent: categoryRowExtent,
+                  ),
                 ),
               ),
               SizedBox(width: metrics.paneGap),
               Expanded(
                 child: Column(
                   children: [
-                    _LivePreviewPanel(
-                      channel: preview,
-                      now: now[preview.id],
-                      next: next[preview.id],
-                      previewVideo: previewVideoBuilder(),
-                      previewActive: previewChannelId == preview.id,
-                      previewLoading:
-                          previewLoading && previewChannelId == preview.id,
-                      previewError: previewChannelId == preview.id
-                          ? previewError
-                          : null,
-                      deliberate: deliberate,
-                      favorite: isFavorite(preview.id),
-                      onToggleFavorite: () => onToggleFavorite(preview.id),
-                      onCatchup: preview.hasArchive
-                          ? () => onCatchup(preview)
-                          : null,
-                      favoriteFocusNode: previewFavoriteFocusNode,
-                      catchupFocusNode: previewCatchupFocusNode,
-                      onControlKey: onPreviewControlKey,
-                      metrics: metrics,
+                    // The panel follows the channel cursor (it shows the
+                    // selected channel until a preview locks it) and its own
+                    // controls' focus — but not which list holds the D-pad.
+                    ListenableBuilder(
+                      listenable: focus.previewRegion,
+                      builder: (context, _) =>
+                          _buildPreviewPanel(context, metrics),
                     ),
                     SizedBox(height: metrics.paneGap),
                     Expanded(
                       child: _buildChannelList(
                         context,
+                        metrics,
                         padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
                       ),
                     ),
@@ -425,6 +415,30 @@ class LiveTabView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildPreviewPanel(BuildContext context, LiveLayoutMetrics metrics) {
+    // Non-null whenever [visible] is non-empty, which the caller already
+    // established; stay defensive rather than assert during a rebuild.
+    final preview = resolvePreviewChannel();
+    if (preview == null) return SizedBox(height: metrics.previewHeight);
+    return _LivePreviewPanel(
+      channel: preview,
+      now: now[preview.id],
+      next: next[preview.id],
+      previewVideo: previewVideoBuilder(),
+      previewActive: previewChannelId == preview.id,
+      previewLoading: previewLoading && previewChannelId == preview.id,
+      previewError: previewChannelId == preview.id ? previewError : null,
+      deliberate: deliberate,
+      favorite: isFavorite(preview.id),
+      onToggleFavorite: () => onToggleFavorite(preview.id),
+      onCatchup: preview.hasArchive ? () => onCatchup(preview) : null,
+      favoriteFocusNode: focus.previewFavoriteFocusNode,
+      catchupFocusNode: focus.previewCatchupFocusNode,
+      onControlKey: focus.handlePreviewControlKey,
+      metrics: metrics,
     );
   }
 }
@@ -1312,6 +1326,11 @@ class _ChannelTile extends StatelessWidget {
   final int position;
   final int total;
 
+  /// Resolved once by [LiveTabView.build] and passed down — every row would
+  /// otherwise recompute the identical value (and take a MediaQuery dependency)
+  /// on every rebuild.
+  final LiveLayoutMetrics metrics;
+
   /// The D-pad selection cursor is on this row.
   final bool cursor;
 
@@ -1340,6 +1359,7 @@ class _ChannelTile extends StatelessWidget {
     required this.enabled,
     required this.position,
     required this.total,
+    required this.metrics,
     required this.cursor,
     required this.favoriteCursor,
     required this.listFocused,
@@ -1349,14 +1369,20 @@ class _ChannelTile extends StatelessWidget {
     this.onLongPress,
   });
 
+  // The two possible favorite actions, hoisted to constants: the row rebuilds
+  // on every cursor move, and `CustomSemanticsAction` has value equality, so
+  // allocating a fresh one per row per rebuild bought nothing.
+  static const _addFavoriteAction = CustomSemanticsAction(
+    label: 'Add to favorites',
+  );
+  static const _removeFavoriteAction = CustomSemanticsAction(
+    label: 'Remove from favorites',
+  );
+
   @override
   Widget build(BuildContext context) {
     final current = now;
     final upcoming = next;
-    final metrics = LiveLayoutMetrics.forSize(
-      MediaQuery.sizeOf(context),
-      compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
-    );
     final dense = metrics.scale < 0.7;
     double? progress;
     if (current != null) {
@@ -1369,19 +1395,17 @@ class _ChannelTile extends StatelessWidget {
     // the *body* column; on the favorite column the star cell takes it over.
     // The panelHi fill stays either way, so the selected row remains visible.
     final active = cursor && listFocused && !favoriteCursor;
-    final programmeLabels = [
-      if (current != null) nowProgrammeLabel(current),
-      if (upcoming != null) nextProgrammeLabel(upcoming),
-    ].join(', ');
-    final semanticsLabel = [
-      channel.name,
-      if (programmeLabels.isNotEmpty) programmeLabels,
-      '$position of $total',
-      favorite ? 'Favorite' : 'Not favorite',
-    ].join(', ');
-    final favoriteAction = CustomSemanticsAction(
-      label: favorite ? 'Remove from favorites' : 'Add to favorites',
-    );
+    // One buffer instead of two intermediate lists and two joins — same text:
+    // `name, Now · X, Next · Y, 3 of 12, Favorite`.
+    final label = StringBuffer(channel.name);
+    if (current != null) label.write(', ${nowProgrammeLabel(current)}');
+    if (upcoming != null) label.write(', ${nextProgrammeLabel(upcoming)}');
+    label.write(', $position of $total');
+    label.write(favorite ? ', Favorite' : ', Not favorite');
+    final semanticsLabel = label.toString();
+    final favoriteAction = favorite
+        ? _removeFavoriteAction
+        : _addFavoriteAction;
     return Semantics(
       label: semanticsLabel,
       button: true,

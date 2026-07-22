@@ -252,6 +252,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // ListenableBuilder in build) — never the whole screen. [_dataListenable] is
   // everything except the preview; the preview's frequent loading/error ticks
   // during channel surfing only rebuild the body.
+  //
+  // [_focus] is deliberately **not** merged in here: it fires on every D-pad
+  // press *and* every focus change, and rebuilding the whole live body for
+  // those was the dominant per-frame cost under key auto-repeat. The live body
+  // subscribes to the coordinator's narrow slices instead
+  // (LiveFocusCoordinator.channelSelection / categorySelection / previewRegion
+  // / digitEntry) — see docs/tv-navigation.md.
   late Listenable _dataListenable;
   late Listenable _bodyListenable;
 
@@ -278,7 +285,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           unawaited(_toggleFavorite(ContentKind.live, channel.id)),
       onFocusTabs: _focusTabs,
     );
-    _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
+    _bodyListenable = Listenable.merge([_dataListenable, _preview]);
     WidgetsBinding.instance.addObserver(this);
     _loadLive();
     _live.startEpgRefresh();
@@ -346,7 +353,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _previewTimer = null;
       _disposeRepositoryControllers();
       _createRepositoryControllers();
-      _bodyListenable = Listenable.merge([_dataListenable, _preview, _focus]);
+      _bodyListenable = Listenable.merge([_dataListenable, _preview]);
       _visibleKey = null;
       _visibleCache = null;
       _channelsByIdKey = null;
@@ -1800,35 +1807,47 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   /// Overlays the digit-entry "Ch 123" chip while the user is typing a
   /// channel number on the remote (see [LiveFocusCoordinator.digitBuffer]).
+  ///
+  /// [body] is passed through as the builder's `child`, so typing digits
+  /// repaints the chip only — never the channel list underneath it.
   Widget _withDigitEntryChip(Widget body) {
-    if (_focus.digitBuffer.isEmpty) return body;
-    return Stack(
-      children: [
-        body,
-        Positioned(
-          top: 8,
-          right: 16,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: AppColors.panel.withValues(alpha: 0.95),
-              borderRadius: BorderRadius.circular(AppRadius.tile),
-              border: Border.all(color: AppColors.accent, width: 2),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              child: Text(
-                'Ch ${_focus.digitBuffer}',
-                style: const TextStyle(
-                  color: AppColors.textHi,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1,
+    return ListenableBuilder(
+      listenable: _focus.digitEntry,
+      child: body,
+      builder: (context, child) {
+        if (_focus.digitBuffer.isEmpty) return child!;
+        return Stack(
+          children: [
+            child!,
+            Positioned(
+              top: 8,
+              right: 16,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppColors.panel.withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(AppRadius.tile),
+                  border: Border.all(color: AppColors.accent, width: 2),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  child: Text(
+                    'Ch ${_focus.digitBuffer}',
+                    style: const TextStyle(
+                      color: AppColors.textHi,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1,
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 
@@ -1838,17 +1857,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       error: _live.error,
       onRetry: () => _loadLive(forceRefresh: true),
       visible: visible,
-      previewChannel: _resolvePreviewChannel(visible),
+      // Resolved inside the preview pane's own rebuild: on a TV remote the
+      // panel follows the channel cursor, and the cursor now moves without
+      // rebuilding this method.
+      resolvePreviewChannel: () => _resolvePreviewChannel(visible),
       now: _live.now,
       next: _live.next,
       deliberate: _deliberatePreview,
       resolving: _resolving,
       scrollController: _scrollController,
       categoryScrollController: _categoryScrollController,
-      channelsFocusNode: _focus.channelsFocusNode,
-      selectedChannelIndex: _focus.selectedChannelIndex,
-      onChannelsKey: _focus.handleChannelsKey,
-      channelColumn: _focus.channelColumn,
+      focus: _focus,
       channelRowExtent: _liveChannelRowExtent(),
       categoryRowExtent: _liveCategoryRowExtent(),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
@@ -1857,18 +1876,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
       onPlayChannel: _play,
       onPreviewChannel: (channel) => unawaited(_showPreviewSheet(channel)),
-      onSelectChannelIndex: (i) => _focus.selectChannel(i, reveal: false),
       onCatchup: _showCatchupSheet,
       categories: _liveCategoriesForUi,
       selectedCategoryId: _categoryId,
-      categoriesFocusNode: _focus.categoriesFocusNode,
-      selectedCategoryIndex: _focus.selectedCategoryIndex,
-      onCategoriesKey: _focus.handleCategoriesKey,
       onCategorySelected: _selectCategory,
-      onSelectCategoryIndex: (i) => _focus.selectCategory(i, reveal: false),
-      previewFavoriteFocusNode: _focus.previewFavoriteFocusNode,
-      previewCatchupFocusNode: _focus.previewCatchupFocusNode,
-      onPreviewControlKey: _focus.handlePreviewControlKey,
       previewVideoBuilder: () => PreviewVideo(preview: _preview),
       previewLoading: _preview.loading,
       previewError: _preview.error,

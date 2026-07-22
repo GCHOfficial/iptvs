@@ -598,4 +598,89 @@ void main() {
       expect(h.focus.selectedChannelIndex, 0);
     });
   });
+
+  // The live body used to rebuild in full on every D-pad press *and* every focus
+  // change, which was the dominant per-frame cost under key auto-repeat on weak
+  // Android TV hardware. The panes now subscribe to narrow slices. These pin the
+  // split so it can't silently collapse back into one notifier.
+  group('notification granularity', () {
+    /// Counts pulses on each slice plus the aggregate.
+    ({
+      int Function() channel,
+      int Function() category,
+      int Function() digits,
+      int Function() preview,
+      int Function() aggregate,
+    })
+    watch(LiveFocusCoordinator focus) {
+      var channel = 0, category = 0, digits = 0, preview = 0, aggregate = 0;
+      focus.channelSelection.addListener(() => channel++);
+      focus.categorySelection.addListener(() => category++);
+      focus.digitEntry.addListener(() => digits++);
+      focus.previewRegion.addListener(() => preview++);
+      focus.addListener(() => aggregate++);
+      return (
+        channel: () => channel,
+        category: () => category,
+        digits: () => digits,
+        preview: () => preview,
+        aggregate: () => aggregate,
+      );
+    }
+
+    test('moving the channel cursor leaves the category sidebar alone', () {
+      final h = make(visible: channels(['a', 'b', 'c']));
+      addTearDown(h.focus.dispose);
+      final counts = watch(h.focus);
+
+      h.focus.selectChannel(1, reveal: false);
+
+      expect(counts.channel(), 1);
+      expect(counts.category(), 0, reason: 'the sidebar did not change');
+      expect(counts.digits(), 0);
+      // The wide preview panel follows the channel cursor, so it must repaint.
+      expect(counts.preview(), 1);
+    });
+
+    test('moving the category cursor leaves the channel list alone', () {
+      final h = make(
+        visible: channels(['a', 'b']),
+        categories: [null, 'news', 'sport'],
+      );
+      addTearDown(h.focus.dispose);
+      final counts = watch(h.focus);
+
+      h.focus.selectCategory(2, reveal: false);
+
+      expect(counts.category(), 1);
+      expect(counts.channel(), 0, reason: 'the channel list did not change');
+      expect(counts.preview(), 0);
+    });
+
+    test('digit entry repaints only the chip', () {
+      final h = make(visible: channels(['a', 'b']));
+      addTearDown(h.focus.dispose);
+      final counts = watch(h.focus);
+
+      h.focus.appendDigit(2);
+
+      expect(counts.digits(), 1);
+      expect(counts.channel(), 0);
+      expect(counts.category(), 0);
+    });
+
+    test('every slice pulse still reaches the aggregate listener', () {
+      final h = make(visible: channels(['a', 'b']), categories: [null, 'news']);
+      addTearDown(h.focus.dispose);
+      final counts = watch(h.focus);
+
+      h.focus.selectChannel(1, reveal: false);
+      h.focus.selectCategory(1, reveal: false);
+      h.focus.appendDigit(2);
+
+      // Anything still listening to the coordinator as a whole — the Back
+      // ladder's route reads, the screen's own wiring — keeps seeing all three.
+      expect(counts.aggregate(), 3);
+    });
+  });
 }

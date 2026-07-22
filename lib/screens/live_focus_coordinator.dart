@@ -44,6 +44,15 @@ enum ChannelRowColumn { body, favorite }
 ///   between the panes; every arrow is consumed, so Flutter's geometry
 ///   traversal never runs inside the live body.
 ///
+/// **Notification granularity.** The coordinator is still the single owner of
+/// the selection state, but it publishes it through *narrow* [Listenable]s
+/// ([channelSelection], [categorySelection], [previewRegion], [digitEntry]) as
+/// well as the aggregate `notifyListeners()`. A D-pad press changes one slice —
+/// rebuilding the sidebar, the preview panel and the channel list for every
+/// press (and every focus-node notification) was the dominant per-frame cost
+/// under key auto-repeat on weak Android TV silicon. Consumers subscribe to the
+/// slice they actually draw; see docs/tv-navigation.md.
+///
 /// Route keys ([RoutedFocusNode.routeKey], read via [focusRouteKey]) still name
 /// the regions for the Back ladder — they are release-safe, unlike `debugLabel`.
 class LiveFocusCoordinator extends ChangeNotifier {
@@ -89,6 +98,56 @@ class LiveFocusCoordinator extends ChangeNotifier {
     ]) {
       node.addListener(_notify);
     }
+    // Each pane's focus node is folded into the slice that *draws* that pane's
+    // `hasFocus`, so a handover still repaints both sides (the losing pane's
+    // node fires too) without waking the panes that can't have changed.
+    channelSelection = Listenable.merge([_channelCursor, channelsFocusNode]);
+    categorySelection = Listenable.merge([_categoryCursor, categoriesFocusNode]);
+    // The wide preview panel follows the channel cursor (it shows the selected
+    // channel while no preview is locked in) and owns the Favorite/Catch-up
+    // controls — but nothing about *which* list holds the D-pad.
+    previewRegion = Listenable.merge([
+      _channelCursor,
+      previewFavoriteFocusNode,
+      previewCatchupFocusNode,
+    ]);
+  }
+
+  // ── Narrow listenables ─────────────────────────────────────────────────────
+  // Each mutation pulses its own slice *and* the aggregate `notifyListeners()`,
+  // so an existing whole-body listener keeps seeing everything.
+
+  final _CoordinatorSlice _channelCursor = _CoordinatorSlice();
+  final _CoordinatorSlice _categoryCursor = _CoordinatorSlice();
+  final _CoordinatorSlice _digitEntry = _CoordinatorSlice();
+
+  /// Fires when the channel cursor moves (index, id reconciliation, intra-row
+  /// [ChannelRowColumn]) or the channel pane gains/loses the D-pad.
+  late final Listenable channelSelection;
+
+  /// Fires when the category cursor moves or the sidebar gains/loses the D-pad.
+  late final Listenable categorySelection;
+
+  /// Fires when anything the wide preview panel reads changes: the selected
+  /// channel and the preview controls' focus.
+  late final Listenable previewRegion;
+
+  /// Fires when the remote's digit-entry buffer changes.
+  Listenable get digitEntry => _digitEntry;
+
+  void _notifyChannelCursor() {
+    _channelCursor.pulse();
+    _notify();
+  }
+
+  void _notifyCategoryCursor() {
+    _categoryCursor.pulse();
+    _notify();
+  }
+
+  void _notifyDigitEntry() {
+    _digitEntry.pulse();
+    _notify();
   }
 
   /// The channel list's scroll controller (owned by the screen).
@@ -223,7 +282,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _selectedChannelIndex = channel;
     _selectedChannelId = channelId;
     _selectedCategoryIndex = category;
-    _notify();
+    // A reconcile can move either cursor; it only runs after the dataset
+    // changed, which repaints the live body anyway.
+    _categoryCursor.pulse();
+    _notifyChannelCursor();
   }
 
   /// Put the channel cursor back at the top (a new filter/search starts fresh).
@@ -233,14 +295,14 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (_selectedChannelIndex == 0 && _selectedChannelId == firstId) return;
     _selectedChannelIndex = 0;
     _selectedChannelId = firstId;
-    _notify();
+    _notifyChannelCursor();
   }
 
   /// Park the intra-row cursor back on the row body. No-op when already there.
   void resetChannelColumn() {
     if (_channelColumn == ChannelRowColumn.body) return;
     _channelColumn = ChannelRowColumn.body;
-    _notify();
+    _notifyChannelCursor();
   }
 
   /// Move the channel cursor to [index] (clamped), reveal it, and tell the
@@ -259,7 +321,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _channelColumn = ChannelRowColumn.body;
     _rememberBrowsed(visible[next].id);
     if (reveal) _revealChannel(next);
-    if (changed) _notify();
+    if (changed) _notifyChannelCursor();
     onChannelSelectionChanged(visible[next], channelsFocusNode.hasFocus);
   }
 
@@ -271,7 +333,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     final next = index.clamp(0, ids.length - 1);
     if (next != _selectedCategoryIndex) {
       _selectedCategoryIndex = next;
-      _notify();
+      _notifyCategoryCursor();
     }
     if (reveal) _revealCategory(next);
   }
@@ -357,7 +419,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
         ? -1
         : visible.indexWhere((channel) => channel.id == resumeId);
     if (index >= 0) _selectedChannelIndex = index;
-    _notify();
+    _notifyChannelCursor();
     focusChannels();
   }
 
@@ -438,7 +500,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
       // star, or an empty list) so geometry traversal never runs.
       if (_channelColumn == ChannelRowColumn.body && selectedChannel != null) {
         _channelColumn = ChannelRowColumn.favorite;
-        _notify();
+        _notifyChannelCursor();
       }
       return KeyEventResult.handled;
     }
@@ -606,7 +668,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _digitBuffer += '$digit';
     _digitTimer?.cancel();
     _digitTimer = Timer(_digitCommitDelay, commitDigitBuffer);
-    _notify();
+    _notifyDigitEntry();
   }
 
   /// Jump the cursor to the visible channel whose [Channel.number] matches.
@@ -627,7 +689,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     _digitTimer = null;
     if (_digitBuffer.isEmpty) return;
     _digitBuffer = '';
-    _notify();
+    _notifyDigitEntry();
   }
 
   void _notify() {
@@ -638,11 +700,32 @@ class LiveFocusCoordinator extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _digitTimer?.cancel();
+    _channelCursor.dispose();
+    _categoryCursor.dispose();
+    _digitEntry.dispose();
     channelsFocusNode.dispose();
     categoriesFocusNode.dispose();
     searchCellFocusNode.dispose();
     previewFavoriteFocusNode.dispose();
     previewCatchupFocusNode.dispose();
+    super.dispose();
+  }
+}
+
+/// One slice of [LiveFocusCoordinator]'s state, published as its own
+/// [Listenable] so a consumer rebuilds only for the state it draws.
+/// [pulse] is inert after [dispose] — the coordinator's teardown order is not
+/// something callers should have to reason about.
+class _CoordinatorSlice extends ChangeNotifier {
+  bool _disposed = false;
+
+  void pulse() {
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
     super.dispose();
   }
 }
