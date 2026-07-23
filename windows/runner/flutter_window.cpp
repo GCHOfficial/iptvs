@@ -103,6 +103,7 @@ bool g_native_keyboard_focus_visible = false;
 
 enum class NativeFocusItem {
   kBack,
+  kFavorite,
   kPlay,
   kSeekBack,
   kSeekForward,
@@ -136,6 +137,8 @@ struct NativeControlState {
   std::wstring title;
   bool is_live = false;
   bool live_synced = true; // at the live edge (red badge) vs behind (grey + button)
+  bool can_favorite = false; // live channel with a favorites store (show the star)
+  bool is_favorite = false;  // current favorite state (Dart owns the store)
   bool reconnecting = false; // live reconnect watchdog re-establishing the stream
   bool playing = false;
   bool fullscreen = false;
@@ -826,6 +829,8 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
   switch (item) {
   case NativeFocusItem::kBack:
     return "back";
+  case NativeFocusItem::kFavorite:
+    return "favorite";
   case NativeFocusItem::kPlay:
     return "playPause";
   case NativeFocusItem::kSeekBack:
@@ -1380,6 +1385,19 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   const COLORREF kNeutralBg = RGB(30, 33, 45);
   const COLORREF kNeutralFg = RGB(206, 210, 224);
   int badge_right = rect.right - 16;
+  // Favorite star (live channels that expose a favorites store) — rightmost in
+  // the top bar, mirroring the embedded/Android overlays; badges stack to its
+  // left. Filled + accent-tinted when favourited. Dart owns the store: a click
+  // sends "favorite" back and Dart pushes the new state via setControlState.
+  if (g_native_control_state.can_favorite) {
+    const RECT fav_rect =
+        RectFrom(badge_right - 38, top_cy - 19, badge_right, top_cy + 19);
+    DrawIconButton(paint_hdc, fav_rect,
+                   g_native_control_state.is_favorite ? L"\xE735" : L"\xE734",
+                   g_native_control_state.is_favorite ||
+                       is_focused(NativeFocusItem::kFavorite));
+    badge_right -= 38 + 8;
+  }
   if (g_native_control_state.reconnecting) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x21BB Reconnecting\x2026",
                              RGB(150, 102, 24), RGB(255, 236, 196));
@@ -1611,6 +1629,15 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   if (PointInRect(x, y, top)) {
     if (PointInRect(x, y, RectFrom(12, 8, 60, 56))) {
       return "back";
+    }
+    // Favorite star, drawn rightmost in the top bar (see PaintNativeControlBar).
+    if (g_native_control_state.can_favorite) {
+      const int top_cy = (top.top + top.bottom) / 2;
+      if (PointInRect(x, y,
+                      RectFrom(rect.right - 54, top_cy - 19, rect.right - 16,
+                               top_cy + 19))) {
+        return "favorite";
+      }
     }
     return "show";
   }
@@ -2433,6 +2460,10 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableBoolArg(args, "isLive", g_native_control_state.is_live);
   g_native_control_state.live_synced =
       EncodableBoolArg(args, "liveSynced", g_native_control_state.live_synced);
+  g_native_control_state.can_favorite =
+      EncodableBoolArg(args, "canFavorite", g_native_control_state.can_favorite);
+  g_native_control_state.is_favorite =
+      EncodableBoolArg(args, "isFavorite", g_native_control_state.is_favorite);
   g_native_control_state.reconnecting =
       EncodableBoolArg(args, "reconnecting", g_native_control_state.reconnecting);
   g_native_control_state.playing =

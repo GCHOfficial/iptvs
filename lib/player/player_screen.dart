@@ -181,6 +181,17 @@ class PlayerScreen extends StatefulWidget {
   /// native launch fails (falls back to embedded either way).
   final bool preferLinuxNative;
 
+  /// Windows only: render the adopted preview engine on the **embedded**
+  /// media_kit surface (its shared texture) instead of hot-swapping mpv's `vo`
+  /// to the native HDR HWND. Set true by the channel list for a same-channel
+  /// **SDR** preview handoff, so preview→fullscreen (and back) is seamless — the
+  /// same `Player`/`VideoController` keeps rendering, no `vo` reinit, and the
+  /// preview is never disposed. HDR streams leave this false and keep the native
+  /// HWND path (real D3D11 HDR, at the cost of the reinit beat) — the same
+  /// "embedded by default, dedicated surface only when the stream needs it"
+  /// policy Linux uses (SDR embedded, HDR native mpv). Ignored off Windows.
+  final bool preferWindowsEmbedded;
+
   /// Debug-only: when non-null (and only honored under [kDebugMode]), passed
   /// through as `soakAutoCloseMs` on the Android native `open` call so the
   /// native Activity self-closes after this many milliseconds — lets
@@ -204,6 +215,7 @@ class PlayerScreen extends StatefulWidget {
     this.onSetFavorite,
     this.resolveAgain,
     this.preferLinuxNative = false,
+    this.preferWindowsEmbedded = false,
   });
 
   @override
@@ -367,7 +379,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _AspectMode('4:3', '0.0', '4:3'),
   ];
 
-  bool get _usesWindowsNativeSurface => Platform.isWindows;
+  // Whether playback is *currently* on the native HWND surface. Starts from the
+  // initial SDR/HDR decision (`preferWindowsEmbedded`) but flips true when an
+  // SDR-adopted embedded stream turns out HDR and escalates
+  // (`_maybeEscalateWindowsNative`), so the runtime gates below track the actual
+  // surface rather than the initial choice. `late` so it can read `widget`.
+  late bool _windowsNativeActive =
+      Platform.isWindows && !widget.preferWindowsEmbedded;
+  // Windows embedded→native escalation guards (one-shot, re-entry-blocked),
+  // mirroring the Linux `_linuxEscalated`/`_linuxEscalating` pair.
+  bool _windowsEscalated = false;
+  bool _windowsEscalating = false;
+  bool get _usesWindowsNativeSurface => _windowsNativeActive;
   bool get _usesLinuxNativeSurface => Platform.isLinux;
   LinuxNativeSession? _linuxNativeSession;
   StreamSubscription<String>? _linuxNativeControlSub;
@@ -546,6 +569,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         unawaited(_logActiveVideoOutput());
         unawaited(_probeHdr10Plus(params));
         unawaited(_maybeEscalateLinuxNative(params));
+        unawaited(_maybeEscalateWindowsNative(params));
       }),
     );
     // Clear the error overlay once playback actually starts.
@@ -1117,6 +1141,73 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _linuxEscalating = false;
   }
 
+  /// Windows counterpart of [_maybeEscalateLinuxNative]: an SDR-adopted embedded
+  /// open ([preferWindowsEmbedded]) whose stream turns out HDR (PQ/HLG) switches
+  /// to the native HWND surface so real D3D11 HDR engages. The ahead-of-time
+  /// colorimetry read in `_openLivePlayer` can miss HDR when the preview hadn't
+  /// decoded it yet (a cold/fast preview→fullscreen), which otherwise left an
+  /// HDR channel stuck on the tone-mapped SDR embedded surface until reopened.
+  /// One-shot; unlike Linux this reuses the *same* media_kit player (a `vo`
+  /// hot-swap, no fresh resolve) — the cost is a brief mid-playback switch.
+  Future<void> _maybeEscalateWindowsNative(VideoParams params) async {
+    // Only from the SDR-adopted embedded path. VOD and HDR-native opens never
+    // set preferWindowsEmbedded, so they never reach here (already native).
+    if (!Platform.isWindows || !widget.preferWindowsEmbedded) return;
+    if (_windowsNativeActive || _windowsEscalated || _windowsEscalating) return;
+    if (!isHdrColorimetry(
+      gamma: params.gamma,
+      primaries: params.primaries,
+      matrix: params.colormatrix,
+    )) {
+      return;
+    }
+    _windowsEscalating = true;
+    _windowsEscalated = true; // one-shot: never retry, even if the surface fails
+    _logPlayback(
+      'windows native escalation: PQ/HLG source — switching embedded → '
+      'native HWND',
+    );
+    // Creates the HWND surface *and* the GDI overlay, sets _windowsNativeSurface
+    // / _nativePlaybackLaunched, and syncs control state (see
+    // _createWindowsNativeHdrSurface / CreateNativeVideoSurface).
+    final handle = await _createWindowsNativeHdrSurface();
+    if (!mounted) {
+      // Route popped mid-escalation: tear the just-created surface down so it
+      // isn't orphaned.
+      if (handle != null) await _prepareWindowsNativeExit();
+      _windowsEscalating = false;
+      return;
+    }
+    if (handle == null) {
+      // Surface creation failed — stay on the embedded (tone-mapped SDR) surface
+      // rather than leaving a black native overlay.
+      _logPlayback('windows native escalation: surface unavailable, staying embedded');
+      _windowsEscalating = false;
+      return;
+    }
+    _windowsNativeActive = true;
+    // The adopted preview player's video output now lives on the HWND (about to
+    // be torn down on exit), so the channel list must discard + restart the
+    // preview on return rather than resuming it — the same as a normal native
+    // hot-swap.
+    _didWindowsHotSwap = true;
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      // wid-before-vo hot-swap of the already-playing player (see
+      // _configureNativePlayer's ordering note).
+      await _configureNativePlayer(platform, handle);
+      if (widget.stream.headers.isNotEmpty) {
+        await _setNativeHeaderOptions(platform, widget.stream.headers);
+      }
+    }
+    if (!mounted) {
+      _windowsEscalating = false;
+      return;
+    }
+    _showNativeControls();
+    _windowsEscalating = false;
+  }
+
   Future<void> _handleLinuxNativeControl(String command) async {
     final session = _linuxNativeSession;
     if (session == null) return;
@@ -1265,6 +1356,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // renders with the latest metadata.
         await _syncWindowsNativeControlState();
         break;
+      case 'favorite':
+        // Dart owns the favorites store; toggle it and the trailing sync below
+        // pushes the new state back to the overlay star.
+        _toggleFavorite();
+        break;
       case 'show':
         break;
     }
@@ -1410,6 +1506,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ..._epgPayload(),
         'isLive': _isLive,
         'liveSynced': _liveSynced,
+        'canFavorite': _canFavorite,
+        'isFavorite': _favorite,
         'reconnecting': _reconnecting,
         'playing': _player.state.playing,
         'fullscreen': _isNativeFullscreen,
