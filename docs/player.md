@@ -601,7 +601,9 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   handoff stays balanced).
 - **C++** (`windows/runner/flutter_window.cpp`, `#ifndef NDEBUG`): `windowsSurfaces` /
   `windowsOverlays` — incremented only when `CreateWindowEx` actually creates (the reuse path
-  doesn't count), decremented on real destroys. Platform-thread-confined plain ints.
+  doesn't count), decremented on real destroys; `windowsOverlayDibs` — the cached overlay
+  back-buffer DIB (0/1), created lazily on first paint and freed in `DestroyNativeControls`.
+  Platform-thread-confined plain ints.
 
 `ResourceCounters.snapshot()` merges the Dart counts with the natives' reply to a `debugCounters`
 method on `iptvs/native_hdr_player` (deliberately *not* a new inbound channel — no new handler
