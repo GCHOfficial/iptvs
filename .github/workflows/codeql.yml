@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # CodeQL only covers native C++ / Kotlin / workflow YAML — skip it on PRs
+    # that touch none of those (the Dart-only majority) so they don't spin up a
+    # full Windows + Android build just to re-scan unchanged native code. It is
+    # not a required status check, so skipping never blocks a merge; push-to-main
+    # and the weekly cron still scan everything.
+    paths:
+      - 'windows/**'
+      - 'android/**'
+      - '.github/**'
   schedule:
     - cron: '23 5 * * 1' # weekly, Monday 05:23 UTC
 

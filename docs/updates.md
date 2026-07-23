@@ -55,6 +55,9 @@ Rules when introducing a new platform artifact into the manifest:
   Cost: the newly-added platform gets no auto-update for that release and must update manually once
   (its installs are new and already have the tolerant parser, which treats a missing entry as "no
   asset", not a crash). Restore the full manifest once the old cohort has drained.
+  **Status:** the 0.1.38 rescue is complete — `linux-x86_64` is back in the signed manifest
+  (`release.yml`), since every install is now 0.1.38+ (skip-unknown parser). Linux auto-update is
+  live again.
 
 ## Layering
 

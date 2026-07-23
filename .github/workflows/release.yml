@@ -235,18 +235,14 @@ jobs:
             exit 1
           fi
           manifest="dist/iptvs-$VERSION-manifest.json"
-          # TEMPORARY (0.1.39 rescue): the signed manifest lists only
-          # android + windows-x64, NOT linux-x86_64 — even though the Linux
-          # AppImage is still built and uploaded as a release asset above.
-          # Every <=0.1.37 client's parser accepts only {android, windows-x64}
-          # and threw 'Unsupported release platform' on 0.1.38's linux entry,
-          # rejecting the whole manifest and bricking auto-update on all
-          # platforms. Omitting linux here lets those clients parse /latest and
-          # update onto the skip-unknown parser. Linux installs are all 0.1.38+
-          # (tolerant parser -> a missing entry is 'no asset', not a crash) and
-          # update manually once. RESTORE the linux-x86_64 artifact (revert this
-          # block to the 3-platform jq below) in 0.1.40+ once the pre-fix cohort
-          # has drained. See docs/updates.md "Adding a release platform".
+          # The signed manifest lists all three release platforms. linux-x86_64
+          # was temporarily omitted during the 0.1.39–0.1.x rescue window: every
+          # <=0.1.37 client's strict {android, windows-x64} parser threw
+          # 'Unsupported release platform' on 0.1.38's linux entry and rejected
+          # the whole manifest, bricking auto-update on *all* platforms. It is
+          # restored now that the pre-fix cohort has drained — every install is
+          # 0.1.38+ with the skip-unknown parser (a missing/extra entry is 'no
+          # asset', not a crash). See docs/updates.md "Adding a release platform".
           jq -cn \
             --arg version "$VERSION" \
             --arg minimum "$MINIMUM_UPDATE_VERSION" \
@@ -256,13 +252,11 @@ jobs:
             --arg windows_name "$(basename "$windows")" \
             --arg windows_sha "$(sha256sum "$windows" | cut -d ' ' -f 1)" \
             --argjson windows_size "$(stat -c '%s' "$windows")" \
-            '{schema:1,version:$version,minimum_version:$minimum,artifacts:[{platform:"android",filename:$android_name,byte_size:$android_size,sha256:$android_sha},{platform:"windows-x64",filename:$windows_name,byte_size:$windows_size,sha256:$windows_sha}]}' \
+            --arg linux_name "$(basename "$linux")" \
+            --arg linux_sha "$(sha256sum "$linux" | cut -d ' ' -f 1)" \
+            --argjson linux_size "$(stat -c '%s' "$linux")" \
+            '{schema:1,version:$version,minimum_version:$minimum,artifacts:[{platform:"android",filename:$android_name,byte_size:$android_size,sha256:$android_sha},{platform:"windows-x64",filename:$windows_name,byte_size:$windows_size,sha256:$windows_sha},{platform:"linux-x86_64",filename:$linux_name,byte_size:$linux_size,sha256:$linux_sha}]}' \
             > "$manifest"
-          # Restore for 0.1.40+ (re-add linux-x86_64):
-          #   --arg linux_name "$(basename "$linux")" \
-          #   --arg linux_sha "$(sha256sum "$linux" | cut -d ' ' -f 1)" \
-          #   --argjson linux_size "$(stat -c '%s' "$linux")" \
-          #   ... ,{platform:"linux-x86_64",filename:$linux_name,byte_size:$linux_size,sha256:$linux_sha}]}
           openssl pkeyutl -sign -rawin -inkey "$key" -passin env:UPDATE_MANIFEST_PRIVATE_KEY_PASSWORD -in "$manifest" -out "$RUNNER_TEMP/manifest.sig"
           base64 -w0 "$RUNNER_TEMP/manifest.sig" > "$manifest.sig"
           rm -f "$key" "$RUNNER_TEMP/manifest.sig"
