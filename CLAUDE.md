@@ -331,7 +331,10 @@ best-effort dev-era repair paths outside the claim.
 `player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with native-HDR paths on
 Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when ExoPlayer can't
 decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR) and Windows (native
-HWND surface, mpv d3d11). Linux: embedded `media_kit_video`/libmpv (with the shared Flutter
+HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
+texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
+PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses). Linux: embedded
+`media_kit_video`/libmpv (with the shared Flutter
 overlay) is the default fullscreen path, and a host-discovered (not bundled), version-gated
 (>= 0.40, 0.41 recommended) native mpv window with an IPTVS-specific GPU/OSD Lua overlay is used
 **only for an HDR stream on Wayland** (X11 has no HDR output path, and SDR gains nothing from the

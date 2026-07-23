@@ -947,6 +947,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // `playbackStream` re-resolved fresh above). SDR/X11 open embedded and
         // escalate to native later only if the source turns out to be HDR.
         preferLinuxNative: linuxNativeStopResolve,
+        // Windows: keep an adopted **SDR** preview on its embedded texture for a
+        // seamless handoff both ways (no `vo` swap to the native HWND, preview
+        // never disposed). HDR keeps the native HWND path for real D3D11 HDR —
+        // the same SDR-embedded / HDR-dedicated split Linux uses.
+        preferWindowsEmbedded: decision.adoptsEmbeddedPreview &&
+            Platform.isWindows &&
+            !streamLikelyHdr,
         favoriteInitial: _isFavorite(ContentKind.live, channel.id),
         onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
         // Live reloads (reconnect watchdog, "Go to live") re-resolve through

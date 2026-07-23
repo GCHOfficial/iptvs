@@ -69,12 +69,17 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
 
   @override
   Widget build(BuildContext context) {
-    if (Platform.isLinux) {
+    // Desktop embedded surfaces (Linux always; Windows for the SDR
+    // preview→fullscreen handoff, where the native HWND path is skipped) use
+    // the full-featured Flutter overlay so they stay at parity with the native
+    // Windows GDI / Android Compose overlays. Other embedded fallbacks (Android,
+    // macOS) keep media_kit's default Material controls.
+    if (Platform.isLinux || Platform.isWindows) {
       return Video(
         controller: widget.controller,
         controls: (state) {
           _videoState = state;
-          return _LinuxPlayerControls(
+          return _EmbeddedPlayerControls(
             player: widget.player,
             title: widget.title,
             sourceName: widget.sourceName,
@@ -202,12 +207,14 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   }
 }
 
-/// First-class Linux overlay. It intentionally uses the shared media_kit
-/// [Player] instead of a Linux-specific native bridge, keeping X11 and Wayland
-/// behavior identical while exposing the same controls and stream information
-/// as the Windows native overlay.
-class _LinuxPlayerControls extends StatefulWidget {
-  const _LinuxPlayerControls({
+/// Full-featured Flutter overlay for the embedded media_kit surface, shared by
+/// Linux (X11 and Wayland) and the Windows SDR preview→fullscreen handoff (which
+/// stays on the embedded texture rather than the native HWND). It drives the
+/// shared media_kit [Player] directly — no platform native bridge — while
+/// exposing the same controls and stream information as the Windows native GDI
+/// overlay, so the two Windows paths stay at parity.
+class _EmbeddedPlayerControls extends StatefulWidget {
+  const _EmbeddedPlayerControls({
     required this.player,
     required this.title,
     required this.sourceName,
@@ -242,10 +249,10 @@ class _LinuxPlayerControls extends StatefulWidget {
   final Future<void> Function() onCycleAspect;
 
   @override
-  State<_LinuxPlayerControls> createState() => _LinuxPlayerControlsState();
+  State<_EmbeddedPlayerControls> createState() => _EmbeddedPlayerControlsState();
 }
 
-class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
+class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   Timer? _hideTimer;
   Timer? _clockTimer;
   StreamSubscription<bool>? _playingSub;
@@ -329,7 +336,7 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xE6000000), Color(0x00000000)],
+          colors: [Color(0xB3000000), Color(0x00000000)],
         ),
       ),
       child: Row(
@@ -365,13 +372,16 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
             ),
           ),
           ..._badges(),
-          if (widget.canFavorite)
+          if (widget.canFavorite) ...[
+            const SizedBox(width: 10),
             _button(
               widget.favorite ? Icons.star_rounded : Icons.star_outline_rounded,
               widget.favorite ? 'Remove favorite' : 'Add favorite',
               widget.onToggleFavorite,
               color: widget.favorite ? AppColors.accent : Colors.white,
+              compact: true,
             ),
+          ],
         ],
       ),
     ),
@@ -409,7 +419,7 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0x00000000), Color(0xE6000000)],
+          colors: [Color(0x00000000), Color(0xB3000000)],
         ),
       ),
       child: Column(
@@ -444,31 +454,7 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
                   );
                 }),
               ],
-              _button(
-                widget.player.state.volume == 0
-                    ? Icons.volume_off
-                    : Icons.volume_up,
-                'Mute',
-                () => unawaited(
-                  widget.player.setVolume(
-                    widget.player.state.volume > 0 ? 0 : 100,
-                  ),
-                ),
-              ),
-              SizedBox(
-                width: 90,
-                child: Slider(
-                  // media_kit volume is 0–100; Slider's default max is 1.0 and
-                  // it asserts value <= max, so the range must be explicit.
-                  max: 100,
-                  value: widget.player.state.volume.clamp(0, 100),
-                  onChanged: (value) {
-                    _show(keep: true);
-                    unawaited(widget.player.setVolume(value));
-                  },
-                  onChangeEnd: (_) => _scheduleHide(),
-                ),
-              ),
+              _volumeControls(context),
               if (!widget.isLive) _positionRebuild(_timeLabel),
               const Spacer(),
               if (widget.isLive && !widget.liveSynced)
@@ -510,6 +496,52 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
     stream: widget.player.stream.position,
     initialData: widget.player.state.position,
     builder: (_, _) => builder(),
+  );
+
+  /// Mute toggle + volume slider, rebuilt from the volume stream so the thumb
+  /// tracks the value live — the surrounding overlay doesn't listen to volume
+  /// (it would rebuild every control on each drag tick), so without this the
+  /// slider read a stale `state.volume` and appeared frozen.
+  Widget _volumeControls(BuildContext context) => StreamBuilder<double>(
+    stream: widget.player.stream.volume,
+    initialData: widget.player.state.volume,
+    builder: (context, snapshot) {
+      final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _button(
+            volume == 0 ? Icons.volume_off : Icons.volume_up,
+            'Mute',
+            () => unawaited(widget.player.setVolume(volume > 0 ? 0 : 100)),
+          ),
+          SizedBox(
+            width: 150,
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 4,
+                activeTrackColor: AppColors.accent,
+                inactiveTrackColor: AppColors.line,
+                thumbColor: AppColors.accent,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              ),
+              // media_kit volume is 0–100; Slider's default max is 1.0 and it
+              // asserts value <= max, so the range must be explicit.
+              child: Slider(
+                max: 100,
+                value: volume,
+                onChanged: (value) {
+                  _show(keep: true);
+                  unawaited(widget.player.setVolume(value));
+                },
+                onChangeEnd: (_) => _scheduleHide(),
+              ),
+            ),
+          ),
+        ],
+      );
+    },
   );
 
   Widget _seekBar() {
@@ -686,31 +718,60 @@ class _LinuxPlayerControlsState extends State<_LinuxPlayerControls> {
     );
   }
 
+  // Rounded-rect chip button matching the native Windows GDI / Android Compose
+  // overlays (dark translucent fill, accent-tinted when active) rather than a
+  // bare Material IconButton, so the embedded overlay reads the same across the
+  // two Windows paths. [active] highlights a toggled control (e.g. an open
+  // menu); [color] overrides the icon tint (e.g. the accent favourite star).
   Widget _button(
     IconData icon,
     String tooltip,
     VoidCallback onPressed, {
-    Color color = Colors.white,
-  }) => IconButton(
-    tooltip: tooltip,
-    onPressed: () {
-      _show();
-      onPressed();
-    },
-    icon: Icon(icon, color: color),
+    Color? color,
+    bool active = false,
+    bool compact = false,
+  }) => Padding(
+    padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 3),
+    child: Tooltip(
+      message: tooltip,
+      child: Material(
+        color: active
+            ? Color.alphaBlend(
+                AppColors.accent.withValues(alpha: 0.30),
+                AppColors.panel,
+              )
+            : AppColors.panel.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(compact ? 10 : 12),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            _show();
+            onPressed();
+          },
+          child: SizedBox(
+            width: compact ? 34 : 44,
+            height: compact ? 32 : 40,
+            child: Icon(
+              icon,
+              size: compact ? 18 : 20,
+              color: color ?? (active ? Colors.white : AppColors.textHi),
+            ),
+          ),
+        ),
+      ),
+    ),
   );
 
   Widget _badge(String text) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
     decoration: BoxDecoration(
-      color: Colors.black54,
-      borderRadius: BorderRadius.circular(4),
-      border: Border.all(color: Colors.white24),
+      color: AppColors.panel.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(6),
     ),
     child: Text(
       text,
       style: const TextStyle(
-        color: Colors.white,
+        color: Color(0xFFCED2E0),
         fontSize: 11,
         fontWeight: FontWeight.w600,
       ),

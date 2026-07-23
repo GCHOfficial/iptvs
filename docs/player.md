@@ -126,16 +126,45 @@ requirement).
 
 ## Windows
 
-Renders into a native HWND surface (`createSurface`) so mpv presents directly through D3D11 (real
+**Surface policy mirrors Linux: embedded for SDR, the native HWND only for HDR.** HDR playback
+renders into a native HWND surface (`createSurface`) so mpv presents directly through D3D11 (real
 HDR) instead of round-tripping through Flutter's SDR texture (`vo=gpu-next`,
 `gpu-context=d3d11`, `hwdec=auto-safe` — `auto-safe` negotiates d3d11va zero-copy and falls back
-to software cleanly; a *forced* `d3d11va` could half-init and desync). Control state is mirrored
+to software cleanly; a *forced* `d3d11va` could half-init and desync). But a **same-channel SDR
+preview→fullscreen handoff stays on the embedded media_kit texture** (`preferWindowsEmbedded`, set
+in `_openLivePlayer` when `decision.adoptsEmbeddedPreview` and the preview colorimetry reads SDR):
+the adopted preview `Player`/`VideoController` keep rendering with no `vo` swap, so the transition
+is seamless both ways (the preview is never disposed, and `hotSwapped` stays false so the channel
+list resumes it on return). `_usesWindowsNativeSurface` reflects the *current* surface, not just the
+initial choice — an SDR-adopted embedded stream that turns out HDR (PQ/HLG on the `videoParams`
+stream) **escalates once** via `_maybeEscalateWindowsNative`: it creates the HWND surface and
+hot-swaps `vo` on the *same* player (no fresh resolve, unlike Linux's separate mpv process),
+flipping `_windowsNativeActive`/`_didWindowsHotSwap` true so exit discards+restarts the preview like
+a normal native open. This covers the cold/fast preview→fullscreen where the ahead-of-time
+colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct opens never set
+`preferWindowsEmbedded`, so they open native immediately. Control state is mirrored
 to native via `setControlState` (Dart→C++) / `nativeControl` (C++→Dart commands); the GDI overlay
 (`windows/runner/flutter_window.cpp`) draws the **same control set, badges, live EPG strip,
-go-to-live, and "Reconnecting…" indicator** as the Android Compose overlay. The controls overlay
-is a layered window clipped to a region covering only the top+bottom bars (+ open menu/info), so
-anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region when the bar
-height changes (e.g. the taller live-EPG bar).
+go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay. The
+favorite star (live channels with a favorites store) sits rightmost in the top bar; Dart owns the
+store, so the click sends a `favorite` command and Dart pushes the new `canFavorite`/`isFavorite`
+back via `setControlState` (mouse-clickable, not yet in the keyboard-focus ring). The controls
+overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
+menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
+when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
+the shared Flutter overlay (`_EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's), kept
+at visual parity with the GDI overlay (chip buttons, badges, favorite star).
+
+`PaintNativeControlBar` **caches its ARGB back-buffer** (`OverlayBackBuffer`: DIB + memory DC,
+file-scope alongside the other single-overlay globals), recreating it only on a client-size change
+rather than allocating + `ZeroMemory`ing a full-window bitmap every `WM_PAINT` — at 4K that was a
+~33 MB alloc + memset + full-surface composite per paint, several times a second while the overlay
+is up (and pinned through a reconnect). Each paint clears and re-composites only the *union of the
+control rects* it drew (the two bars plus any open menu/info), plus whatever the previous paint
+touched (so a closed menu / shrunk bar is erased, not left stale in the reused buffer); those rects
+are merged into disjoint bands and pushed with `UpdateLayeredWindowIndirect`'s `prcDirty`, so the
+transparent middle is never cleared or uploaded. The cached DIB is a debug-counted resource
+(`windowsOverlayDibs`), freed in `DestroyNativeControls`.
 
 **Dynamic range** here comes from mpv's `video-params` (`gamma`/`primaries`/`colormatrix`, in
 `_dynamicRangeLabel`) — mpv/libavcodec already parse the in-band VUI/SEI, so this matches the
@@ -346,7 +375,8 @@ probe upgrades (Lua derives PQ/HLG from mpv properties but can't judge the
 scene metadata's semantics itself).
 
 The overlay is a from-scratch ASS-events renderer at parity with the embedded
-Linux fallback (`_LinuxPlayerControls` in `player_overlay.dart`), not a
+Flutter overlay (`_EmbeddedPlayerControls` in `player_overlay.dart`, shared by
+Linux and the Windows SDR embedded path), not a
 generic mpv skin: text renders in bundled **Inter** and icons as glyphs from
 bundled **Material Icons** (`linux/mpv/fonts/`, installed by
 `tool/package_linux_appimage.sh` into `usr/share/iptvs/fonts/` and pointed at
