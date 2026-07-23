@@ -1,6 +1,7 @@
 version: 2
 updates:
-  # Flutter / Dart packages (pubspec.yaml).
+  # Flutter / Dart packages (pubspec.yaml). Minor/patch bumps land in one grouped
+  # PR to cut noise; majors stay individual (they can carry breaking changes).
   - package-ecosystem: "pub"
     directory: "/"
     schedule:
@@ -8,14 +9,21 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    groups:
+      pub-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
-  # GitHub Actions used by the build/release workflows.
+  # GitHub Actions used by the build/release workflows — all bumps in one PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]
 
   # Android Gradle dependencies (media3, etc.). The vendored libmpv AAR is a local
   # file and isn't tracked by Dependabot.
@@ -26,3 +34,7 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(android)"
+    groups:
+      gradle-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

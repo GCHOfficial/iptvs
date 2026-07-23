@@ -80,7 +80,11 @@ jobs:
   build-android:
     name: Build Android smoke APK (phone + TV)
     needs: [analyze-test, changes]
-    if: needs.changes.outputs.code == 'true'
+    # Not on push-to-main: "require branches up to date" means the PR already
+    # built this exact tree, and these platform builds aren't required checks, so
+    # rebuilding them on the merge commit is pure duplication. analyze-test still
+    # runs on main as the required health check.
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -128,7 +132,11 @@ jobs:
   build-windows:
     name: Build Windows
     needs: [analyze-test, changes]
-    if: needs.changes.outputs.code == 'true'
+    # Not on push-to-main: "require branches up to date" means the PR already
+    # built this exact tree, and these platform builds aren't required checks, so
+    # rebuilding them on the merge commit is pure duplication. analyze-test still
+    # runs on main as the required health check.
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -159,7 +167,11 @@ jobs:
   build-linux:
     name: Build Linux AppImage
     needs: [analyze-test, changes]
-    if: needs.changes.outputs.code == 'true'
+    # Not on push-to-main: "require branches up to date" means the PR already
+    # built this exact tree, and these platform builds aren't required checks, so
+    # rebuilding them on the merge commit is pure duplication. analyze-test still
+    # runs on main as the required health check.
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     # The AppImage no longer bundles mpv (Noble's system mpv is 0.37, which has
     # no Wayland HDR and exits on --target-colorspace-hint=auto, added in 0.41)
     # — LinuxNativeSession discovers and version-gates the *host's* mpv at
