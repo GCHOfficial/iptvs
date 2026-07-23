@@ -34,6 +34,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
+import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/sources/demo_source.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
@@ -49,6 +50,12 @@ void main() {
   late AppDatabase db;
 
   setUpAll(() {
+    // The demo/live channels carry network logo URLs, which render through
+    // CachedNetworkImage/flutter_cache_manager — its path_provider calls and
+    // cleanup Timer both break under `flutter test` (it aborts on Linux before
+    // the Timer, so this only failed on Windows). Skip logo loading; these tests
+    // assert channel names/focus, not images.
+    debugDisableNetworkChannelLogos = true;
     // The wide live layout builds an inline preview player (media_kit); it must
     // be able to construct headless. libmpv is only present when running from a
     // full build directory, not in a plain `flutter test` run, so we catch the
@@ -60,6 +67,8 @@ void main() {
       // libmpv not in PATH — tests will be skipped.
     }
   });
+
+  tearDownAll(() => debugDisableNetworkChannelLogos = false);
 
   setUp(() async {
     tempDir = Directory.systemTemp.createTempSync('iptvs_focus_test');

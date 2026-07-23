@@ -57,7 +57,40 @@ constexpr int kNativeControlsKindOverlay = 0;
 // thread (all FlutterWindow methods run there), so plain ints are fine.
 int g_debug_surface_count = 0;
 int g_debug_overlay_count = 0;
+// Counts the cached overlay back-buffer DIB/DC pair (0 or 1). Surfaced via
+// debugCounters as "windowsOverlayDibs"; the lifecycle soak asserts it returns
+// to 0 after the overlay is destroyed (ReleaseOverlayBackBuffer, called from
+// DestroyNativeControls). Not folded into windowsOverlays because that counts
+// windows, not the paint-time back-buffer.
+int g_debug_overlay_dib_count = 0;
 #endif
+
+// Cached back-buffer for the layered controls overlay. The overlay is a
+// full-window layered window, but only the top/bottom bars (+ any open
+// menu/info panel) are ever drawn or visible (the rest is clipped away by the
+// window region). Previously every WM_PAINT allocated a fresh full-window ARGB
+// DIB, ZeroMemory'd it, and UpdateLayeredWindow'd the whole surface — a ~33 MB
+// alloc + memset + composite per paint at 4K, several times a second while the
+// overlay is up (and pinned visible through a reconnect). This caches the DIB +
+// memory DC and reuses them across paints, recreating only when the client size
+// changes; each paint clears and re-composites just the union of the control
+// rects (see PaintNativeControlBar). It lives at file scope, alongside
+// g_native_control_state, because PaintNativeControlBar is a free function
+// driven by the overlay WndProc and there is exactly one overlay window per
+// process — the same single-overlay invariant those globals already assume.
+struct OverlayBackBuffer {
+  HDC dc = nullptr;
+  HBITMAP bitmap = nullptr;
+  HBITMAP old_bitmap = nullptr;
+  void *bits = nullptr;
+  int width = 0;
+  int height = 0;
+  // Control rects touched by the previous paint, so the next paint can clear
+  // and re-composite anything a shrinking/closing control vacated (making
+  // correctness independent of when the window region is rebuilt).
+  std::vector<RECT> prev_rects;
+};
+OverlayBackBuffer g_overlay_back_buffer;
 bool g_native_video_cursor_visible = true;
 // Mini-player mode (see SetNativeWindowMiniPlayer): dragging the video moves
 // the whole window.
@@ -434,6 +467,101 @@ HBITMAP Create32BitDIBSection(HDC hdc, int width, int height, void **bits) {
   bmi.bmiHeader.biBitCount = 32;
   bmi.bmiHeader.biCompression = BI_RGB;
   return CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
+// Frees the cached overlay back-buffer (see OverlayBackBuffer). Called from
+// DestroyNativeControls, and by EnsureOverlayBackBuffer on a size change.
+void ReleaseOverlayBackBuffer() {
+  OverlayBackBuffer &b = g_overlay_back_buffer;
+  if (b.dc) {
+    if (b.old_bitmap) {
+      SelectObject(b.dc, b.old_bitmap);
+    }
+    DeleteDC(b.dc);
+  }
+  if (b.bitmap) {
+    DeleteObject(b.bitmap);
+#ifndef NDEBUG
+    --g_debug_overlay_dib_count;
+#endif
+  }
+  b.prev_rects.clear();
+  b.dc = nullptr;
+  b.bitmap = nullptr;
+  b.old_bitmap = nullptr;
+  b.bits = nullptr;
+  b.width = 0;
+  b.height = 0;
+}
+
+// Returns the cached back-buffer, (re)creating the DIB + memory DC only when
+// the target size changes. A fresh CreateDIBSection is zero-initialised (fully
+// transparent), and prev_rects is seeded to the whole window so the first paint
+// after a (re)create composites the entire surface once.
+OverlayBackBuffer &EnsureOverlayBackBuffer(HDC hdc, int width, int height) {
+  OverlayBackBuffer &b = g_overlay_back_buffer;
+  if (b.dc && b.bitmap && b.width == width && b.height == height) {
+    return b;
+  }
+  ReleaseOverlayBackBuffer();
+  b.dc = CreateCompatibleDC(hdc);
+  b.bitmap = Create32BitDIBSection(hdc, width, height, &b.bits);
+  b.old_bitmap = static_cast<HBITMAP>(SelectObject(b.dc, b.bitmap));
+  b.width = width;
+  b.height = height;
+  b.prev_rects = {RECT{0, 0, width, height}};
+#ifndef NDEBUG
+  if (b.bitmap) {
+    ++g_debug_overlay_dib_count;
+  }
+#endif
+  return b;
+}
+
+// Zeroes (fully transparent) the pixels of one rect in the top-down DIB,
+// clamped to the buffer bounds. Used to reset only the control bands each
+// paint instead of ZeroMemory'ing the whole (mostly transparent) surface.
+void ZeroDibRect(uint32_t *pixels, int dib_width, int dib_height,
+                 const RECT &r) {
+  const int left = std::max(0, static_cast<int>(r.left));
+  const int top = std::max(0, static_cast<int>(r.top));
+  const int right = std::min(dib_width, static_cast<int>(r.right));
+  const int bottom = std::min(dib_height, static_cast<int>(r.bottom));
+  if (right <= left || bottom <= top) {
+    return;
+  }
+  const size_t span = static_cast<size_t>(right - left) * sizeof(uint32_t);
+  for (int y = top; y < bottom; ++y) {
+    ZeroMemory(pixels + static_cast<size_t>(y) * dib_width + left, span);
+  }
+}
+
+// Collapses overlapping rects into disjoint bounding boxes (N is tiny: the two
+// bars plus at most one open menu/info panel). Non-overlapping rects — chiefly
+// the top and bottom bars with the transparent middle between them — stay
+// separate, so each is cleared/composited without touching the gap.
+std::vector<RECT> MergeDirtyRects(std::vector<RECT> rects) {
+  rects.erase(std::remove_if(rects.begin(), rects.end(),
+                             [](const RECT &r) {
+                               return r.right <= r.left || r.bottom <= r.top;
+                             }),
+              rects.end());
+  bool merged = true;
+  while (merged) {
+    merged = false;
+    for (size_t i = 0; i < rects.size() && !merged; ++i) {
+      for (size_t j = i + 1; j < rects.size(); ++j) {
+        RECT scratch;
+        if (IntersectRect(&scratch, &rects[i], &rects[j])) {
+          UnionRect(&rects[i], &rects[i], &rects[j]);
+          rects.erase(rects.begin() + j);
+          merged = true;
+          break;
+        }
+      }
+    }
+  }
+  return rects;
 }
 
 void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
@@ -1187,16 +1315,33 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     return;
   }
 
-  HDC paint_hdc = CreateCompatibleDC(hdc);
-  void *bits = nullptr;
-  HBITMAP bitmap = Create32BitDIBSection(hdc, width, height, &bits);
-  HBITMAP old_bitmap = static_cast<HBITMAP>(SelectObject(paint_hdc, bitmap));
+  OverlayBackBuffer &buffer = EnsureOverlayBackBuffer(hdc, width, height);
+  HDC paint_hdc = buffer.dc;
+  uint32_t *pixels = static_cast<uint32_t *>(buffer.bits);
 
-  ZeroMemory(bits, width * height * 4);
   const RECT top = TopControlsRect(rect);
   const RECT bottom = BottomControlsRect(rect);
+  // The union of the control rects drawn/visible this paint. Everything outside
+  // them (the transparent middle) is never touched and stays clipped by the
+  // window region, so it needs neither clearing nor compositing.
+  std::vector<RECT> current_rects = {top, bottom};
+  if (g_native_control_state.open_menu != NativeMenuKind::kNone) {
+    current_rects.push_back(CurrentMenuRect(rect));
+  }
+  if (HasInfoPanel()) {
+    current_rects.push_back(InfoPanelRect(rect));
+  }
+  // Clear the current rects plus anything the previous paint touched, so a
+  // closed menu / shrunk bar is erased from the reused buffer rather than left
+  // stale. Only these bands are cleared; the middle is skipped.
+  std::vector<RECT> dirty_rects = current_rects;
+  dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
+                     buffer.prev_rects.end());
+  for (const RECT &r : dirty_rects) {
+    ZeroDibRect(pixels, width, height, r);
+  }
+
   const uint32_t bg_pixel = 0x33000000; // 20% opaque black
-  uint32_t *pixels = static_cast<uint32_t *>(bits);
   for (int y = top.top; y < top.bottom; ++y) {
     uint32_t *row = pixels + y * width;
     for (int x = 0; x < width; ++x) {
@@ -1416,19 +1561,45 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                                        RGB(10, 11, 16), 0xFF);
   }
 
+  // Composite only the dirty bands (current + previously-touched control rects,
+  // merged), each as a prcDirty sub-update of the layered surface, instead of
+  // re-uploading the whole (mostly transparent) window every paint.
   HDC screen_dc = GetDC(nullptr);
   SIZE size = {width, height};
   POINT pt_src = {0, 0};
   BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-  if (!UpdateLayeredWindow(hwnd, screen_dc, nullptr, &size, paint_hdc,
-                           &pt_src, 0, &blend, ULW_ALPHA)) {
+  const std::vector<RECT> bands = MergeDirtyRects(dirty_rects);
+  bool composited = true;
+  for (RECT band : bands) {
+    band.left = std::max<LONG>(0, band.left);
+    band.top = std::max<LONG>(0, band.top);
+    band.right = std::min<LONG>(width, band.right);
+    band.bottom = std::min<LONG>(height, band.bottom);
+    if (band.right <= band.left || band.bottom <= band.top) {
+      continue;
+    }
+    UPDATELAYEREDWINDOWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hdcDst = screen_dc;
+    info.pptDst = nullptr; // don't move the window
+    info.psize = &size;
+    info.hdcSrc = paint_hdc;
+    info.pptSrc = &pt_src;
+    info.pblend = &blend;
+    info.dwFlags = ULW_ALPHA;
+    info.prcDirty = &band;
+    if (!UpdateLayeredWindowIndirect(hwnd, &info)) {
+      composited = false;
+      break;
+    }
+  }
+  if (!composited) {
     BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
   }
   ReleaseDC(nullptr, screen_dc);
 
-  SelectObject(paint_hdc, old_bitmap);
-  DeleteObject(bitmap);
-  DeleteDC(paint_hdc);
+  // Keep the cached DIB/DC; remember this paint's rects for the next clear.
+  buffer.prev_rects = std::move(current_rects);
   EndPaint(hwnd, &paint);
 }
 
@@ -2062,6 +2233,7 @@ void FlutterWindow::DestroyNativeControls() {
     --g_debug_overlay_count;
 #endif
   }
+  ReleaseOverlayBackBuffer();
   native_controls_region_dirty_ = true;
 }
 
@@ -2622,6 +2794,8 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
               flutter::EncodableValue(g_debug_surface_count);
           counters[flutter::EncodableValue("windowsOverlays")] =
               flutter::EncodableValue(g_debug_overlay_count);
+          counters[flutter::EncodableValue("windowsOverlayDibs")] =
+              flutter::EncodableValue(g_debug_overlay_dib_count);
 #endif
           result->Success(flutter::EncodableValue(counters));
           return;

@@ -52,6 +52,14 @@ const double kCategoryRowExtent = 44;
 double channelRowExtentFor(bool hasEpg) =>
     hasEpg ? kChannelRowExtentWithEpg : kChannelRowExtentPlain;
 
+/// Test seam: when true, channel logos render their fallback instead of loading
+/// through `CachedNetworkImage`/`flutter_cache_manager`. Widget tests that build
+/// the live list set this so the cache manager's `path_provider` calls and its
+/// cleanup `Timer` (both hostile to `flutter test`) never run. Off in
+/// production.
+@visibleForTesting
+bool debugDisableNetworkChannelLogos = false;
+
 /// Bounded density for wide browsing layouts.
 ///
 /// Android TV can expose either 960×540 or 1920×1080 logical viewports for a 4K
@@ -708,7 +716,8 @@ class _LivePreviewPanel extends StatelessWidget {
                             descendantsAreFocusable: false,
                             child: IgnorePointer(child: previewVideo),
                           )
-                        else if (channel.logo != null &&
+                        else if (!debugDisableNetworkChannelLogos &&
+                            channel.logo != null &&
                             channel.logo!.isNotEmpty)
                           LayoutBuilder(
                             builder: (context, constraints) =>
@@ -1383,7 +1392,13 @@ class _ChannelTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final current = now;
     final upcoming = next;
-    final dense = metrics.scale < 0.7;
+    // Drop the "Next" line whenever the row extent is scaled below its full
+    // height — the inner text/spacing is fixed-size, so a shrunk extent can't
+    // fit all four lines and would overflow (worst in windowed mode, where
+    // `scale` = height/720 < 1.0). The full "Next" line only fits at the
+    // unscaled 112 px extent (fullscreen); below that it moves to the preview
+    // panel/semantics, as the fixed selection-model extent requires.
+    final dense = metrics.channelRowExtentWithEpg < kChannelRowExtentWithEpg;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1623,7 +1638,9 @@ class _LogoState extends State<_Logo> {
     );
 
     final logo = widget.channel.logo;
-    if (logo == null || logo.isEmpty) return fallback;
+    if (logo == null || logo.isEmpty || debugDisableNetworkChannelLogos) {
+      return fallback;
+    }
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),

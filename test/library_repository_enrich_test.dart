@@ -94,7 +94,8 @@ void main() {
     db = await AppDatabase.openAt('${tempDir.path}/iptv.db');
   });
 
-  tearDown(() {
+  tearDown(() async {
+    await db.close();
     if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 

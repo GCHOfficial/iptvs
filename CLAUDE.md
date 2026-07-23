@@ -376,7 +376,8 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in
   the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
   channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
-  `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays` — all release-inert
+  `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays`/`windowsOverlayDibs` (the last is
+  the cached overlay back-buffer DIB) — all release-inert
   (`kDebugMode`/`BuildConfig.DEBUG`/`#ifndef NDEBUG`) and merged by `ResourceCounters.snapshot()`
   via a `debugCounters` method on the existing HDR channel. Counters must return to zero after an
   open/close cycle; `integration_test/player_soak_test.dart` (owner-run on hardware, never CI)
