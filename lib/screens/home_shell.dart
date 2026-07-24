@@ -19,9 +19,11 @@ import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import '../theme.dart';
 import '../widgets/profile_avatar.dart';
 import 'channel_list_screen.dart';
 import 'cloud_sync_screen.dart';
+import 'legal_screen.dart';
 import 'profile_pick_screen.dart';
 import 'sources_screen.dart';
 import 'update_flow.dart';
@@ -291,24 +293,53 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final repo = _repo;
     if (repo == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('IPTV Player')),
+        appBar: AppBar(
+          title: const Text('IPTV Player'),
+          actions: [
+            IconButton(
+              tooltip: 'Help & about',
+              icon: const Icon(Icons.help_outline),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LegalScreen()),
+              ),
+            ),
+          ],
+        ),
         body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('No source configured'),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: _manageSources,
-                icon: const Icon(Icons.add),
-                label: const Text('Add a source'),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'No source configured',
+                    style: TextStyle(fontSize: 18),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Bring your own IPTV provider — a Stalker portal, an Xtream '
+                    'account, or an M3U playlist. No account is needed to try '
+                    'the Demo.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppColors.textLo),
+                  ),
+                  const SizedBox(height: 20),
+                  FilledButton.icon(
+                    autofocus: true,
+                    onPressed: _manageSources,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Add a source'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: _useDemo,
+                    child: const Text('Use demo streams'),
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
-              TextButton(
-                onPressed: _useDemo,
-                child: const Text('Use demo streams'),
-              ),
-            ],
+            ),
           ),
         ),
       );
