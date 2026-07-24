@@ -143,7 +143,12 @@ class _OrderedListPage {
 /// Point this at a portal you're entitled to. Field mappings follow the
 /// standard Stalker schema; if a particular panel names a field differently,
 /// adjust [_mapChannel].
-class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
+class StalkerSource
+    implements
+        Source,
+        CatchupSource,
+        SourceCapabilityReporter,
+        RefreshableSource {
   final String sourceId;
   final String portal; // e.g. http://host:port/c/
   final String mac;
@@ -251,6 +256,14 @@ class StalkerSource implements Source, CatchupSource, SourceCapabilityReporter {
     _channelCache ??= await _fetchAllChannels();
     if (categoryId == null) return _channelCache!;
     return _channelCache!.where((c) => c.categoryId == categoryId).toList();
+  }
+
+  @override
+  void invalidate() {
+    // Drop the memoized live catalog so a forced reload re-fetches it from the
+    // portal. Session/auth state (_endpoint/_token/_profileLoaded) is left
+    // intact — connect() is already re-run before the fetch.
+    _channelCache = null;
   }
 
   @override

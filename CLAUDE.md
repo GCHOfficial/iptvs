@@ -216,13 +216,20 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   deliberately separate from `Source`, since `implements` doesn't inherit default bodies.
   Don't add new parse/map work on the main isolate for provider-sized payloads, and don't
   return both a dynamic and a typed graph from a worker.
+  A source that memoizes its catalog in memory (Stalker `_channelCache`, M3U `_ensureParsed`,
+  Xtream `_mediaListCache`) implements the same-shaped optional `RefreshableSource { invalidate() }`
+  so a *forced* reload actually re-hits the provider: `LibraryRepository.load`/`loadMedia` call
+  `invalidate()` (via `is RefreshableSource`) only when `forceRefresh` is true — never on a
+  non-forced load or on `loadMoreMedia` pagination.
 - **Liveness is provider metadata, not inferred.** `StreamInfo.isLive` is set by the `Source`.
   Don't guess from stream duration (an HLS live window looks finite). Live = no seek bar.
 - **Secrets must never reach logs, on-screen errors, or exported diagnostics.** Provider URLs and
   errors carry credentials. Use `redactUrl` (`lib/data/net.dart`) for any URL that goes into an
   error/log, and `redactText` (same file) for free-form text that may *embed* a URL — it also
-  scrubs credential-shaped *path* segments (`/live/user/pass/1.ts`), which `redactUrl`'s
-  query-focused redaction doesn't. Stalker additionally uses `redactStalkerDiagnostic` /
+  scrubs credential-shaped *path* segments (`/live/user/pass/1.ts`): token/long-shaped segments,
+  plus the two segments right after an IPTV route keyword (`live|movie|movies|series|timeshift|play`)
+  regardless of length (the stream id/filename stays), which `redactUrl`'s query-focused redaction
+  doesn't touch. Stalker additionally uses `redactStalkerDiagnostic` /
   `_redactUrl` for MAC/Bearer tokens. The diagnostics log is user-exportable — assume anything
   you log may be shared for support.
 - **HTTP timeouts.** All `HttpClient`s set `connectionTimeout` (TCP handshake only). For the
