@@ -9,6 +9,7 @@ import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/profile_avatar.dart';
+import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
 import 'home_shell.dart';
 
@@ -169,10 +170,17 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
         entries.any((e) => e.id == cloudActiveId && e.isCloud)) {
       activeId = cloudActiveId;
       activeSource = _ProfileSource.cloud;
-    } else if (entries.isNotEmpty) {
-      activeId = entries.first.id;
-      activeSource = entries.first.source;
     }
+    // No fallback to `entries.first`: a profile is "active" only when a genuine
+    // persisted selection (local or cloud) points at it. Auto-promoting the
+    // first entry would make the identity shortcut in `_selectProfile` and the
+    // parking write in `_snapshotCurrent` trust the live store as that
+    // profile's — which is false right after the active profile was deleted
+    // (the live store still holds the deleted profile's leftovers, or the empty
+    // baseline). Trusting it there overwrites the promoted profile's stored
+    // snapshot on the next switch. Leaving `activeId` null keeps
+    // `_snapshotCurrent` a no-op until the user explicitly picks a profile,
+    // which restores that profile's snapshot through the normal path.
 
     if (widget.bootMode) {
       final mode = await _localStore.pickerStartup();
@@ -364,7 +372,10 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       if (mounted) {
         setState(() {
           _busy = false;
-          _error = '$e';
+          // A cloud call here can throw a PostgrestException whose details/hint
+          // may embed row data (credentials in a provider URL). friendlyCloudError
+          // shows only the safe, redacted message and never `$e`.
+          _error = friendlyCloudError(e);
         });
       }
     }
@@ -411,7 +422,10 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       if (mounted) {
         setState(() {
           _busy = false;
-          _error = '$e';
+          // Snapshotting the outgoing (possibly cloud) profile can hit a cloud
+          // call that throws a PostgrestException with credential-bearing
+          // details; render only the safe, redacted message.
+          _error = friendlyCloudError(e);
         });
       }
     }
@@ -447,7 +461,15 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     );
     if (confirmed != true || !mounted) return;
     await _localStore.delete(entry.id);
-    if (_activeProfileId == entry.id) {
+    if (_activeProfileId == entry.id && _activeSource == entry.source) {
+      // Deleting the profile we're currently "in". Its device state is still
+      // live in the store; drop to a neutral empty baseline so those leftovers
+      // can neither be shown after a Skip nor be parked into another profile on
+      // the next switch. No profile is marked active — the user must explicitly
+      // pick one, which restores its snapshot the normal way. This is the
+      // invariant that guarantees no profile's stored snapshot is ever
+      // overwritten with state that isn't its own.
+      await _restoreSnapshot(const ProfileSnapshot());
       _activeProfileId = null;
       _activeSource = null;
     }
@@ -1059,13 +1081,15 @@ class _CreateProfileDialogState extends State<_CreateProfileDialog> {
     return AlertDialog(
       backgroundColor: AppColors.panel,
       title: const Text('New profile'),
-      content: TextField(
+      // TvTextField, not a bare TextField: on a TV remote a plain TextField
+      // traps D-pad focus (the editor eats the arrow keys), leaving no way out.
+      // This wraps it in the "OK to edit" cell the rest of the app uses.
+      content: TvTextField(
         controller: _controller,
+        label: 'Profile name',
+        hintText: 'e.g. Living room',
         autofocus: true,
-        decoration: const InputDecoration(
-          hintText: 'Profile name',
-          border: OutlineInputBorder(),
-        ),
+        textInputAction: TextInputAction.done,
         onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
       ),
       actions: [
