@@ -135,6 +135,23 @@ into a local profile); switching to a cloud profile restores its snapshot first 
 extra sources + managed ids), then does the normal `setProfile` + pull. This keeps `pullSources`'s
 "preserve non-managed sources" semantic working on the right baseline and prevents cross-profile
 source leaks. New local profiles are seeded with only the Demo source. Local profiles can be
-deleted in the picker's manage mode; cloud profiles are managed in the web panel. JSON
-round-trips, the startup decision, and the stable cloud-avatar colour hash are unit-tested in
-`test/profile_store_test.dart`.
+deleted in the picker's manage mode; cloud profiles are managed in the web panel.
+
+**Deleting the *active* profile** needs care: at delete time that profile's device state is still
+live in the store, and the picker must not let it leak or be mis-attributed. So deleting the
+profile you're currently "in" resets the live state to a neutral empty baseline
+(`_restoreSnapshot(const ProfileSnapshot())`) and marks **no** profile active — the picker never
+auto-promotes another entry to "active" just because it's first in the list. This is what
+guarantees the core invariant: *no profile's stored snapshot is ever overwritten with state that
+isn't its own.* The mechanism relies on two things staying true — the parking write
+(`_snapshotCurrent`) is a no-op while no profile is active, and `_check` only marks a profile
+active when a genuine persisted selection (local `activeId` / cloud `active_profile_id`) points at
+it. Selecting a profile afterwards restores its snapshot through the normal switch path. Deleting a
+*non-active* profile leaves the active profile and its live state untouched. Single-profile
+short-circuit (`shouldShowPickerAtStartup`) is unaffected: an install with one profile still boots
+straight to `HomeShell`, since that profile carries a persisted active id.
+
+JSON round-trips, the startup decision, and the stable cloud-avatar colour hash are unit-tested in
+`test/profile_store_test.dart`; the deletion contract (non-active delete, delete-active with others
+present / as the last profile, and the `friendlyCloudError` surface) is pinned by
+`test/profile_pick_screen_test.dart`.
