@@ -46,9 +46,17 @@ int reconnectMinGapMs({
 /// with `buffering=false`, so the buffering-gated stall watchdog can never see
 /// it (and `reconnect_at_eof` can't compensate — see `kLiveMpvOptions`). Live
 /// treats it as a drop, mirroring the Linux-native `end-file` drop signal; VOD
-/// completing is a legitimate end of playback, and an active native session
-/// means the embedded player's events describe a stopped engine, not the
-/// stream.
+/// completing is a legitimate end of playback.
+///
+/// [nativeSessionActive] means specifically that a *separate* engine owns
+/// playback while the media_kit `_player` sits **idle**, so a `completed` event
+/// from `_player` describes a stopped engine, not the stream — the Linux native
+/// mpv process, and the Android native HDR Activity. It must **not** be set for
+/// the **Windows** native HWND path: there the same media_kit `_player` still
+/// plays (mpv presents through the HWND surface via a `vo` swap), so its
+/// `completed` genuinely describes a clean live EOF and must reconnect (the
+/// reopen path is proven — `_goToLive`/`_reconnectLive` reopen `_player` on the
+/// Windows native surface). See docs/player.md "Live auto-reconnect".
 bool shouldReconnectOnCompleted({
   required bool completed,
   required bool isLive,
@@ -452,11 +460,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _subs.add(
       _player.stream.completed.listen((completed) {
         if (!mounted) return;
+        // Only suppress when a *separate* engine plays and this `_player` is
+        // idle: the Linux native mpv process, or the Android native Activity.
+        // The Windows native HWND path still plays through this same `_player`
+        // (mpv presents via a `vo` swap), so `_nativePlaybackLaunched` being
+        // true there must NOT suppress the reconnect — its `completed` is a real
+        // live EOF and `_reconnectLive` reopens `_player` on the HWND surface.
         if (!shouldReconnectOnCompleted(
           completed: completed,
           isLive: _isLive,
           nativeSessionActive:
-              _linuxNativeSession != null || _nativePlaybackLaunched,
+              _linuxNativeSession != null ||
+              (Platform.isAndroid && _nativePlaybackLaunched),
         )) {
           return;
         }
@@ -704,8 +719,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
       );
     }
-    // Insurance against a muted/zero-volume default.
-    await _player.setVolume(100);
+    // Only force full volume when adopting a preview: the TV live preview plays
+    // muted, so an adopted engine may arrive at zero volume and must be made
+    // audible. A plain fresh open (default 100) or an error-overlay Retry must
+    // NOT clobber a volume the user deliberately lowered.
+    if (adopting) await _player.setVolume(100);
     if (canSkipOpen) await _player.play();
     _showNativeControls();
   }
@@ -1162,7 +1180,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     _windowsEscalating = true;
-    _windowsEscalated = true; // one-shot: never retry, even if the surface fails
+    _windowsEscalated =
+        true; // one-shot: never retry, even if the surface fails
     _logPlayback(
       'windows native escalation: PQ/HLG source — switching embedded → '
       'native HWND',
@@ -1181,7 +1200,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (handle == null) {
       // Surface creation failed — stay on the embedded (tone-mapped SDR) surface
       // rather than leaving a black native overlay.
-      _logPlayback('windows native escalation: surface unavailable, staying embedded');
+      _logPlayback(
+        'windows native escalation: surface unavailable, staying embedded',
+      );
       _windowsEscalating = false;
       return;
     }
@@ -2262,6 +2283,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () {
             _handlePlaybackInput();
+            // Single-press peel on the shared embedded overlay (Linux + Windows
+            // SDR): close an open info panel first and consume the press, only
+            // exiting once there's nothing left to peel — parity with the native
+            // overlays' menu→info→hide→exit ladder. The on-screen back arrow
+            // still exits directly (handled inside the overlay).
+            if (_embeddedSurfaceKey.currentState?.handleBackPeel() ?? false) {
+              return;
+            }
             _back();
           },
           const SingleActivator(LogicalKeyboardKey.space): () {

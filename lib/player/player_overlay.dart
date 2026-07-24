@@ -8,6 +8,45 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 
+/// The narrow slice of a media_kit [Player] the embedded overlay reads and
+/// drives. Extracted as an interface purely so the overlay can be widget-tested
+/// without a real libmpv engine (constructing a [Player] needs libmpv, which is
+/// absent under plain `flutter test`): production wraps the real [Player] in
+/// [PlayerBackedEmbeddedControls], tests supply a stub. Keeps the same
+/// `.stream`/`.state` accessor shape the widget already used, so the body is
+/// unchanged beyond the field rename.
+abstract class EmbeddedControls {
+  PlayerStream get stream;
+  PlayerState get state;
+  Future<void> setVolume(double volume);
+  Future<void> seek(Duration to);
+  Future<void> setRate(double rate);
+  Future<void> setAudioTrack(AudioTrack track);
+  Future<void> setSubtitleTrack(SubtitleTrack track);
+}
+
+/// Production [EmbeddedControls] backed by a real media_kit [Player].
+class PlayerBackedEmbeddedControls implements EmbeddedControls {
+  const PlayerBackedEmbeddedControls(this._player);
+  final Player _player;
+
+  @override
+  PlayerStream get stream => _player.stream;
+  @override
+  PlayerState get state => _player.state;
+  @override
+  Future<void> setVolume(double volume) => _player.setVolume(volume);
+  @override
+  Future<void> seek(Duration to) => _player.seek(to);
+  @override
+  Future<void> setRate(double rate) => _player.setRate(rate);
+  @override
+  Future<void> setAudioTrack(AudioTrack track) => _player.setAudioTrack(track);
+  @override
+  Future<void> setSubtitleTrack(SubtitleTrack track) =>
+      _player.setSubtitleTrack(track);
+}
+
 /// Embedded media_kit presentation. Playback lifecycle and platform handoff
 /// stay in [PlayerScreen]; this widget only describes the visible controls.
 class PlayerVideoSurface extends StatefulWidget {
@@ -59,6 +98,10 @@ class PlayerVideoSurface extends StatefulWidget {
 
 class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   VideoState? _videoState;
+  late final EmbeddedControls _controls = PlayerBackedEmbeddedControls(
+    widget.player,
+  );
+  final GlobalKey<EmbeddedPlayerControlsState> _controlsKey = GlobalKey();
 
   void togglePlayerFullscreen() {
     final state = _videoState;
@@ -66,6 +109,13 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
       unawaited(toggleFullscreen(state.context));
     }
   }
+
+  /// Single-press Back/Escape peel for the embedded overlay, called by
+  /// [PlayerScreen]'s Escape binding: closes the info panel if open (returns
+  /// true — the press is consumed) so the exit only happens once there's
+  /// nothing left to peel. No-op (false) on the non-desktop default-controls
+  /// path where the overlay isn't mounted.
+  bool handleBackPeel() => _controlsKey.currentState?.handleBackPeel() ?? false;
 
   @override
   Widget build(BuildContext context) {
@@ -79,8 +129,9 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
         controller: widget.controller,
         controls: (state) {
           _videoState = state;
-          return _EmbeddedPlayerControls(
-            player: widget.player,
+          return EmbeddedPlayerControls(
+            key: _controlsKey,
+            controls: _controls,
             title: widget.title,
             sourceName: widget.sourceName,
             epgNow: widget.epgNow,
@@ -95,6 +146,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             onPlayPause: widget.onPlayPause,
             onGoLive: widget.onGoLive,
             onCycleAspect: widget.onCycleAspect,
+            onToggleFullscreen: togglePlayerFullscreen,
           );
         },
       );
@@ -213,9 +265,13 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
 /// shared media_kit [Player] directly — no platform native bridge — while
 /// exposing the same controls and stream information as the Windows native GDI
 /// overlay, so the two Windows paths stay at parity.
-class _EmbeddedPlayerControls extends StatefulWidget {
-  const _EmbeddedPlayerControls({
-    required this.player,
+/// Public only so it can be widget-tested directly with a stub
+/// [EmbeddedControls] (no libmpv engine); in the app it is built solely by
+/// [PlayerVideoSurface].
+class EmbeddedPlayerControls extends StatefulWidget {
+  const EmbeddedPlayerControls({
+    super.key,
+    required this.controls,
     required this.title,
     required this.sourceName,
     required this.epgNow,
@@ -230,9 +286,10 @@ class _EmbeddedPlayerControls extends StatefulWidget {
     required this.onPlayPause,
     required this.onGoLive,
     required this.onCycleAspect,
+    required this.onToggleFullscreen,
   });
 
-  final Player player;
+  final EmbeddedControls controls;
   final String title;
   final String? sourceName;
   final Programme? epgNow;
@@ -248,12 +305,16 @@ class _EmbeddedPlayerControls extends StatefulWidget {
   final Future<void> Function() onGoLive;
   final Future<void> Function() onCycleAspect;
 
+  /// Enters/exits fullscreen. Injected (rather than calling media_kit's
+  /// `toggleFullscreen(context)` inline) so the double-tap and fullscreen-button
+  /// behavior is exercisable in a widget test without a `Video` ancestor.
+  final VoidCallback onToggleFullscreen;
+
   @override
-  State<_EmbeddedPlayerControls> createState() =>
-      _EmbeddedPlayerControlsState();
+  State<EmbeddedPlayerControls> createState() => EmbeddedPlayerControlsState();
 }
 
-class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
+class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Timer? _hideTimer;
   Timer? _clockTimer;
   StreamSubscription<bool>? _playingSub;
@@ -266,13 +327,13 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   @override
   void initState() {
     super.initState();
-    _playingSub = widget.player.stream.playing.listen((_) {
+    _playingSub = widget.controls.stream.playing.listen((_) {
       if (mounted) setState(() {});
       _scheduleHide();
     });
-    _tracksSub = widget.player.stream.tracks.listen((_) => _refresh());
-    _trackSub = widget.player.stream.track.listen((_) => _refresh());
-    _paramsSub = widget.player.stream.videoParams.listen((_) => _refresh());
+    _tracksSub = widget.controls.stream.tracks.listen((_) => _refresh());
+    _trackSub = widget.controls.stream.track.listen((_) => _refresh());
+    _paramsSub = widget.controls.stream.videoParams.listen((_) => _refresh());
     _clockTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) => _refresh(),
@@ -291,10 +352,22 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
 
   void _scheduleHide() {
     _hideTimer?.cancel();
-    if (!widget.player.state.playing || _showInfo) return;
+    if (!widget.controls.state.playing || _showInfo) return;
     _hideTimer = Timer(const Duration(seconds: 4), () {
       if (mounted) setState(() => _visible = false);
     });
+  }
+
+  /// Closes the info panel (the non-modal `Positioned` overlay). Shared by the
+  /// tap-outside dismiss and [PlayerScreen]'s Escape peel; returns true when it
+  /// had an open panel to close (so Escape consumes the press instead of
+  /// exiting). The modal `PopupMenuButton` menus aren't a rung here — they
+  /// dismiss themselves on outside-tap/Escape.
+  bool handleBackPeel() {
+    if (!_showInfo) return false;
+    setState(() => _showInfo = false);
+    _scheduleHide();
+    return true;
   }
 
   @override
@@ -326,8 +399,16 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
           Positioned.fill(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _show,
-              onDoubleTap: () => unawaited(toggleFullscreen(context)),
+              // Tapping the exposed video area closes an open info panel first
+              // (tap-outside-to-dismiss), else just reveals the chrome.
+              onTap: () {
+                if (_showInfo) {
+                  handleBackPeel();
+                } else {
+                  _show();
+                }
+              },
+              onDoubleTap: widget.onToggleFullscreen,
             ),
           ),
           if (_visible) ...[_topBar(), _bottomBar(context)],
@@ -420,9 +501,9 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   );
 
   List<Widget> _badges() {
-    final params = widget.player.state.videoParams;
-    final width = params.w ?? widget.player.state.width;
-    final height = params.h ?? widget.player.state.height;
+    final params = widget.controls.state.videoParams;
+    final width = params.w ?? widget.controls.state.width;
+    final height = params.h ?? widget.controls.state.height;
     final video = _realVideoTrack();
     final items = <String>[
       if (width != null && height != null && width > 0 && height > 0)
@@ -472,27 +553,27 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
               return Row(
                 children: [
                   _button(
-                    widget.player.state.playing
+                    widget.controls.state.playing
                         ? Icons.pause
                         : Icons.play_arrow,
-                    widget.player.state.playing ? 'Pause' : 'Play',
+                    widget.controls.state.playing ? 'Pause' : 'Play',
                     () => unawaited(widget.onPlayPause()),
                   ),
                   if (!widget.isLive) ...[
                     _button(Icons.replay_10, 'Back 10 seconds', () {
                       final next =
-                          widget.player.state.position -
+                          widget.controls.state.position -
                           const Duration(seconds: 10);
                       unawaited(
-                        widget.player.seek(
+                        widget.controls.seek(
                           next < Duration.zero ? Duration.zero : next,
                         ),
                       );
                     }),
                     _button(Icons.forward_10, 'Forward 10 seconds', () {
                       unawaited(
-                        widget.player.seek(
-                          widget.player.state.position +
+                        widget.controls.seek(
+                          widget.controls.state.position +
                               const Duration(seconds: 10),
                         ),
                       );
@@ -528,7 +609,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
                   _button(
                     Icons.fullscreen,
                     'Fullscreen (F)',
-                    () => unawaited(toggleFullscreen(context)),
+                    widget.onToggleFullscreen,
                   ),
                 ],
               );
@@ -545,8 +626,8 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   /// wrapping the whole Stack in this stream rebuilt every control several
   /// times a second, even for live streams that never render position at all.
   Widget _positionRebuild(Widget Function() builder) => StreamBuilder<Duration>(
-    stream: widget.player.stream.position,
-    initialData: widget.player.state.position,
+    stream: widget.controls.stream.position,
+    initialData: widget.controls.state.position,
     builder: (_, _) => builder(),
   );
 
@@ -558,8 +639,8 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     BuildContext context, {
     bool showSlider = true,
   }) => StreamBuilder<double>(
-    stream: widget.player.stream.volume,
-    initialData: widget.player.state.volume,
+    stream: widget.controls.stream.volume,
+    initialData: widget.controls.state.volume,
     builder: (context, snapshot) {
       final volume = (snapshot.data ?? 0).clamp(0.0, 100.0);
       return Row(
@@ -568,7 +649,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
           _button(
             volume == 0 ? Icons.volume_off : Icons.volume_up,
             'Mute',
-            () => unawaited(widget.player.setVolume(volume > 0 ? 0 : 100)),
+            () => unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100)),
           ),
           if (showSlider)
             SizedBox(
@@ -593,7 +674,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
                   value: volume,
                   onChanged: (value) {
                     _show(keep: true);
-                    unawaited(widget.player.setVolume(value));
+                    unawaited(widget.controls.setVolume(value));
                   },
                   onChangeEnd: (_) => _scheduleHide(),
                 ),
@@ -605,8 +686,8 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   );
 
   Widget _seekBar() {
-    final duration = widget.player.state.duration;
-    final position = widget.player.state.position;
+    final duration = widget.controls.state.duration;
+    final position = widget.controls.state.position;
     final maximum = duration.inMilliseconds > 0
         ? duration.inMilliseconds.toDouble()
         : 1.0;
@@ -616,7 +697,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
       onChanged: duration <= Duration.zero
           ? null
           : (value) => unawaited(
-              widget.player.seek(Duration(milliseconds: value.round())),
+              widget.controls.seek(Duration(milliseconds: value.round())),
             ),
     );
   }
@@ -656,7 +737,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   }
 
   Widget _timeLabel() => Text(
-    '${_duration(widget.player.state.position)} / ${_duration(widget.player.state.duration)}',
+    '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',
     style: const TextStyle(color: Colors.white70),
   );
 
@@ -667,7 +748,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     onCanceled: _scheduleHide,
     onSelected: (id) {
       final track = _audioTracks().firstWhere((track) => track.id == id);
-      unawaited(widget.player.setAudioTrack(track));
+      unawaited(widget.controls.setAudioTrack(track));
       _scheduleHide();
     },
     itemBuilder: (_) => [
@@ -677,7 +758,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   );
 
   Widget _subtitleMenu() {
-    final tracks = widget.player.state.tracks.subtitle;
+    final tracks = widget.controls.state.tracks.subtitle;
     return PopupMenuButton<String>(
       tooltip: 'Subtitles',
       icon: const Icon(Icons.subtitles, color: Colors.white),
@@ -685,7 +766,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
       onCanceled: _scheduleHide,
       onSelected: (id) {
         final track = tracks.firstWhere((track) => track.id == id);
-        unawaited(widget.player.setSubtitleTrack(track));
+        unawaited(widget.controls.setSubtitleTrack(track));
         _scheduleHide();
       },
       itemBuilder: (_) => [
@@ -701,7 +782,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     onOpened: () => _show(keep: true),
     onCanceled: _scheduleHide,
     onSelected: (rate) {
-      unawaited(widget.player.setRate(rate));
+      unawaited(widget.controls.setRate(rate));
       _scheduleHide();
     },
     itemBuilder: (_) => [
@@ -714,7 +795,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   );
 
   Widget _infoPanel() {
-    final params = widget.player.state.videoParams;
+    final params = widget.controls.state.videoParams;
     final video = _realVideoTrack();
     final audio = _realAudioTrack();
     final rows = <(String, String)>[
@@ -740,46 +821,52 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
       top: 76,
       right: 20,
       width: 320,
-      child: Material(
-        color: AppColors.panel.withValues(alpha: 0.96),
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Stream information',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 17,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 12),
-              for (final row in rows)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 115,
-                        child: Text(
-                          row.$1,
-                          style: const TextStyle(color: AppColors.textLo),
-                        ),
-                      ),
-                      Expanded(
-                        child: Text(
-                          row.$2,
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    ],
+      // Absorb taps so a press on the panel itself doesn't fall through to the
+      // background tap-outside handler and immediately re-close it.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        child: Material(
+          color: AppColors.panel.withValues(alpha: 0.96),
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Stream information',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-            ],
+                const SizedBox(height: 12),
+                for (final row in rows)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 115,
+                          child: Text(
+                            row.$1,
+                            style: const TextStyle(color: AppColors.textLo),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            row.$2,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -846,17 +933,17 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     ),
   );
 
-  List<AudioTrack> _audioTracks() => widget.player.state.tracks.audio
+  List<AudioTrack> _audioTracks() => widget.controls.state.tracks.audio
       .where((track) => track.id != 'auto' && track.id != 'no')
       .toList(growable: false);
 
-  VideoTrack _realVideoTrack() => widget.player.state.tracks.video.firstWhere(
+  VideoTrack _realVideoTrack() => widget.controls.state.tracks.video.firstWhere(
     (track) => track.id != 'auto' && track.id != 'no',
-    orElse: () => widget.player.state.track.video,
+    orElse: () => widget.controls.state.track.video,
   );
 
   AudioTrack _realAudioTrack() =>
-      _audioTracks().firstOrNull ?? widget.player.state.track.audio;
+      _audioTracks().firstOrNull ?? widget.controls.state.track.audio;
 
   static String _audioLabel(AudioTrack track) => [
     track.language?.toUpperCase(),

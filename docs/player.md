@@ -152,8 +152,20 @@ back via `setControlState` (mouse-clickable, not yet in the keyboard-focus ring)
 overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
 when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
-the shared Flutter overlay (`_EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's), kept
-at visual parity with the GDI overlay (chip buttons, badges, favorite star). Two layout/latency
+the shared Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's), kept
+at visual parity with the GDI overlay (chip buttons, badges, favorite star). It reads/drives the
+media_kit `Player` through a narrow `EmbeddedControls` seam (`PlayerBackedEmbeddedControls` in
+production) purely so the overlay is widget-testable without a libmpv engine —
+`test/player_overlay_test.dart` pins the gesture layering/latency, the live-vs-VOD control set,
+and the responsive collapse/no-overflow with a stub. **Back/Escape peel + tap-outside parity:** the
+info panel is a non-modal `Positioned`, so it needs an explicit single-press peel to match the
+native overlays' menu→info→hide→exit ladder — `EmbeddedPlayerControlsState.handleBackPeel()` closes
+an open info panel first (consuming the press), and `PlayerScreen`'s Escape binding calls it
+(via `PlayerVideoSurfaceState.handleBackPeel`) before falling through to exit. Tapping the exposed
+video area also dismisses an open info panel (the panel itself absorbs taps so it isn't re-closed
+by its own hit). The on-screen back-*arrow* button still exits directly (documented parity with the
+native overlays); the modal `PopupMenuButton` menus dismiss themselves and aren't a peel rung.
+Two layout/latency
 invariants there: (1) **tap-to-show / double-tap-fullscreen sits on a background `Positioned.fill`
 layer *behind* the bars, never as an ancestor of them** — a `DoubleTapGestureRecognizer` holds the
 gesture arena for `kDoubleTapTimeout` on every tap it can see, so wrapping the whole overlay in it
@@ -386,7 +398,7 @@ probe upgrades (Lua derives PQ/HLG from mpv properties but can't judge the
 scene metadata's semantics itself).
 
 The overlay is a from-scratch ASS-events renderer at parity with the embedded
-Flutter overlay (`_EmbeddedPlayerControls` in `player_overlay.dart`, shared by
+Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, shared by
 Linux and the Windows SDR embedded path), not a
 generic mpv skin: text renders in bundled **Inter** and icons as glyphs from
 bundled **Material Icons** (`linux/mpv/fonts/`, installed by
@@ -531,7 +543,15 @@ different stacks:
   `stream.completed` listener treats a *live* `completed` as a drop (pure decision:
   `shouldReconnectOnCompleted`, pinned in `test/reconnect_policy_test.dart`) — VOD completing is
   a legitimate end of playback and is left alone, and app-initiated `stop()` resets
-  `completed` to false so teardown/handoffs never trip it.
+  `completed` to false so teardown/handoffs never trip it. The listener's `nativeSessionActive`
+  suppression is deliberately derived as `_linuxNativeSession != null || (Platform.isAndroid &&
+  _nativePlaybackLaunched)` — i.e. it fires **only** when a *separate* engine owns playback and
+  this `_player` sits idle (Linux native mpv, Android native Activity). The **Windows native HDR
+  path is not a native session for this purpose**: it renders through this *same* `_player` (a
+  `vo` swap onto the HWND, no separate engine), so its `completed` is a genuine live EOF and must
+  reconnect — `_reconnectLive` reopens `_player` on the HWND surface, the same reopen `_goToLive`
+  already does. (Earlier this counted plain `_nativePlaybackLaunched`, which is true on Windows
+  native and wrongly froze HDR-live on the last frame.)
 - **Linux native** in `player_screen.dart` too, but the mpv process is a *separate OS process*
   whose media_kit `_player` is idle, so the watchdog is driven off mpv's JSON-IPC signals
   (`LinuxNativeSession.playbackEvents`, a `LinuxNativePlaybackSignal` stream). `end-file` with
