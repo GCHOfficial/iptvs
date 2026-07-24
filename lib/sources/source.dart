@@ -536,3 +536,23 @@ abstract interface class BatchedEpgSource {
     LoadToken? token,
   });
 }
+
+/// Optional capability a [Source] can additionally implement to drop any
+/// catalog it has memoized in memory, so the next fetch hits the provider
+/// again. A *forced* reload in [LibraryRepository] (`load`/`loadMedia` with
+/// `forceRefresh: true`) calls [invalidate] — via an `is RefreshableSource`
+/// check, after [Source.connect] and before fetching — so "Reload source"
+/// actually reaches the provider instead of replaying a memoized list.
+///
+/// A separate interface for the same reason as [BatchedEpgSource]: every
+/// [Source] here declares `implements Source`, and Dart does not inherit
+/// default method bodies through `implements`, so a defaulted member on
+/// [Source] would force every implementer to redeclare it. A source that
+/// memoizes nothing simply doesn't implement this; the repository skips the
+/// call.
+abstract interface class RefreshableSource {
+  /// Discards memoized catalogs so the next catalog call re-fetches from the
+  /// provider. Never invalidates from pagination (`loadMoreMedia`) or a
+  /// non-forced load.
+  void invalidate();
+}

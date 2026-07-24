@@ -454,16 +454,47 @@ String redactText(String text) {
   return _redactUrlPath(text);
 }
 
+/// Path segments that introduce IPTV credential/route material. Xtream-style
+/// stream URLs put the username and password in the two segments immediately
+/// after one of these keywords (`/live/<user>/<pass>/<id>.ts`), and those creds
+/// are frequently too short to trip the length/token heuristic below — so the
+/// segments right after a keyword are redacted structurally, regardless of
+/// length.
+const _kCredentialPathKeywords = {
+  'live',
+  'movie',
+  'movies',
+  'series',
+  'timeshift',
+  'play',
+};
+
 String _redactUrlPath(String value) {
   final uri = Uri.tryParse(value);
   if (uri == null) return value;
   if (!uri.hasAuthority && !value.contains('/')) return value;
-  final cleanSegments = uri.pathSegments.map((segment) {
+  final segments = uri.pathSegments;
+  // Structural redaction: after a credential keyword, redact the next two
+  // segments (the user/pass pair) regardless of length, but never the final
+  // segment — that's the stream id / filename, which carries no secret.
+  final redactByStructure = List<bool>.filled(segments.length, false);
+  for (var i = 0; i < segments.length; i++) {
+    if (_kCredentialPathKeywords.contains(segments[i].toLowerCase())) {
+      for (var j = i + 1; j <= i + 2 && j < segments.length - 1; j++) {
+        redactByStructure[j] = true;
+      }
+    }
+  }
+  final cleanSegments = <String>[];
+  for (var i = 0; i < segments.length; i++) {
+    final segment = segments[i];
     final looksSecret =
         segment.length > 18 ||
         RegExp(r'^[A-Za-z0-9_-]{12,}$').hasMatch(segment);
-    return looksSecret ? '<redacted>' : segment;
-  }).toList();
+    cleanSegments.add(
+      (looksSecret || redactByStructure[i]) ? '<redacted>' : segment,
+    );
+  }
   final path = cleanSegments.join('/');
   final authority = uri.hasAuthority
       ? '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}'

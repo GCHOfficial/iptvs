@@ -62,5 +62,51 @@ void main() {
     test('passes through plain text without URLs or slashes', () {
       expect(redactText('connection refused'), 'connection refused');
     });
+
+    test('structurally redacts short creds after each keyword', () {
+      // Short (< 12 char) user/pass that the length/token heuristic misses.
+      for (final keyword in [
+        'live',
+        'movie',
+        'movies',
+        'series',
+        'timeshift',
+        'play',
+      ]) {
+        final message =
+            'HTTP 403 fetching http://host:8080/$keyword/john/1234/99.ts';
+        final redacted = redactText(message);
+        expect(
+          redacted,
+          isNot(contains('john')),
+          reason: 'user leaked after "$keyword"',
+        );
+        expect(
+          redacted,
+          isNot(contains('1234')),
+          reason: 'pass leaked after "$keyword"',
+        );
+        // Keyword, host, and the stream id/filename stay intact.
+        expect(redacted, contains('/$keyword/'));
+        expect(redacted, contains('99.ts'));
+        expect(redacted, contains('host:8080'));
+      }
+    });
+
+    test('does not crash when a keyword is the final path segment', () {
+      expect(
+        redactText('HTTP 500 fetching http://host/live'),
+        contains('/live'),
+      );
+    });
+
+    test('does not over-redact a keyword with one following segment', () {
+      // `/series/list.json` — the segment after the keyword is also the final
+      // segment (the resource name), so it must stay readable.
+      const message = 'HTTP 404 fetching http://host/series/list.json';
+      final redacted = redactText(message);
+      expect(redacted, contains('/series/list.json'));
+      expect(redacted, isNot(contains('<redacted>')));
+    });
   });
 }

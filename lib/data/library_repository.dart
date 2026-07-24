@@ -112,6 +112,13 @@ class LibraryRepository {
     final token = loadToken;
     // Always connect: cheap auth, and resolve()/playback/EPG need it.
     await source.connect();
+    // A forced reload must drop the source's in-memory catalog, or "Reload
+    // source" replays a memoized list and never reaches the provider. `is`
+    // doesn't promote across the unrelated RefreshableSource interface, hence
+    // the explicit cast (safe, guarded by the check).
+    if (forceRefresh && source is RefreshableSource) {
+      (source as RefreshableSource).invalidate();
+    }
 
     final snapshot = await _loadChannels(
       forceRefresh: forceRefresh,
@@ -228,6 +235,12 @@ class LibraryRepository {
     final providerWatch = Stopwatch()..start();
     final programmes = await source.epg(channels);
     providerWatch.stop();
+    if (token?.isCancelled ?? false) {
+      // Superseded by a newer load — skip the stale guide write (the batched
+      // branch is already token-guarded). The previous guide stays intact with
+      // its epg_synced_at un-advanced, so the newer load still refreshes it.
+      return;
+    }
     // Always replace — a success-empty result (a source with no EPG data)
     // must still clear any stale cached programmes and advance
     // epg_synced_at, or a no-EPG source gets re-fetched on every load.
@@ -280,6 +293,11 @@ class LibraryRepository {
   }) async {
     final token = loadToken;
     await source.connect();
+    // A forced reload must drop any memoized VOD/series catalog before
+    // fetching (see [load]); pagination (`loadMoreMedia`) never invalidates.
+    if (forceRefresh && source is RefreshableSource) {
+      (source as RefreshableSource).invalidate();
+    }
     // Reveal point, and the easiest one to miss: `parent` is a *cached* model
     // (a season the user drilled into), so its locator is sealed, and
     // `StalkerSource._seasonPlaybackHints` reads `parent.extra['cmd']` to give

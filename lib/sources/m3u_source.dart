@@ -23,7 +23,8 @@ class M3uSource
         Source,
         BatchedEpgSource,
         CatchupSource,
-        SourceCapabilityReporter {
+        SourceCapabilityReporter,
+        RefreshableSource {
   final String sourceId;
   final String playlistUrl;
   final String? epgUrl;
@@ -230,6 +231,17 @@ class M3uSource
   // Small playlists parse fast enough inline; isolate spawn overhead would
   // dominate. Mirrors XtreamSource's `_isolateJsonThreshold`.
   static const _isolateM3uThreshold = 256 * 1024;
+
+  @override
+  void invalidate() {
+    // Drop everything _ensureParsed memoizes so a forced reload re-downloads
+    // and re-parses the playlist — otherwise a stale channel list, header EPG
+    // url, and catch-up capability would survive "Reload source".
+    _channels = null;
+    _categories = null;
+    _headerEpgUrl = null;
+    _catchupCapability = CatchupCapability.unsupported;
+  }
 
   Future<void> _ensureParsed() async {
     if (_channels != null) return;

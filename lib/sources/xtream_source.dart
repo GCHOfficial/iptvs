@@ -21,7 +21,8 @@ class XtreamSource
         Source,
         BatchedEpgSource,
         CatchupSource,
-        SourceCapabilityReporter {
+        SourceCapabilityReporter,
+        RefreshableSource {
   final String sourceId;
   final String host; // e.g. http://host:port
   final String username;
@@ -563,6 +564,13 @@ class XtreamSource
       page: page,
       totalPages: totalPages < page ? page : totalPages,
     );
+  }
+
+  @override
+  void invalidate() {
+    // Drop the memoized VOD/series catalogs so a forced reload re-fetches them.
+    // Xtream live channels aren't memoized, so nothing else to clear here.
+    _mediaListCache.clear();
   }
 
   Future<List<MediaItem>> _fetchMediaList(
