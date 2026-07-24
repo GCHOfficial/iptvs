@@ -81,6 +81,14 @@ class MediaTabView extends StatelessWidget {
   /// since search returns a flat, non-paged result set.
   final bool showingSearch;
 
+  /// True when a category filter is active. Combined with [showingSearch] to
+  /// pick the empty-state wording below: a genuinely unfiltered-empty source
+  /// ("this provider returned nothing") reads very differently from a
+  /// filtered-empty one ("nothing matches"). Defaults to false — category
+  /// filtering lives in `ChannelListScreen`, which this view does not own;
+  /// wire this through from the caller alongside the category selector.
+  final bool categoryFilterActive;
+
   /// Id of the last-played item in this kind, autofocused on return when still
   /// visible (else the first item is).
   final String? lastPlayedId;
@@ -109,6 +117,7 @@ class MediaTabView extends StatelessWidget {
     required this.loadingMore,
     required this.error,
     required this.showingSearch,
+    this.categoryFilterActive = false,
     required this.lastPlayedId,
     required this.scrollController,
     required this.firstFocusNode,
@@ -263,10 +272,19 @@ class MediaTabView extends StatelessWidget {
         ),
       );
     }
+    final label = kind == ContentKind.movie ? 'movies' : 'series';
+    final filtered = showingSearch || categoryFilterActive;
     return Center(
-      child: Text(
-        'No ${kind == ContentKind.movie ? 'movies' : 'series'} match',
-        style: const TextStyle(color: AppColors.textLo),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text(
+          filtered
+              ? 'No $label match'
+              : 'This source has no $label — try Reload from the toolbar '
+                    'or check the source.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppColors.textLo),
+        ),
       ),
     );
   }
@@ -1115,16 +1133,30 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
   final Map<String, Future<List<MediaItem>>> _episodeFutures = {};
   bool _refreshingMetadata = false;
 
+  /// Captured by `_SeriesBrowser.onFirstSeasonFocusNode` once the first
+  /// season header builds — see that field's doc comment.
+  FocusNode? _firstSeasonFocusNode;
+
   @override
   void initState() {
     super.initState();
     // Movies/episodes autofocus their Play button directly. A series has no
     // top-level Play button, so once the seasons load, nudge focus onto the
-    // first season tile (ExpansionTile exposes no autofocus of its own).
+    // first season tile. `FocusScope.nextFocus()` used to be called here, but
+    // with nothing focused yet in this sheet it just lands on the very first
+    // focusable stop — the title row's favorite star — not the season list.
+    // Request the season header's own captured node directly instead; fall
+    // back to nextFocus() if it somehow wasn't captured (e.g. no seasons).
     if (widget.onPlay == null) {
       _seasonsFuture?.whenComplete(() {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) FocusScope.of(context).nextFocus();
+          if (!mounted) return;
+          final node = _firstSeasonFocusNode;
+          if (node != null && node.canRequestFocus) {
+            node.requestFocus();
+          } else {
+            FocusScope.of(context).nextFocus();
+          }
         });
       });
     }
@@ -1293,6 +1325,8 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
                     seasons: seasonsFuture,
                     episodesFor: _episodes,
                     onPlayEpisode: _play,
+                    onFirstSeasonFocusNode: (node) =>
+                        _firstSeasonFocusNode = node,
                   ),
                 ],
               ],
@@ -1398,15 +1432,34 @@ class _MetadataStatus extends StatelessWidget {
   }
 }
 
+/// `S2E5, Episode Title` style concise label for an episode's D-pad focus
+/// ring (`FocusableCard.semanticsLabel`) — season/episode number first so a
+/// screen reader announces position before the (possibly long) title.
+String _episodeSemanticsLabel(MediaItem episode) {
+  final sxe = episode.seasonNumber != null && episode.episodeNumber != null
+      ? 'S${episode.seasonNumber}E${episode.episodeNumber}'
+      : null;
+  return sxe == null ? episode.title : '$sxe, ${episode.title}';
+}
+
 class _SeriesBrowser extends StatelessWidget {
   final Future<List<MediaItem>> seasons;
   final Future<List<MediaItem>> Function(MediaItem season) episodesFor;
   final ValueChanged<MediaItem> onPlayEpisode;
 
+  /// Called once, during build, with the first season header's own
+  /// (ExpansionTile-internal) [FocusNode] as soon as it exists — so the
+  /// sheet can [FocusNode.requestFocus] it directly after seasons load,
+  /// instead of `FocusScope.nextFocus()`, which lands on the title row's
+  /// favorite star (the first focusable stop in the sheet when there's no
+  /// top-level Play button). Null when there's nothing to capture yet.
+  final ValueChanged<FocusNode>? onFirstSeasonFocusNode;
+
   const _SeriesBrowser({
     required this.seasons,
     required this.episodesFor,
     required this.onPlayEpisode,
+    this.onFirstSeasonFocusNode,
   });
 
   @override
@@ -1437,23 +1490,38 @@ class _SeriesBrowser extends StatelessWidget {
         }
         return Column(
           children: [
-            for (final season in seasons)
+            for (var i = 0; i < seasons.length; i++)
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 childrenPadding: const EdgeInsets.only(bottom: 8),
-                title: Text(season.title),
+                // The first season's title carries a `Builder` so it can hand
+                // its own (ExpansionTile-internal) focus node back up to the
+                // sheet — see `onFirstSeasonFocusNode`'s doc comment for why:
+                // the sheet needs to request focus on this exact node rather
+                // than `FocusScope.nextFocus()`, which currently lands on the
+                // title row's favorite star instead of the season list.
+                title: i == 0 && onFirstSeasonFocusNode != null
+                    ? Builder(
+                        builder: (context) {
+                          onFirstSeasonFocusNode!(
+                            Focus.of(context, createDependency: false),
+                          );
+                          return Text(seasons[i].title);
+                        },
+                      )
+                    : Text(seasons[i].title),
                 subtitle:
-                    season.seasonNumber == null ||
-                        season.title.trim().toLowerCase() ==
-                            'season ${season.seasonNumber}'.toLowerCase()
+                    seasons[i].seasonNumber == null ||
+                        seasons[i].title.trim().toLowerCase() ==
+                            'season ${seasons[i].seasonNumber}'.toLowerCase()
                     ? null
                     : Text(
-                        'Season ${season.seasonNumber}',
+                        'Season ${seasons[i].seasonNumber}',
                         style: const TextStyle(color: AppColors.textLo),
                       ),
                 children: [
                   FutureBuilder<List<MediaItem>>(
-                    future: episodesFor(season),
+                    future: episodesFor(seasons[i]),
                     builder: (context, episodeSnapshot) {
                       if (episodeSnapshot.connectionState !=
                           ConnectionState.done) {
@@ -1484,26 +1552,63 @@ class _SeriesBrowser extends StatelessWidget {
                       }
                       return Column(
                         children: [
+                          // FocusableCard (not ListTile) — the series browser
+                          // was the only browsing surface without the app's
+                          // accent D-pad focus ring; season headers stay
+                          // ExpansionTile (see the doc comment above on why
+                          // that one isn't wrapped).
                           for (final episode in episodes)
-                            ListTile(
-                              dense: true,
-                              contentPadding: EdgeInsets.zero,
-                              leading: const Icon(Icons.play_arrow_rounded),
-                              title: Text(
-                                episode.episodeNumber == null
-                                    ? episode.title
-                                    : '${episode.episodeNumber}. ${episode.title}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: episode.description == null
-                                  ? null
-                                  : Text(
-                                      episode.description!,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                            FocusableCard(
+                              debugLabel: 'media.episode.${episode.id}',
+                              semanticsLabel: _episodeSemanticsLabel(episode),
                               onTap: () => onPlayEpisode(episode),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.play_arrow_rounded,
+                                      color: AppColors.accent,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            episode.episodeNumber == null
+                                                ? episode.title
+                                                : '${episode.episodeNumber}. ${episode.title}',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyLarge,
+                                          ),
+                                          if (episode.description !=
+                                              null) ...[
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              episode.description!,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                color: AppColors.textLo,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                         ],
                       );

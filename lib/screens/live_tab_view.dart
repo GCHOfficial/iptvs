@@ -156,6 +156,15 @@ class LiveTabView extends StatelessWidget {
 
   final List<Channel> visible;
 
+  /// True when a live search query (>= 2 chars) is active, mirroring
+  /// `MediaTabView.showingSearch`. Combined with [selectedCategoryId] to
+  /// decide the empty-state wording below: a genuinely unfiltered-empty
+  /// source ("this provider returned nothing") reads very differently from a
+  /// filtered-empty one ("nothing matches"). Defaults to false — the live
+  /// tab's search text lives in `ChannelListScreen`, which this view does not
+  /// own; wire this through from the caller alongside the search box.
+  final bool searchActive;
+
   /// Resolves the preview target (null only when [visible] is empty). A
   /// callback, not a value: on a TV remote the panel follows the channel
   /// cursor, so it must be re-resolved inside the preview pane's own rebuild.
@@ -217,6 +226,7 @@ class LiveTabView extends StatelessWidget {
     required this.error,
     required this.onRetry,
     required this.visible,
+    this.searchActive = false,
     required this.resolvePreviewChannel,
     required this.now,
     required this.next,
@@ -348,10 +358,18 @@ class LiveTabView extends StatelessWidget {
       );
     }
     if (visible.isEmpty) {
-      return const Center(
-        child: Text(
-          'No channels match',
-          style: TextStyle(color: AppColors.textLo),
+      final filtered = searchActive || selectedCategoryId != null;
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            filtered
+                ? 'No channels match'
+                : 'This source has no channels — try Reload from the '
+                      'toolbar or check the source.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppColors.textLo),
+          ),
         ),
       );
     }
@@ -784,6 +802,43 @@ class _LivePreviewPanel extends StatelessWidget {
                               child: const Text(
                                 'Preview',
                                 style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                        // The below-panel text hint (`_hint`) is gated behind
+                        // `!compact`, but Android TV wide layouts are always
+                        // compact (0.625 scale) — the device that most needs
+                        // the "press OK" nudge. Mirror the "Preview" badge
+                        // above with a corner chip on the thumbnail itself,
+                        // which costs zero layout height, so compact layouts
+                        // still get the hint. Non-compact layouts keep the
+                        // text hint unchanged and don't get this chip too.
+                        if (compact &&
+                            !previewActive &&
+                            !previewLoading &&
+                            previewError == null &&
+                            _hint != null)
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: Container(
+                              margin: const EdgeInsets.all(8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.55),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                _hint!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 11,
                                   fontWeight: FontWeight.w600,
@@ -1567,7 +1622,7 @@ class _ChannelTile extends StatelessWidget {
                           size: 20,
                           color: favorite
                               ? AppColors.accent
-                              : AppColors.textLo.withValues(alpha: 0.55),
+                              : AppColors.textLo.withValues(alpha: 0.8),
                         ),
                       ),
                     ),
