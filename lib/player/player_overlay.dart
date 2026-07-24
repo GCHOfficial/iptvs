@@ -249,7 +249,8 @@ class _EmbeddedPlayerControls extends StatefulWidget {
   final Future<void> Function() onCycleAspect;
 
   @override
-  State<_EmbeddedPlayerControls> createState() => _EmbeddedPlayerControlsState();
+  State<_EmbeddedPlayerControls> createState() =>
+      _EmbeddedPlayerControlsState();
 }
 
 class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
@@ -312,16 +313,26 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     return MouseRegion(
       cursor: _visible ? SystemMouseCursors.basic : SystemMouseCursors.none,
       onHover: (_) => _show(),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: _show,
-        onDoubleTap: () => unawaited(toggleFullscreen(context)),
-        child: Stack(
-          children: [
-            if (_visible) ...[_topBar(), _bottomBar(context)],
-            if (_showInfo) _infoPanel(),
-          ],
-        ),
+      child: Stack(
+        children: [
+          // Tap-to-show / double-tap-fullscreen lives on a background layer
+          // *behind* the bars, not as an ancestor of them. A double-tap
+          // recognizer holds the gesture arena for kDoubleTapTimeout (~300ms)
+          // on every tap it can see; when it wrapped the whole overlay it
+          // sat in the arena for every control press too, delaying each one
+          // by that timeout and making the overlay feel heavy. As a sibling
+          // below the bars it only sees taps on the exposed video area, so
+          // button/menu taps resolve immediately.
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _show,
+              onDoubleTap: () => unawaited(toggleFullscreen(context)),
+            ),
+          ),
+          if (_visible) ...[_topBar(), _bottomBar(context)],
+          if (_showInfo) _infoPanel(),
+        ],
       ),
     );
   }
@@ -339,50 +350,71 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
           colors: [Color(0xB3000000), Color(0x00000000)],
         ),
       ),
-      child: Row(
-        children: [
-          _button(Icons.arrow_back, 'Back', widget.onBack),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (widget.epgNow case final now?)
+      child: LayoutBuilder(
+        builder: (context, constraints) => Row(
+          children: [
+            _button(Icons.arrow_back, 'Back', widget.onBack),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    PlayerVideoSurfaceState._programmeLine(now, widget.epgNext),
+                    widget.title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: AppColors.textLo,
-                      fontSize: 12,
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-              ],
+                  if (widget.epgNow case final now?)
+                    Text(
+                      PlayerVideoSurfaceState._programmeLine(
+                        now,
+                        widget.epgNext,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
-          ..._badges(),
-          if (widget.canFavorite) ...[
-            const SizedBox(width: 10),
-            _button(
-              widget.favorite ? Icons.star_rounded : Icons.star_outline_rounded,
-              widget.favorite ? 'Remove favorite' : 'Add favorite',
-              widget.onToggleFavorite,
-              color: widget.favorite ? AppColors.accent : Colors.white,
-              compact: true,
+            const SizedBox(width: 8),
+            // Badges are capped to a fraction of the bar and wrap onto a
+            // second line when the window is narrow, so a full EPG + long
+            // resolution/HDR/FPS/source/clock set can never overflow the row.
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: constraints.maxWidth * 0.55,
+              ),
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 6,
+                runSpacing: 6,
+                children: _badges(),
+              ),
             ),
+            if (widget.canFavorite) ...[
+              const SizedBox(width: 10),
+              _button(
+                widget.favorite
+                    ? Icons.star_rounded
+                    : Icons.star_outline_rounded,
+                widget.favorite ? 'Remove favorite' : 'Add favorite',
+                widget.onToggleFavorite,
+                color: widget.favorite ? AppColors.accent : Colors.white,
+                compact: true,
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     ),
   );
@@ -403,10 +435,7 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
         source,
       _hm(DateTime.now()),
     ];
-    return [
-      for (final item in items)
-        Padding(padding: const EdgeInsets.only(left: 6), child: _badge(item)),
-    ];
+    return [for (final item in items) _badge(item)];
   }
 
   Widget _bottomBar(BuildContext context) => Positioned(
@@ -414,12 +443,18 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
     right: 0,
     bottom: 0,
     child: Container(
-      padding: const EdgeInsets.fromLTRB(20, 34, 20, 12),
+      // The gradient fills this (bottom-anchored) container. It ramps to a
+      // solid dark value by ~45% down — where the two-row live bar (progress +
+      // controls) begins — instead of fading linearly to dark only at the very
+      // bottom, so both rows sit on a real backdrop rather than near-transparent
+      // scrim. The top inset sets how high the transparent fade starts.
+      padding: const EdgeInsets.fromLTRB(20, 36, 20, 14),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0x00000000), Color(0xB3000000)],
+          colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
+          stops: [0.0, 0.45, 1.0],
         ),
       ),
       child: Column(
@@ -427,60 +462,77 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
         children: [
           if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
           const SizedBox(height: 4),
-          Row(
-            children: [
-              _button(
-                widget.player.state.playing ? Icons.pause : Icons.play_arrow,
-                widget.player.state.playing ? 'Pause' : 'Play',
-                () => unawaited(widget.onPlayPause()),
-              ),
-              if (!widget.isLive) ...[
-                _button(Icons.replay_10, 'Back 10 seconds', () {
-                  final next =
-                      widget.player.state.position -
-                      const Duration(seconds: 10);
-                  unawaited(
-                    widget.player.seek(
-                      next < Duration.zero ? Duration.zero : next,
-                    ),
-                  );
-                }),
-                _button(Icons.forward_10, 'Forward 10 seconds', () {
-                  unawaited(
-                    widget.player.seek(
-                      widget.player.state.position +
-                          const Duration(seconds: 10),
-                    ),
-                  );
-                }),
-              ],
-              _volumeControls(context),
-              if (!widget.isLive) _positionRebuild(_timeLabel),
-              const Spacer(),
-              if (widget.isLive && !widget.liveSynced)
-                TextButton.icon(
-                  onPressed: () => unawaited(widget.onGoLive()),
-                  icon: const Icon(Icons.skip_next),
-                  label: const Text('Go to live'),
-                ),
-              if (_audioTracks().length > 1) _audioMenu(),
-              _subtitleMenu(),
-              if (!widget.isLive) _speedMenu(),
-              _button(
-                Icons.aspect_ratio,
-                'Cycle aspect ratio',
-                () => unawaited(widget.onCycleAspect()),
-              ),
-              _button(Icons.info_outline, 'Stream information', () {
-                setState(() => _showInfo = !_showInfo);
-                _show(keep: _showInfo);
-              }),
-              _button(
-                Icons.fullscreen,
-                'Fullscreen (F)',
-                () => unawaited(toggleFullscreen(context)),
-              ),
-            ],
+          LayoutBuilder(
+            builder: (context, constraints) {
+              // Below this width the fixed controls + volume slider stop
+              // fitting alongside the left/right split, so collapse the two
+              // widest optional pieces: the volume slider (mute stays) and the
+              // "Go to live" text label (its icon stays).
+              final compact = constraints.maxWidth < 720;
+              return Row(
+                children: [
+                  _button(
+                    widget.player.state.playing
+                        ? Icons.pause
+                        : Icons.play_arrow,
+                    widget.player.state.playing ? 'Pause' : 'Play',
+                    () => unawaited(widget.onPlayPause()),
+                  ),
+                  if (!widget.isLive) ...[
+                    _button(Icons.replay_10, 'Back 10 seconds', () {
+                      final next =
+                          widget.player.state.position -
+                          const Duration(seconds: 10);
+                      unawaited(
+                        widget.player.seek(
+                          next < Duration.zero ? Duration.zero : next,
+                        ),
+                      );
+                    }),
+                    _button(Icons.forward_10, 'Forward 10 seconds', () {
+                      unawaited(
+                        widget.player.seek(
+                          widget.player.state.position +
+                              const Duration(seconds: 10),
+                        ),
+                      );
+                    }),
+                  ],
+                  _volumeControls(context, showSlider: !compact),
+                  if (!widget.isLive) _positionRebuild(_timeLabel),
+                  const Spacer(),
+                  if (widget.isLive && !widget.liveSynced)
+                    compact
+                        ? _button(
+                            Icons.skip_next,
+                            'Go to live',
+                            () => unawaited(widget.onGoLive()),
+                          )
+                        : TextButton.icon(
+                            onPressed: () => unawaited(widget.onGoLive()),
+                            icon: const Icon(Icons.skip_next),
+                            label: const Text('Go to live'),
+                          ),
+                  if (_audioTracks().length > 1) _audioMenu(),
+                  _subtitleMenu(),
+                  if (!widget.isLive) _speedMenu(),
+                  _button(
+                    Icons.aspect_ratio,
+                    'Cycle aspect ratio',
+                    () => unawaited(widget.onCycleAspect()),
+                  ),
+                  _button(Icons.info_outline, 'Stream information', () {
+                    setState(() => _showInfo = !_showInfo);
+                    _show(keep: _showInfo);
+                  }),
+                  _button(
+                    Icons.fullscreen,
+                    'Fullscreen (F)',
+                    () => unawaited(toggleFullscreen(context)),
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -502,7 +554,10 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
   /// tracks the value live — the surrounding overlay doesn't listen to volume
   /// (it would rebuild every control on each drag tick), so without this the
   /// slider read a stale `state.volume` and appeared frozen.
-  Widget _volumeControls(BuildContext context) => StreamBuilder<double>(
+  Widget _volumeControls(
+    BuildContext context, {
+    bool showSlider = true,
+  }) => StreamBuilder<double>(
     stream: widget.player.stream.volume,
     initialData: widget.player.state.volume,
     builder: (context, snapshot) {
@@ -515,30 +570,35 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
             'Mute',
             () => unawaited(widget.player.setVolume(volume > 0 ? 0 : 100)),
           ),
-          SizedBox(
-            width: 150,
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 4,
-                activeTrackColor: AppColors.accent,
-                inactiveTrackColor: AppColors.line,
-                thumbColor: AppColors.accent,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              ),
-              // media_kit volume is 0–100; Slider's default max is 1.0 and it
-              // asserts value <= max, so the range must be explicit.
-              child: Slider(
-                max: 100,
-                value: volume,
-                onChanged: (value) {
-                  _show(keep: true);
-                  unawaited(widget.player.setVolume(value));
-                },
-                onChangeEnd: (_) => _scheduleHide(),
+          if (showSlider)
+            SizedBox(
+              width: 150,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 4,
+                  activeTrackColor: AppColors.accent,
+                  inactiveTrackColor: AppColors.line,
+                  thumbColor: AppColors.accent,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 7,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 14,
+                  ),
+                ),
+                // media_kit volume is 0–100; Slider's default max is 1.0 and it
+                // asserts value <= max, so the range must be explicit.
+                child: Slider(
+                  max: 100,
+                  value: volume,
+                  onChanged: (value) {
+                    _show(keep: true);
+                    unawaited(widget.player.setVolume(value));
+                  },
+                  onChangeEnd: (_) => _scheduleHide(),
+                ),
               ),
             ),
-          ),
         ],
       );
     },
@@ -568,22 +628,30 @@ class _EmbeddedPlayerControlsState extends State<_EmbeddedPlayerControls> {
         ? 0
         : DateTime.now().difference(now.start).inSeconds;
     final progress = total <= 0 ? 0.0 : (elapsed / total).clamp(0.0, 1.0);
-    return Row(
-      children: [
-        _LiveBadge(synced: widget.liveSynced),
-        const SizedBox(width: 12),
-        Expanded(child: LinearProgressIndicator(value: progress)),
-        if (now != null) ...[
+    return LayoutBuilder(
+      builder: (context, constraints) => Row(
+        children: [
+          _LiveBadge(synced: widget.liveSynced),
           const SizedBox(width: 12),
-          Flexible(
-            child: Text(
-              now.title,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white),
+          Expanded(child: LinearProgressIndicator(value: progress)),
+          if (now != null) ...[
+            const SizedBox(width: 12),
+            // The title is width-capped and non-flex so the progress bar keeps
+            // all the remaining width. A `Flexible` title shared the row ~50/50
+            // with the `Expanded` bar, leaving the bar ending mid-screen with
+            // dead space to its right.
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.4),
+              child: Text(
+                now.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white),
+              ),
             ),
-          ),
+          ],
         ],
-      ],
+      ),
     );
   }
 

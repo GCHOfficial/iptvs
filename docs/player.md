@@ -153,7 +153,18 @@ overlay is a layered window clipped to a region covering only the top+bottom bar
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
 when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
 the shared Flutter overlay (`_EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's), kept
-at visual parity with the GDI overlay (chip buttons, badges, favorite star).
+at visual parity with the GDI overlay (chip buttons, badges, favorite star). Two layout/latency
+invariants there: (1) **tap-to-show / double-tap-fullscreen sits on a background `Positioned.fill`
+layer *behind* the bars, never as an ancestor of them** — a `DoubleTapGestureRecognizer` holds the
+gesture arena for `kDoubleTapTimeout` on every tap it can see, so wrapping the whole overlay in it
+delayed every control press by that timeout (the "heavy" feel); as a sibling below the bars it only
+sees the exposed video area. (2) The **top-bar badges are width-capped and wrap** (a `Wrap` inside a
+`ConstrainedBox(maxWidth: constraints.maxWidth * 0.55)` under a `LayoutBuilder`), so a full EPG plus
+the resolution/HDR/FPS/source/clock badge set can't overflow the row on a narrow/windowed surface.
+The **live-progress title is likewise width-capped and non-flex** (0.4 of the bar) so the `Expanded`
+progress bar keeps the rest of the width instead of splitting the row ~50/50, and the **bottom
+control row drops its two widest optional pieces below ~720px** (`compact`): the volume slider
+collapses to the mute button, and "Go to live" collapses to its icon.
 
 `PaintNativeControlBar` **caches its ARGB back-buffer** (`OverlayBackBuffer`: DIB + memory DC,
 file-scope alongside the other single-overlay globals), recreating it only on a client-size change
