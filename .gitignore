@@ -58,3 +58,7 @@ app.*.map.json
 
 # Local Flutter DevTools settings.
 /devtools_options.yaml
+
+# Working drafts / notes not meant for the repo (store-listing copy, questionnaire
+# answers, tester-feedback triage, etc.). Local scratch only.
+/docs/private/

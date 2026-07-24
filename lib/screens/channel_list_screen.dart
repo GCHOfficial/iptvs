@@ -20,6 +20,7 @@ import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
 import 'epg_grid_screen.dart';
 import 'favorites_controller.dart';
+import 'legal_screen.dart';
 import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
@@ -1680,6 +1681,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                             sourceId: widget.repo.source.id,
                             onReingest: () => _loadLive(forceRefresh: true),
                           ),
+                        ),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'Help & about',
+                    icon: const Icon(Icons.help_outline),
+                    onPressed: () async {
+                      await _preview.stop();
+                      if (!context.mounted) return;
+                      await Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const LegalScreen(),
                         ),
                       );
                     },
