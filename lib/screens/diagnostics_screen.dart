@@ -28,6 +28,7 @@ class DiagnosticsScreen extends StatelessWidget {
         title: const Text('Diagnostics'),
         actions: [
           IconButton(
+            autofocus: true,
             tooltip: 'Copy',
             icon: const Icon(Icons.copy_outlined),
             onPressed: () {

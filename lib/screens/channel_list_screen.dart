@@ -1855,6 +1855,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             loadingMore: _media(_tab).loadingMore,
             error: _media(_tab).error,
             showingSearch: _query.trim().length >= 2,
+            categoryFilterActive: _media(_tab).categoryId != null,
             lastPlayedId: _media(_tab).lastPlayedId,
             scrollController: _media(_tab).scrollController,
             firstFocusNode: _media(_tab).firstFocusNode,
@@ -1921,6 +1922,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       error: _live.error,
       onRetry: () => _loadLive(forceRefresh: true),
       visible: visible,
+      searchActive: _query.trim().length >= 2,
       // Resolved inside the preview pane's own rebuild: on a TV remote the
       // panel follows the channel cursor, and the cursor now moves without
       // rebuilding this method.

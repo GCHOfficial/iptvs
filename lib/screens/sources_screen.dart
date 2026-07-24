@@ -237,7 +237,13 @@ class _SourcesScreenState extends State<SourcesScreen> {
       ),
       // A FilledButton (rather than a FAB) so it shows the same accent/white
       // focus ring as the "Save source" / "Save" buttons under a D-pad.
+      // Autofocus it once loaded with no sources — the first source card
+      // already autofocuses (see _buildSourceList), so this is the only
+      // D-pad target on a fresh install's first "Sources" visit. Gated on
+      // !_loading so it doesn't grab focus during the spinner frame and then
+      // block the first card's own autofocus once sources arrive.
       floatingActionButton: FilledButton.icon(
+        autofocus: !_loading && _sources.isEmpty,
         onPressed: _add,
         icon: const Icon(Icons.add),
         label: const Text('Add source'),
@@ -1094,6 +1100,7 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
                   label: 'TMDB API credential',
                   hintText: 'Paste a v3 API key or v4 Read Access Token',
                   obscureText: true,
+                  autofocus: true,
                   textInputAction: TextInputAction.next,
                 ),
                 const SizedBox(height: 12),

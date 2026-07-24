@@ -41,6 +41,9 @@ class LegalScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           _LinkCard(
+            // A D-pad user entering this screen should land on a visible focus
+            // ring immediately, not on an unfocused scaffold.
+            autofocus: true,
             icon: Icons.help_outline,
             title: 'Support',
             subtitle: 'Troubleshooting and contact information',
@@ -77,12 +80,14 @@ class LegalScreen extends StatelessWidget {
 /// and "OK to activate" behaviour match the rest of the TV-facing UI).
 class _LinkCard extends StatelessWidget {
   const _LinkCard({
+    this.autofocus = false,
     required this.icon,
     required this.title,
     required this.subtitle,
     required this.onTap,
   });
 
+  final bool autofocus;
   final IconData icon;
   final String title;
   final String subtitle;
@@ -91,6 +96,7 @@ class _LinkCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FocusableCard(
+      autofocus: autofocus,
       onTap: onTap,
       scrollOnFocus: false,
       semanticsLabel: '$title. $subtitle. Opens in your browser.',

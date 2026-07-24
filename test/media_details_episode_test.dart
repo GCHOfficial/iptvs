@@ -114,7 +114,9 @@ void main() {
       // animation can settle before we tap.
       await tester.pumpAndSettle();
 
-      final episodeTile = find.widgetWithText(ListTile, '1. Big Buck Bunny');
+      // Episode rows are FocusableCard now (accent D-pad focus ring parity
+      // with the rest of the browsing surfaces), not a ListTile.
+      final episodeTile = find.text('1. Big Buck Bunny');
       await tester.ensureVisible(episodeTile);
       await tester.pumpAndSettle();
       await tester.tap(episodeTile);

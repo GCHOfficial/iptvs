@@ -27,4 +27,19 @@ void main() {
       expect(card.onTap, isNotNull);
     }
   });
+
+  testWidgets('first link autofocuses so a D-pad user lands on a focus ring', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: LegalScreen()));
+    await tester.pump();
+
+    final firstCard = tester.widget<FocusableCard>(
+      find.ancestor(
+        of: find.text('Support'),
+        matching: find.byType(FocusableCard),
+      ),
+    );
+    expect(firstCard.autofocus, isTrue);
+  });
 }
