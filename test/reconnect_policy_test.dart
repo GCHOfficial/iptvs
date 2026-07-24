@@ -71,8 +71,11 @@ void main() {
       );
     });
 
-    test('ignored while a native session owns playback (the embedded '
-        'player is stopped, not the stream)', () {
+    test('ignored while a separate engine owns playback and the embedded '
+        'player is idle (Linux native mpv / Android native Activity)', () {
+      // `nativeSessionActive` is true only when the media_kit `_player` sits
+      // idle behind a separate engine — its `completed` describes a stopped
+      // engine, not the stream.
       expect(
         shouldReconnectOnCompleted(
           completed: true,
@@ -80,6 +83,24 @@ void main() {
           nativeSessionActive: true,
         ),
         isFalse,
+      );
+    });
+
+    test('Windows native HDR-live reconnects on a clean EOF (the same _player '
+        'plays through the HWND, so nativeSessionActive stays false)', () {
+      // On Windows the native HWND path renders through the SAME media_kit
+      // `_player` (a `vo` swap, no separate engine), so its `completed` is a
+      // genuine live drop. `_PlayerScreenState` derives `nativeSessionActive`
+      // as `_linuxNativeSession != null || (Platform.isAndroid &&
+      // _nativePlaybackLaunched)` — false on Windows-native — so the reconnect
+      // fires (and `_reconnectLive` reopens `_player` on the HWND surface).
+      expect(
+        shouldReconnectOnCompleted(
+          completed: true,
+          isLive: true,
+          nativeSessionActive: false,
+        ),
+        isTrue,
       );
     });
 
