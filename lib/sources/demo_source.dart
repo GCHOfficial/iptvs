@@ -92,6 +92,22 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
       'https://video.blender.org/lazy-static/thumbnails/'
       '23f3ef79-15dc-44c5-aa45-cf92e78a4509.jpg';
 
+  // Portrait poster art (Wikimedia Commons display-sized thumbs). The
+  // PeerTube thumbnails above are 16:9 video stills — right for `backdrop`
+  // and channel logos, but the media grid and details sheet crop `poster`
+  // to portrait, so poster slots get true portrait art where the open
+  // movies have it (Caminandes and Spring have no portrait poster; their
+  // items lean on `backdrop`/the placeholder instead).
+  static const _bbbPoster =
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/'
+      'Big_buck_bunny_poster_big.jpg/500px-Big_buck_bunny_poster_big.jpg';
+  static const _sintelPoster =
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8f/'
+      'Sintel_poster.jpg/500px-Sintel_poster.jpg';
+  static const _tearsPoster =
+      'https://upload.wikimedia.org/wikipedia/commons/thumb/7/70/'
+      'Tos-poster.png/500px-Tos-poster.png';
+
   static const _channels = <Channel>[
     Channel(
       id: 'bbb',
@@ -191,7 +207,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
       title: 'Big Buck Bunny',
       kind: ContentKind.movie,
       categoryId: 'open-animation',
-      poster: _bbbArt,
+      poster: _bbbPoster,
       backdrop: _bbbArt,
       description:
           'A gentle giant rabbit turns the tables on three woodland bullies. '
@@ -206,7 +222,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
       title: 'Sintel',
       kind: ContentKind.movie,
       categoryId: 'open-animation',
-      poster: _sintelArt,
+      poster: _sintelPoster,
       backdrop: _sintelArt,
       description:
           'A lone warrior searches for a dragon she befriended long ago. '
@@ -221,7 +237,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
       title: 'Tears of Steel',
       kind: ContentKind.movie,
       categoryId: 'open-scifi',
-      poster: _tearsArt,
+      poster: _tearsPoster,
       backdrop: _tearsArt,
       description:
           'Scientists and warriors stage a desperate encounter in a future '
@@ -255,7 +271,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     title: 'Codec Test Series',
     kind: ContentKind.series,
     categoryId: 'demo-series',
-    poster: _bbbArt,
+    poster: _bbbPoster,
     backdrop: _tearsArt,
     description:
         'Two seasons of public playback fixtures covering adaptive HLS, '
@@ -269,7 +285,9 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     title: 'Caminandes',
     kind: ContentKind.series,
     categoryId: 'open-series',
-    poster: _llamigosArt,
+    // No portrait poster exists for Caminandes — leave it null so the grid
+    // shows its clean placeholder instead of a hard portrait crop of the
+    // 16:9 cover; the details sheet still gets art via `backdrop`.
     backdrop: _granDillamaArt,
     description:
         'Koro the llama discovers that the road is never as easy as it looks. '
@@ -284,7 +302,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     kind: ContentKind.season,
     parentId: 'demo-series-1',
     seasonNumber: 1,
-    poster: _bbbArt,
+    poster: _bbbPoster,
   );
   static const _codecSeason2 = MediaItem(
     id: 'demo-series-1:season:2',
@@ -292,7 +310,7 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     kind: ContentKind.season,
     parentId: 'demo-series-1',
     seasonNumber: 2,
-    poster: _sintelArt,
+    poster: _sintelPoster,
   );
   static const _caminandesSeason = MediaItem(
     id: 'caminandes:season:1',
@@ -300,7 +318,6 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     kind: ContentKind.season,
     parentId: 'caminandes',
     seasonNumber: 1,
-    poster: _llamigosArt,
   );
 
   static const _codecSeason1Episodes = <MediaItem>[
