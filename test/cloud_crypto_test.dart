@@ -140,6 +140,27 @@ void main() {
       );
     });
 
+    // The shared `ecdhP256Invalid` fixture group, looped here so BOTH
+    // implementations assert the same rejections. Peer public-key validation is
+    // the control that prevents an invalid-curve attack — a malicious server
+    // handing over a crafted `epk` could otherwise recover this device's
+    // long-lived private scalar — and P-256's cofactor of 1 means an accepted
+    // on-curve point is necessarily in the prime-order subgroup, so this check
+    // is the whole defence. It works today; the point of looping the fixture is
+    // that a refactor cannot silently drop a case on one side only.
+    for (final v in vectors('ecdhP256Invalid')) {
+      test('rejects invalid peer public key: ${v['name']}', () {
+        expect(
+          () => ecdhSharedX(
+            _unhex(v['privateKey_hex'] as String),
+            _unhex(v['peerPublicKey_hex'] as String),
+          ),
+          throwsA(isA<CloudCryptoException>()),
+          reason: v['note'] as String?,
+        );
+      });
+    }
+
     test('key pair round-trips scalar → public → shared symmetry', () {
       final a = generateP256KeyPair();
       final b = generateP256KeyPair();

@@ -231,3 +231,86 @@ export function friendlyError(error) {
   }
   return scrubUrls(out);
 }
+
+// ── sticky E2EE state ─────────────────────────────────────────────────────────
+//
+// The server is NOT trusted on whether a profile is encrypted. `get_crypto_state`
+// decides whether the write path encrypts, so a backend answering
+// `{ enabled: false }` — or suddenly 404-ing the crypto RPCs, which is
+// indistinguishable from a legitimate pre-migration backend — would get this
+// panel to write every provider credential and API key back as plaintext
+// `format` 0. The server-side format gate is the stated defence, but it lives in
+// the same trust domain as the attacker.
+//
+// So: once a profile is *seen* encrypted, that fact is remembered here, and only
+// an explicit local action can forget it. localStorage is the right store — it
+// is per-origin, survives reloads, and is exactly as trustworthy as the panel
+// code itself (an XSS'd panel is already outside the threat boundary).
+//
+// A legitimate `disableE2ee` clears the mark for the browser that performed it;
+// any OTHER browser sees the same signal as an attack and must clear it through
+// `acknowledgeDowngrade` (wired to a Security-tab button).
+//
+// These live HERE rather than in secrets.js purely so they can be tested:
+// secrets.js transitively imports supabase.js, which needs Vite's
+// `import.meta.env` and a DOM and therefore cannot load under `node:test`. The
+// `storage` parameter is the seam — production callers omit it and get
+// localStorage; tests pass a fake. Without that, the one piece of state standing
+// between a lying backend and plaintext credentials would be unpinned.
+
+export const E2EE_SEEN_KEY = 'iptvs_e2ee_seen';
+
+// Some embedders throw on `localStorage` access rather than returning undefined
+// (private mode, blocked third-party storage), so the read itself is guarded.
+function defaultStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readSeen(storage) {
+  try {
+    const raw = storage?.getItem(E2EE_SEEN_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+  } catch {
+    // Corrupt or unavailable storage restarts from "nothing known". That fails
+    // OPEN by design: a device that has never seen encryption cannot distinguish
+    // a downgrade from a profile that was simply never encrypted, and refusing
+    // to sync at all on unreadable storage would be a worse failure than the
+    // protection lapsing back to per-session.
+    return [];
+  }
+}
+
+function writeSeen(ids, storage) {
+  try {
+    storage?.setItem(E2EE_SEEN_KEY, JSON.stringify(ids));
+  } catch {
+    // Private-mode / quota failure: the sticky protection degrades to
+    // per-session only. Never fail the surrounding operation over it.
+  }
+}
+
+/// Whether this browser has ever seen `profileId` end-to-end encrypted.
+export function wasE2eeSeen(profileId, storage = defaultStorage()) {
+  return readSeen(storage).includes(profileId);
+}
+
+export function markE2eeSeen(profileId, storage = defaultStorage()) {
+  const ids = readSeen(storage);
+  if (ids.includes(profileId)) return;
+  ids.push(profileId);
+  writeSeen(ids, storage);
+}
+
+// Forget the mark. Called by `disableE2ee` (this browser just turned it off, so
+// the state change is authenticated by the user's own action) and by the
+// Security tab's explicit acknowledgement.
+export function acknowledgeDowngrade(profileId, storage = defaultStorage()) {
+  const ids = readSeen(storage);
+  const next = ids.filter((id) => id !== profileId);
+  if (next.length !== ids.length) writeSeen(next, storage);
+}

@@ -81,15 +81,41 @@ export function isMissingFunctionError(error) {
   );
 }
 
+// ── sticky E2EE state ─────────────────────────────────────────────────────────
+//
+// Implemented in validate.js (dependency-free, so `node:test` can exercise it —
+// this module cannot load under node, since it transitively imports supabase.js)
+// and re-exported here so callers keep importing it from `secrets`. The full
+// rationale for distrusting the server on E2EE state lives with the code.
+//
+// Imported AND re-exported deliberately: a bare `export … from` re-exports
+// without creating a local binding, which would leave the three call sites below
+// throwing ReferenceError at runtime.
+import { wasE2eeSeen, markE2eeSeen, acknowledgeDowngrade } from './validate.js';
+
+export { wasE2eeSeen, markE2eeSeen, acknowledgeDowngrade };
+
 // ── RPC wrappers ──────────────────────────────────────────────────────────────
 
+// Returns `{ enabled, ck_version, missing?, downgraded? }`. `downgraded` is set
+// when the server claims the profile is NOT encrypted but this browser has seen
+// that it was: callers must refuse to write plaintext secrets in that state.
 export async function getCryptoState(profileId) {
   const { data, error } = await supabase.rpc('get_crypto_state', { p_profile_id: profileId });
   if (error) {
-    if (isMissingFunctionError(error)) return { enabled: false, missing: true };
+    if (isMissingFunctionError(error)) {
+      // "The RPC doesn't exist" is a legitimate pre-migration answer AND a
+      // trivial way to fake a downgrade, so the mark decides which it is.
+      return { enabled: false, missing: true, downgraded: wasE2eeSeen(profileId) };
+    }
     throw error;
   }
-  return data ?? { enabled: false };
+  const state = data ?? { enabled: false };
+  if (state.enabled) {
+    markE2eeSeen(profileId);
+    return state;
+  }
+  return { ...state, enabled: false, downgraded: wasE2eeSeen(profileId) };
 }
 
 export async function getSecrets(profileId) {
@@ -174,9 +200,17 @@ export async function loadDecodedSecrets(profileId) {
 // ── encode (write side) ───────────────────────────────────────────────────────
 
 // Build a { format, payload } secret element for a write, honoring the profile's
-// E2EE state. Throws CloudCryptoError('locked') if E2EE is on but not unlocked.
+// E2EE state. Throws CloudCryptoError('locked') if E2EE is on but not unlocked,
+// and CloudCryptoError('downgraded') if the server claims it is off for a
+// profile this browser has seen encrypted.
 async function encodeSecretElement(profileId, kind, id, secretMap, cryptoState) {
   if (!cryptoState.enabled) {
+    // Re-check the mark here rather than trusting the passed-in state: this is
+    // the single place plaintext can leave the browser, so it fails closed on
+    // its own evidence even if a caller hands over a stale/forged state object.
+    if (cryptoState.downgraded || wasE2eeSeen(profileId)) {
+      throw new cc.CloudCryptoError('downgraded');
+    }
     return { format: 0, payload: secretMap };
   }
   const s = requireUnlocked(profileId);
@@ -261,6 +295,9 @@ export async function unlock(profileId, passphrase) {
     ckVersion: material.ck_version,
     aad,
   });
+  // A successful unwrap is proof the profile really is encrypted, so it is also
+  // the strongest place to (re-)assert the sticky mark.
+  markE2eeSeen(profileId);
   setSession(profileId, ck, material.ck_version);
 }
 
@@ -327,6 +364,7 @@ export async function enableE2ee(profileId, passphrase) {
     p_device_cks,
   });
   if (error) throw error;
+  markE2eeSeen(profileId);
   setSession(profileId, ck, ckVersion);
 }
 
@@ -373,6 +411,11 @@ export async function disableE2ee(profileId) {
     p_metadata_secret,
   });
   if (error) throw error;
+  // The user just turned E2EE off from this browser, so "the server says it is
+  // off" is now expected rather than suspicious. Other browsers/devices keep
+  // their own marks and must acknowledge the change themselves — that
+  // asymmetry is the point: only a local, human action clears the mark.
+  acknowledgeDowngrade(profileId);
   lock();
 }
 
@@ -511,7 +554,11 @@ export async function provisionDevice(profileId, deviceUid, publicKeyB64) {
 // Whether E2EE is on for a profile (gates the Devices tab provisioning UI).
 export async function deviceCryptoContext(profileId) {
   const state = await getCryptoState(profileId);
-  return { enabled: !!state.enabled, ckVersion: state.ck_version };
+  return {
+    enabled: !!state.enabled,
+    ckVersion: state.ck_version,
+    downgraded: !!state.downgraded,
+  };
 }
 
 // Authoritative per-device provisioning state for the Devices page, via the

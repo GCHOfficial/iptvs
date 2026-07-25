@@ -134,6 +134,13 @@ recognisable subtitle) but can't stream on their own. A **server-side strip trig
 broad-only on the rows, so even a device that skips the split can't leak a secret into the
 broad table.
 
+That list exists **twice**, in two languages: `secret_keys.dart` and the `array[…]` literals inside
+the SQL strip trigger. A drift between them is a real credential leak — a secret key the SQL doesn't
+know about lands in the broad, non-E2EE table — so `test/secret_keys_parity_test.dart` asserts
+set-equality, reading the *latest* `sources_validate`/`metadata_validate` definition across
+`supabase/migrations/` rather than a hardcoded filename, so a future migration redefining the
+trigger is picked up automatically.
+
 ### Server contract (RPCs the device calls)
 
 - `get_secrets(p_profile_id)` → `{"sources":{"<source_id>":{"format":0|1,"payload":…}}, "metadata":{"format":0|1,"payload":…}|null}`.
@@ -167,6 +174,20 @@ ships no working ECDH on the Dart VM or native Flutter (`DartEcdh` throws), so t
 implemented in pure Dart in `cloud_crypto.dart` and validated against the RFC 5903 §8.1
 known-answer vector. The ECDH shared secret is the X coordinate encoded as **exactly 32 bytes,
 big-endian, left-padded** (a leading-zero X must round-trip — pinned by a dedicated fixture case).
+
+**What the KAT does and does not establish.** It validates the field/point arithmetic on one known
+input; it proves nothing about *input validation*, and because both implementations run the same
+hand-rolled algorithm, a shared logic bug outside its path would not be caught by the interop gate
+at all. Peer public-key validation is the control that actually matters — a malicious server handing
+over a crafted `epk` could otherwise recover a device's long-lived private scalar (invalid-curve
+attack), and P-256's cofactor of 1 means an accepted on-curve point is necessarily in the
+prime-order subgroup, so that check is the whole defence. It is pinned on **both** sides by the
+shared `ecdhP256Invalid` fixture group (off-curve, point-at-infinity encoding, `x >= p`,
+compressed-point prefix, wrong length). Scalar multiplication is **not** constant-time on either
+side (textbook double-and-add over variable-time bignums, with a Fermat inversion): the device's
+long-lived scalar is only ever multiplied locally against a server-supplied `epk` with no timing
+observable returned, and anyone positioned to measure it can read the private key out of the
+keychain instead — so this is an accepted limitation, recorded rather than hidden.
 
 Envelopes are JSON; every binary field is **standard base64 (RFC 4648, with padding — never
 base64url)**:
@@ -292,29 +313,55 @@ It **does not protect** against: a compromised or XSS'd panel *while it is unloc
 CK in memory and can read/rewrite secrets), or a malicious already-paired device that legitimately
 holds the CK.
 
-**An *active* (writing) backend is a third category, and it is outside the guarantee.** The earlier
-wording covered only an operator who *reads*; an operator or compromised backend that also
-**writes** defeats E2EE by other routes, and both clients currently trust the server on these:
+**An *active* (writing) backend is a third category.** The earlier wording covered only an operator
+who *reads*; one that also **writes** attacks E2EE by two other routes, and both clients used to
+trust the server on them. Both are now closed by **sticky client-side state** — the server is not
+believed when it contradicts what a client has already seen:
 
-- **Downgrade to plaintext.** Both clients decide whether to encrypt from `get_crypto_state.enabled`
-  (`secrets.js` `encodeSecretElement`, `cloud_sync.dart` `_CryptoState`). A backend answering
-  `{enabled: false}` makes every client push provider credentials and metadata API keys in
-  `format 0`. The server-side format gate is the stated defence, but it lives in the same trust
-  domain as the attacker. Neither client remembers that a profile *was* E2EE.
-- **Content-key rollback.** `cloud_sync.dart` takes `ck_version` from the very `device_ck` row it is
-  about to unwrap and never compares it to the version `get_crypto_state` reported, so a backend
-  serving a consistent pre-rotation bundle pins a device to a **revoked** generation.
+- **Downgrade to plaintext.** Both clients decide whether to encrypt from `get_crypto_state.enabled`,
+  so a backend answering `{enabled: false}` — or simply 404-ing the crypto RPCs, which is
+  indistinguishable from a pre-migration backend — would collect every client's provider credentials
+  and metadata API keys as `format 0`. Each client now records that a profile *was* seen encrypted
+  (panel: `localStorage` `iptvs_e2ee_seen`; device: an `E2eeMark` in secure storage) and, on a
+  contradiction, resolves to **`locked` + `downgraded`** rather than encoding plaintext. Push is
+  refused with `CloudPushBlockedException` / `kCloudE2eeDowngradedMessage`, deliberately worded
+  differently from the plain locked message: "not set up yet" and "the encryption this profile had
+  has disappeared" call for different user action. Clearing the mark takes an explicit local action
+  (the panel's own `disableE2ee`, or an acknowledgement) — never a server assertion.
+- **Content-key rollback.** `cloud_sync.dart` used to take `ck_version` from the very `device_ck` row
+  it was about to unwrap (`?? ckVersion`) and never compare it with what `get_crypto_state`
+  reported, so a backend serving a *consistent* pre-rotation bundle pinned a device to a **revoked**
+  generation — the `ckv`-in-AAD binding prevents *mixing* generations but establishes no freshness.
+  Now `isCkVersionRollback` treats the reported version as a **floor** and additionally compares
+  against a monotonic high-water mark advanced only on a successful unwrap, so a rollback fails even
+  if both RPCs lie. The `?? ckVersion` fallback is gone: a row with no version cannot be checked and
+  is therefore rejected.
 
-Consequently, "`rotate_content_key` … makes every old-version envelope fail its `ckv` check" holds
-against a device that knows the current `ck_version` — i.e. **rotation is a remedy for a compromised
-device, not for a compromised backend**. Revocation cannot un-leak a CK a device already cached; the
-remedy for a suspected device compromise remains `rotate_content_key` (panel-side), which mints a
-new `ck_version`, re-wraps to the still-trusted devices, and invalidates old-version envelopes.
+`buildSecretElement` also fails closed rather than open: `locked` used to be "treated as `off`
+defensively", which meant *emitting plaintext*. It now throws. An empty secret still returns `null`
+(send no element → server preserves), which is safe in any state because no plaintext is involved —
+that is the "absent = preserve" contract, not a downgrade.
 
-Closing the two bullets above needs client-side sticky state (a per-profile "was enabled" flag and a
-monotonic `ck_version` high-water mark in secure storage). **Not yet implemented** — recorded here
-rather than left implied, because a boundary that reads as complete and isn't is worse than a
-documented gap.
+The read direction is closed too: `decodeSecretEntry` refuses a `format` 0 entry whenever the status
+is not `off`. Without that, an active backend could still feed a locked/ready device attacker-chosen
+*plaintext* — including `playlistUrl`, i.e. which server the player connects to. Returning empty
+reproduces what real E2EE would do (those bytes wouldn't decrypt) and the local overlay keeps the
+credential the device already holds.
+
+**The residual, stated plainly:** a legitimate panel-side *disable* is byte-identical, from a
+device's point of view, to the attack. So turning E2EE off costs one explicit acknowledgement per
+device and per browser (or an unpair). That asymmetry is the design, not a bug — the client cannot
+tell the two apart, so it asks rather than guessing. Note also that the sticky mark is
+**unauthenticated in the tightening direction**: a hostile server can set it once, which degrades a
+device to local-credentials-only with no push. That is safe (and such a server could deny service
+anyway). The `ck_version` watermark, by contrast, **is** authenticated — it advances only after a
+successful `decodeDeviceWrap`, and the server cannot mint a wrap at a version whose CK it does not
+hold, so it cannot be inflated to wedge a device permanently.
+
+Even so: **rotation remains a remedy for a compromised device, not for a compromised backend.**
+Revocation cannot un-leak a CK a device already cached; the remedy for a suspected device compromise
+is `rotate_content_key` (panel-side), which mints a new `ck_version`, re-wraps to the still-trusted
+devices, and invalidates old-version envelopes.
 
 ### Validation limits and rate limiting
 
@@ -337,14 +384,16 @@ table, reaped on account deletion). `claim_pairing` is rate-limited too (10/min)
 push/claim-class RPC without a throttle, and a successful claim grants read access to that device's
 owner's data. Reads/pulls are deliberately unthrottled
 (PostgREST has no per-user limit and an Edge proxy isn't justified) — accepted risk, mitigated
-by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` shows
-`iptvs: `-prefixed messages as-is and reduces everything else to generic text. The app's
-`friendlyCloudError` is **not** equivalent, despite what this file used to say: it renders any
-Postgres `message` (redacted through `redactText`) rather than genericising it, so a raw
-`duplicate key value violates unique constraint …` can reach the user. The load-bearing half of the
-claim does hold on both — Postgres puts row values in `details`/`hint`, and **neither client ever
-renders those**, which is what keeps CHECK-style "Failing row contains (…)" credential leaks off
-the screen.
+by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` and the app's
+`friendlyCloudError` both show `iptvs: `-prefixed messages as-is, map permission/RLS errors to a
+generic "not allowed", and reduce everything else to generic text. (`friendlyCloudError` used to
+render any Postgres `message` verbatim-but-redacted, so a raw
+`duplicate key value violates unique constraint …` reached the user; it now genericises like the
+panel.) The load-bearing half holds on both — Postgres puts row values in `details`/`hint`, and
+**neither client ever renders those**, which is what keeps CHECK-style "Failing row contains (…)"
+credential leaks off the screen. The panel's `console.error` sites are held to the same standard:
+they log code + scrubbed message, never the raw error object, because `details`/`hint` would carry
+the offending row into a browser console that is one screen-share away from public.
 
 > **Never add `alter table … force row level security`.** It looks like obvious hardening and it
 > would break the system. The five RPC-only tables have **zero** policies by design, and every

@@ -5,6 +5,7 @@ import { supabase, KIND_FIELDS } from './supabase.js';
 import {
   validateSource,
   friendlyError,
+  scrubUrls,
   splitFields,
   kindHasSecret,
   deviceProvisionState,
@@ -129,6 +130,22 @@ const esc = (s) =>
   String(s ?? '').replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// Log a failure for debugging WITHOUT leaking what the UI deliberately refuses
+// to show. `console.error(error)` on a Supabase error object prints `details`
+// and `hint` too, and for a failing-row constraint violation those carry the
+// whole offending row — provider URLs with embedded credentials included. The
+// browser console is one screenshot or one screen-share away from being public,
+// so it gets the same treatment as the toast: code + scrubbed message only.
+// A plain client-side Error has no details/hint, so its stack is safe to keep
+// (and is the useful part there).
+function logError(error, where) {
+  if (!error) return;
+  const kind = error.code ?? error.name ?? 'error';
+  const message = scrubUrls(String(error.message ?? error));
+  const stack = error.details == null && error.hint == null ? error.stack : undefined;
+  console.error(`[iptvs${where ? `:${where}` : ''}]`, kind, message, stack ?? '');
+}
+
 function toast(msg, isError = false) {
   const t = document.createElement('div');
   t.className = `toast ${isError ? 'error' : ''}`;
@@ -166,7 +183,7 @@ function renderLogin() {
       email,
       options: { emailRedirectTo: redirectTo },
     });
-    if (error) console.error(error);
+    if (error) logError(error);
     document.getElementById('msg').textContent = error
       ? friendlyError(error)
       : 'Check your email for the sign-in link.';
@@ -186,7 +203,7 @@ async function renderSources() {
     .select('*')
     .eq('profile_id', currentProfileId)
     .order('position');
-  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
+  if (error) { logError(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
 
   // Secrets no longer live in sources.fields (a server strip-trigger removes
   // them). Load them from the secret store so the summary and the edit form can
@@ -196,13 +213,18 @@ async function renderSources() {
   try {
     decoded = await secrets.loadDecodedSecrets(currentProfileId);
   } catch (e) {
-    console.error(e); // degrade to broad-only display rather than failing the page
+    logError(e); // degrade to broad-only display rather than failing the page
   }
   const locked = decoded.sources && Object.values(decoded.sources).includes(secrets.LOCKED);
+  // Sticky-state check, not a server question: `wasE2eeSeen` is local, so this
+  // banner appears even when the backend is the thing that regressed.
+  const downgraded = secrets.wasE2eeSeen(currentProfileId) &&
+    !(await secrets.getCryptoState(currentProfileId).catch(() => ({ enabled: true }))).enabled;
 
   const nextPos = data.length ? Math.max(...data.map((s) => s.position ?? 0)) + 1 : 0;
   view().innerHTML = `
     <p class="muted hint">Sources for <strong>${esc(profileName(currentProfileId))}</strong>. Devices show them in this order — use ↑ / ↓ to reorder.</p>
+    ${downgraded ? `<p class="error">${esc(DOWNGRADE_MESSAGE)}</p>` : ''}
     ${locked ? '<p class="muted hint">This profile is end-to-end encrypted and locked. Credentials are hidden — open <strong>Security</strong> to unlock.</p>' : ''}
     <div class="rows">
       ${data.length ? data.map((s, i) => sourceRow(s, i, data.length, decoded)).join('') : '<p class="muted">No sources yet.</p>'}
@@ -267,7 +289,7 @@ async function reorder(data, index, dir) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i].position === i) continue;
     const { error } = await supabase.from('sources').update({ position: i }).eq('id', arr[i].id);
-    if (error) { console.error(error); return toast(friendlyError(error), true); }
+    if (error) { logError(error); return toast(friendlyError(error), true); }
   }
   renderSources();
 }
@@ -336,10 +358,18 @@ function editSource(existing, nextPos = 0, decoded = null) {
     try {
       cryptoState = await secrets.getCryptoState(currentProfileId);
     } catch (err) {
-      console.error(err);
+      logError(err);
       return toast(friendlyError(err), true);
     }
     const needsSecret = kindHasSecret(kind);
+    // The server says this profile is NOT encrypted, but this browser has seen
+    // it encrypted. Saving would write the credentials back as plaintext on the
+    // strength of the server's own claim — exactly the downgrade this refuses.
+    // The broad row is left untouched too: a half-applied save is worse than a
+    // refused one.
+    if (cryptoState.downgraded && needsSecret) {
+      return toast(DOWNGRADE_MESSAGE, true);
+    }
     const locked = cryptoState.enabled && !secrets.unlockedFor(currentProfileId);
     // A locked profile can't encrypt. Creating a NEW secret-bearing source would
     // silently drop the credentials the form collected, so block that. An
@@ -358,11 +388,11 @@ function editSource(existing, nextPos = 0, decoded = null) {
     let sourceId = existing?.id;
     if (existing) {
       const res = await supabase.from('sources').update(row).eq('id', existing.id);
-      if (res.error) { console.error(res.error); return toast(friendlyError(res.error), true); }
+      if (res.error) { logError(res.error); return toast(friendlyError(res.error), true); }
     } else {
       row.position = nextPos; // append after the current last source
       const res = await supabase.from('sources').insert(row).select('id').single();
-      if (res.error) { console.error(res.error); return toast(friendlyError(res.error), true); }
+      if (res.error) { logError(res.error); return toast(friendlyError(res.error), true); }
       sourceId = res.data.id;
     }
 
@@ -370,7 +400,7 @@ function editSource(existing, nextPos = 0, decoded = null) {
       try {
         await secrets.setSourceSecret(currentProfileId, sourceId, secret, cryptoState);
       } catch (err) {
-        console.error(err);
+        logError(err);
         return toast(
           err instanceof CloudCryptoError
             ? 'Could not encrypt the credentials — unlock this profile in Security and try again.'
@@ -387,7 +417,7 @@ function editSource(existing, nextPos = 0, decoded = null) {
 async function deleteSource(id) {
   if (!confirm('Delete this source?')) return;
   const { error } = await supabase.from('sources').delete().eq('id', id);
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   renderSources();
 }
 
@@ -396,7 +426,7 @@ async function deleteSource(id) {
 async function renderProfiles() {
   view().innerHTML = '<p class="muted">Loading…</p>';
   const { data, error } = await supabase.from('profiles').select('*').order('position');
-  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
+  if (error) { logError(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
   profiles = data;
   const nextPos = data.length ? Math.max(...data.map((p) => p.position ?? 0)) + 1 : 0;
   const atCap = data.length >= MAX_PROFILES;
@@ -444,7 +474,7 @@ async function addProfile(nextPos) {
   const { error } = await supabase
     .from('profiles')
     .insert({ owner: session.user.id, name: name.trim() || 'Profile', position: nextPos });
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   await ensureProfiles();
   render();
 }
@@ -460,7 +490,7 @@ async function renameProfile(id, data) {
     .from('profiles')
     .update({ name: name.trim() || 'Profile' })
     .eq('id', id);
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   await ensureProfiles();
   render();
 }
@@ -469,7 +499,7 @@ async function deleteProfile(id, count) {
   if (count <= 1) return toast('Keep at least one profile.', true);
   if (!confirm('Delete this profile? Its sources, metadata, and favorites are removed.')) return;
   const { error } = await supabase.from('profiles').delete().eq('id', id);
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   if (currentProfileId === id) currentProfileId = null; // re-settled by ensureProfiles
   await ensureProfiles();
   render();
@@ -484,7 +514,7 @@ async function reorderProfiles(data, index, dir) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i].position === i) continue;
     const { error } = await supabase.from('profiles').update({ position: i }).eq('id', arr[i].id);
-    if (error) { console.error(error); return toast(friendlyError(error), true); }
+    if (error) { logError(error); return toast(friendlyError(error), true); }
   }
   renderProfiles();
 }
@@ -516,7 +546,7 @@ async function renderMetadata() {
       for (const k of METADATA_SECRET_KEYS) if (c[k]) metaSecret[k] = c[k];
     }
   } catch (e) {
-    console.error(e);
+    logError(e);
   }
   const sv = (k) => (isLocked ? '' : (metaSecret[k] ?? ''));
 
@@ -561,21 +591,27 @@ async function renderMetadata() {
     try {
       cryptoState = await secrets.getCryptoState(currentProfileId);
     } catch (err) {
-      console.error(err);
+      logError(err);
       return toast(friendlyError(err), true);
+    }
+    // Same downgrade refusal as the source form — the API keys are secrets too.
+    // Only blocked when there is actually a key to write; a broad-only save
+    // (provider choice / auto-enrich) stays available.
+    if (cryptoState.downgraded && Object.keys(secret).length > 0) {
+      return toast(DOWNGRADE_MESSAGE, true);
     }
     const locked = cryptoState.enabled && !secrets.unlockedFor(currentProfileId);
 
     const upsert = await supabase
       .from('metadata_configs')
       .upsert({ owner: session.user.id, profile_id: currentProfileId, config });
-    if (upsert.error) { console.error(upsert.error); return toast(friendlyError(upsert.error), true); }
+    if (upsert.error) { logError(upsert.error); return toast(friendlyError(upsert.error), true); }
 
     if (!locked) {
       try {
         await secrets.setMetadataSecret(currentProfileId, secret, cryptoState);
       } catch (err) {
-        console.error(err);
+        logError(err);
         return toast(
           err instanceof CloudCryptoError
             ? 'Could not encrypt the API keys — unlock this profile in Security and try again.'
@@ -589,6 +625,12 @@ async function renderMetadata() {
 }
 
 // -------------------------------------------------------------- security
+
+// Shown wherever a write is refused because the profile's encryption state
+// regressed. Mirrors `kCloudE2eeDowngradedMessage` in lib/data/cloud_sync.dart.
+const DOWNGRADE_MESSAGE =
+  'This profile was end-to-end encrypted, but the server now reports it as off. ' +
+  'Nothing was saved in the clear — check the Security tab.';
 
 // The passphrase-loss warning shown wherever a passphrase is first set.
 const PASSPHRASE_LOSS_WARNING =
@@ -606,9 +648,14 @@ async function renderSecurity() {
   try {
     state = await secrets.getCryptoState(currentProfileId);
   } catch (err) {
-    console.error(err);
+    logError(err);
     return (view().innerHTML = `<p class="error">${esc(friendlyError(err))}</p>`);
   }
+
+  const name = esc(profileName(currentProfileId));
+  // Checked BEFORE `missing`: a backend that stops serving the crypto RPCs at
+  // all is just the downgrade wearing a different hat.
+  if (state.downgraded) return renderSecurityDowngraded(name);
 
   if (state.missing) {
     return (view().innerHTML = `
@@ -617,10 +664,39 @@ async function renderSecurity() {
       Credentials are stored server-side, protected by row-level security and TLS.</p>`);
   }
 
-  const name = esc(profileName(currentProfileId));
   if (!state.enabled) return renderSecurityDisabled(name);
   if (!secrets.unlockedFor(currentProfileId)) return renderSecurityLocked(name);
   return renderSecurityUnlocked(name);
+}
+
+// This browser has seen the profile end-to-end encrypted, but the server now
+// says it isn't. Two things produce that, and the panel cannot tell them apart:
+// someone disabled encryption from another browser/session, or the backend is
+// lying to make clients write plaintext. Until the user says which, credential
+// writes stay blocked — a wrong "it was legitimate" guess costs every stored
+// credential, while a wrong "it was an attack" guess costs one extra click.
+function renderSecurityDowngraded(name) {
+  view().innerHTML = `
+    <h2>Security · ${name}</h2>
+    <p class="error">${esc(DOWNGRADE_MESSAGE)}</p>
+    <p class="muted hint">Saving credentials or API keys for this profile is blocked
+    in this browser. If <strong>you</strong> (or someone with your account) turned
+    encryption off deliberately, confirm below and this profile goes back to
+    server-side storage protected by row-level security and TLS. If you did not,
+    do <strong>not</strong> confirm: sign out, and check the account and its devices
+    first.</p>
+    <div class="danger-zone section">
+      <h3>Confirm this was you</h3>
+      <p>Only confirm if you know encryption was turned off on purpose. Credentials
+      saved after this are readable by the server operator.</p>
+      <button id="ack-downgrade" class="danger-solid">Encryption was turned off on purpose</button>
+    </div>`;
+  document.getElementById('ack-downgrade').onclick = () => {
+    if (!confirm('Confirm that end-to-end encryption was turned off deliberately? Credentials will be stored server-side again.')) return;
+    secrets.acknowledgeDowngrade(currentProfileId);
+    toast('Acknowledged. This profile is no longer end-to-end encrypted.');
+    render();
+  };
 }
 
 function renderSecurityDisabled(name) {
@@ -859,7 +935,7 @@ async function runCryptoOp(btn, busyLabel, op) {
   try {
     await op();
   } catch (err) {
-    console.error(err);
+    logError(err);
     toast(friendlyError(err), true);
   } finally {
     if (btn) { btn.disabled = false; if (label != null) btn.textContent = label; }
@@ -874,7 +950,7 @@ async function renderDevices() {
     .from('devices')
     .select('*')
     .order('created_at');
-  if (error) { console.error(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
+  if (error) { logError(error); return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`); }
 
   // Crypto context for the CURRENTLY SELECTED profile — provisioning wraps that
   // profile's content key to a device's public key.
@@ -883,7 +959,7 @@ async function renderDevices() {
     try {
       cryptoCtx = await secrets.deviceCryptoContext(currentProfileId);
     } catch (e) {
-      console.error(e);
+      logError(e);
     }
   }
   const unlocked = cryptoCtx.enabled && !!secrets.unlockedFor(currentProfileId);
@@ -894,7 +970,7 @@ async function renderDevices() {
     try {
       provisioning = await secrets.listDeviceProvisioning(currentProfileId);
     } catch (e) {
-      console.error(e);
+      logError(e);
     }
   }
 
@@ -921,7 +997,7 @@ async function renderDevices() {
     e.preventDefault();
     const code = new FormData(e.target).get('code').trim().toUpperCase();
     const { error } = await supabase.rpc('claim_pairing', { p_code: code });
-    if (error) { console.error(error); return toast(friendlyError(error), true); }
+    if (error) { logError(error); return toast(friendlyError(error), true); }
     toast('Device paired');
     renderDevices();
   };
@@ -982,7 +1058,7 @@ async function provisionDevice(deviceUid, data) {
     await secrets.provisionDevice(currentProfileId, deviceUid, d.public_key);
     toast('Content key sent to the device.');
   } catch (err) {
-    console.error(err);
+    logError(err);
     toast(
       err instanceof CloudCryptoError
         ? 'Unlock this profile in Security before provisioning.'
@@ -1000,14 +1076,14 @@ async function renameDevice(id, data) {
     .from('devices')
     .update({ label: label.trim() })
     .eq('device_uid', id);
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   renderDevices();
 }
 
 async function revokeDevice(id) {
   if (!confirm('Revoke this device? It will stop syncing.')) return;
   const { error } = await supabase.from('devices').delete().eq('device_uid', id);
-  if (error) { console.error(error); return toast(friendlyError(error), true); }
+  if (error) { logError(error); return toast(friendlyError(error), true); }
   renderDevices();
 }
 
@@ -1051,7 +1127,7 @@ async function deleteAccount() {
   button.textContent = 'Deleting…';
   const { error } = await supabase.rpc('delete_account');
   if (error) {
-    console.error(error);
+    logError(error);
     button.disabled = false;
     button.textContent = 'Delete cloud account';
     return toast(friendlyError(error), true);

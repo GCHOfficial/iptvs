@@ -19,23 +19,61 @@ import 'source_identity_migration.dart';
 /// (`errcode check_violation`, e.g. "iptvs: too many favorites (max 200000)").
 const _kServerMessagePrefix = 'iptvs: ';
 
-/// A short, safe-to-display message for a cloud sync failure. Never uses
-/// [Exception.toString] on a [PostgrestException]: it includes the `details`
-/// field, which for a failing-row constraint violation can contain the row's
-/// raw data (including credentials embedded in provider URLs). Only
-/// `.message` is shown, and even that is run through [redactText] in case a
-/// server message ever embeds a URL.
+/// How PostgREST/Postgres phrase a permission or RLS denial. Mirrors the panel's
+/// `PERMISSION_ERROR_RE` (panel/src/validate.js): the raw text names tables and
+/// policies, so it is reduced to "not allowed" rather than shown.
+final _kPermissionErrorRe = RegExp(
+  r'permission denied|row-level security|not allowed|rls',
+  caseSensitive: false,
+);
+
+/// Shown for a server-side failure this client has no specific wording for.
+const _kGenericServerError = 'Cloud sync failed. Please try again.';
+
+/// Shown for a failure that isn't a recognised server error at all (typically a
+/// socket/TLS/timeout failure on the way out).
+const _kGenericClientError =
+    'Cloud sync failed. Check your connection and try again.';
+
+/// A short, safe-to-display message for a cloud sync failure.
+///
+/// The contract mirrors the panel's `friendlyError` (panel/src/validate.js), and
+/// deliberately **genericises** anything the server wasn't explicitly asked to
+/// author. Only three things reach the user:
+///
+/// 1. `iptvs: `-prefixed messages — the server's own validation text, which the
+///    migrations guarantee never interpolates payload values.
+/// 2. A permission/RLS denial, collapsed to "Not allowed."
+/// 3. A [CloudPushBlockedException] — a *client*-authored constant.
+///
+/// Everything else becomes a static generic string. This matters because a raw
+/// Postgres message can carry row data of its own (e.g. `duplicate key value
+/// violates unique constraint …`, which names the conflicting values on some
+/// constraint types) — [redactText] scrubs URL-shaped credentials but cannot
+/// know that a bare token *is* a credential. `details`/`hint` are never read at
+/// all: for a failing-row constraint violation they contain the whole row.
 String friendlyCloudError(Object e) {
+  // Client-authored, static text — safe verbatim, and the only way the
+  // locked/downgraded push explanation reaches the user.
+  if (e is CloudPushBlockedException) return e.message;
   final String raw;
   if (e is PostgrestException) {
     final message = e.message;
-    raw = message.startsWith(_kServerMessagePrefix)
-        ? message.substring(_kServerMessagePrefix.length)
-        : message;
+    if (message.startsWith(_kServerMessagePrefix)) {
+      raw = message.substring(_kServerMessagePrefix.length);
+    } else if (_kPermissionErrorRe.hasMatch(message)) {
+      return 'Not allowed.';
+    } else {
+      return _kGenericServerError;
+    }
   } else if (e is AuthException) {
+    // GoTrue messages are a fixed, server-authored set ("Anonymous sign-ins are
+    // disabled", "Invalid login credentials") that never carry row data, and
+    // they are the only actionable text a pairing failure has. Kept verbatim
+    // (still redacted) on purpose — see test/cloud_sync_test.dart.
     raw = e.message;
   } else {
-    return 'Cloud sync failed. Check your connection and try again.';
+    return _kGenericClientError;
   }
   return redactText(raw);
 }
@@ -109,6 +147,123 @@ const _favoriteKinds = [
 ///   the user unlocks by opening the panel.
 enum CloudCryptoStatus { off, ready, locked }
 
+/// A push refused by this device's own E2EE state (locked, or a detected
+/// downgrade) rather than by the server. Its [message] is a client-authored
+/// constant, so [friendlyCloudError] renders it verbatim.
+///
+/// Extends [CloudCryptoException] so existing `on CloudCryptoException` handlers
+/// keep catching it.
+class CloudPushBlockedException extends CloudCryptoException {
+  const CloudPushBlockedException(super.message);
+}
+
+/// The resolved E2EE state of a profile, with *why* it is what it is.
+///
+/// [downgraded] is the sticky-state verdict: this device has previously seen the
+/// profile end-to-end encrypted, but the server now claims otherwise (E2EE off,
+/// the crypto RPCs suddenly missing, or an older `ck_version` than this device
+/// has already unwrapped). It is always paired with
+/// [CloudCryptoStatus.locked] — fail closed — because the alternative is
+/// exactly the attack: a backend that answers `{enabled: false}` and collects
+/// every client's credentials in plaintext.
+class CloudCryptoState {
+  final CloudCryptoStatus status;
+  final bool downgraded;
+
+  const CloudCryptoState({required this.status, this.downgraded = false});
+}
+
+/// The user-facing explanation of a detected downgrade. Deliberately distinct
+/// from [kCloudE2eeLockedMessage]: "not set up yet" and "the encryption this
+/// profile had has disappeared" call for different user action.
+const kCloudE2eeDowngradedMessage =
+    'This profile was end-to-end encrypted, but the server now reports it as '
+    'off (or at an older key). Nothing is being sent in the clear. Open the '
+    'panel and verify this profile\'s Security settings.';
+
+/// The user-facing message shown when push is blocked on a locked E2EE device.
+const kCloudE2eeLockedMessage =
+    'This profile is end-to-end encrypted. Open the panel and unlock it to '
+    'finish setting up this device.';
+
+/// This device's **sticky** record of a cloud profile's E2EE state — the whole
+/// point of which is that it is not re-derived from the server on each call.
+///
+/// - [seenEnabled] is set the first time `get_crypto_state` reports the profile
+///   as encrypted. It is server-asserted (so a hostile backend could set it
+///   spuriously) but it can only ever *tighten* behaviour, never loosen it.
+/// - [ckVersion] is a monotonic high-water mark recorded **only after a content
+///   key at that version was successfully unwrapped** with this device's private
+///   key. That unwrap is the authentication: the server cannot mint a device
+///   wrap at a version it doesn't hold the CK for, so it cannot inflate this
+///   number to wedge the device — it can only replay an older one, which is what
+///   the high-water mark rejects.
+class E2eeMark {
+  final bool seenEnabled;
+  final int ckVersion;
+
+  const E2eeMark({this.seenEnabled = false, this.ckVersion = 0});
+
+  /// Nothing known about this profile yet.
+  static const none = E2eeMark();
+
+  /// True once anything is worth persisting.
+  bool get isSet => seenEnabled || ckVersion > 0;
+
+  E2eeMark merge({bool? seenEnabled, int? ckVersion}) => E2eeMark(
+    seenEnabled: this.seenEnabled || (seenEnabled ?? false),
+    // Monotonic: a lower reported version never lowers the mark.
+    ckVersion: ckVersion == null || ckVersion < this.ckVersion
+        ? this.ckVersion
+        : ckVersion,
+  );
+}
+
+/// Whether the E2EE state the server *claims* contradicts what this device has
+/// already established for the profile. Pure (no network, no storage).
+///
+/// Two shapes of the same attack:
+/// - **Downgrade to plaintext** — the server says E2EE is off (or answers
+///   "function does not exist", i.e. [serverEnabled] false) for a profile this
+///   device has seen encrypted. Trusting that answer makes the device push
+///   provider credentials and metadata API keys as `format` 0.
+/// - **State rollback** — the server still says E2EE is on, but at a
+///   `ck_version` older than one this device has already unwrapped, which is the
+///   setup for pinning it to a revoked content-key generation.
+///
+/// A legitimate "disable E2EE" from the panel is indistinguishable from the
+/// first case *by construction* (that is the whole difficulty), so it also lands
+/// here: the device stays fail-closed until the user clears the mark via
+/// [CloudSync.acknowledgeE2eeDowngrade] or unpairs.
+bool isE2eeDowngrade({
+  required bool serverEnabled,
+  required int serverCkVersion,
+  required E2eeMark mark,
+}) {
+  if (!serverEnabled) return mark.isSet;
+  return serverCkVersion < mark.ckVersion;
+}
+
+/// Whether a `device_ck` row's version is older than it is allowed to be.
+///
+/// [serverCkVersion] (from `get_crypto_state`) is treated as a **floor**, not as
+/// a fallback: the two RPCs were never compared before, so a backend serving a
+/// *consistent* pre-rotation bundle (old `device_ck` row plus old
+/// `source_secrets` envelopes, all at the same older version) got the device to
+/// unwrap and happily use a **revoked** content key. The `ckv`-in-AAD binding
+/// stops generations being *mixed*; it establishes no freshness on its own.
+/// [watermark] adds freshness that survives both RPCs lying, since it is only
+/// ever advanced by a successful unwrap.
+///
+/// A row *newer* than the reported state is allowed: that is the benign race
+/// where the panel rotates the key between the two calls.
+bool isCkVersionRollback({
+  required int rowCkVersion,
+  required int serverCkVersion,
+  required int watermark,
+}) =>
+    rowCkVersion < serverCkVersion || rowCkVersion < watermark;
+
 /// Whether [e] is a "function does not exist" error from calling an RPC that a
 /// pre-migration backend doesn't have yet. Such a call must degrade to "no cloud
 /// secrets available", never crash the sync.
@@ -141,6 +296,15 @@ Future<Map<String, String>> decodeSecretEntry({
   final format = entry['format'];
   final payload = entry['payload'];
   if (format == 0) {
+    // Plaintext is only ever accepted for a profile this device believes is
+    // NOT encrypted. On an encrypted profile a `format` 0 entry is either the
+    // server contradicting itself or an active backend feeding the device
+    // attacker-chosen values — and a source secret includes `playlistUrl`,
+    // i.e. which server the player connects to. Under real E2EE those bytes
+    // would simply fail to decrypt, so refusing them here restores that
+    // outcome: empty → the defensive local overlay keeps the credential the
+    // device already holds.
+    if (status != CloudCryptoStatus.off) return const {};
     if (payload is! Map) return const {};
     return {
       for (final e in payload.entries) e.key.toString(): e.value?.toString() ?? '',
@@ -170,8 +334,15 @@ Future<Map<String, String>> decodeSecretEntry({
 /// preserve whatever it has stored (never blank it). Pure (crypto only).
 ///
 /// E2EE [ready] → `format` 1 (encrypted under [contentKey]); E2EE [off] →
-/// `format` 0 (plaintext). [locked] must never reach here (push is disabled);
-/// it is treated as [off] defensively but callers guard first.
+/// `format` 0 (plaintext).
+///
+/// **[locked] throws** [CloudCryptoException]. Both callers gate on the status
+/// before getting here, so this branch is unreachable today — but a defensive
+/// branch in a fail-closed design must not emit plaintext. The old "treated as
+/// off defensively" behaviour would have put the credentials into a `format` 0
+/// element; the server would have rejected the write, but the plaintext would
+/// already have left the device. Same for [ready] with a null [contentKey]:
+/// there is nothing to encrypt with, so refuse rather than downgrade.
 Future<Map<String, dynamic>?> buildSecretElement({
   required Map<String, String> secret,
   required CloudCryptoStatus status,
@@ -180,8 +351,21 @@ Future<Map<String, dynamic>?> buildSecretElement({
   required List<int> aad,
   List<int>? ivOverride,
 }) async {
+  // Checked first: an empty secret is "the device doesn't know this one", which
+  // sends no element at all (the server preserves what it has). No plaintext is
+  // involved, so it is safe even in a locked/downgraded state.
   if (secret.isEmpty) return null;
-  if (status == CloudCryptoStatus.ready && contentKey != null) {
+  if (status == CloudCryptoStatus.locked) {
+    throw const CloudCryptoException(
+      'refusing to encode a secret while the profile is locked',
+    );
+  }
+  if (status == CloudCryptoStatus.ready) {
+    if (contentKey == null) {
+      throw const CloudCryptoException(
+        'refusing to encode a secret without a content key',
+      );
+    }
     final iv = ivOverride ?? randomBytes(12);
     final envelope = await encryptSecretEnvelope(
       secret: secret,
@@ -260,6 +444,13 @@ class CloudSync {
   /// on par with the provider credentials already stored here.
   static const _kDevicePriv = 'cloud_device_priv_key';
   static const _kDevicePub = 'cloud_device_pub_key';
+
+  /// Sticky per-profile E2EE marks (see [E2eeMark]), as a JSON object
+  /// `{"<profile_id>": {"seen": true, "ckv": 3}}`. Deliberately in the keychain
+  /// next to the device key pair rather than in prefs: it is a security
+  /// decision input, and prefs are trivially editable on a rooted device.
+  /// Cleared wholesale by [unpair].
+  static const _kE2eeMarks = 'cloud_e2ee_marks';
 
   CloudSync({
     SupabaseClient? client,
@@ -544,7 +735,7 @@ class CloudSync {
   Future<int> pushSources(SourceStore store, String profileId) async {
     final crypto = await _resolveCryptoState(profileId);
     if (crypto.status == CloudCryptoStatus.locked) {
-      throw const CloudCryptoException(_kLockedPushMessage);
+      throw CloudPushBlockedException(crypto.blockedPushMessage);
     }
     final all = await store.list();
     final activeOld = await store.activeId();
@@ -608,7 +799,7 @@ class CloudSync {
   Future<void> pushMetadata(SourceStore store, String profileId) async {
     final crypto = await _resolveCryptoState(profileId);
     if (crypto.status == CloudCryptoStatus.locked) {
-      throw const CloudCryptoException(_kLockedPushMessage);
+      throw CloudPushBlockedException(crypto.blockedPushMessage);
     }
     final config = await store.metadataConfig();
     final element = await buildSecretElement(
@@ -667,6 +858,11 @@ class CloudSync {
     }
     await _storage.delete(key: _kCloudIds);
     await _storage.delete(key: _kProfileId);
+    // The sticky E2EE marks are scoped to the account we are leaving; keeping
+    // them would fail-close a *different* account's profile that happens to
+    // reuse an id. (Unpairing is an explicit user action, so this is not a
+    // server-triggerable reset.)
+    await _storage.delete(key: _kE2eeMarks);
     final id = deviceId;
     if (id == null) return;
     try {
@@ -687,14 +883,47 @@ class CloudSync {
 
   /// The E2EE state of [profileId] as seen by this device, for the sync screen's
   /// status line and to gate push. Degrades to [CloudCryptoStatus.off] against a
-  /// pre-migration backend.
+  /// pre-migration backend — unless this device has already seen the profile
+  /// encrypted, in which case it fails closed to [CloudCryptoStatus.locked]
+  /// (see [cryptoState] for the reason distinction).
   Future<CloudCryptoStatus> cryptoStatus(String profileId) async =>
       (await _resolveCryptoState(profileId)).status;
+
+  /// Like [cryptoStatus] but keeps *why*: a locked device that has merely never
+  /// been provisioned is a different user story from one whose profile the
+  /// server has downgraded. UI should render [kCloudE2eeDowngradedMessage] for
+  /// the latter and offer [acknowledgeE2eeDowngrade].
+  Future<CloudCryptoState> cryptoState(String profileId) async {
+    final resolved = await _resolveCryptoState(profileId);
+    return CloudCryptoState(
+      status: resolved.status,
+      downgraded: resolved.downgraded,
+    );
+  }
+
+  /// Clear this device's sticky E2EE mark for [profileId], accepting whatever
+  /// the server now reports.
+  ///
+  /// This is the *only* way out of a detected downgrade short of unpairing, and
+  /// it must stay an explicit user action: a legitimate "disable end-to-end
+  /// encryption" in the panel is, from the device's side, byte-for-byte the
+  /// attack this mark exists to catch. Nothing the backend can say may clear it.
+  Future<void> acknowledgeE2eeDowngrade(String profileId) async {
+    final marks = await _readE2eeMarks();
+    if (marks.remove(profileId) == null) return;
+    await _writeE2eeMarks(marks);
+  }
 
   /// Resolve crypto state + (when [ready]) the unwrapped content key. Never
   /// throws for an expected condition: a missing RPC or a missing/undecryptable
   /// CK becomes [off]/[locked], not an exception.
+  ///
+  /// Every "off"/"proceed" decision here is cross-checked against this device's
+  /// sticky [E2eeMark], because the server is not trusted on its own E2EE state:
+  /// the plaintext-downgrade and content-key-rollback paths are both a backend
+  /// simply answering with older/emptier truth than it previously did.
   Future<_CryptoState> _resolveCryptoState(String profileId) async {
+    final mark = await _readE2eeMark(profileId);
     Map<String, dynamic>? state;
     try {
       final res = await _client.rpc(
@@ -703,12 +932,29 @@ class CloudSync {
       );
       state = res == null ? null : Map<String, dynamic>.from(res as Map);
     } on PostgrestException catch (e) {
-      if (isMissingFunctionError(e)) return const _CryptoState.off();
+      // A pre-migration backend has no crypto RPCs at all — but so does one
+      // pretending not to, which is just the downgrade by another route.
+      if (isMissingFunctionError(e)) {
+        return mark.isSet
+            ? const _CryptoState.downgraded()
+            : const _CryptoState.off();
+      }
       rethrow;
     }
     final enabled = state?['enabled'] == true;
     final ckVersion = (state?['ck_version'] as int?) ?? 0;
+    if (isE2eeDowngrade(
+      serverEnabled: enabled,
+      serverCkVersion: ckVersion,
+      mark: mark,
+    )) {
+      return const _CryptoState.downgraded();
+    }
     if (!enabled) return const _CryptoState.off();
+    // Remember that this profile is encrypted *before* attempting the unwrap:
+    // a device that never gets provisioned must still refuse a later "it's off
+    // now" answer.
+    await _markE2eeSeen(profileId);
 
     // E2EE is on: register this device's public key (idempotent) and try to
     // unwrap the content key. Any failure downgrades to locked (fail closed).
@@ -719,7 +965,17 @@ class CloudSync {
       if (ckRow == null) {
         return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
       }
-      final rowCkv = (ckRow['ck_version'] as int?) ?? ckVersion;
+      // No `?? ckVersion` fallback: a row without a version cannot be checked
+      // for freshness, so it is not usable.
+      final rowCkv = ckRow['ck_version'] as int?;
+      if (rowCkv == null ||
+          isCkVersionRollback(
+            rowCkVersion: rowCkv,
+            serverCkVersion: ckVersion,
+            watermark: mark.ckVersion,
+          )) {
+        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+      }
       final wrapped = _asJsonMap(ckRow['wrapped_ck']);
       if (wrapped == null) {
         return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
@@ -734,6 +990,11 @@ class CloudSync {
         ckVersion: rowCkv,
         aad: deviceWrapAad(profileId, uid, rowCkv),
       );
+      // Only now is `rowCkv` authenticated — the wrap decrypted under this
+      // device's private key, which the server cannot forge at a version whose
+      // CK it doesn't hold. Safe to advance the high-water mark; advancing it
+      // from an unverified number would hand the server a permanent lockout.
+      await _recordCkVersion(profileId, rowCkv);
       return _CryptoState(
         status: CloudCryptoStatus.ready,
         ckVersion: rowCkv,
@@ -748,6 +1009,65 @@ class CloudSync {
       rethrow;
     }
   }
+
+  // ── sticky E2EE marks ─────────────────────────────────────────────────────
+
+  Future<Map<String, E2eeMark>> _readE2eeMarks() async {
+    final raw = await _storage.read(key: _kE2eeMarks);
+    if (raw == null || raw.isEmpty) return <String, E2eeMark>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return <String, E2eeMark>{};
+      return {
+        for (final e in decoded.entries)
+          if (e.value is Map)
+            e.key.toString(): E2eeMark(
+              seenEnabled: (e.value as Map)['seen'] == true,
+              ckVersion: ((e.value as Map)['ckv'] as int?) ?? 0,
+            ),
+      };
+    } catch (_) {
+      // A corrupt mark store must not brick sync; the worst case is that the
+      // sticky protection restarts from "nothing known".
+      return <String, E2eeMark>{};
+    }
+  }
+
+  Future<E2eeMark> _readE2eeMark(String profileId) async =>
+      (await _readE2eeMarks())[profileId] ?? E2eeMark.none;
+
+  Future<void> _writeE2eeMarks(Map<String, E2eeMark> marks) => _storage.write(
+    key: _kE2eeMarks,
+    value: jsonEncode({
+      for (final e in marks.entries)
+        if (e.value.isSet)
+          e.key: {'seen': e.value.seenEnabled, 'ckv': e.value.ckVersion},
+    }),
+  );
+
+  /// Merge [seenEnabled]/[ckVersion] into the profile's mark. Both directions
+  /// only ever tighten (see [E2eeMark.merge]).
+  Future<void> _updateE2eeMark(
+    String profileId, {
+    bool? seenEnabled,
+    int? ckVersion,
+  }) async {
+    final marks = await _readE2eeMarks();
+    final current = marks[profileId] ?? E2eeMark.none;
+    final next = current.merge(seenEnabled: seenEnabled, ckVersion: ckVersion);
+    if (next.seenEnabled == current.seenEnabled &&
+        next.ckVersion == current.ckVersion) {
+      return; // no-op writes would hit the keychain on every pull
+    }
+    marks[profileId] = next;
+    await _writeE2eeMarks(marks);
+  }
+
+  Future<void> _markE2eeSeen(String profileId) =>
+      _updateE2eeMark(profileId, seenEnabled: true);
+
+  Future<void> _recordCkVersion(String profileId, int ckVersion) =>
+      _updateE2eeMark(profileId, seenEnabled: true, ckVersion: ckVersion);
 
   /// Fetch the per-profile secrets bundle (`{sources:{id:{format,payload}},
   /// metadata:{...}|null}`), or null against a pre-migration backend.
@@ -818,11 +1138,6 @@ class CloudSync {
       _storage.write(key: _kCloudIds, value: ids.join(','));
 }
 
-/// The user-facing message shown when push is blocked on a locked E2EE device.
-const _kLockedPushMessage =
-    'This profile is end-to-end encrypted. Open the panel and unlock it to '
-    'finish setting up this device.';
-
 /// Coerce a jsonb-or-JSON-string value to a `Map<String, dynamic>`, or null.
 Map<String, dynamic>? _asJsonMap(Object? value) {
   if (value == null) return null;
@@ -844,14 +1159,33 @@ class _CryptoState {
   final int ckVersion;
   final List<int>? ck;
 
+  /// Set when the state was forced to [CloudCryptoStatus.locked] because the
+  /// server contradicted this device's sticky [E2eeMark] (see
+  /// [isE2eeDowngrade]) rather than because the device simply has no key yet.
+  final bool downgraded;
+
+  // Only [_CryptoState.downgraded] sets that flag, so it is not a parameter here.
   const _CryptoState({
     required this.status,
     this.ckVersion = 0,
     this.ck,
-  });
+  }) : downgraded = false;
 
   const _CryptoState.off()
       : status = CloudCryptoStatus.off,
         ckVersion = 0,
-        ck = null;
+        ck = null,
+        downgraded = false;
+
+  /// Locked because the server's claim regressed. Carries no ck_version on
+  /// purpose: nothing the server just said about versions is trustworthy.
+  const _CryptoState.downgraded()
+      : status = CloudCryptoStatus.locked,
+        ckVersion = 0,
+        ck = null,
+        downgraded = true;
+
+  /// The message a blocked push explains itself with.
+  String get blockedPushMessage =>
+      downgraded ? kCloudE2eeDowngradedMessage : kCloudE2eeLockedMessage;
 }

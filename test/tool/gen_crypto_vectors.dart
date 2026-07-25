@@ -321,6 +321,69 @@ Future<void> main() async {
   }
   out['ecdhP256'] = ecdh;
 
+  // ── ECDH P-256: negative / malformed public-key vectors ───────────────────
+  // Both `ecdhSharedX` implementations validate a peer public key before ever
+  // multiplying (65-byte 0x04 prefix, x < p, y < p, on-curve) — this is what
+  // closes the classic invalid-curve attack. It is easy for a refactor to drop
+  // silently since nothing else exercises it, so pin it here. Each case is
+  // verified in THIS generator (not just documented): `invalidCase` calls
+  // `ecdhSharedX` and aborts the run if it does NOT throw, so a
+  // silently-broken validator fails vector generation instead of shipping a
+  // fixture that asserts nothing.
+  final ecdhInvalid = <Map<String, dynamic>>[];
+  final invalidPrivateKeyHex = '01' * 32;
+  void invalidCase(String name, String note, String peerPublicKeyHex) {
+    var threw = false;
+    try {
+      ecdhSharedX(unhex(invalidPrivateKeyHex), unhex(peerPublicKeyHex));
+    } on CloudCryptoException {
+      threw = true;
+    }
+    if (!threw) {
+      stderrThrow(
+        'expected ecdhSharedX to reject invalid vector [$name]: $note',
+      );
+    }
+    ecdhInvalid.add({
+      'name': name,
+      'source': 'self-generated (negative — decoding MUST throw)',
+      'privateKey_hex': invalidPrivateKeyHex,
+      'peerPublicKey_hex': peerPublicKeyHex,
+      'note': note,
+    });
+  }
+
+  invalidCase(
+    'off-curve-point',
+    '0x04 prefix with (x=1, y=1); (1,1) is not a point on P-256.',
+    '04${'00' * 31}01${'00' * 31}01',
+  );
+  invalidCase(
+    'point-at-infinity-encoding',
+    '0x04 followed by 64 zero bytes. (0,0) is not on P-256 (b != 0 in the '
+        'curve equation), so this must be rejected as off-curve rather than '
+        'silently accepted as some degenerate point.',
+    '04${'00' * 64}',
+  );
+  invalidCase(
+    'x-out-of-range',
+    'x = 0xff...ff, which is >= the field prime p; decoding must reject this '
+        'before it ever reaches the on-curve check.',
+    '04${'ff' * 32}${'00' * 31}01',
+  );
+  invalidCase(
+    'compressed-point-prefix',
+    '0x02 compressed-point prefix. This implementation only accepts the '
+        'uncompressed 0x04 point format.',
+    '02${'00' * 31}01${'00' * 31}01',
+  );
+  invalidCase(
+    'wrong-length-key',
+    '64 bytes instead of the required 65 (no leading format-tag byte).',
+    '00' * 64,
+  );
+  out['ecdhP256Invalid'] = ecdhInvalid;
+
   // ── device-wrapped CK (end-to-end) ─────────────────────────────────────────
   {
     const profileId = '11111111-1111-4111-8111-111111111111';
