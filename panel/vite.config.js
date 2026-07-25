@@ -16,6 +16,15 @@ export default defineConfig(({ mode }) => {
   // third-party origins. Injected into the built index.html only — the dev
   // server (with its inline HMR client + websocket) is intentionally left
   // unconstrained. `vite preview` serves the built output, so it carries the CSP.
+  //
+  // No `frame-ancestors` here on purpose. GitHub Pages serves static files and
+  // cannot set response headers, so this policy can only be delivered by a
+  // <meta http-equiv> — and `frame-ancestors` is ignored by spec when delivered
+  // that way (browsers log a console warning and enforce nothing). Listing it
+  // advertised clickjacking protection the panel did not actually have;
+  // `src/framebust.js` provides the real thing. If the panel ever moves to a
+  // host that can send headers, serve this same policy as a real
+  // Content-Security-Policy header and add `frame-ancestors 'none'` back there.
   const csp = [
     "default-src 'self'",
     "script-src 'self'",
@@ -25,7 +34,6 @@ export default defineConfig(({ mode }) => {
     `connect-src ${connectSrc}`,
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
     "object-src 'none'",
   ].join('; ');
 

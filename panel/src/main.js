@@ -1,3 +1,6 @@
+// MUST stay first: refuses to evaluate the rest of the entry graph when the
+// panel is framed (the meta CSP cannot enforce `frame-ancestors`).
+import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
 import {
   validateSource,
