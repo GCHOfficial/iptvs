@@ -81,15 +81,86 @@ export function isMissingFunctionError(error) {
   );
 }
 
+// ── sticky E2EE state ─────────────────────────────────────────────────────────
+//
+// The server is NOT trusted on whether a profile is encrypted. `get_crypto_state`
+// decides whether the write path encrypts, so a backend answering
+// `{ enabled: false }` (or suddenly 404-ing the crypto RPCs) would get this panel
+// to write every provider credential and API key back as plaintext `format` 0.
+// The server-side format gate is the stated defence, but it lives in the same
+// trust domain as the attacker.
+//
+// So: once a profile is *seen* encrypted, that fact is remembered here and only
+// an explicit local action can forget it. localStorage is the right store — it
+// is per-origin, survives reloads, and is exactly as trustworthy as the panel
+// code itself (an XSS'd panel is already outside the threat boundary).
+//
+// A legitimate `disableE2ee` clears the mark for the browser that performed it;
+// any OTHER browser sees the same signal as an attack and must be acknowledged
+// through `acknowledgeDowngrade` (wired to a Security-tab button).
+const E2EE_SEEN_KEY = 'iptvs_e2ee_seen';
+
+function readSeen() {
+  try {
+    const raw = localStorage.getItem(E2EE_SEEN_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return []; // corrupt/unavailable storage restarts from "nothing known"
+  }
+}
+
+function writeSeen(ids) {
+  try {
+    localStorage.setItem(E2EE_SEEN_KEY, JSON.stringify(ids));
+  } catch {
+    // Private-mode / quota failure: the sticky protection degrades to
+    // per-session only. Never fail the operation over it.
+  }
+}
+
+// Whether this browser has ever seen `profileId` end-to-end encrypted.
+export function wasE2eeSeen(profileId) {
+  return readSeen().includes(profileId);
+}
+
+export function markE2eeSeen(profileId) {
+  const ids = readSeen();
+  if (ids.includes(profileId)) return;
+  ids.push(profileId);
+  writeSeen(ids);
+}
+
+// Forget the mark. Called by `disableE2ee` (this browser just turned it off, so
+// the state change is authenticated by the user's own action) and by the
+// Security tab's explicit acknowledgement.
+export function acknowledgeDowngrade(profileId) {
+  const ids = readSeen();
+  const next = ids.filter((id) => id !== profileId);
+  if (next.length !== ids.length) writeSeen(next);
+}
+
 // ── RPC wrappers ──────────────────────────────────────────────────────────────
 
+// Returns `{ enabled, ck_version, missing?, downgraded? }`. `downgraded` is set
+// when the server claims the profile is NOT encrypted but this browser has seen
+// that it was: callers must refuse to write plaintext secrets in that state.
 export async function getCryptoState(profileId) {
   const { data, error } = await supabase.rpc('get_crypto_state', { p_profile_id: profileId });
   if (error) {
-    if (isMissingFunctionError(error)) return { enabled: false, missing: true };
+    if (isMissingFunctionError(error)) {
+      // "The RPC doesn't exist" is a legitimate pre-migration answer AND a
+      // trivial way to fake a downgrade, so the mark decides which it is.
+      return { enabled: false, missing: true, downgraded: wasE2eeSeen(profileId) };
+    }
     throw error;
   }
-  return data ?? { enabled: false };
+  const state = data ?? { enabled: false };
+  if (state.enabled) {
+    markE2eeSeen(profileId);
+    return state;
+  }
+  return { ...state, enabled: false, downgraded: wasE2eeSeen(profileId) };
 }
 
 export async function getSecrets(profileId) {
@@ -174,9 +245,17 @@ export async function loadDecodedSecrets(profileId) {
 // ── encode (write side) ───────────────────────────────────────────────────────
 
 // Build a { format, payload } secret element for a write, honoring the profile's
-// E2EE state. Throws CloudCryptoError('locked') if E2EE is on but not unlocked.
+// E2EE state. Throws CloudCryptoError('locked') if E2EE is on but not unlocked,
+// and CloudCryptoError('downgraded') if the server claims it is off for a
+// profile this browser has seen encrypted.
 async function encodeSecretElement(profileId, kind, id, secretMap, cryptoState) {
   if (!cryptoState.enabled) {
+    // Re-check the mark here rather than trusting the passed-in state: this is
+    // the single place plaintext can leave the browser, so it fails closed on
+    // its own evidence even if a caller hands over a stale/forged state object.
+    if (cryptoState.downgraded || wasE2eeSeen(profileId)) {
+      throw new cc.CloudCryptoError('downgraded');
+    }
     return { format: 0, payload: secretMap };
   }
   const s = requireUnlocked(profileId);
@@ -261,6 +340,9 @@ export async function unlock(profileId, passphrase) {
     ckVersion: material.ck_version,
     aad,
   });
+  // A successful unwrap is proof the profile really is encrypted, so it is also
+  // the strongest place to (re-)assert the sticky mark.
+  markE2eeSeen(profileId);
   setSession(profileId, ck, material.ck_version);
 }
 
@@ -327,6 +409,7 @@ export async function enableE2ee(profileId, passphrase) {
     p_device_cks,
   });
   if (error) throw error;
+  markE2eeSeen(profileId);
   setSession(profileId, ck, ckVersion);
 }
 
@@ -373,6 +456,11 @@ export async function disableE2ee(profileId) {
     p_metadata_secret,
   });
   if (error) throw error;
+  // The user just turned E2EE off from this browser, so "the server says it is
+  // off" is now expected rather than suspicious. Other browsers/devices keep
+  // their own marks and must acknowledge the change themselves — that
+  // asymmetry is the point: only a local, human action clears the mark.
+  acknowledgeDowngrade(profileId);
   lock();
 }
 
@@ -511,7 +599,11 @@ export async function provisionDevice(profileId, deviceUid, publicKeyB64) {
 // Whether E2EE is on for a profile (gates the Devices tab provisioning UI).
 export async function deviceCryptoContext(profileId) {
   const state = await getCryptoState(profileId);
-  return { enabled: !!state.enabled, ckVersion: state.ck_version };
+  return {
+    enabled: !!state.enabled,
+    ckVersion: state.ck_version,
+    downgraded: !!state.downgraded,
+  };
 }
 
 // Authoritative per-device provisioning state for the Devices page, via the

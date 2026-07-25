@@ -119,6 +119,43 @@
       "note": "sharedX_hex is exactly 32 bytes; first byte is 00 and must be preserved (left-padded), not trimmed."
     }
   ],
+  "ecdhP256Invalid": [
+    {
+      "name": "off-curve-point",
+      "source": "self-generated (negative — decoding MUST throw)",
+      "privateKey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "peerPublicKey_hex": "0400000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001",
+      "note": "0x04 prefix with (x=1, y=1); (1,1) is not a point on P-256."
+    },
+    {
+      "name": "point-at-infinity-encoding",
+      "source": "self-generated (negative — decoding MUST throw)",
+      "privateKey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "peerPublicKey_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "note": "0x04 followed by 64 zero bytes. (0,0) is not on P-256 (b != 0 in the curve equation), so this must be rejected as off-curve rather than silently accepted as some degenerate point."
+    },
+    {
+      "name": "x-out-of-range",
+      "source": "self-generated (negative — decoding MUST throw)",
+      "privateKey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "peerPublicKey_hex": "04ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000000000000000000000000000000000000000000001",
+      "note": "x = 0xff...ff, which is >= the field prime p; decoding must reject this before it ever reaches the on-curve check."
+    },
+    {
+      "name": "compressed-point-prefix",
+      "source": "self-generated (negative — decoding MUST throw)",
+      "privateKey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "peerPublicKey_hex": "0200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001",
+      "note": "0x02 compressed-point prefix. This implementation only accepts the uncompressed 0x04 point format."
+    },
+    {
+      "name": "wrong-length-key",
+      "source": "self-generated (negative — decoding MUST throw)",
+      "privateKey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "peerPublicKey_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "note": "64 bytes instead of the required 65 (no leading format-tag byte)."
+    }
+  ],
   "deviceWrap": [
     {
       "name": "device-wrap-e2e",

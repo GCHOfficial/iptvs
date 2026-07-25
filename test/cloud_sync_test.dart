@@ -238,6 +238,57 @@ void main() {
       expect(friendlyCloudError(e), 'Invalid login credentials');
     });
 
+    test('genericises a raw Postgres message (no constraint text leaks)', () {
+      // The message half of a constraint violation is server-authored but NOT
+      // in the `iptvs: ` contract, so it is not shown: some constraint kinds
+      // name the offending values right in the message.
+      final e = PostgrestException(
+        message:
+            'duplicate key value violates unique constraint "source_secrets_pkey"',
+        code: '23505',
+        details: 'Key (source_id)=(123) already exists.',
+      );
+      final message = friendlyCloudError(e);
+      expect(message.contains('source_secrets_pkey'), isFalse);
+      expect(message.contains('duplicate key'), isFalse);
+      expect(message.contains('Key (source_id)'), isFalse);
+      expect(message, 'Cloud sync failed. Please try again.');
+    });
+
+    test('collapses a permission/RLS denial to "Not allowed."', () {
+      expect(
+        friendlyCloudError(
+          PostgrestException(
+            message: 'new row violates row-level security policy for table "sources"',
+            code: '42501',
+          ),
+        ),
+        'Not allowed.',
+      );
+      expect(
+        friendlyCloudError(
+          PostgrestException(message: 'permission denied for table devices'),
+        ),
+        'Not allowed.',
+      );
+    });
+
+    test('renders a client-authored push-blocked message verbatim', () {
+      // These are constants in cloud_sync.dart, never server text — they are
+      // the only way the locked/downgraded explanation reaches the user.
+      expect(
+        friendlyCloudError(
+          const CloudPushBlockedException(kCloudE2eeDowngradedMessage),
+        ),
+        kCloudE2eeDowngradedMessage,
+      );
+      // Still a CloudCryptoException, so existing handlers keep catching it.
+      expect(
+        const CloudPushBlockedException(kCloudE2eeLockedMessage),
+        isA<CloudCryptoException>(),
+      );
+    });
+
     test('falls back to a generic message for anything else', () {
       expect(
         friendlyCloudError(Exception('SocketException: some raw detail')),
@@ -363,6 +414,63 @@ void main() {
       expect(el['payload'], {'username': 'u', 'password': 'p'});
     });
 
+    test('throws rather than emitting plaintext while locked', () async {
+      // Unreachable today (both callers gate on the status first) and the
+      // server would reject a format-0 write on an E2EE profile — but by then
+      // the credentials would already have left the device. A defensive branch
+      // in a fail-closed design must not emit plaintext.
+      await expectLater(
+        buildSecretElement(
+          secret: const {'username': 'u', 'password': 'p'},
+          status: CloudCryptoStatus.locked,
+          contentKey: null,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        throwsA(isA<CloudCryptoException>()),
+      );
+      // Even if a content key were somehow present, locked stays a refusal.
+      await expectLater(
+        buildSecretElement(
+          secret: const {'password': 'p'},
+          status: CloudCryptoStatus.locked,
+          contentKey: ck,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        throwsA(isA<CloudCryptoException>()),
+      );
+    });
+
+    test('throws when ready but the content key is missing', () async {
+      await expectLater(
+        buildSecretElement(
+          secret: const {'password': 'p'},
+          status: CloudCryptoStatus.ready,
+          contentKey: null,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        throwsA(isA<CloudCryptoException>()),
+      );
+    });
+
+    test('an unknown secret is still absent (null) while locked', () async {
+      // "Absent" sends no element at all, so the server preserves what it has —
+      // no plaintext is involved, and blocking it would needlessly break a
+      // broad-only push.
+      expect(
+        await buildSecretElement(
+          secret: const {},
+          status: CloudCryptoStatus.locked,
+          contentKey: null,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        isNull,
+      );
+    });
+
     test('format 1 (encrypted) when E2EE is ready, and round-trips', () async {
       final el = await buildSecretElement(
         secret: const {'username': 'u', 'password': 'p'},
@@ -439,6 +547,38 @@ void main() {
       expect(map, isEmpty);
     });
 
+    test('refuses a format 0 entry on an encrypted profile', () async {
+      // A backend that serves plaintext to a device that believes the profile
+      // is encrypted is feeding it attacker-chosen values — and a source secret
+      // includes `playlistUrl`, i.e. which server the player connects to. Under
+      // real E2EE those bytes would not decrypt; empty reproduces that, and the
+      // defensive local overlay then keeps the credential the device holds.
+      const entry = {
+        'format': 0,
+        'payload': {'playlistUrl': 'http://attacker.invalid/list.m3u'},
+      };
+      expect(
+        await decodeSecretEntry(
+          entry: entry,
+          status: CloudCryptoStatus.ready,
+          contentKey: ck,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        isEmpty,
+      );
+      expect(
+        await decodeSecretEntry(
+          entry: entry,
+          status: CloudCryptoStatus.locked,
+          contentKey: null,
+          ckVersion: 1,
+          aad: aad,
+        ),
+        isEmpty,
+      );
+    });
+
     test('format 1 with the wrong CK fails closed (throws)', () async {
       final el = await buildSecretElement(
         secret: const {'password': 'p'},
@@ -458,6 +598,138 @@ void main() {
         ),
         throwsA(isA<CloudCryptoException>()),
       );
+    });
+  });
+
+  // The client no longer trusts the server on its own E2EE state. These two
+  // predicates are the whole decision; _resolveCryptoState just wires them to
+  // the RPCs and to the keychain-persisted E2eeMark.
+  group('isE2eeDowngrade (server-asserted state vs. the sticky mark)', () {
+    test('a first-time off profile is genuinely off', () {
+      expect(
+        isE2eeDowngrade(
+          serverEnabled: false,
+          serverCkVersion: 0,
+          mark: E2eeMark.none,
+        ),
+        isFalse,
+      );
+    });
+
+    test('"E2EE is off now" on a profile seen encrypted is a downgrade', () {
+      // The plaintext downgrade: the backend answers {enabled:false} and every
+      // client pushes provider credentials as format 0.
+      expect(
+        isE2eeDowngrade(
+          serverEnabled: false,
+          serverCkVersion: 0,
+          mark: const E2eeMark(seenEnabled: true),
+        ),
+        isTrue,
+      );
+      // Same for a device that got as far as unwrapping a key, even if the
+      // "seen" flag were somehow absent.
+      expect(
+        isE2eeDowngrade(
+          serverEnabled: false,
+          serverCkVersion: 0,
+          mark: const E2eeMark(ckVersion: 2),
+        ),
+        isTrue,
+      );
+    });
+
+    test('a reported ck_version below the high-water mark is a rollback', () {
+      expect(
+        isE2eeDowngrade(
+          serverEnabled: true,
+          serverCkVersion: 1,
+          mark: const E2eeMark(seenEnabled: true, ckVersion: 2),
+        ),
+        isTrue,
+      );
+    });
+
+    test('same or newer ck_version proceeds normally', () {
+      for (final reported in [2, 3]) {
+        expect(
+          isE2eeDowngrade(
+            serverEnabled: true,
+            serverCkVersion: reported,
+            mark: const E2eeMark(seenEnabled: true, ckVersion: 2),
+          ),
+          isFalse,
+          reason: 'ck_version $reported must not read as a rollback',
+        );
+      }
+    });
+  });
+
+  group('isCkVersionRollback (device_ck freshness)', () {
+    test('a device_ck older than the reported state is rejected', () {
+      // The bug this closes: the row's own ck_version was taken as
+      // authoritative, so a consistent pre-rotation bundle (old device_ck + old
+      // envelopes, all at N-1) pinned the device to a REVOKED content key.
+      expect(
+        isCkVersionRollback(
+          rowCkVersion: 1,
+          serverCkVersion: 2,
+          watermark: 0,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a device_ck older than the high-water mark is rejected', () {
+      // Survives both RPCs lying in agreement: the watermark only ever advances
+      // after a successful unwrap, which the server cannot forge.
+      expect(
+        isCkVersionRollback(
+          rowCkVersion: 1,
+          serverCkVersion: 1,
+          watermark: 3,
+        ),
+        isTrue,
+      );
+    });
+
+    test('the current version is accepted', () {
+      expect(
+        isCkVersionRollback(
+          rowCkVersion: 3,
+          serverCkVersion: 3,
+          watermark: 3,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a newer row than the reported state is accepted (rotation race)', () {
+      // The panel can rotate between get_crypto_state and get_device_ck; that
+      // is forward motion, not a rollback.
+      expect(
+        isCkVersionRollback(
+          rowCkVersion: 4,
+          serverCkVersion: 3,
+          watermark: 3,
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('E2eeMark (monotonic, tighten-only)', () {
+    test('merge never lowers the ck_version or unsets seenEnabled', () {
+      const mark = E2eeMark(seenEnabled: true, ckVersion: 5);
+      expect(mark.merge(ckVersion: 3).ckVersion, 5);
+      expect(mark.merge(seenEnabled: false).seenEnabled, isTrue);
+      expect(mark.merge(ckVersion: 7).ckVersion, 7);
+    });
+
+    test('an empty mark reads as "nothing known"', () {
+      expect(E2eeMark.none.isSet, isFalse);
+      expect(const E2eeMark(seenEnabled: true).isSet, isTrue);
+      expect(const E2eeMark(ckVersion: 1).isSet, isTrue);
     });
   });
 
