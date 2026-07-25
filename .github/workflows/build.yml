@@ -155,6 +155,11 @@ jobs:
       - name: Exercise Windows updater rejection and rollback
         run: flutter test test/windows_update_script_test.dart
       - name: Build release (Windows x64)
+        # GITHUB_TOKEN lets windows/CMakeLists.txt authenticate the GitHub API
+        # call that resolves the latest libmpv (gpu-next) build, dodging the
+        # unauthenticated rate limit on shared runners.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: flutter build windows --release --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-windows-x64.zip

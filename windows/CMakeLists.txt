@@ -100,35 +100,129 @@ endif()
 # folder (it takes precedence). See windows/libmpv/README.md.
 set(LIBMPV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmpv")
 set(CUSTOM_LIBMPV "${LIBMPV_DIR}/libmpv-2.dll")
+# Optional pinned/mirrored override for reproducible or offline builds:
+#   -DLIBMPV_PLACEBO_URL=... [-DLIBMPV_PLACEBO_SHA256=...]  (or the same env vars)
+# Left unset, we resolve zhongfly's *latest* mpv-winbuild release at configure
+# time: zhongfly publishes daily and deletes old assets, so a fixed dated URL
+# rots within days (which is exactly what broke a pinned build). See
+# windows/libmpv/README.md.
+if(NOT DEFINED LIBMPV_PLACEBO_URL AND DEFINED ENV{LIBMPV_PLACEBO_URL})
+  set(LIBMPV_PLACEBO_URL "$ENV{LIBMPV_PLACEBO_URL}")
+endif()
+if(NOT DEFINED LIBMPV_PLACEBO_SHA256 AND DEFINED ENV{LIBMPV_PLACEBO_SHA256})
+  set(LIBMPV_PLACEBO_SHA256 "$ENV{LIBMPV_PLACEBO_SHA256}")
+endif()
+
 if(NOT EXISTS "${CUSTOM_LIBMPV}")
-  set(LIBMPV_PLACEBO_URL "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-06-24-2339eb7276/mpv-dev-x86_64-20260624-git-2339eb7276.7z")
-  set(LIBMPV_PLACEBO_SHA256 "51cd88560196d788b6410d571c2aa324a56cd5794300009f93ea7f2c35a930c9")
   set(LIBMPV_PLACEBO_ARCHIVE "${CMAKE_BINARY_DIR}/libmpv-placebo.7z")
   set(LIBMPV_PLACEBO_EXTRACT "${CMAKE_BINARY_DIR}/libmpv-placebo")
-  message(STATUS "Fetching libplacebo libmpv (gpu-next): ${LIBMPV_PLACEBO_URL}")
-  file(DOWNLOAD "${LIBMPV_PLACEBO_URL}" "${LIBMPV_PLACEBO_ARCHIVE}"
-    SHOW_PROGRESS
-    EXPECTED_HASH "SHA256=${LIBMPV_PLACEBO_SHA256}"
-    STATUS LIBMPV_DL_STATUS)
-  list(GET LIBMPV_DL_STATUS 0 LIBMPV_DL_CODE)
-  if(NOT LIBMPV_DL_CODE EQUAL 0)
-    message(WARNING "libmpv download failed (${LIBMPV_DL_STATUS}); HDR / Dolby "
-      "Vision will fall back to media_kit's bundled libmpv. See "
-      "windows/libmpv/README.md to vendor it manually.")
-  else()
-    file(MAKE_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}")
-    execute_process(
-      COMMAND "${CMAKE_COMMAND}" -E tar xzf "${LIBMPV_PLACEBO_ARCHIVE}"
-      WORKING_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}"
-      RESULT_VARIABLE LIBMPV_EXTRACT_RESULT)
-    file(GLOB_RECURSE LIBMPV_FOUND "${LIBMPV_PLACEBO_EXTRACT}/libmpv-2.dll")
-    if(LIBMPV_EXTRACT_RESULT EQUAL 0 AND LIBMPV_FOUND)
-      list(GET LIBMPV_FOUND 0 LIBMPV_FOUND_FIRST)
-      file(MAKE_DIRECTORY "${LIBMPV_DIR}")
-      file(COPY "${LIBMPV_FOUND_FIRST}" DESTINATION "${LIBMPV_DIR}")
-      message(STATUS "Vendored libmpv-2.dll -> ${CUSTOM_LIBMPV}")
+
+  # Optional auth header — dodges the unauthenticated GitHub API rate limit on
+  # shared CI runners. Set GITHUB_TOKEN in the build environment (CI provides it).
+  set(LIBMPV_API_HEADERS "")
+  if(DEFINED ENV{GITHUB_TOKEN} AND NOT "$ENV{GITHUB_TOKEN}" STREQUAL "")
+    set(LIBMPV_API_HEADERS HTTPHEADER "Authorization: Bearer $ENV{GITHUB_TOKEN}")
+  endif()
+
+  # Resolve the latest release's dev asset when no explicit URL was given.
+  if(NOT LIBMPV_PLACEBO_URL)
+    if(CMAKE_VERSION VERSION_LESS "3.19")
+      message(WARNING "CMake < 3.19 can't parse the release metadata to auto-fetch "
+        "libmpv; HDR / Dolby Vision falls back to media_kit's bundled libmpv. "
+        "Vendor windows/libmpv/libmpv-2.dll manually (see its README).")
     else()
-      message(WARNING "Could not extract libmpv-2.dll from the downloaded archive.")
+      set(LIBMPV_API_JSON "${CMAKE_BINARY_DIR}/mpv-winbuild-latest.json")
+      message(STATUS "Resolving latest libmpv (gpu-next) build from zhongfly/mpv-winbuild")
+      file(DOWNLOAD
+        "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest"
+        "${LIBMPV_API_JSON}"
+        ${LIBMPV_API_HEADERS}
+        STATUS LIBMPV_API_STATUS)
+      list(GET LIBMPV_API_STATUS 0 LIBMPV_API_CODE)
+      if(NOT LIBMPV_API_CODE EQUAL 0)
+        message(WARNING "Could not query the mpv-winbuild release list "
+          "(${LIBMPV_API_STATUS}); falling back to media_kit's bundled libmpv.")
+      else()
+        file(READ "${LIBMPV_API_JSON}" LIBMPV_RELEASE_JSON)
+        string(JSON LIBMPV_ASSET_COUNT ERROR_VARIABLE LIBMPV_JSON_ERR
+          LENGTH "${LIBMPV_RELEASE_JSON}" "assets")
+        # string(JSON) sets the error var to the literal "NOTFOUND" on success,
+        # which is itself a CMake false constant — so compare it explicitly
+        # rather than relying on if(<var>) truthiness.
+        if(NOT LIBMPV_JSON_ERR STREQUAL "NOTFOUND" OR NOT LIBMPV_ASSET_COUNT MATCHES "^[1-9][0-9]*$")
+          message(WARNING "Unexpected release metadata (${LIBMPV_JSON_ERR}); "
+            "falling back to media_kit's bundled libmpv.")
+        else()
+          math(EXPR LIBMPV_ASSET_LAST "${LIBMPV_ASSET_COUNT} - 1")
+          foreach(i RANGE ${LIBMPV_ASSET_LAST})
+            string(JSON LIBMPV_ASSET GET "${LIBMPV_RELEASE_JSON}" "assets" ${i})
+            string(JSON LIBMPV_ASSET_NAME GET "${LIBMPV_ASSET}" "name")
+            # The generic x86_64 dev archive (libmpv-2.dll inside). Exclude the
+            # "-v3-" build: it requires AVX2 and crashes on older CPUs.
+            if(LIBMPV_ASSET_NAME MATCHES "^mpv-dev-x86_64-[0-9].*\\.7z$")
+              string(JSON LIBMPV_PLACEBO_URL GET "${LIBMPV_ASSET}" "browser_download_url")
+              string(JSON LIBMPV_PLACEBO_DIGEST ERROR_VARIABLE LIBMPV_DG_ERR
+                GET "${LIBMPV_ASSET}" "digest")
+              if(LIBMPV_DG_ERR STREQUAL "NOTFOUND" AND LIBMPV_PLACEBO_DIGEST MATCHES "^sha256:([0-9a-fA-F]+)$")
+                set(LIBMPV_PLACEBO_SHA256 "${CMAKE_MATCH_1}")
+              endif()
+              break()
+            endif()
+          endforeach()
+          if(NOT LIBMPV_PLACEBO_URL)
+            message(WARNING "No mpv-dev-x86_64 asset in the latest release; "
+              "falling back to media_kit's bundled libmpv.")
+          endif()
+        endif()
+      endif()
+    endif()
+  endif()
+
+  if(LIBMPV_PLACEBO_URL)
+    message(STATUS "Fetching libplacebo libmpv (gpu-next): ${LIBMPV_PLACEBO_URL}")
+    # Download WITHOUT EXPECTED_HASH so a 404 / rotted asset can never turn into
+    # a fatal configure error (the deleted pinned URL did exactly that); verify
+    # the digest by hand afterwards and fall back on any mismatch.
+    file(DOWNLOAD "${LIBMPV_PLACEBO_URL}" "${LIBMPV_PLACEBO_ARCHIVE}"
+      SHOW_PROGRESS
+      STATUS LIBMPV_DL_STATUS)
+    list(GET LIBMPV_DL_STATUS 0 LIBMPV_DL_CODE)
+    set(LIBMPV_DL_OK TRUE)
+    if(NOT LIBMPV_DL_CODE EQUAL 0)
+      set(LIBMPV_DL_OK FALSE)
+      message(WARNING "libmpv download failed (${LIBMPV_DL_STATUS}); HDR / Dolby "
+        "Vision will fall back to media_kit's bundled libmpv. See "
+        "windows/libmpv/README.md to vendor it manually.")
+    elseif(LIBMPV_PLACEBO_SHA256)
+      file(SHA256 "${LIBMPV_PLACEBO_ARCHIVE}" LIBMPV_ACTUAL_SHA256)
+      string(TOLOWER "${LIBMPV_PLACEBO_SHA256}" LIBMPV_EXPECTED_LC)
+      string(TOLOWER "${LIBMPV_ACTUAL_SHA256}" LIBMPV_ACTUAL_LC)
+      if(NOT LIBMPV_ACTUAL_LC STREQUAL LIBMPV_EXPECTED_LC)
+        set(LIBMPV_DL_OK FALSE)
+        message(WARNING "libmpv archive SHA-256 mismatch (expected "
+          "${LIBMPV_EXPECTED_LC}, got ${LIBMPV_ACTUAL_LC}); falling back to "
+          "media_kit's bundled libmpv.")
+      endif()
+    else()
+      message(STATUS "No digest available to verify the libmpv archive; "
+        "proceeding on HTTPS/GitHub transport trust.")
+    endif()
+
+    if(LIBMPV_DL_OK)
+      file(MAKE_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}")
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xzf "${LIBMPV_PLACEBO_ARCHIVE}"
+        WORKING_DIRECTORY "${LIBMPV_PLACEBO_EXTRACT}"
+        RESULT_VARIABLE LIBMPV_EXTRACT_RESULT)
+      file(GLOB_RECURSE LIBMPV_FOUND "${LIBMPV_PLACEBO_EXTRACT}/libmpv-2.dll")
+      if(LIBMPV_EXTRACT_RESULT EQUAL 0 AND LIBMPV_FOUND)
+        list(GET LIBMPV_FOUND 0 LIBMPV_FOUND_FIRST)
+        file(MAKE_DIRECTORY "${LIBMPV_DIR}")
+        file(COPY "${LIBMPV_FOUND_FIRST}" DESTINATION "${LIBMPV_DIR}")
+        message(STATUS "Vendored libmpv-2.dll -> ${CUSTOM_LIBMPV}")
+      else()
+        message(WARNING "Could not extract libmpv-2.dll from the downloaded archive.")
+      endif()
     endif()
   endif()
 endif()

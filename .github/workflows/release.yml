@@ -135,6 +135,10 @@ jobs:
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - name: Build release (Windows x64)
+        # Authenticates the GitHub API call in windows/CMakeLists.txt that
+        # resolves the latest libmpv build (avoids the anonymous rate limit).
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: flutter build windows --release --build-name ${{ needs.version.outputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=UPDATE_MANIFEST_PUBLIC_KEY=${{ vars.UPDATE_MANIFEST_PUBLIC_KEY }}
       - name: Package build
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath iptvs-${{ needs.version.outputs.version }}-windows-x64.zip
