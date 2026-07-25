@@ -226,3 +226,17 @@ begin
   return p_id;
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- The helpers are called from inside `set local role authenticated` / `anon`
+-- blocks, so those roles need USAGE on the schema and EXECUTE on the functions
+-- — without this every test file dies on "permission denied for schema test"
+-- at its first login call. The two login_* helpers are SECURITY DEFINER (only
+-- the bootstrapping superuser may INSERT into auth.users), so granting EXECUTE
+-- is what makes them usable, not a privilege escalation for the test roles:
+-- they can only mint an auth.users row and a JWT claim inside this throwaway
+-- CI database.
+-- ---------------------------------------------------------------------------
+
+grant usage on schema test to anon, authenticated, service_role;
+grant execute on all functions in schema test to anon, authenticated, service_role;

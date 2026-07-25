@@ -33,18 +33,33 @@ select ok(
 -- in any future migration that adds a DEFINER function without the pin.
 -- ---------------------------------------------------------------------------
 
-select ok(
-  not exists (
-    select 1
+-- Two things this assertion learned the hard way, both worth keeping:
+--
+--   * `SET search_path = ''` is stored in pg_proc.proconfig as the text
+--     `search_path=""` — WITH the quotes — not `search_path=`. Comparing
+--     against the unquoted form made this fail for every function rather than
+--     none, which looked like a catastrophic finding and was a test bug.
+--   * `rls_auto_enable` is Supabase's OWN event-trigger function (it pins
+--     `pg_catalog`, not `''`), present in the platform image rather than
+--     created by any migration here. supabase/README.md already documents it
+--     as an expected advisor warning, so it is excluded by name.
+--
+-- Reported as an array rather than a bare boolean so a future failure names the
+-- offending function instead of just saying "no".
+select is(
+  (
+    select coalesce(array_agg(p.proname::text order by p.proname), '{}'::text[])
       from pg_proc p
       join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public'
        and p.prosecdef
+       and p.proname <> 'rls_auto_enable'
        and not exists (
          select 1 from unnest(coalesce(p.proconfig, '{}'::text[])) as cfg(setting)
-          where cfg.setting = 'search_path='
+          where cfg.setting in ('search_path=', 'search_path=""')
        )
   ),
+  '{}'::text[],
   'every SECURITY DEFINER function in public pins search_path to empty'
 );
 
