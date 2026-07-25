@@ -2,7 +2,18 @@
 // (wired to `node --test test/` in package.json).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateSource, scrubUrls, friendlyError, KIND_FIELDS } from '../src/validate.js';
+import {
+  validateSource,
+  scrubUrls,
+  friendlyError,
+  KIND_FIELDS,
+  splitFields,
+  kindHasSecret,
+  deviceProvisionState,
+  deviceNeedsKey,
+  SOURCE_SECRET_KEYS,
+  METADATA_SECRET_KEYS,
+} from '../src/validate.js';
 
 // ---------------------------------------------------------- validateSource
 
@@ -77,6 +88,109 @@ test('KIND_FIELDS marks URL-bearing fields with isUrl', () => {
   assert.equal(KIND_FIELDS.m3u.find((f) => f.key === 'playlistUrl').isUrl, true);
   assert.equal(KIND_FIELDS.m3u.find((f) => f.key === 'epgUrl').isUrl, true);
   assert.equal(KIND_FIELDS.stalker.find((f) => f.key === 'portal').isUrl, true);
+});
+
+// ------------------------------------------------------ secret-key registry
+
+test('secret-key registries mirror lib/data/secret_keys.dart', () => {
+  assert.deepEqual(
+    [...SOURCE_SECRET_KEYS].sort(),
+    ['epgUrl', 'mac', 'password', 'playlistUrl', 'userAgent', 'username'],
+  );
+  assert.deepEqual(
+    [...METADATA_SECRET_KEYS].sort(),
+    ['mdblistApiKey', 'tmdbApiKey', 'tvdbApiKey', 'tvdbPin'],
+  );
+});
+
+test('splitFields keeps broad fields verbatim and moves non-empty secrets', () => {
+  const { broad, secret } = splitFields(
+    { host: 'portal.example.com', username: 'alice', password: 'hunter2' },
+    SOURCE_SECRET_KEYS,
+  );
+  assert.deepEqual(broad, { host: 'portal.example.com' });
+  assert.deepEqual(secret, { username: 'alice', password: 'hunter2' });
+});
+
+test('splitFields drops empty secret values so they read as absent (preserve)', () => {
+  const { broad, secret } = splitFields(
+    { host: 'portal.example.com', username: 'alice', password: '' },
+    SOURCE_SECRET_KEYS,
+  );
+  assert.deepEqual(broad, { host: 'portal.example.com' });
+  assert.deepEqual(secret, { username: 'alice' });
+  assert.ok(!('password' in secret), 'an empty secret must not be sent');
+});
+
+test('splitFields keeps a broad field even when empty', () => {
+  const { broad } = splitFields({ host: '' }, SOURCE_SECRET_KEYS);
+  assert.deepEqual(broad, { host: '' });
+});
+
+test('splitFields never leaks a source secret key into the broad map', () => {
+  const { broad } = splitFields(
+    { portal: 'http://p.example.com', mac: '00:1A:79:00:00:00' },
+    SOURCE_SECRET_KEYS,
+  );
+  for (const k of SOURCE_SECRET_KEYS) assert.ok(!(k in broad), `${k} must not be broad`);
+});
+
+test('splitFields separates metadata API keys from broad config', () => {
+  const { broad, secret } = splitFields(
+    { provider: 'tmdb', autoEnrich: 'on', tmdbApiKey: 'abc', tvdbPin: '' },
+    METADATA_SECRET_KEYS,
+  );
+  assert.deepEqual(broad, { provider: 'tmdb', autoEnrich: 'on' });
+  assert.deepEqual(secret, { tmdbApiKey: 'abc' });
+});
+
+test('kindHasSecret is true for credential kinds and false for demo', () => {
+  assert.equal(kindHasSecret('stalker'), true); // mac
+  assert.equal(kindHasSecret('xtream'), true); // username/password
+  assert.equal(kindHasSecret('m3u'), true); // playlistUrl
+  assert.equal(kindHasSecret('demo'), false);
+  assert.equal(kindHasSecret('bogus'), false);
+});
+
+// -------------------------------------------------- deviceProvisionState
+
+test('deviceProvisionState maps the four provisioning states', () => {
+  assert.equal(
+    deviceProvisionState({ has_public_key: false, has_ck: false, stale: false }),
+    'no-key',
+  );
+  assert.equal(
+    deviceProvisionState({ has_public_key: true, has_ck: false, stale: false }),
+    'needs-key',
+  );
+  assert.equal(
+    deviceProvisionState({ has_public_key: true, has_ck: true, stale: true }),
+    'stale',
+  );
+  assert.equal(
+    deviceProvisionState({ has_public_key: true, has_ck: true, stale: false }),
+    'provisioned',
+  );
+});
+
+test('deviceProvisionState treats a missing entry as no-key (fail safe)', () => {
+  assert.equal(deviceProvisionState(undefined), 'no-key');
+  assert.equal(deviceProvisionState(null), 'no-key');
+});
+
+test('deviceProvisionState ignores stale when the device has no CK', () => {
+  // The server only sets stale when has_ck; guard against a malformed entry.
+  assert.equal(
+    deviceProvisionState({ has_public_key: true, has_ck: false, stale: true }),
+    'needs-key',
+  );
+});
+
+test('deviceNeedsKey is true only for needs-key and stale', () => {
+  assert.equal(deviceNeedsKey('needs-key'), true);
+  assert.equal(deviceNeedsKey('stale'), true);
+  assert.equal(deviceNeedsKey('provisioned'), false);
+  assert.equal(deviceNeedsKey('no-key'), false);
 });
 
 // ---------------------------------------------------------------- scrubUrls

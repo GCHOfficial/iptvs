@@ -108,7 +108,24 @@ input, select {
 
 .muted { color: var(--text-lo); }
 .hint { margin: 0 0 12px; font-size: 13px; }
+.mt { margin-top: 10px; }
 .error { color: var(--danger); }
+.config-msg { padding: 2rem; }
+
+/* A passphrase-loss / irreversibility warning inside a form. */
+.warn {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #ffd7a8;
+  background: color-mix(in srgb, #e5a04d 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, #e5a04d 40%, transparent);
+}
+
+/* Vertical separation between stacked forms (Security tab). */
+.form.section, .danger-zone.section { margin-top: 28px; }
+.form.section h3, .danger-zone.section h3 { margin: 0; }
 .legal-links { margin-top: 20px; }
 .account-section h2 { margin-bottom: 4px; }
 .danger-zone {
