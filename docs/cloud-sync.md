@@ -42,14 +42,21 @@ owner-scoped via `current_device_owner()`: an *unpaired* anonymous caller has no
 rejected, and a payload can't touch another account's rows (insert forces `owner = o`; the
 upsert's `DO UPDATE` is guarded by `owner = o`). A paired device can already read all of its
 owner's credentials, so writing that **same** owner's list adds no cross-account blast radius.
-Pairing codes are short-lived + rate-limited. Push uses last-write-wins (it replaces the panel's
-set). Every `SECURITY DEFINER` function pins `search_path = ''` with schema-qualified references
+Pairing codes are short-lived + rate-limited. Push uses last-write-wins **refined by a
+field-preserving server-side merge** (see "Credential round-trip" below): a device push replaces
+the profile's source set and reorders it, but per source the `fields` (and per profile the
+metadata `config`) merge through `merge_preserving_nonempty(stored, incoming)`, so a push can add
+or change a field but can never blank a stored non-empty value — only a direct panel edit can.
+Every `SECURITY DEFINER` function pins `search_path = ''` with schema-qualified references
 (the profile-cap trigger is `SECURITY INVOKER` and serializes concurrent inserts per owner with a
 transaction-scoped advisory lock, so the cap of 20 holds under parallel creation).
 
 ### Last-write-wins and timestamp authority
 
-Conflict resolution is last-write-wins: a push fully replaces the target profile's set. Timestamp
+Conflict resolution is last-write-wins at the row level: a push deletes the profile's sources that
+aren't in the payload and upserts the rest (and reorders them). At the **field** level it is
+refined by the field-preserving merge below — the incoming non-empty values win, but a
+missing/blank incoming value can't overwrite a stored non-empty one. Timestamp
 authority is the **server** — `updated_at` is stamped by the `touch_updated_at` BEFORE-UPDATE
 trigger and explicit `now()` in the push RPCs; the snapshot-revision triggers also advance it for
 source and metadata inserts, updates, and deletes. Clients send no timestamps and none are
@@ -57,6 +64,157 @@ compared.
 Concurrent writers therefore resolve by write order, not clock, so clock skew and equal client
 timestamps are irrelevant. A pull always reflects whatever the last successful write left in the
 row.
+
+### Credential round-trip (Phase 1) and the E2EE ladder
+
+Devices carry the **full** `fields` (credentials included) in both directions, and metadata API
+keys ride the same path. This deliberately reverses the earlier device-side credential stripping
+(commit d45d350), which had made two-way sync lossy: a device once pushed only a "cloud-safe"
+projection (an Xtream `host` with no `username`/`password`, no m3u `playlistUrl` at all, and
+metadata config without its API keys), so a push wholesale-replaced the row and **blanked** the
+credentials a user had entered in the panel; the device then re-overlaid whatever local secrets it
+had on pull, which only masked the loss on that one device.
+
+Phase 1 established that a device push can never blank a stored non-empty value (the
+`merge_preserving_nonempty` field-preserving merge on the push RPCs; only a direct panel edit can
+clear a field). Phase 2/3 (below) split *secret* keys out of the broadly-readable rows entirely,
+so the credential-bearing columns no longer carry credentials at all — but the same
+never-blank-a-secret guarantee still holds through the secret RPCs' absent-means-preserve
+semantics, and the broad `merge_preserving_nonempty` merge is unchanged.
+
+## Isolated secrets + opt-in E2EE (Phase 2/3)
+
+Secrets no longer live in the broadly-readable rows. The cloud `sources.fields` and
+`metadata_configs.config` carry only **broad** keys; the **secret** keys travel through dedicated
+RPCs and, when a profile opts into end-to-end encryption, are encrypted client-side under a
+per-profile **content key (CK)** the server never sees in the clear.
+
+### What is a secret
+
+`lib/data/secret_keys.dart` is the canonical split. Source secret keys:
+`{mac, username, password, playlistUrl, epgUrl, userAgent}`; metadata secret keys:
+`{tmdbApiKey, tvdbApiKey, tvdbPin, mdblistApiKey}`. Everything else (`portal`, `host`,
+`playlistExpiryHint`, provider choice, `autoEnrich`, per-source `settings`) is broad. `portal`/
+`host` stay broad on purpose — they name the provider (so the panel and sources screen show a
+recognisable subtitle) but can't stream on their own. A **server-side strip trigger** enforces
+broad-only on the rows, so even a device that skips the split can't leak a secret into the
+broad table.
+
+### Server contract (RPCs the device calls)
+
+- `get_secrets(p_profile_id)` → `{"sources":{"<source_id>":{"format":0|1,"payload":…}}, "metadata":{"format":0|1,"payload":…}|null}`.
+- `push_sources(payload, p_profile_id)` — each source element **may** carry a `secret:
+  {"format":0|1,"payload":…}`. **Absent = preserve** the stored secret server-side; the device
+  sends the element only when it *knows* the secret. The server rejects a format that doesn't
+  match the profile (E2EE profiles accept only `format` 1 at the current `ck_version`; plaintext
+  profiles only `format` 0).
+- `push_metadata(p_config, p_profile_id, p_secret)` — the new 3-arg form; `p_config` is broad
+  only, `p_secret` is the same secret element (absent/null = preserve).
+- `get_crypto_state(p_profile_id)` → `{enabled, ck_version}`.
+- `set_device_public_key(p_public_key)` — idempotent registration of this device's public key.
+- `get_device_ck(p_profile_id)` → `{ck_version, wrapped_ck}|null` — the CK wrapped **to this
+  device**. `null` means this device isn't provisioned yet (locked).
+
+`get_profile_crypto` / `provision_device_ck` / `enable` / `disable` / `rotate_content_key` are
+**panel-only** and never called from Dart. Every one of these RPCs may throw "function does not
+exist" against a pre-migration backend; the client treats that as **"no cloud secrets available"**
+and degrades to broad-only sync — it never crashes (`isMissingFunctionError`).
+
+### Crypto (`lib/data/cloud_crypto.dart`)
+
+Primitives: PBKDF2-HMAC-SHA256 (600 000 iterations in production; panel-side KEK), HKDF-SHA256,
+AES-256-GCM (12-byte random IV, 128-bit tag), ECDH P-256. **Note:** `package:cryptography` 2.9.0
+ships no working ECDH on the Dart VM or native Flutter (`DartEcdh` throws), so the P-256 curve is
+implemented in pure Dart in `cloud_crypto.dart` and validated against the RFC 5903 §8.1
+known-answer vector. The ECDH shared secret is the X coordinate encoded as **exactly 32 bytes,
+big-endian, left-padded** (a leading-zero X must round-trip — pinned by a dedicated fixture case).
+
+Envelopes are JSON; every binary field is **standard base64 (RFC 4648, with padding — never
+base64url)**:
+
+- **Secret** (`format` 1): `v`=1, `alg`="A256GCM", `ckv`, `iv`, `ct` (`ciphertext||tag`).
+  Plaintext = UTF-8 of the secret map as **canonical JSON** (keys sorted ascending, no
+  whitespace). AES key = the CK.
+- **Device-wrapped CK**: `v`, `alg`, `kdf`="HKDF-SHA256", `ckv`, `epk` (65-byte uncompressed
+  `0x04||X||Y`), `iv`, `ct`. AES key = HKDF-SHA256(ikm = ECDH shared X, salt = empty, info = AAD).
+- **CK-under-KEK** (panel-side, passphrase): `kdf`="PBKDF2-SHA256", `salt`, `iter`, plus the usual
+  fields.
+
+The **AAD is always reconstructed from context** (never read from the envelope) and passed to
+AES-GCM; `ckv` is additionally cross-checked against the expected content-key version. AAD strings:
+
+- source secret — `iptvs.secret.v1|source|<profile_id>|<source_id>|<ck_version>`
+- metadata secret — `iptvs.secret.v1|metadata|<profile_id>|<ck_version>`
+- CK-under-KEK — `iptvs.kek.v1|<profile_id>|<ck_version>`
+- device wrap — `iptvs.devicewrap.v1|<profile_id>|<device_uid>|<ck_version>`
+
+Every decrypt/version/auth failure throws `CloudCryptoException` and **fails closed** — a decrypt
+path never returns an empty map or silently drops a credential. The cross-language interop gate is
+`test/fixtures/crypto_vectors.json` (published RFC/NIST KATs + self-generated end-to-end vectors,
+authored by the Dart side, asserted by both `test/cloud_crypto_test.dart` and the panel's Node
+tests).
+
+### Device lifecycle + the LOCKED state
+
+On first cloud use the device generates a P-256 key pair (`generateP256KeyPair`), persists the
+private scalar in the keychain (`cloud_device_priv_key`/`cloud_device_pub_key`, alongside the
+other secure-storage keys), and registers the public key via `set_device_public_key`. When
+`get_crypto_state` reports `enabled`, the device fetches `get_device_ck`, unwraps the CK with its
+private key (`decodeDeviceWrap`), and holds the CK **in memory only** (never persisted).
+
+`CloudSync.cryptoStatus(profileId)` collapses this to three states (`CloudCryptoStatus`):
+
+- **off** — E2EE disabled (or pre-migration). Secrets travel as `format` 0 (plaintext), still
+  RLS+TLS protected.
+- **ready** — E2EE on and the CK is unwrapped: pull decrypts, push encrypts (`format` 1).
+- **locked** — E2EE on but no CK / unwrap failed / unknown `v`/`alg`/`ckv`. **Devices never prompt
+  for the passphrase** (TV constraint). A locked device: shows the actionable message *"This
+  profile is end-to-end encrypted. Open the panel and unlock it to finish setting up this
+  device."*, **has Push disabled entirely**, pulls broad fields only, and marks any source without
+  a locally-known secret as **needs-attention** in the sources screen (badge + snackbar; a source
+  with empty credentials is never activated — fail closed).
+
+**Defensive local overlay (pull):** after merging broad fields with the decrypted secret, the pull
+overlays the device's existing local config for any secret key the cloud left absent/empty
+(`fillGapsFromLocal`, `MetadataConfig.fromCloudParts`). Cloud non-empty always wins; local only
+fills gaps. So a locked device — or a partially-migrated profile — never blanks a credential the
+device already holds.
+
+**Source-move clears the secret:** a source's secret is bound to its `source_id` through the AAD.
+Moving/re-creating a source (a new `source_id`) means the old ciphertext can't be decrypted under
+the new id, so the secret does not follow — the panel/device must re-enter it. This is intentional
+(the AAD binding is what stops a secret being replayed under a different source).
+
+### Panel Security UI + hardening
+
+The panel owns every crypto-admin flow (devices never see the passphrase). A per-profile
+**Security** tab offers: Enable (passphrase entered twice + an explicit loss warning — losing the
+passphrase means re-entering credentials), Unlock, Rotate passphrase, Rotate content key, Disable,
+and Lock now. The session unlock derives the KEK once per session and holds the unwrapped CK
+**only in a module-closure variable** (`panel/src/secrets.js` — never `localStorage`/
+`sessionStorage`), zeroed on lock, profile switch, auth change, and a **15-minute idle auto-lock**.
+The Devices tab shows per-device provisioning for the profile with a "Send key" action when
+unlocked (wraps the CK to that device's `public_key` → `provision_device_ck`). While a profile is
+locked, source edits are **broad-only** — the stored secret is preserved, never blanked — and
+adding a new secret-bearing source is blocked. Enable/disable/rotate-content-key pass the
+`profiles.updated_at` they observed as `p_expected_revision`; a concurrent device push surfaces a
+friendly "changed since read — retry".
+
+All panel pages ship a strict **CSP** (no inline scripts/styles, `connect-src` limited to self +
+the Supabase origin, `frame-ancestors 'none'`; the legal pages run with `script-src 'none'`),
+injected at build time by `panel/vite.config.js`. This is part of the threat boundary below: the
+CSP is what makes "XSS'd panel" a hard target rather than a soft one.
+
+### Threat boundary
+
+E2EE **protects** the credential/API-key secrets against: the database at rest, a Supabase
+operator or insider reading the tables, and an RLS bug that over-exposes the *broad* tables — none
+of those ever see plaintext secrets, only ciphertext they can't unwrap without the CK. It **does
+not protect** against: a compromised or XSS'd panel *while it is unlocked* (it holds the CK in
+memory and can read/rewrite secrets), or a malicious already-paired device that legitimately holds
+the CK. Revocation cannot un-leak a CK that a device already cached — the remedy for a suspected
+compromise is `rotate_content_key` (panel-side), which mints a new `ck_version`, re-wraps to the
+still-trusted devices, and makes every old-version envelope fail its `ckv` check.
 
 ### Validation limits and rate limiting
 
@@ -100,8 +258,15 @@ the managed set in panel order but leaves local-only sources alone). Source ids 
 (`newSourceId`/`isUuid` in [`source_config.dart`](../lib/sources/source_config.dart)) so they
 round-trip through the `uuid`-typed cloud column; push rewrites any legacy non-UUID id first.
 [`secure_local_storage.dart`](../lib/data/secure_local_storage.dart) persists the Supabase session
-in the keychain, not plaintext prefs. Init is in `main.dart`, behind `isConfigured`. The pure
-mapper `cloudRowToConfig` + the id helpers are unit-tested in `test/cloud_sync_test.dart`.
+in the keychain, not plaintext prefs. Init is in `main.dart`, behind `isConfigured`.
+[`secret_keys.dart`](../lib/data/secret_keys.dart) is the broad/secret split;
+[`cloud_crypto.dart`](../lib/data/cloud_crypto.dart) is the pure crypto surface (envelopes, AAD,
+the pure-Dart P-256). The device P-256 key pair persists in the keychain
+(`cloud_device_priv_key`/`cloud_device_pub_key`) via the same `FlutterSecureStorage` as the rest.
+The pure mappers/helpers (`cloudRowToConfig`, the id helpers, `splitFields`/`mergeFields`/
+`fillGapsFromLocal`, `buildSecretElement`/`decodeSecretEntry`, `isMissingFunctionError`,
+`MetadataConfig.fromCloudParts`, `sourceCredentialsMissing`) are unit-tested in
+`test/cloud_sync_test.dart`; the crypto vectors + fail-closed cases in `test/cloud_crypto_test.dart`.
 
 ## Web panel
 

@@ -7,7 +7,7 @@ const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!url || !key) {
   document.getElementById('app').innerHTML =
-    '<p style="padding:2rem">Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (see panel/.env.example).</p>';
+    '<p class="config-msg">Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY (see panel/.env.example).</p>';
   throw new Error('Missing Supabase config');
 }
 

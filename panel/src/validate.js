@@ -30,6 +30,82 @@ export const KIND_FIELDS = {
 const MAX_LABEL_LENGTH = 1024;
 const MAX_FIELD_LENGTH = 8192;
 
+// Canonical broad/secret split — mirrors lib/data/secret_keys.dart exactly. In
+// the cloud a source's `fields` and a metadata config carry ONLY the broad keys;
+// every secret key travels through the dedicated secret RPCs
+// (set_source_secret / set_metadata_secret / the `secret` element on push), and
+// is encrypted client-side when the profile has opt-in E2EE enabled. A
+// server-side strip trigger drops these keys from the broad rows regardless, so
+// the split here is the client half of that contract, not the only guard.
+//
+// The form still COLLECTS and VALIDATES the full field set together (see
+// validateSource / KIND_FIELDS); the split is applied only at submission.
+export const SOURCE_SECRET_KEYS = [
+  'mac',
+  'username',
+  'password',
+  'playlistUrl',
+  'epgUrl',
+  'userAgent',
+];
+export const METADATA_SECRET_KEYS = ['tmdbApiKey', 'tvdbApiKey', 'tvdbPin', 'mdblistApiKey'];
+
+// Splits a full field map into { broad, secret } against `secretKeys`.
+// Mirrors lib/data/secret_keys.dart's splitFields: `broad` keeps every
+// non-secret entry verbatim (including empties); `secret` keeps every secret
+// entry whose value is NON-EMPTY — an empty secret value is dropped so it reads
+// as *absent* ("this value isn't being set"), which the preserve-on-absent push
+// path treats as "keep whatever the server has" rather than "blank it".
+export function splitFields(fields, secretKeys) {
+  const set = new Set(secretKeys);
+  const broad = {};
+  const secret = {};
+  for (const [k, v] of Object.entries(fields ?? {})) {
+    const val = v == null ? '' : String(v);
+    if (set.has(k)) {
+      if (val.length > 0) secret[k] = val;
+    } else {
+      broad[k] = val;
+    }
+  }
+  return { broad, secret };
+}
+
+// True when a source kind carries any credential-bearing (secret) field. Demo
+// has none, so it never writes a secret row.
+export function kindHasSecret(kind) {
+  const spec = KIND_FIELDS[kind];
+  if (!spec) return false;
+  const set = new Set(SOURCE_SECRET_KEYS);
+  return spec.some((f) => set.has(f.key));
+}
+
+// Maps one `list_device_ck` entry (the authoritative owner-side provisioning
+// view — see supabase/migrations/20260726000000_e2ee.sql) to a UI state. Pure
+// and dependency-free so it can be unit-tested without a backend.
+//
+//   { has_public_key, has_ck, stale } →
+//     'no-key'      — device hasn't registered a public key yet (will on next
+//                     app launch); cannot be provisioned.
+//     'needs-key'   — has a key but no content key for this profile.
+//     'stale'       — has a content key at an OLD ck_version (rotate happened).
+//     'provisioned' — has the current content key.
+//
+// `stale` is precomputed server-side (always false when E2EE is off), so a
+// disabled profile never yields 'stale'. Provisioning ("Send key") applies to
+// 'needs-key' and 'stale'.
+export function deviceProvisionState(entry) {
+  if (!entry || !entry.has_public_key) return 'no-key';
+  if (!entry.has_ck) return 'needs-key';
+  if (entry.stale) return 'stale';
+  return 'provisioned';
+}
+
+// Whether provisioning ("Send key") is meaningful for a state.
+export function deviceNeedsKey(state) {
+  return state === 'needs-key' || state === 'stale';
+}
+
 // Only http/https are ever allowed for a scheme'd value; a scheme-less value
 // (e.g. an Xtream host like "myportal.example.com:8080") is fine — it's the
 // scheme itself that's the injection vector (javascript:, file:, data:, ...).

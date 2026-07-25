@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'none'; style-src 'self'; img-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" />
     <meta name="description" content="Privacy policy for IPTVS Player." />
     <meta name="theme-color" content="#7b6cf6" />
     <title>Privacy policy — IPTVS Player</title>
@@ -106,10 +107,36 @@
       <h2>Security</h2>
       <p>
         Developer-operated cloud traffic uses HTTPS/TLS. Cloud access is restricted
-        using authenticated sessions and database row-level security. Sensitive
-        local configuration uses platform secure storage where available. No system
-        can be guaranteed completely secure, so use unique provider credentials and
-        revoke them if you believe they have been exposed.
+        using authenticated sessions and database row-level security, which limit
+        each account's data to that account. Sensitive local configuration uses
+        platform secure storage where available.
+      </p>
+      <p>
+        Source credentials — provider usernames, passwords, MAC addresses, playlist
+        and EPG URLs — and metadata-provider API keys and PINs are stored on the
+        server so your paired devices can pull them. They are kept in a dedicated,
+        isolated secrets store that is reachable only through narrow, purpose-built
+        access functions; the broadly-readable configuration tables never contain
+        them. They are protected by row-level security, which limits each account's
+        secrets to that account, and by TLS in transit.
+      </p>
+      <p>
+        You can additionally turn on <strong>end-to-end encryption</strong> for a
+        profile from the panel's <strong>Security</strong> section. When it is on,
+        your credentials and API keys are encrypted in your browser with a key
+        derived from a sync passphrase before they are sent to the server, so the
+        server stores only ciphertext and the service operator cannot read the
+        values. The passphrase itself is <strong>never sent to the server</strong>
+        and cannot be recovered by anyone, including the developer. Because the
+        passphrase is the only thing that can unlock these credentials, if you lose
+        it you will need to re-enter your provider credentials and API keys; there is
+        no reset. Until you enable this option, credentials remain server-side and
+        protected by row-level security and TLS but not end-to-end encrypted, so the
+        service operator can technically access them.
+      </p>
+      <p>
+        No system can be guaranteed completely secure, so use unique provider
+        credentials and revoke them if you believe they have been exposed.
       </p>
 
       <h2>Retention and deletion</h2>

@@ -45,6 +45,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   List<CloudProfile> _profiles = const [];
   String? _activeProfileId;
   DateTime? _knownRemoteRevision;
+  CloudCryptoStatus _crypto = CloudCryptoStatus.off;
 
   @override
   void initState() {
@@ -96,6 +97,20 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           .firstOrNull
           ?.updatedAt;
     });
+    await _refreshCrypto();
+  }
+
+  /// Refresh the E2EE status for the active profile (best-effort; degrades to
+  /// [CloudCryptoStatus.off] against a pre-migration backend or on error).
+  Future<void> _refreshCrypto() async {
+    final profileId = _activeProfileId;
+    if (profileId == null) return;
+    try {
+      final status = await _sync.cryptoStatus(profileId);
+      if (mounted) setState(() => _crypto = status);
+    } catch (_) {
+      // Leave the prior status; the pull/push paths surface real failures.
+    }
   }
 
   Future<void> _switchProfile(String id) async {
@@ -108,6 +123,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         _activeProfileId = id;
         _busy = false;
       });
+      await _refreshCrypto();
       await _pull();
     } catch (e) {
       if (mounted) {
@@ -184,6 +200,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       if (mounted) setState(() => _error = friendlyCloudError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
+      await _refreshCrypto();
     }
   }
 
@@ -483,7 +500,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       style: TextStyle(color: AppColors.textLo),
     ),
     ..._profileSection(),
-    const SizedBox(height: 24),
+    const SizedBox(height: 20),
+    _cryptoStatusLine(),
+    const SizedBox(height: 20),
     FilledButton.icon(
       onPressed: _busy ? null : () => _pull(),
       icon: _busy
@@ -497,7 +516,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
     ),
     const SizedBox(height: 12),
     OutlinedButton.icon(
-      onPressed: _busy ? null : _push,
+      // Push is disabled on a locked E2EE device — it holds no content key, so
+      // it can't produce the encrypted secret the server would accept.
+      onPressed: (_busy || _crypto == CloudCryptoStatus.locked) ? null : _push,
       icon: const Icon(Icons.cloud_upload_outlined),
       label: const Text('Push to panel'),
     ),
@@ -508,6 +529,42 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       label: const Text('Unpair this device'),
     ),
   ];
+
+  /// A status line describing the profile's end-to-end-encryption state. Locked
+  /// devices get the actionable unlock message (and Push is disabled above).
+  Widget _cryptoStatusLine() {
+    final (IconData icon, String text, Color color) = switch (_crypto) {
+      CloudCryptoStatus.off => (
+        Icons.lock_open_outlined,
+        'End-to-end encryption: off (secrets protected by the server\'s access '
+            'control and TLS).',
+        AppColors.textLo,
+      ),
+      CloudCryptoStatus.ready => (
+        Icons.lock_outline,
+        'End-to-end encryption: on — this device is set up and can sync '
+            'credentials.',
+        AppColors.accent,
+      ),
+      CloudCryptoStatus.locked => (
+        Icons.lock,
+        'This profile is end-to-end encrypted. Open the panel and unlock it to '
+            'finish setting up this device. Until then, Push is disabled and '
+            'sources without saved credentials need attention.',
+        const Color(0xFFE5484D),
+      ),
+    };
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 18, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(text, style: TextStyle(color: color, fontSize: 13)),
+        ),
+      ],
+    );
+  }
 
   /// The profile picker: lists the account's profiles, highlights the active
   /// one, and switches (then re-pulls) on selection. Profiles are created and
