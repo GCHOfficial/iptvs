@@ -100,11 +100,15 @@ Permanent direct-distribution certificate SHA-256:
 
 ### Submission records
 
-The completed launch checklists, dated identity-verification evidence and
-certificate fingerprints live in `docs/private/store-launch-record.md` (not in
-the repo — it is a one-time audit trail for one account, not something another
-developer can act on). Per-submission Console answers, listing copy and smoke
-tests are in [`google-play-submission.md`](google-play-submission.md).
+One-time launch evidence — completed checklists, dated identity-verification
+records, and the submitted Play Console state (listing copy, App content answers,
+Data safety declarations, asset inventory) — is kept out of the repo in
+`docs/private/store-launch-record.md` and
+`docs/private/google-play-submission-record.md`. It is an audit trail for one
+publisher account, not something another developer can act on.
+
+The reusable per-release checks are in
+[`google-play-submission.md`](google-play-submission.md).
 
 New Google Play apps and TV apps are published as Android App Bundles. Do not
 upload the direct-download APK as the Play production artifact.
