@@ -1,0 +1,110 @@
+name: Database tests
+
+# Proves two things CI has never verified before: (1) every
+# supabase/migrations/*.sql file replays cleanly, in order, against a fresh
+# database — nothing in this repo currently checks the migration ledger
+# actually applies from scratch — and (2) the cross-tenant isolation fixed by
+# migrations/20260727000000_tenant_isolation.sql (and the RLS/RPC surface
+# around it) holds, via a pgTAP suite that impersonates two tenants in plain
+# SQL. See supabase/tests/00_bootstrap.sql for what's recreated and why, and
+# supabase/README.md's security checklist for the invariants under test.
+#
+# Deliberately NOT `supabase start` / `supabase test db`: there is no
+# supabase/config.toml in this repo, and the Docker Compose stack that
+# command drives is slow and comparatively flaky in CI for what amounts to a
+# handful of SQL files. A bare `supabase/postgres` service container ships
+# pgTAP and pgcrypto out of the box and starts in seconds.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/**'
+      - '.github/workflows/db-tests.yml'
+  pull_request:
+    paths:
+      - 'supabase/**'
+      - '.github/workflows/db-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only reads the repo and talks to a
+# same-job service container, never the real Supabase project.
+permissions:
+  contents: read
+
+jobs:
+  pgtap:
+    name: Replay migrations + pgTAP
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # supabase/postgres, not plain postgres: it ships pgTAP and pgcrypto
+        # (gen_pairing_code() calls extensions.gen_random_bytes()) without
+        # extra provisioning. Pin bumps are a deliberate, reviewed change —
+        # bump the tag here, not silently via a floating `17`/`latest`.
+        image: supabase/postgres:17.6.1.156
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # postgresql-client: psql, for both the bootstrap/replay steps below.
+      # libtap-parser-sourcehandler-pgtap-perl: pg_prove, the pgTAP TAP
+      # harness (a Perl script; independent of the server's pgTAP version).
+      - name: Install psql and pg_prove
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client libtap-parser-sourcehandler-pgtap-perl
+
+      - name: Wait for Postgres to accept connections
+        run: |
+          for _ in $(seq 1 30); do
+            pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" && exit 0
+            sleep 2
+          done
+          echo "Postgres never became ready" >&2
+          exit 1
+
+      # Recreates the minimal auth surface + roles the migrations touch, and
+      # installs pgTAP. Must run before the migrations: several of them
+      # reference auth.users / auth.uid() / the anon|authenticated roles at
+      # CREATE time.
+      - name: Bootstrap auth surface + pgTAP
+        run: psql -v ON_ERROR_STOP=1 -f supabase/tests/00_bootstrap.sql
+
+      # THE replay proof: every migration file, in filename order (Supabase's
+      # own convention — the timestamp prefix IS the apply order), against a
+      # database that has never seen any of them. ON_ERROR_STOP + `set -e`
+      # means the first failing file fails the job, and which file failed is
+      # visible directly in the step log.
+      - name: Replay every migration from scratch
+        run: |
+          set -euo pipefail
+          for f in supabase/migrations/*.sql; do
+            echo "== applying $f =="
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run pgTAP suite
+        run: |
+          pg_prove --ext .test.sql --verbose \
+            --dbname "$PGDATABASE" --username "$PGUSER" --host "$PGHOST" --port "$PGPORT" \
+            supabase/tests/*.test.sql

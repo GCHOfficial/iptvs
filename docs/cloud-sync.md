@@ -11,9 +11,23 @@ changing sync, pairing, profiles, or anything under `supabase/`.
 Supabase (the only free option bundling Postgres + Auth + RLS + a client SDK that's safe to call
 directly from a static page). Schema + the entire security boundary live in
 [`supabase/migrations/`](../supabase/migrations/) (timestamped `<version>_<name>.sql`, the first
-is the schema + RLS) — read the first file's header before changing it. Five tables (`profiles`,
-`sources`, `metadata_configs`, `devices`, `pairings`) with **deny-by-default RLS** (no policy = no
-access) and `SECURITY DEFINER` RPCs: three pairing
+is the schema + RLS) — read the first file's header before changing it. **Ten** tables with
+**deny-by-default RLS** (no policy = no access): five client-facing (`profiles`, `sources`,
+`metadata_configs`, `devices`, `pairings`) that carry policies, and five **RPC-only** ones
+(`source_secrets`, `metadata_secrets`, `profile_crypto`, `device_ck`, `push_rate`) that
+deliberately have **zero** policies — RLS-enabled with no policy denies everything, so they are
+reachable only through `SECURITY DEFINER` functions. The advisor reports those five as
+`rls_enabled_no_policy` INFO; that is the design, not a gap. Since `20260727000000_tenant_isolation`
+they also have **no table-level grants** to `anon`/`authenticated`, so the protection is two-layer
+rather than resting solely on "zero policies".
+
+**Ownership is enforced by the schema, not only by RPC predicates.** `profiles` and `sources` carry
+a redundant `unique (id, owner)`, and every owner-bearing child (`sources`, `metadata_configs`,
+`source_secrets`, `metadata_secrets`, `profile_crypto`) is pinned by a **composite foreign key**
+`(parent_id, owner) → parent(id, owner)`. A row whose owner disagrees with its parent's is therefore
+unrepresentable — for the RPCs, for the panel's direct RLS writes, and for anything added later.
+
+Then `SECURITY DEFINER` RPCs: three pairing
 (`request_pairing`/`pairing_status`/`claim_pairing`), the profile-scoped push
 (`push_sources`/`push_metadata`/`push_favorites`, each `(payload, p_profile_id)`), and
 `set_device_profile`. Migrations are applied to the live project and re-applying is idempotent;
@@ -39,10 +53,30 @@ write policy requires `is_real_user()`); they gain read access only after a real
 their pairing code (`claim_pairing`). The optional **push** is the one device→cloud write path
 and goes through the `push_sources`/`push_metadata` `SECURITY DEFINER` RPCs, which are
 owner-scoped via `current_device_owner()`: an *unpaired* anonymous caller has no owner and is
-rejected, and a payload can't touch another account's rows (insert forces `owner = o`; the
-upsert's `DO UPDATE` is guarded by `owner = o`). A paired device can already read all of its
-owner's credentials, so writing that **same** owner's list adds no cross-account blast radius.
-Pairing codes are short-lived + rate-limited. Push uses last-write-wins **refined by a
+rejected, and a payload can't touch another account's rows. **How that is enforced changed in
+`20260727000000_tenant_isolation`, and the previous wording was wrong.** The old claim — "insert
+forces `owner = o`; the upsert's `DO UPDATE` is guarded by `owner = o`" — described the `sources`
+row only, and an owner-guarded `ON CONFLICT` **skips a foreign row silently rather than rejecting
+it**. Control therefore reached `push_sources`' secret loop still carrying another account's source
+id, and `source_secrets.source_id` was an FK to `sources(id)` — existence, not ownership — so a
+crafted payload could plant a credential (including `playlistUrl`, i.e. *which server the victim's
+player connects to*) on a source it did not own, which `get_secrets` then served to the victim.
+Now: the composite `(id, owner)` FKs make that row unrepresentable, and a foreign id **raises**
+`iptvs: source id belongs to another account` before any mutation instead of being dropped
+silently. A paired device can already read all of its owner's credentials, so writing that **same**
+owner's list adds no cross-account blast radius.
+
+Pairing codes are short-lived + rate-limited — and since the same migration that is enforced on
+**every** path: `pairings` previously had a direct `pairings_insert` policy with no `is_real_user()`
+and no validation trigger, so any anonymous session could insert an unbounded, attacker-chosen code
+with its own TTL, bypassing `request_pairing`'s 5/min limit and 10-minute expiry entirely. The
+policy is dropped (`request_pairing` is `SECURITY DEFINER`, so it bypasses RLS and is unaffected;
+the only direct client access is a self-scoped `DELETE`), and a `pairings_validate` trigger bounds
+the code, caps the TTL at 15 minutes, forbids a pre-set `claimed_by`, and freezes
+`code`/`device_uid`/`expires_at` on UPDATE so only `claim_pairing`'s `claimed_by` write is legal.
+A matching `devices_validate` trigger makes `device_uid` **immutable** — it was previously
+re-pointable at an arbitrary uuid, which let an account capture a device's identity and receive
+that device's pushed credentials. Push uses last-write-wins **refined by a
 field-preserving server-side merge** (see "Credential round-trip" below): a device push replaces
 the profile's source set and reorders it, but per source the `fields` (and per profile the
 metadata `config`) merge through `merge_preserving_nonempty(stored, incoming)`, so a push can add
@@ -285,8 +319,11 @@ documented gap.
 ### Validation limits and rate limiting
 
 Writes are bounded at two layers (`..._harden_cloud.sql`): **BEFORE INSERT/UPDATE triggers** on
-`sources`/`profiles`/`metadata_configs` call shared `assert_*` helpers — binding the panel's
-*direct* table writes as well as the RPCs — and each push RPC additionally checks the top-level
+`sources`/`profiles`/`metadata_configs` — plus `source_secrets`/`metadata_secrets`
+(`..._secrets_store.sql`) and `pairings`/`devices` (`..._tenant_isolation.sql`; those two were the
+gap — the header's "every device→cloud write" claim did not hold for them) — call shared `assert_*`
+helpers, binding the panel's *direct* table writes as well as the RPCs, and each push RPC
+additionally checks the top-level
 array count and byte size **before any mutation**. Rejections raise `check_violation` with a
 stable `iptvs: ` message prefix and never interpolate payload values (a raw CHECK constraint was
 deliberately rejected: its "Failing row contains (…)" detail would leak credentials through
@@ -296,11 +333,28 @@ value, 16 MB payload ceilings — so a legitimate user on a huge portal is never
 push RPCs are rate-limited DB-side (`check_push_rate`, 30 calls/min per device session —
 deliberately per-device, not per-owner, since two devices on one account are independent
 human-driven callers — one self-resetting row per subject in the policy-less `push_rate`
-table, reaped on account deletion). Reads/pulls are deliberately unthrottled
+table, reaped on account deletion). `claim_pairing` is rate-limited too (10/min) — it was the only
+push/claim-class RPC without a throttle, and a successful claim grants read access to that device's
+owner's data. Reads/pulls are deliberately unthrottled
 (PostgREST has no per-user limit and an Edge proxy isn't justified) — accepted risk, mitigated
-by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` and the app's
-`friendlyCloudError` show `iptvs: `-prefixed messages as-is and reduce everything else to
-generic text — Postgres `details`/`hint` are never rendered.
+by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` shows
+`iptvs: `-prefixed messages as-is and reduces everything else to generic text. The app's
+`friendlyCloudError` is **not** equivalent, despite what this file used to say: it renders any
+Postgres `message` (redacted through `redactText`) rather than genericising it, so a raw
+`duplicate key value violates unique constraint …` can reach the user. The load-bearing half of the
+claim does hold on both — Postgres puts row values in `details`/`hint`, and **neither client ever
+renders those**, which is what keeps CHECK-style "Failing row contains (…)" credential leaks off
+the screen.
+
+> **Never add `alter table … force row level security`.** It looks like obvious hardening and it
+> would break the system. The five RPC-only tables have **zero** policies by design, and every
+> `SECURITY DEFINER` RPC runs as `postgres` — which is also the table owner. `FORCE` subjects the
+> owner to RLS, so with no policies present every one of those RPCs would silently read and write
+> nothing. The residual risk it would address is nil anyway: no client-reachable role owns these
+> tables (PostgREST connects as `authenticator` and `SET ROLE`s to `anon`/`authenticated`, and
+> `service_role` bypasses RLS via `BYPASSRLS` regardless). The correct defence-in-depth is the
+> table-level `REVOKE` in `..._tenant_isolation.sql`, which also strips **TRUNCATE** — RLS does not
+> filter TRUNCATE at all, so holding it on an RLS-protected table is a latent full-wipe primitive.
 
 ## Pairing flow (code-based, works on every platform)
 
