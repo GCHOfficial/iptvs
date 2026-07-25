@@ -58,10 +58,15 @@ void main() {
       ),
     );
     expect(publishing, contains('9P8KK9T379WN'));
+    // Both link rows must reference THIS product. They used to be pinned to the
+    // literal "Available after the product is live" placeholder, which stopped
+    // being true once the Store listing went live — that assertion tracked a
+    // one-time launch TODO rather than an identity invariant. Pinning the Store
+    // ID inside each row keeps the real property (the links can't drift to
+    // another product) without re-pinning a placeholder.
     expect(
       RegExp(
-        r'\| (Store deep link|Web Store URL) \| '
-        r'Available after the product is live \|',
+        r'\| (Store deep link|Web Store URL) \| [^|]*9P8KK9T379WN[^|]*\|',
       ).allMatches(publishing),
       hasLength(2),
     );
