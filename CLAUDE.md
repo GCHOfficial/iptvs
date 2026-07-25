@@ -278,7 +278,24 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.
 - Devices are anonymous users with **no direct table writes**; the only device→cloud write path
-  is the owner-scoped `push_*` RPCs. Push is last-write-wins.
+  is the owner-scoped `push_*` RPCs. Push is row-level last-write-wins **refined by field-preserve**:
+  broad fields merge through `merge_preserving_nonempty(stored, incoming)` so a device push can
+  never blank a stored non-empty value — **only a direct panel edit can clear one**.
+- **Secrets are isolated + optionally E2EE (Phase 2/3 — implemented; docs/cloud-sync.md).** The
+  cloud `sources.fields`/`metadata_configs.config` rows carry only **broad** keys (a server strip
+  trigger enforces it); secret keys (`secret_keys.dart`: mac/username/password/playlistUrl/epgUrl/
+  userAgent; tmdb/tvdb/tvdbPin/mdblist keys) travel through dedicated RPCs (`get_secrets`, a
+  per-source `secret` element on `push_sources`, `p_secret` on the 3-arg `push_metadata`) as
+  `{format:0|1,payload}`. **Absent secret = server preserves** (never blanks). When a profile opts
+  into E2EE the secret is `format` 1 — AES-256-GCM under a per-profile content key the device
+  unwraps with its own P-256 key pair (`cloud_crypto.dart`; **secret format is server-enforced**).
+  `CloudCryptoStatus` = off/ready/**locked**; a locked device (no CK — devices never prompt for the
+  passphrase) disables Push and badges credential-less sources as needs-attention (fail closed,
+  never activate empty credentials). Pull applies a **defensive local overlay** so a locked/partial
+  profile never blanks a locally-held secret. Crypto is protected vs DB-at-rest / operator / broad
+  RLS bugs, **not** vs an unlocked/XSS'd panel or a paired device holding the CK; `rotate_content_key`
+  is the revocation remedy. `package:cryptography` 2.9.0 has no VM/native ECDH, so P-256 is pure-Dart
+  in `cloud_crypto.dart` (RFC-5903-validated); vectors in `test/fixtures/crypto_vectors.json`.
 - Every profile (local and cloud) owns a `ProfileSnapshot`; switching snapshots the outgoing
   state and restores the incoming one, keeping cloud-managed source ids scoped per profile so
   pulls never leak sources across profiles (`local_profile_store.dart`).

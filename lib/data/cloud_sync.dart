@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -5,8 +8,10 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
+import 'cloud_crypto.dart';
 import 'metadata_config.dart';
 import 'net.dart';
+import 'secret_keys.dart';
 import 'source_store.dart';
 import 'source_identity_migration.dart';
 
@@ -88,6 +93,114 @@ const _favoriteKinds = [
   ContentKind.series,
 ];
 
+/// The end-to-end-encryption state of the active cloud profile as seen by this
+/// device.
+///
+/// - [off] — the profile has no E2EE (cloud secrets are RLS+TLS protected only),
+///   or the backend predates the secrets migration. Secrets travel as `format`
+///   0 (plaintext).
+/// - [ready] — E2EE is on and this device holds the unwrapped content key, so it
+///   can decrypt pulled secrets and encrypt (`format` 1) on push.
+/// - [locked] — E2EE is on but this device has no content key (never provisioned
+///   / unwrap failed). It can still pull broad fields (credentials stay whatever
+///   the device already had, via the defensive local overlay) but **push is
+///   disabled**, and any source without a locally-known secret is surfaced as
+///   needs-attention. Devices never prompt for the passphrase (TV constraint) —
+///   the user unlocks by opening the panel.
+enum CloudCryptoStatus { off, ready, locked }
+
+/// Whether [e] is a "function does not exist" error from calling an RPC that a
+/// pre-migration backend doesn't have yet. Such a call must degrade to "no cloud
+/// secrets available", never crash the sync.
+bool isMissingFunctionError(Object e) {
+  if (e is! PostgrestException) return false;
+  if (e.code == '42883' || e.code == 'PGRST202') return true;
+  final m = e.message.toLowerCase();
+  return m.contains('does not exist') || m.contains('could not find the function');
+}
+
+/// Decode a pulled `{"format":0|1,"payload":...}` secret entry to a plain secret
+/// map. Pure (crypto only, no network).
+///
+/// Returns an **empty** map when the entry is absent, or when the profile is
+/// E2EE but this device is [CloudCryptoStatus.locked] (no key) — an expected,
+/// non-integrity state that the caller resolves via the defensive local overlay.
+/// **Throws** [CloudCryptoException] on a genuine integrity failure (bad format,
+/// or a decrypt/version/auth failure while the device *does* hold a key), which
+/// the caller catches per-source and surfaces as needs-attention. It never
+/// returns a partial/empty map *as if* it were the real secret for a decryptable
+/// entry — fail closed.
+Future<Map<String, String>> decodeSecretEntry({
+  required Map<String, dynamic>? entry,
+  required CloudCryptoStatus status,
+  required List<int>? contentKey,
+  required int ckVersion,
+  required List<int> aad,
+}) async {
+  if (entry == null) return const {};
+  final format = entry['format'];
+  final payload = entry['payload'];
+  if (format == 0) {
+    if (payload is! Map) return const {};
+    return {
+      for (final e in payload.entries) e.key.toString(): e.value?.toString() ?? '',
+    };
+  }
+  if (format == 1) {
+    if (status != CloudCryptoStatus.ready || contentKey == null) {
+      // Locked: cannot decrypt; fall back to the local overlay (not an
+      // integrity failure, so do not throw).
+      return const {};
+    }
+    if (payload is! Map) {
+      throw const CloudCryptoException('secret payload is not an object');
+    }
+    return decryptSecretEnvelope(
+      envelope: Map<String, dynamic>.from(payload),
+      contentKey: contentKey,
+      ckVersion: ckVersion,
+      aad: aad,
+    );
+  }
+  throw CloudCryptoException('unknown secret format: $format');
+}
+
+/// Build the `secret` element for a push, or **null** when the device doesn't
+/// know the secret ([secret] empty) — an absent element tells the server to
+/// preserve whatever it has stored (never blank it). Pure (crypto only).
+///
+/// E2EE [ready] → `format` 1 (encrypted under [contentKey]); E2EE [off] →
+/// `format` 0 (plaintext). [locked] must never reach here (push is disabled);
+/// it is treated as [off] defensively but callers guard first.
+Future<Map<String, dynamic>?> buildSecretElement({
+  required Map<String, String> secret,
+  required CloudCryptoStatus status,
+  required List<int>? contentKey,
+  required int ckVersion,
+  required List<int> aad,
+  List<int>? ivOverride,
+}) async {
+  if (secret.isEmpty) return null;
+  if (status == CloudCryptoStatus.ready && contentKey != null) {
+    final iv = ivOverride ?? randomBytes(12);
+    final envelope = await encryptSecretEnvelope(
+      secret: secret,
+      contentKey: contentKey,
+      ckVersion: ckVersion,
+      aad: aad,
+      iv: iv,
+    );
+    return {'format': 1, 'payload': envelope};
+  }
+  return {'format': 0, 'payload': secret};
+}
+
+/// Cryptographically-strong random bytes (IV/nonce generation).
+List<int> randomBytes(int n) {
+  final r = Random.secure();
+  return List<int>.generate(n, (_) => r.nextInt(256));
+}
+
 /// Maps a Supabase `sources` row to a [SourceConfig]. Pure (no network) so it
 /// can be unit-tested directly. `fields` arrives as a JSON object whose values
 /// are coerced back to strings to match [SourceConfig.fields].
@@ -110,18 +223,22 @@ SourceConfig cloudRowToConfig(Map<String, dynamic> row) {
   return config;
 }
 
-SourceConfig _mergeLocalSecrets(SourceConfig cloud, SourceConfig? local) {
-  if (local == null || local.kind != cloud.kind) return cloud;
-  return cloud.copyWith(fields: {...cloud.fields, ...local.fields});
-}
-
-SourceConfig _cloudSafeConfig(SourceConfig config) =>
-    config.copyWith(fields: config.cloudSafeFields);
-
-/// Read-only cloud sync: a device pairs with a panel account, then pulls the
-/// account's source list and metadata config into the local [SourceStore]. The
-/// device authenticates anonymously and never writes credentials upstream — the
-/// web panel is the source of truth (see `supabase/migrations/0001_init.sql`).
+/// Two-way cloud sync: a device pairs with a panel account, then pulls the
+/// account's source list and metadata config into the local [SourceStore] and
+/// can optionally push its own list back up. The device authenticates
+/// anonymously.
+///
+/// **Phase-2 isolated secrets + Phase-3 opt-in E2EE.** The cloud `sources.fields`
+/// and `metadata_configs.config` rows now carry only the **broad** keys; secrets
+/// (credentials/locators, API keys) travel through dedicated RPCs (`get_secrets`,
+/// the per-source `secret` element on `push_sources`, `p_secret` on
+/// `push_metadata`). When a profile has E2EE enabled, secrets are encrypted
+/// client-side under a per-profile content key that this device unwraps with its
+/// own P-256 key pair ([cloud_crypto.dart]); when it's off, they travel as
+/// plaintext (`format` 0), still RLS+TLS protected. A push can never blank a
+/// stored value (empty/absent secret → server preserves), and a pull applies a
+/// defensive local overlay so a locked device never loses a credential it
+/// already holds. See docs/cloud-sync.md for the protocol and threat boundary.
 class CloudSync {
   final SupabaseClient _client;
   final FlutterSecureStorage _storage;
@@ -137,6 +254,12 @@ class CloudSync {
   /// The profile this device last synced, cached so the picker can preselect it
   /// offline; the `devices.active_profile_id` row is the source of truth.
   static const _kProfileId = 'cloud_profile_id';
+
+  /// This device's long-lived P-256 key pair for E2EE content-key unwrapping,
+  /// persisted in the keychain (base64). The private scalar is a device secret
+  /// on par with the provider credentials already stored here.
+  static const _kDevicePriv = 'cloud_device_priv_key';
+  static const _kDevicePub = 'cloud_device_pub_key';
 
   CloudSync({
     SupabaseClient? client,
@@ -257,20 +380,46 @@ class CloudSync {
   /// added on the device are kept (after the cloud ones). Returns the number of
   /// cloud sources synced.
   Future<int> pullSources(SourceStore store, String profileId) async {
+    final crypto = await _resolveCryptoState(profileId);
     final rows = await _client
         .from('sources')
         .select()
         .eq('profile_id', profileId)
         .order('position');
-    final cloudConfigs = [
-      for (final r in rows)
-        _cloudSafeConfig(cloudRowToConfig(Map<String, dynamic>.from(r))),
-    ];
+    final secrets = await _fetchSecrets(profileId);
+    final secretSources = (secrets?['sources'] as Map?) ?? const {};
     final localById = {for (final c in await store.list()) c.id: c};
-    final configs = [
-      for (final cloud in cloudConfigs)
-        _mergeLocalSecrets(cloud, localById[cloud.id]),
-    ];
+
+    // Merge each source's broad row with its (decrypted) secret map, then apply
+    // the defensive local overlay so a locked/partial profile can't blank a
+    // credential this device already holds (amendment B1).
+    final configs = <SourceConfig>[];
+    for (final r in rows) {
+      final base = cloudRowToConfig(Map<String, dynamic>.from(r));
+      final rawEntry = secretSources[base.id];
+      Map<String, String> secretMap = const {};
+      try {
+        secretMap = await decodeSecretEntry(
+          entry: rawEntry == null
+              ? null
+              : Map<String, dynamic>.from(rawEntry as Map),
+          status: crypto.status,
+          contentKey: crypto.ck,
+          ckVersion: crypto.ckVersion,
+          aad: sourceSecretAad(profileId, base.id, crypto.ckVersion),
+        );
+      } on CloudCryptoException {
+        // A per-source integrity failure surfaces as needs-attention (empty
+        // secret → missing credential badge), without aborting the whole pull.
+        secretMap = const {};
+      }
+      var fields = mergeFields(base.fields, secretMap);
+      final local = localById[base.id];
+      if (local != null) {
+        fields = fillGapsFromLocal(fields, local.fields, kSourceSecretKeys);
+      }
+      configs.add(base.copyWith(fields: fields));
+    }
     final newIds = configs.map((c) => c.id).toSet();
     final prevIds = await _readCloudIds();
 
@@ -297,19 +446,31 @@ class CloudSync {
         .eq('profile_id', profileId)
         .maybeSingle();
     if (row == null) return false;
-    final config = Map<String, dynamic>.from(row['config'] as Map);
-    final cloud = MetadataConfig.fromJson(config);
+    final broad = Map<String, dynamic>.from(row['config'] as Map);
+    final crypto = await _resolveCryptoState(profileId);
+    final secrets = await _fetchSecrets(profileId);
+    final rawEntry = secrets?['metadata'];
+    Map<String, String> secretMap = const {};
+    if (rawEntry != null) {
+      try {
+        secretMap = await decodeSecretEntry(
+          entry: Map<String, dynamic>.from(rawEntry as Map),
+          status: crypto.status,
+          contentKey: crypto.ck,
+          ckVersion: crypto.ckVersion,
+          aad: metadataSecretAad(profileId, crypto.ckVersion),
+        );
+      } on CloudCryptoException {
+        secretMap = const {};
+      }
+    }
     final local = await store.metadataConfig();
-    await store.saveMetadataConfig(
-      MetadataConfig(
-        provider: cloud.provider,
-        tmdbApiKey: local.tmdbApiKey,
-        tvdbApiKey: local.tvdbApiKey,
-        tvdbPin: local.tvdbPin,
-        mdblistApiKey: local.mdblistApiKey,
-        autoEnrich: cloud.autoEnrich,
-      ),
+    final merged = MetadataConfig.fromCloudParts(
+      broad: broad,
+      secret: secretMap,
+      local: local,
     );
+    await store.saveMetadataConfig(merged);
     return true;
   }
 
@@ -371,13 +532,20 @@ class CloudSync {
     }
   }
 
-  /// Push this device's full source list up to the paired account, replacing the
-  /// panel's set (last-write-wins, mediated by the `push_sources` RPC so the
-  /// device never has direct write access). Legacy non-UUID local ids are first
+  /// Push this device's full source list (full `fields`, credentials included)
+  /// up to the paired account, replacing the panel's set except that the server
+  /// merges each source's `fields` field-wise so a push never blanks a stored
+  /// non-empty credential (last-write-wins refined by field-preserve, mediated by
+  /// the `push_sources` RPC so the device never has direct write access). Legacy
+  /// non-UUID local ids are first
   /// rewritten to UUIDs and persisted, so device and cloud share ids and the push
   /// is idempotent. After a push the whole local list is cloud-managed. Returns
   /// the number of sources pushed.
   Future<int> pushSources(SourceStore store, String profileId) async {
+    final crypto = await _resolveCryptoState(profileId);
+    if (crypto.status == CloudCryptoStatus.locked) {
+      throw const CloudCryptoException(_kLockedPushMessage);
+    }
     final all = await store.list();
     final activeOld = await store.activeId();
     String? activeNew = activeOld;
@@ -404,17 +572,28 @@ class CloudSync {
       await store.setActive(activeNew);
     }
 
-    final payload = [
-      for (var i = 0; i < normalized.length; i++)
-        {
-          'id': normalized[i].id,
-          'kind': normalized[i].kind.name,
-          'label': normalized[i].label,
-          'fields': normalized[i].cloudSafeFields,
-          'settings': normalized[i].settings,
-          'position': i,
-        },
-    ];
+    final payload = <Map<String, dynamic>>[];
+    for (var i = 0; i < normalized.length; i++) {
+      final c = normalized[i];
+      final (broad, secret) = splitFields(c.fields, kSourceSecretKeys);
+      final element = await buildSecretElement(
+        secret: secret,
+        status: crypto.status,
+        contentKey: crypto.ck,
+        ckVersion: crypto.ckVersion,
+        aad: sourceSecretAad(profileId, c.id, crypto.ckVersion),
+      );
+      payload.add({
+        'id': c.id,
+        'kind': c.kind.name,
+        'label': c.label,
+        'fields': broad,
+        'settings': c.settings,
+        'position': i,
+        // Absent 'secret' → server preserves the stored one for this source.
+        'secret': ?element,
+      });
+    }
     await _client.rpc(
       'push_sources',
       params: {'p_sources': payload, 'p_profile_id': profileId},
@@ -427,10 +606,25 @@ class CloudSync {
   /// Push this device's metadata provider config up to the given profile
   /// (last-write-wins, via the `push_metadata` RPC).
   Future<void> pushMetadata(SourceStore store, String profileId) async {
+    final crypto = await _resolveCryptoState(profileId);
+    if (crypto.status == CloudCryptoStatus.locked) {
+      throw const CloudCryptoException(_kLockedPushMessage);
+    }
     final config = await store.metadataConfig();
+    final element = await buildSecretElement(
+      secret: config.cloudSecretFields(),
+      status: crypto.status,
+      contentKey: crypto.ck,
+      ckVersion: crypto.ckVersion,
+      aad: metadataSecretAad(profileId, crypto.ckVersion),
+    );
     await _client.rpc(
       'push_metadata',
-      params: {'p_config': config.cloudSafeJson, 'p_profile_id': profileId},
+      params: {
+        'p_config': config.cloudBroadJson(),
+        'p_profile_id': profileId,
+        'p_secret': element,
+      },
     );
   }
 
@@ -491,6 +685,129 @@ class CloudSync {
 
   Future<void> setManagedSourceIds(Set<String> ids) => _writeCloudIds(ids);
 
+  /// The E2EE state of [profileId] as seen by this device, for the sync screen's
+  /// status line and to gate push. Degrades to [CloudCryptoStatus.off] against a
+  /// pre-migration backend.
+  Future<CloudCryptoStatus> cryptoStatus(String profileId) async =>
+      (await _resolveCryptoState(profileId)).status;
+
+  /// Resolve crypto state + (when [ready]) the unwrapped content key. Never
+  /// throws for an expected condition: a missing RPC or a missing/undecryptable
+  /// CK becomes [off]/[locked], not an exception.
+  Future<_CryptoState> _resolveCryptoState(String profileId) async {
+    Map<String, dynamic>? state;
+    try {
+      final res = await _client.rpc(
+        'get_crypto_state',
+        params: {'p_profile_id': profileId},
+      );
+      state = res == null ? null : Map<String, dynamic>.from(res as Map);
+    } on PostgrestException catch (e) {
+      if (isMissingFunctionError(e)) return const _CryptoState.off();
+      rethrow;
+    }
+    final enabled = state?['enabled'] == true;
+    final ckVersion = (state?['ck_version'] as int?) ?? 0;
+    if (!enabled) return const _CryptoState.off();
+
+    // E2EE is on: register this device's public key (idempotent) and try to
+    // unwrap the content key. Any failure downgrades to locked (fail closed).
+    try {
+      final keyPair = await _ensureDeviceKeyPair();
+      await _publishDevicePublicKey(keyPair);
+      final ckRow = await _getDeviceCk(profileId);
+      if (ckRow == null) {
+        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+      }
+      final rowCkv = (ckRow['ck_version'] as int?) ?? ckVersion;
+      final wrapped = _asJsonMap(ckRow['wrapped_ck']);
+      if (wrapped == null) {
+        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+      }
+      final uid = deviceId;
+      if (uid == null) {
+        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+      }
+      final ck = await decodeDeviceWrap(
+        envelope: wrapped,
+        devicePrivateKey: keyPair.privateKey,
+        ckVersion: rowCkv,
+        aad: deviceWrapAad(profileId, uid, rowCkv),
+      );
+      return _CryptoState(
+        status: CloudCryptoStatus.ready,
+        ckVersion: rowCkv,
+        ck: ck,
+      );
+    } on CloudCryptoException {
+      return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+    } on PostgrestException catch (e) {
+      if (isMissingFunctionError(e)) {
+        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+      }
+      rethrow;
+    }
+  }
+
+  /// Fetch the per-profile secrets bundle (`{sources:{id:{format,payload}},
+  /// metadata:{...}|null}`), or null against a pre-migration backend.
+  Future<Map<String, dynamic>?> _fetchSecrets(String profileId) async {
+    try {
+      final res = await _client.rpc(
+        'get_secrets',
+        params: {'p_profile_id': profileId},
+      );
+      return res == null ? null : Map<String, dynamic>.from(res as Map);
+    } on PostgrestException catch (e) {
+      if (isMissingFunctionError(e)) return null;
+      rethrow;
+    }
+  }
+
+  /// This device's P-256 key pair, generating + persisting one on first use.
+  Future<EcKeyPair> _ensureDeviceKeyPair() async {
+    final privB64 = await _storage.read(key: _kDevicePriv);
+    if (privB64 != null && privB64.isNotEmpty) {
+      final priv = b64Decode(privB64);
+      final pubB64 = await _storage.read(key: _kDevicePub);
+      if (pubB64 != null && pubB64.isNotEmpty) {
+        return EcKeyPair(privateKey: priv, publicKey: b64Decode(pubB64));
+      }
+      final rebuilt = p256KeyPairFromScalar(priv);
+      await _storage.write(key: _kDevicePub, value: b64Encode(rebuilt.publicKey));
+      return rebuilt;
+    }
+    final fresh = generateP256KeyPair();
+    await _storage.write(key: _kDevicePriv, value: b64Encode(fresh.privateKey));
+    await _storage.write(key: _kDevicePub, value: b64Encode(fresh.publicKey));
+    return fresh;
+  }
+
+  Future<void> _publishDevicePublicKey(EcKeyPair keyPair) async {
+    try {
+      await _client.rpc(
+        'set_device_public_key',
+        params: {'p_public_key': b64Encode(keyPair.publicKey)},
+      );
+    } on PostgrestException catch (e) {
+      if (isMissingFunctionError(e)) return;
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _getDeviceCk(String profileId) async {
+    final res = await _client.rpc(
+      'get_device_ck',
+      params: {'p_profile_id': profileId},
+    );
+    if (res == null) return null;
+    if (res is List) {
+      return res.isEmpty ? null : Map<String, dynamic>.from(res.first as Map);
+    }
+    if (res is Map) return Map<String, dynamic>.from(res);
+    return null;
+  }
+
   Future<Set<String>> _readCloudIds() async {
     final raw = await _storage.read(key: _kCloudIds);
     if (raw == null || raw.isEmpty) return <String>{};
@@ -499,4 +816,42 @@ class CloudSync {
 
   Future<void> _writeCloudIds(Set<String> ids) =>
       _storage.write(key: _kCloudIds, value: ids.join(','));
+}
+
+/// The user-facing message shown when push is blocked on a locked E2EE device.
+const _kLockedPushMessage =
+    'This profile is end-to-end encrypted. Open the panel and unlock it to '
+    'finish setting up this device.';
+
+/// Coerce a jsonb-or-JSON-string value to a `Map<String, dynamic>`, or null.
+Map<String, dynamic>? _asJsonMap(Object? value) {
+  if (value == null) return null;
+  if (value is Map) return Map<String, dynamic>.from(value);
+  if (value is String) {
+    try {
+      final decoded = jsonDecode(value);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
+}
+
+/// Resolved E2EE state + the unwrapped content key when [CloudCryptoStatus.ready].
+class _CryptoState {
+  final CloudCryptoStatus status;
+  final int ckVersion;
+  final List<int>? ck;
+
+  const _CryptoState({
+    required this.status,
+    this.ckVersion = 0,
+    this.ck,
+  });
+
+  const _CryptoState.off()
+      : status = CloudCryptoStatus.off,
+        ckVersion = 0,
+        ck = null;
 }

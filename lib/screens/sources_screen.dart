@@ -133,6 +133,22 @@ class _SourcesScreenState extends State<SourcesScreen> {
   }
 
   Future<void> _activate(SourceConfig c) async {
+    // Fail closed: never activate a source with missing credentials (e.g. a
+    // cloud pull left it locked because this device is E2EE-locked, or the
+    // secret was never provisioned). Playback would fail anyway.
+    if (sourceCredentialsMissing(c)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This source is missing its credentials. Unlock this profile in '
+            'the panel (or edit the source) before activating it.',
+          ),
+          duration: Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
     await widget.store.setActive(c.id);
     await _reload();
   }
@@ -566,6 +582,10 @@ class _SourceCardState extends State<_SourceCard> {
                       failed: _expiryFailed,
                       expiry: _expiry,
                     ),
+                    if (sourceCredentialsMissing(widget.config)) ...[
+                      const SizedBox(height: 6),
+                      const _NeedsAttentionBadge(),
+                    ],
                   ],
                 ),
               );
@@ -699,6 +719,32 @@ class _ExpiryBadge extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// A small chip flagging a source whose credentials are missing/locked (e.g. a
+/// cloud pull left it locked on an E2EE-locked device). Explains that the source
+/// can't be activated until it's unlocked in the panel or edited locally.
+class _NeedsAttentionBadge extends StatelessWidget {
+  const _NeedsAttentionBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFFE5A23D);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.lock_outline, size: 13, color: color),
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            'Needs attention — credentials locked. Unlock in the panel.',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: color, fontSize: 12),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _ActivePill extends StatelessWidget {
