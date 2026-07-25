@@ -172,19 +172,12 @@ class SourceConfig {
     if (settings.isNotEmpty) 'settings': settings,
   };
 
-  /// Fields safe to send to the account panel. Credentials and complete
-  /// playlist locators remain device-local and are never part of cloud JSON.
-  Map<String, String> get cloudSafeFields => switch (kind) {
-    SourceKind.stalker => {
-      if (fields['portal'] case final value? when value.isNotEmpty)
-        'portal': value,
-    },
-    SourceKind.xtream => {
-      if (fields['host'] case final value? when value.isNotEmpty) 'host': value,
-    },
-    SourceKind.m3u => const {},
-    SourceKind.demo => const {},
-  };
+  // NOTE: cloud sync now sends the full `fields` (credentials included) in both
+  // directions, with the server refusing to blank a stored non-empty value
+  // (`merge_preserving_nonempty`). The former `cloudSafeFields` credential-strip
+  // projection is intentionally gone; the future opt-in E2EE phase (Phase 3, see
+  // docs/cloud-sync.md) will reintroduce a projection that encrypts the locator
+  // fields rather than dropping them.
 
   factory SourceConfig.fromJson(Map<String, dynamic> j) => SourceConfig(
     id: j['id'] as String,
@@ -193,6 +186,26 @@ class SourceConfig {
     fields: Map<String, String>.from(j['fields'] as Map),
     settings: (j['settings'] as Map?)?.cast<String, dynamic>() ?? const {},
   );
+}
+
+/// Whether [config] is missing a required credential/locator, i.e. it can't be
+/// activated or played. This is exactly the state a cloud pull leaves a source
+/// in when the profile is end-to-end encrypted and this device is **locked** (no
+/// content key), or when a secret was never provisioned: the broad fields arrive
+/// but the secret ones stay empty. Used to fail closed — the sources screen
+/// badges such a source and refuses to activate it. Pure; no crypto/network.
+bool sourceCredentialsMissing(SourceConfig config) {
+  bool blank(String key) => (config.fields[key] ?? '').trim().isEmpty;
+  switch (config.kind) {
+    case SourceKind.stalker:
+      return blank('portal') || blank('mac');
+    case SourceKind.xtream:
+      return blank('host') || blank('username') || blank('password');
+    case SourceKind.m3u:
+      return blank('playlistUrl');
+    case SourceKind.demo:
+      return false;
+  }
 }
 
 String _legacyXtreamBase(String host) {
