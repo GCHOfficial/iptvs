@@ -13,6 +13,15 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   (`..._two_way_push.sql`) are the only device→cloud write path — owner-scoped via
   `current_device_owner()`, so an unpaired anon caller is rejected and a payload
   can't reach another account's rows.
+- **Tenant isolation** (`..._tenant_isolation.sql`) — makes that last sentence
+  actually true. It was not: an owner-guarded `ON CONFLICT` *skips* a foreign row
+  rather than rejecting it, so a crafted `push_sources` payload could carry another
+  account's source id into the secret loop and plant a credential there. Adds
+  composite `(id, owner)` keys + composite FKs so a cross-owner row is
+  unrepresentable, raises instead of skipping on a foreign id, filters
+  `source_secrets.owner` in `get_secrets`, drops the unvalidated direct
+  `pairings` INSERT path, makes `devices.device_uid` immutable, throttles
+  `claim_pairing`, and revokes table-level grants on the five RPC-only tables.
 - **Profiles** (`..._profiles.sql`) — an account holds multiple named **profiles**,
   each its own source list + metadata config + per-source `settings` (hidden
   categories) + `favorites`. `sources`/`metadata_configs` gain a `profile_id`
@@ -91,6 +100,11 @@ Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy ano
 
 ## Security checklist (do this before trusting it)
 
+**These were unchecked manual boxes for months, and two of them were false** (a
+`push_sources` payload *could* reach another account's secret rows; an anonymous
+session *did* have a direct INSERT on `pairings`). They are now the spec for the
+pgTAP suite in `supabase/tests/` — prefer extending that over re-checking by hand.
+
 - [ ] Anonymous session reads **nothing** from `sources`/`metadata_configs` until paired.
 - [ ] Anonymous session has **no direct** INSERT/UPDATE/DELETE on any table (writes need a real account).
 - [ ] `push_sources`/`push_metadata` reject an **unpaired** anonymous caller (no owner).
@@ -102,3 +116,16 @@ Prefer the modern **publishable key** (`sb_publishable_…`) over the legacy ano
 - [ ] Deleting a `devices` row immediately revokes that device's read access (and its push).
 - [ ] `delete_account` rejects anonymous devices, deletes only the caller, and
       removes all owner rows plus the caller's paired anonymous auth users.
+- [ ] A `push_sources` payload naming another account's **source id** raises
+      `iptvs: source id belongs to another account` (it used to skip silently).
+- [ ] `get_secrets` never returns a `source_secrets` row owned by another account.
+- [ ] `sources`/`metadata_configs` cannot be inserted pointing at another
+      account's `profile_id` (composite FK violation).
+- [ ] An anonymous session cannot INSERT into `pairings` directly, and
+      `request_pairing` still works.
+- [ ] `update devices set device_uid = …` raises `iptvs: device identity is
+      immutable`, and `claim_pairing` still succeeds (it re-points `owner`).
+- [ ] `anon`/`authenticated` hold **no** privileges on `source_secrets`,
+      `metadata_secrets`, `profile_crypto`, `device_ck`, `push_rate`, and no
+      TRUNCATE on the five client-facing tables.
+- [ ] Every `SECURITY DEFINER` function pins `search_path = ''`.

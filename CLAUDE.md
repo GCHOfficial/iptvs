@@ -281,6 +281,17 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   is the owner-scoped `push_*` RPCs. Push is row-level last-write-wins **refined by field-preserve**:
   broad fields merge through `merge_preserving_nonempty(stored, incoming)` so a device push can
   never blank a stored non-empty value — **only a direct panel edit can clear one**.
+- **Ownership is a schema invariant, not just an RPC predicate.** `profiles`/`sources` carry a
+  redundant `unique (id, owner)` and every owner-bearing child is pinned by a composite FK
+  `(parent_id, owner) → parent(id, owner)` (`..._tenant_isolation.sql`), so a row whose owner
+  disagrees with its parent's is unrepresentable. This exists because an owner-guarded
+  `ON CONFLICT` **skips silently instead of rejecting**, which let a crafted `push_sources` payload
+  plant a credential on another account's source. Keep new child tables inside that pattern.
+- **Never add `alter table … force row level security`.** The five RPC-only secret tables have
+  zero policies by design and the `SECURITY DEFINER` RPCs run as `postgres`, which owns the tables
+  — `FORCE` would make every one of those RPCs silently read and write nothing. Defence in depth is
+  the table-level `REVOKE` (which also strips TRUNCATE — RLS does not filter TRUNCATE). Rationale
+  in docs/cloud-sync.md.
 - **Secrets are isolated + optionally E2EE (Phase 2/3 — implemented; docs/cloud-sync.md).** The
   cloud `sources.fields`/`metadata_configs.config` rows carry only **broad** keys (a server strip
   trigger enforces it); secret keys (`secret_keys.dart`: mac/username/password/playlistUrl/epgUrl/
