@@ -48,19 +48,26 @@ jobs:
         # bump the tag here, not silently via a floating `17`/`latest`.
         image: supabase/postgres:17.6.1.156
         env:
+          # `supabase_admin`, not `postgres`: this image bakes in Supabase's role
+          # layout, where `auth` (and friends) are owned by `supabase_admin` and
+          # `postgres` is NOT a member of it. Connecting as `postgres` meant the
+          # bootstrap could not create `auth.users` — the job's first-run
+          # failure. `supabase_admin` is the image's actual superuser, so it owns
+          # the schema outright and no ownership juggling is needed.
+          POSTGRES_USER: supabase_admin
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U postgres"
+          --health-cmd="pg_isready -U supabase_admin"
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
     env:
       PGHOST: localhost
       PGPORT: 5432
-      PGUSER: postgres
+      PGUSER: supabase_admin
       PGPASSWORD: postgres
       PGDATABASE: postgres
     steps:
@@ -82,6 +89,18 @@ jobs:
           done
           echo "Postgres never became ready" >&2
           exit 1
+
+      # Cheap insurance against a base-image role/ownership change silently
+      # reshaping the environment these tests assume. Printed before anything
+      # runs, so a future failure is diagnosable from the log alone.
+      - name: Report role and ownership layout
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "select current_user, session_user;"
+          psql -v ON_ERROR_STOP=1 -c \
+            "select rolname, rolsuper from pg_roles where rolname not like 'pg\_%' order by rolname;"
+          psql -v ON_ERROR_STOP=1 -c \
+            "select nspname, pg_get_userbyid(nspowner) as owner from pg_namespace
+              where nspname in ('public','auth','extensions') order by nspname;"
 
       # Recreates the minimal auth surface + roles the migrations touch, and
       # installs pgTAP. Must run before the migrations: several of them
