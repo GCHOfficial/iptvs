@@ -60,6 +60,15 @@ const String kPbkdf2Name = 'PBKDF2-SHA256';
 /// Production PBKDF2 iteration count for the passphrase KEK (panel-side).
 const int kPbkdf2ProductionIterations = 600000;
 
+/// Accepted range for an envelope's `iter` on the READ path. The server's
+/// `>= 100000` floor validates `profile_crypto.kdf_iterations`, a column no read
+/// path consults — [decodeCkUnderKek] takes `iter` from the envelope, which is
+/// attacker-writable. Confidentiality never rested on this (a forged low count
+/// still cannot produce a valid GCM tag), but an unbounded value is a DoS in
+/// both directions. Keep in lockstep with `panel/src/crypto.js`.
+const int kPbkdf2MinIterations = 100000;
+const int kPbkdf2MaxIterations = 10000000;
+
 // ── base64 (standard, padded) ────────────────────────────────────────────────
 
 String b64Encode(List<int> bytes) => base64.encode(bytes);
@@ -520,6 +529,9 @@ Future<Uint8List> decodeCkUnderKek({
   _checkHeader(envelope, ckVersion, kPbkdf2Name);
   final salt = b64Decode(_requireString(envelope, 'salt'));
   final iterations = _requireInt(envelope, 'iter');
+  if (iterations < kPbkdf2MinIterations || iterations > kPbkdf2MaxIterations) {
+    throw const CloudCryptoException('envelope iteration count out of range');
+  }
   final iv = b64Decode(_requireString(envelope, 'iv'));
   final ctAndTag = b64Decode(_requireString(envelope, 'ct'));
   final kek = await pbkdf2Sha256(utf8.encode(passphrase), salt, iterations, 32);

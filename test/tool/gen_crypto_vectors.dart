@@ -424,7 +424,12 @@ Future<void> main() async {
     );
     final salt = unhex('a0a1a2a3a4a5a6a7a8a9aaabacadaeaf');
     final iv = unhex('b0b1b2b3b4b5b6b7b8b9babb');
-    const iterations = 4096; // low, for a fast fixture (production is 600000)
+    // Must be a value the read path accepts: `decodeCkUnderKek` bounds the
+    // envelope's `iter` to [kPbkdf2MinIterations, kPbkdf2MaxIterations], so the
+    // old fast-fixture 4096 is now rejected on both sides. Sitting exactly on
+    // the floor keeps the fixture as cheap as it is allowed to be and doubles
+    // as documentation of where the floor is (production is 600000).
+    const iterations = kPbkdf2MinIterations;
     final aad = kekAad(profileId, ckVersion);
     final envelope = await encodeCkUnderKek(
       contentKey: ck,

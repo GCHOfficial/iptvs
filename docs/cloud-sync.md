@@ -122,7 +122,12 @@ and degrades to broad-only sync — it never crashes (`isMissingFunctionError`).
 
 ### Crypto (`lib/data/cloud_crypto.dart`)
 
-Primitives: PBKDF2-HMAC-SHA256 (600 000 iterations in production; panel-side KEK), HKDF-SHA256,
+Primitives: PBKDF2-HMAC-SHA256 (600 000 iterations in production; panel-side KEK — the read path
+bounds an envelope's `iter` to **[100 000, 10 000 000]** in both `crypto.js` and `cloud_crypto.dart`;
+before that bound existed the server's documented ≥100 000 floor validated `profile_crypto
+.kdf_iterations`, a column *no read path consults*, so `iter: 1` was accepted silently and a huge
+one wedged the tab — confidentiality never depended on it, but the stated control was inert),
+HKDF-SHA256,
 AES-256-GCM (12-byte random IV, 128-bit tag), ECDH P-256. **Note:** `package:cryptography` 2.9.0
 ships no working ECDH on the Dart VM or native Flutter (`DartEcdh` throws), so the P-256 curve is
 implemented in pure Dart in `cloud_crypto.dart` and validated against the RFC 5903 §8.1
@@ -190,7 +195,28 @@ the new id, so the secret does not follow — the panel/device must re-enter it.
 The panel owns every crypto-admin flow (devices never see the passphrase). A per-profile
 **Security** tab offers: Enable (passphrase entered twice + an explicit loss warning — losing the
 passphrase means re-entering credentials), Unlock, Rotate passphrase, Rotate content key, Disable,
-and Lock now. The session unlock derives the KEK once per session and holds the unwrapped CK
+and Lock now.
+
+**Passphrase policy (`panel/src/passphrase.js`).** The wrapped CK, its salt and its iteration count
+all sit in one `profile_crypto` row, so the operator-in-the-threat-model gets an *offline* attack
+with no rate limit and no lockout: **the passphrase's own entropy is the entire margin.** At 600 k
+iterations that is ≈1.8 × 10⁴ guesses/s on one consumer GPU, so the former 8-character floor fell in
+**minutes** for a typical human-chosen password (~22 bits). Raising KDF cost cannot fix this —
+Argon2id at 64 MiB buys ≈4 bits, 1 GiB ≈8–9, against a ~28-bit shortfall — so the fix is entropy:
+a **Generate** button produces a 6-word diceware phrase from a 1024-word list (**60 bits**) and is
+the intended path, gated behind an "I have saved this" confirmation because loss is unrecoverable;
+hand-typed entry is still allowed but floored at **16 characters**. The wordlist length must stay a
+power of two (masked selection would otherwise be biased) and duplicate-free — both pinned by
+`panel/test/passphrase.test.js`, because either failure silently halves entropy at runtime.
+
+**`rotateContentKey` verifies the typed passphrase before minting anything.** `requireUnlocked`
+only proves a *session* CK exists; it says nothing about what was typed into "Current passphrase".
+Without the check a typo overwrote the stored `wrapped_ck` with one wrapped under the wrong KEK —
+server-accepted, success toast, session still unlocked — after which the *correct* passphrase no
+longer worked either and `disableE2ee` (which requires an unlocked session) was unreachable: the
+profile became permanently unrecoverable from the panel. The guard re-derives the KEK and lets the
+GCM tag reject, then constant-time-compares against the session key. Order is load-bearing and is
+pinned by `panel/test/crypto_hardening.test.js`. The session unlock derives the KEK once per session and holds the unwrapped CK
 **only in a module-closure variable** (`panel/src/secrets.js` — never `localStorage`/
 `sessionStorage`), zeroed on lock, profile switch, auth change, and a **15-minute idle auto-lock**.
 The Devices tab shows per-device provisioning for the profile with a "Send key" action when
@@ -222,13 +248,39 @@ restore `frame-ancestors 'none'` there.
 ### Threat boundary
 
 E2EE **protects** the credential/API-key secrets against: the database at rest, a Supabase
-operator or insider reading the tables, and an RLS bug that over-exposes the *broad* tables — none
-of those ever see plaintext secrets, only ciphertext they can't unwrap without the CK. It **does
-not protect** against: a compromised or XSS'd panel *while it is unlocked* (it holds the CK in
-memory and can read/rewrite secrets), or a malicious already-paired device that legitimately holds
-the CK. Revocation cannot un-leak a CK that a device already cached — the remedy for a suspected
-compromise is `rotate_content_key` (panel-side), which mints a new `ck_version`, re-wraps to the
-still-trusted devices, and makes every old-version envelope fail its `ckv` check.
+operator or insider **reading** the tables, and an RLS bug that over-exposes the *broad* tables —
+none of those ever see plaintext secrets, only ciphertext they can't unwrap without the CK. **That
+protection reduces entirely to the offline strength of the passphrase** (see "Passphrase policy"
+above): the wrapped CK, salt and iteration count are all in one row, so a reader of that row gets
+an unlimited offline attack. This is the whole reason the generator exists.
+
+It **does not protect** against: a compromised or XSS'd panel *while it is unlocked* (it holds the
+CK in memory and can read/rewrite secrets), or a malicious already-paired device that legitimately
+holds the CK.
+
+**An *active* (writing) backend is a third category, and it is outside the guarantee.** The earlier
+wording covered only an operator who *reads*; an operator or compromised backend that also
+**writes** defeats E2EE by other routes, and both clients currently trust the server on these:
+
+- **Downgrade to plaintext.** Both clients decide whether to encrypt from `get_crypto_state.enabled`
+  (`secrets.js` `encodeSecretElement`, `cloud_sync.dart` `_CryptoState`). A backend answering
+  `{enabled: false}` makes every client push provider credentials and metadata API keys in
+  `format 0`. The server-side format gate is the stated defence, but it lives in the same trust
+  domain as the attacker. Neither client remembers that a profile *was* E2EE.
+- **Content-key rollback.** `cloud_sync.dart` takes `ck_version` from the very `device_ck` row it is
+  about to unwrap and never compares it to the version `get_crypto_state` reported, so a backend
+  serving a consistent pre-rotation bundle pins a device to a **revoked** generation.
+
+Consequently, "`rotate_content_key` … makes every old-version envelope fail its `ckv` check" holds
+against a device that knows the current `ck_version` — i.e. **rotation is a remedy for a compromised
+device, not for a compromised backend**. Revocation cannot un-leak a CK a device already cached; the
+remedy for a suspected device compromise remains `rotate_content_key` (panel-side), which mints a
+new `ck_version`, re-wraps to the still-trusted devices, and invalidates old-version envelopes.
+
+Closing the two bullets above needs client-side sticky state (a per-profile "was enabled" flag and a
+monotonic `ck_version` high-water mark in secure storage). **Not yet implemented** — recorded here
+rather than left implied, because a boundary that reads as complete and isn't is worse than a
+documented gap.
 
 ### Validation limits and rate limiting
 

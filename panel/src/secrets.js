@@ -406,6 +406,36 @@ export async function rotateContentKey(profileId, passphrase) {
   if (!material || !material.enabled) throw new cc.CloudCryptoError('e2ee not enabled');
   const oldCkVersion = material.ck_version;
   const newCkVersion = oldCkVersion + 1;
+
+  // Verify the typed passphrase BEFORE anything is minted or pushed.
+  //
+  // `requireUnlocked` only proves a session CK exists — it says nothing about
+  // what the user just typed into "Current passphrase". Without this check a
+  // typo sailed through: the new CK was wrapped under a KEK derived from the
+  // wrong passphrase, the server accepted it (it cannot tell), the toast said
+  // success, and the browser stayed unlocked — while the old wrapped_ck was
+  // overwritten. The correct passphrase then no longer worked either, and
+  // `disableE2ee` requires an unlocked session, so the profile was permanently
+  // unrecoverable from the panel. One typo, silent, irreversible.
+  //
+  // The GCM tag does the real work: a wrong passphrase derives a wrong KEK and
+  // decryption fails closed. The constant-time comparison against the session
+  // key is belt-and-braces for the case where the stored envelope somehow no
+  // longer matches the session we are rotating.
+  let reDerived;
+  try {
+    reDerived = await cc.decodeCkUnderKek({
+      envelope: material.wrapped_ck,
+      passphrase,
+      ckVersion: oldCkVersion,
+      aad: cc.kekAad(profileId, oldCkVersion),
+    });
+  } catch {
+    throw new cc.CloudCryptoError('wrong passphrase');
+  }
+  if (!cc.constantTimeEqual(reDerived, s.key)) {
+    throw new cc.CloudCryptoError('wrong passphrase');
+  }
   const revision = await readRevision(profileId);
   const secrets = await getSecrets(profileId);
   const plain = await decryptAllSecrets(profileId, secrets, s.key, s.ckVersion);

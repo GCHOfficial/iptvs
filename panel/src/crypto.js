@@ -44,6 +44,27 @@ export const PBKDF2_NAME = 'PBKDF2-SHA256';
 // Production PBKDF2 iteration count for the passphrase KEK (panel-side).
 export const PBKDF2_PRODUCTION_ITERATIONS = 600000;
 
+// Accepted range for an envelope's `iter` on the READ path. The server's
+// >= 100000 floor validates `profile_crypto.kdf_iterations`, a column no read
+// path ever consults — `decodeCkUnderKek` takes `iter` from the envelope, which
+// is attacker-writable. Confidentiality never depended on this (a forged low
+// count still can't produce a valid GCM tag), but an unbounded value is a DoS
+// in both directions: `iter: 1` derives instantly and silently, and a huge one
+// wedges the tab for hours. Bounding it here is what makes the documented floor
+// real rather than inert. Keep in lockstep with `cloud_crypto.dart`.
+export const PBKDF2_MIN_ITERATIONS = 100000;
+export const PBKDF2_MAX_ITERATIONS = 10000000;
+
+// Constant-time byte comparison. Used to confirm a re-derived key matches the
+// session's, without leaking where they diverge through timing.
+export function constantTimeEqual(a, b) {
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
 // A typed, fail-closed crypto failure. Surfaced by the panel as a
 // "needs attention" state, never as a dropped/empty secret.
 export class CloudCryptoError extends Error {
@@ -542,6 +563,9 @@ export async function decodeCkUnderKek({ envelope, passphrase, ckVersion, aad })
   _checkHeader(envelope, ckVersion, PBKDF2_NAME);
   const salt = b64Decode(_requireString(envelope, 'salt'));
   const iterations = _requireInt(envelope, 'iter');
+  if (iterations < PBKDF2_MIN_ITERATIONS || iterations > PBKDF2_MAX_ITERATIONS) {
+    throw new CloudCryptoError('envelope iteration count out of range');
+  }
   const iv = b64Decode(_requireString(envelope, 'iv'));
   const ctAndTag = b64Decode(_requireString(envelope, 'ct'));
   const kek = await pbkdf2Sha256(utf8Encode(passphrase), salt, iterations, 32);
