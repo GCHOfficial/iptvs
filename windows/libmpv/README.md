@@ -8,13 +8,37 @@ magenta cast, because the legacy `gpu` VO can't apply the DV reshaping.
 ## How it's handled
 
 `windows/CMakeLists.txt` fixes this automatically: if `libmpv-2.dll` is not
-already present in this folder, the build **downloads a pinned, hash-verified
-libplacebo build** (from zhongfly's `mpv-winbuild`) at configure time and copies
-it over the one media_kit bundles. So a fresh clone / CI just works — no manual
-step. The player then requests `vo=gpu-next`.
+already present in this folder, the build **resolves zhongfly's latest
+`mpv-winbuild` release** at configure time (via the GitHub API), downloads the
+generic `mpv-dev-x86_64` archive, verifies it against the release's published
+SHA-256 digest, and copies `libmpv-2.dll` over the one media_kit bundles. So a
+fresh clone / CI just works — no manual step. The player then requests
+`vo=gpu-next`.
 
-To pin a newer/different build, update `LIBMPV_PLACEBO_URL` + `LIBMPV_PLACEBO_SHA256`
-in `windows/CMakeLists.txt`.
+Why *latest* and not a fixed URL: zhongfly publishes a new build daily and
+**deletes old release assets**, so any pinned dated URL 404s within days (that
+outage is what this replaced). The trade-off is that the exact mpv build isn't
+reproducible across machines/dates. If a fetch fails for any reason (offline,
+API rate-limited, digest mismatch), the build **falls back to media_kit's
+bundled libmpv** — never a hard error; only HDR/DV rendering is affected.
+
+**Pinning for a reproducible or offline build.** Pass an explicit URL (and
+optionally a digest to verify) — as a CMake cache var or an environment
+variable:
+
+```
+flutter build windows --release \
+  -- -DLIBMPV_PLACEBO_URL=https://example/mpv-dev-x86_64-….7z \
+     -DLIBMPV_PLACEBO_SHA256=<sha256>
+```
+
+For a fully self-contained supply chain, mirror a known-good `libmpv-2.dll` (or
+the `.7z`) somewhere you control and point `LIBMPV_PLACEBO_URL` at it, or just
+drop the DLL in this folder (below) — that takes precedence over any download.
+
+CI authenticates the GitHub API call with the workflow's `GITHUB_TOKEN` to avoid
+the anonymous rate limit; a cache keyed on `windows/CMakeLists.txt` keeps the
+resolved DLL stable between runs.
 
 ## Using your own DLL (override / offline)
 
