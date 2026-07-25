@@ -88,6 +88,10 @@ jobs:
 
       - name: Build Windows (C++)
         if: matrix.language == 'c-cpp'
+        # Authenticates the GitHub API call in windows/CMakeLists.txt that
+        # resolves the latest libmpv build (avoids the anonymous rate limit).
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           flutter config --enable-windows-desktop
           flutter pub get
