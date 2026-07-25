@@ -20,15 +20,28 @@ insert into public.sources (id, owner, profile_id, kind, label)
 -- Anonymous (no session at all) reads nothing and writes nothing, even
 -- though rows exist.
 reset role;
+-- Clearing the claims is REQUIRED, not tidiness. `test.login_user()` above set
+-- `request.jwt.claims` with transaction-local scope, and `reset role` does not
+-- touch GUCs — so without this, `auth.uid()` still resolves to owner A and the
+-- "anonymous" session reads A's rows through the ordinary owner policy. That is
+-- a stale-session artefact of the harness, not an RLS hole (a real anon request
+-- carries no JWT at all), but it made this assertion report a cross-tenant read
+-- that does not exist.
+select set_config('request.jwt.claims', '', true);
 set local role anon;
 select is(
   (select count(*) from public.sources)::int, 0,
   'an anonymous session reads zero rows from sources, even though rows exist'
 );
+-- The first gate an anon INSERT actually hits is the validation trigger, whose
+-- `assert_source_valid` was revoked from anon in harden_cloud.sql — so the error
+-- is "permission denied for function", not an RLS message. RLS is the second
+-- gate and would reject it too; that path is exercised by the cross-tenant
+-- authenticated tests (04/06), which do hold EXECUTE.
 select throws_like(
   $$ insert into public.sources (id, owner, kind, label)
      values (gen_random_uuid(), gen_random_uuid(), 'm3u', 'x') $$,
-  '%row-level security%',
+  '%permission denied%',
   'an anonymous session cannot INSERT into sources directly'
 );
 

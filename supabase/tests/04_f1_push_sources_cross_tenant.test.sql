@@ -84,6 +84,7 @@ select throws_ok(
     :'source_a_id'::uuid, :'owner_b'::uuid, :'profile_b_id'::uuid, '{}'::jsonb
   ),
   '23503',
+  NULL,
   'a source_secrets row whose owner disagrees with its source''s owner violates the composite FK'
 );
 

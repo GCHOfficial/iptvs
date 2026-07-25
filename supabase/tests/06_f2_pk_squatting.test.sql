@@ -27,6 +27,7 @@ select throws_ok(
     gen_random_uuid(), :'owner_b'::uuid, :'profile_a_id'::uuid, 'm3u', 'squatted'
   ),
   '23503',
+  NULL,
   'inserting a sources row under a foreign profile_id violates the composite FK'
 );
 
@@ -39,6 +40,7 @@ select throws_ok(
     :'owner_b'::uuid, :'profile_a_id'::uuid
   ),
   '23503',
+  NULL,
   'inserting a metadata_configs row under a foreign profile_id violates the composite FK'
 );
 
