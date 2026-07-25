@@ -303,9 +303,15 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   `CloudCryptoStatus` = off/ready/**locked**; a locked device (no CK — devices never prompt for the
   passphrase) disables Push and badges credential-less sources as needs-attention (fail closed,
   never activate empty credentials). Pull applies a **defensive local overlay** so a locked/partial
-  profile never blanks a locally-held secret. Crypto is protected vs DB-at-rest / operator / broad
+  profile never blanks a locally-held secret. **The server is not trusted on E2EE state:** both
+  clients keep a sticky per-profile mark (device `cloud_e2ee_marks`, panel `iptvs_e2ee_seen`), and a
+  server reporting E2EE *off* — or an *older* `ck_version` — after a client has seen it on is treated
+  as a **downgrade** and fails closed to `locked`, never to plaintext. Only an explicit local
+  acknowledgement clears the mark, because a legitimate panel-side disable is indistinguishable from
+  the attack. Write paths throw rather than emit `format 0`; the read path still degrades to empty.
+  Crypto is protected vs DB-at-rest / operator / broad
   RLS bugs, **not** vs an unlocked/XSS'd panel or a paired device holding the CK; `rotate_content_key`
-  is the revocation remedy. `package:cryptography` 2.9.0 has no VM/native ECDH, so P-256 is pure-Dart
+  is the revocation remedy (against a compromised *device* — not against a compromised backend). `package:cryptography` 2.9.0 has no VM/native ECDH, so P-256 is pure-Dart
   in `cloud_crypto.dart` (RFC-5903-validated); vectors in `test/fixtures/crypto_vectors.json`.
 - Every profile (local and cloud) owns a `ProfileSnapshot`; switching snapshots the outgoing
   state and restores the incoming one, keeping cloud-managed source ids scoped per profile so

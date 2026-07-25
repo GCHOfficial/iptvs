@@ -342,6 +342,22 @@ defensively", which meant *emitting plaintext*. It now throws. An empty secret s
 (send no element → server preserves), which is safe in any state because no plaintext is involved —
 that is the "absent = preserve" contract, not a downgrade.
 
+The read direction is closed too: `decodeSecretEntry` refuses a `format` 0 entry whenever the status
+is not `off`. Without that, an active backend could still feed a locked/ready device attacker-chosen
+*plaintext* — including `playlistUrl`, i.e. which server the player connects to. Returning empty
+reproduces what real E2EE would do (those bytes wouldn't decrypt) and the local overlay keeps the
+credential the device already holds.
+
+**The residual, stated plainly:** a legitimate panel-side *disable* is byte-identical, from a
+device's point of view, to the attack. So turning E2EE off costs one explicit acknowledgement per
+device and per browser (or an unpair). That asymmetry is the design, not a bug — the client cannot
+tell the two apart, so it asks rather than guessing. Note also that the sticky mark is
+**unauthenticated in the tightening direction**: a hostile server can set it once, which degrades a
+device to local-credentials-only with no push. That is safe (and such a server could deny service
+anyway). The `ck_version` watermark, by contrast, **is** authenticated — it advances only after a
+successful `decodeDeviceWrap`, and the server cannot mint a wrap at a version whose CK it does not
+hold, so it cannot be inflated to wedge a device permanently.
+
 Even so: **rotation remains a remedy for a compromised device, not for a compromised backend.**
 Revocation cannot un-leak a CK a device already cached; the remedy for a suspected device compromise
 is `rotate_content_key` (panel-side), which mints a new `ck_version`, re-wraps to the still-trusted

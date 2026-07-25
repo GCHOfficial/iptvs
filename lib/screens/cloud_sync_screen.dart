@@ -47,6 +47,11 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   DateTime? _knownRemoteRevision;
   CloudCryptoStatus _crypto = CloudCryptoStatus.off;
 
+  /// The server reports this profile as unencrypted (or at an older key) after
+  /// this device has already seen it encrypted. Always accompanies
+  /// [CloudCryptoStatus.locked] — see [_refreshCrypto].
+  bool _downgraded = false;
+
   @override
   void initState() {
     super.initState();
@@ -102,15 +107,60 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
 
   /// Refresh the E2EE status for the active profile (best-effort; degrades to
   /// [CloudCryptoStatus.off] against a pre-migration backend or on error).
+  ///
+  /// A *downgrade* also resolves to [CloudCryptoStatus.locked], so it is carried
+  /// separately: the two states need different words and different actions —
+  /// "unlock this device in the panel" versus "the encryption this profile had
+  /// has disappeared". Without [_downgraded] the distinct message never reaches
+  /// the screen.
   Future<void> _refreshCrypto() async {
     final profileId = _activeProfileId;
     if (profileId == null) return;
     try {
-      final status = await _sync.cryptoStatus(profileId);
-      if (mounted) setState(() => _crypto = status);
+      final state = await _sync.cryptoState(profileId);
+      if (mounted) {
+        setState(() {
+          _crypto = state.status;
+          _downgraded = state.downgraded;
+        });
+      }
     } catch (_) {
       // Leave the prior status; the pull/push paths surface real failures.
     }
+  }
+
+  /// Accept that a profile's encryption was turned off deliberately, clearing
+  /// this device's sticky mark. Confirm-gated because the *legitimate* case (a
+  /// panel-side disable) and the attack (a backend lying about E2EE state) look
+  /// identical from here — only the user knows which happened, so the device
+  /// asks rather than guessing.
+  Future<void> _acknowledgeDowngrade() async {
+    final profileId = _activeProfileId;
+    if (profileId == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Encryption turned off?'),
+        content: const Text(
+          'Only continue if you turned end-to-end encryption off yourself in '
+          'the panel. If you did not, this device will start sending '
+          'credentials the server can read.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('I turned it off'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _sync.acknowledgeE2eeDowngrade(profileId);
+    await _refreshCrypto();
   }
 
   Future<void> _switchProfile(String id) async {
@@ -533,6 +583,38 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   /// A status line describing the profile's end-to-end-encryption state. Locked
   /// devices get the actionable unlock message (and Push is disabled above).
   Widget _cryptoStatusLine() {
+    // Checked before the switch: a downgrade *is* `locked`, but the locked text
+    // ("unlock this device in the panel") is actively misleading here — there is
+    // nothing to unlock, because the server is claiming the encryption is gone.
+    if (_downgraded) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.gpp_maybe_outlined,
+            size: 18,
+            color: Color(0xFFE5484D),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  kCloudE2eeDowngradedMessage,
+                  style: TextStyle(color: Color(0xFFE5484D), fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                TextButton(
+                  onPressed: _busy ? null : _acknowledgeDowngrade,
+                  child: const Text('I turned encryption off on purpose'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
     final (IconData icon, String text, Color color) = switch (_crypto) {
       CloudCryptoStatus.off => (
         Icons.lock_open_outlined,
