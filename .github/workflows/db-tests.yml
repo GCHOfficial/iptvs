@@ -122,8 +122,15 @@ jobs:
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
 
+      # `--ext .sql`, NOT `--ext .test.sql`: pg_prove picks its source handler by
+      # extension, and TAP::Parser::SourceHandler::pgTAP registers for `.sql`.
+      # Passing `.test.sql` matched nothing, so every file fell through to the
+      # PERL handler and was compiled as Perl — "Can't modify constant item in
+      # predecrement (--)" is a SQL comment being parsed as Perl. The explicit
+      # glob below is what actually restricts the run to *.test.sql (and keeps
+      # 00_bootstrap.sql out of it).
       - name: Run pgTAP suite
         run: |
-          pg_prove --ext .test.sql --verbose \
+          pg_prove --ext .sql --verbose \
             --dbname "$PGDATABASE" --username "$PGUSER" --host "$PGHOST" --port "$PGPORT" \
             supabase/tests/*.test.sql
