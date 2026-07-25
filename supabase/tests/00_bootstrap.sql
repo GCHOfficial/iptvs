@@ -130,6 +130,14 @@ create table if not exists auth.users (
   is_anonymous boolean not null default false
 );
 
+-- The image ALSO ships GoTrue's real `auth.users`, from a schema version
+-- predating anonymous sign-ins — so the `create table if not exists` above is a
+-- no-op and `is_anonymous` is simply absent. That column is not optional here:
+-- `is_real_user()` reads it via the JWT, and account_deletion.sql deletes
+-- `where is_anonymous is true`, so the whole device-vs-account distinction under
+-- test depends on it. Add it if the table came from the image.
+alter table auth.users add column if not exists is_anonymous boolean not null default false;
+
 grant usage on schema auth to anon, authenticated, service_role;
 grant select on auth.users to anon, authenticated, service_role;
 
