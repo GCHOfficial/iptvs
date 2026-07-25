@@ -14,12 +14,16 @@ import {
 } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
+import {
+  generatePassphrase,
+  passphraseStrength,
+  validatePassphrase,
+  GENERATED_BITS,
+  MIN_PASSPHRASE_LENGTH,
+} from './passphrase.js';
 
 const MAX_PROFILE_NAME_LENGTH = 256;
 const MAX_METADATA_FIELD_LENGTH = 1024;
-// Minimum sync-passphrase length. E2EE is only as strong as the passphrase, and
-// the passphrase is unrecoverable, so guard against trivially weak entries.
-const MIN_PASSPHRASE_LENGTH = 8;
 
 const app = document.getElementById('app');
 // Profiles per account are capped server-side (a BEFORE INSERT trigger); mirror
@@ -628,10 +632,13 @@ function renderSecurityDisabled(name) {
     <form id="enable" class="form">
       <h3>Enable end-to-end encryption</h3>
       <p class="warn">${esc(PASSPHRASE_LOSS_WARNING)}</p>
+      ${passphraseGeneratorMarkup()}
       <label>Sync passphrase<input type="password" name="p1" autocomplete="new-password" /></label>
+      <p data-strength class="strength"></p>
       <label>Confirm passphrase<input type="password" name="p2" autocomplete="new-password" /></label>
       <div class="form-actions"><button class="primary">Enable encryption</button></div>
     </form>`;
+  const enableCanSubmit = wirePassphraseGenerator(document.getElementById('enable'));
   document.getElementById('enable').onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -639,6 +646,7 @@ function renderSecurityDisabled(name) {
     const p2 = fd.get('p2') ?? '';
     const err = validatePassphrasePair(p1, p2);
     if (err) return toast(err, true);
+    if (!enableCanSubmit()) return;
     await runCryptoOp(e.submitter, 'Enabling…', async () => {
       await secrets.enableE2ee(currentProfileId, p1);
       toast('End-to-end encryption enabled and unlocked.');
@@ -687,7 +695,9 @@ function renderSecurityUnlocked(name) {
     <form id="rotpass" class="form section">
       <h3>Change passphrase</h3>
       <p class="warn">${esc(PASSPHRASE_LOSS_WARNING)}</p>
+      ${passphraseGeneratorMarkup()}
       <label>New passphrase<input type="password" name="p1" autocomplete="new-password" /></label>
+      <p data-strength class="strength"></p>
       <label>Confirm new passphrase<input type="password" name="p2" autocomplete="new-password" /></label>
       <div class="form-actions"><button class="primary">Change passphrase</button></div>
     </form>
@@ -713,11 +723,13 @@ function renderSecurityUnlocked(name) {
     toast('Locked.');
   };
 
+  const rotpassCanSubmit = wirePassphraseGenerator(document.getElementById('rotpass'));
   document.getElementById('rotpass').onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const err = validatePassphrasePair(fd.get('p1') ?? '', fd.get('p2') ?? '');
     if (err) return toast(err, true);
+    if (!rotpassCanSubmit()) return;
     await runCryptoOp(e.submitter, 'Changing…', async () => {
       await secrets.rotatePassphrase(currentProfileId, fd.get('p1'));
       toast('Passphrase changed.');
@@ -747,11 +759,96 @@ function renderSecurityUnlocked(name) {
 }
 
 function validatePassphrasePair(p1, p2) {
-  if (p1.length < MIN_PASSPHRASE_LENGTH) {
-    return `Passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters.`;
+  return validatePassphrase(p1, p2);
+}
+
+// Markup for the "Generate" affordance shared by the enable and change-passphrase
+// forms. A generated phrase is the intended path: see passphrase.js for why a
+// hand-typed one cannot be made strong enough by raising the KDF cost.
+function passphraseGeneratorMarkup() {
+  return `
+    <div class="genwrap">
+      <button type="button" class="primary" data-gen>Generate a strong passphrase</button>
+      <div class="genout" data-genout hidden>
+        <code data-genphrase></code>
+        <div class="form-actions">
+          <button type="button" data-gencopy>Copy</button>
+        </div>
+        <label class="gensaved"><input type="checkbox" data-gensaved /> I have saved this
+        somewhere safe — it cannot be recovered</label>
+      </div>
+      <p class="muted hint">A generated passphrase carries about ${GENERATED_BITS} bits of
+      entropy. You only type it here, never on a TV.</p>
+    </div>`;
+}
+
+// Wire the generator + strength meter inside `form`. Returns a `canSubmit()`
+// predicate the submit handler must consult: when a phrase was generated we
+// refuse to proceed until the user confirms they saved it, because losing it is
+// unrecoverable by design.
+function wirePassphraseGenerator(form) {
+  const genBtn = form.querySelector('[data-gen]');
+  const out = form.querySelector('[data-genout]');
+  const phraseEl = form.querySelector('[data-genphrase]');
+  const savedBox = form.querySelector('[data-gensaved]');
+  const copyBtn = form.querySelector('[data-gencopy]');
+  const p1 = form.querySelector('[name="p1"]');
+  const p2 = form.querySelector('[name="p2"]');
+  const meter = form.querySelector('[data-strength]');
+  let generated = false;
+
+  const refreshMeter = () => {
+    if (!meter) return;
+    const { score, label } = passphraseStrength(p1.value);
+    meter.textContent = p1.value ? `Strength: ${label}` : '';
+    meter.className = `strength s${score}`;
+  };
+
+  genBtn.onclick = () => {
+    const phrase = generatePassphrase();
+    phraseEl.textContent = phrase;
+    // Fill both fields and reveal them: the user must be able to read what they
+    // are being asked to save.
+    p1.value = phrase;
+    p2.value = phrase;
+    p1.type = 'text';
+    p2.type = 'text';
+    out.hidden = false;
+    savedBox.checked = false;
+    generated = true;
+    refreshMeter();
+  };
+
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(phraseEl.textContent ?? '');
+        toast('Passphrase copied.');
+      } catch {
+        toast('Could not copy — select and copy it manually.', true);
+      }
+    };
   }
-  if (p1 !== p2) return 'Passphrases do not match.';
-  return null;
+
+  // Typing by hand abandons the generated phrase, so the saved-confirmation no
+  // longer applies.
+  for (const el of [p1, p2]) {
+    el.addEventListener('input', () => {
+      if (generated && el.value !== phraseEl.textContent) {
+        generated = false;
+        out.hidden = true;
+      }
+      refreshMeter();
+    });
+  }
+
+  return () => {
+    if (generated && !savedBox.checked) {
+      toast('Confirm you have saved the passphrase first.', true);
+      return false;
+    }
+    return true;
+  };
 }
 
 // Run a crypto/RPC op with a busy button and safe error surfacing. `btn` may be

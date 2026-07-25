@@ -182,9 +182,9 @@
         "kdf": "PBKDF2-SHA256",
         "ckv": 3,
         "salt": "oKGio6SlpqeoqaqrrK2urw==",
-        "iter": 4096,
+        "iter": 100000,
         "iv": "sLGys7S1tre4ubq7",
-        "ct": "6h4Pjorv2CI2fdOYrMy9Ap8S5/FctmGPCFg7eFCN1X7GDPdD3/EN3jZy+jm40k5G"
+        "ct": "XZ+eAT/ci3ujpJ82bzujO2e3TlSL6kmM//sg8aSrEZxyv1wSSiIgt/4ZbYreLrYw"
       }
     }
   ]

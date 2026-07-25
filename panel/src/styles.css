@@ -152,6 +152,32 @@ button.danger-solid { background: var(--danger); color: #fff; }
 }
 .toast.error { background: var(--danger); color: #fff; }
 
+/* Passphrase generator. The generated phrase is shown in plain text on purpose:
+   it is unrecoverable, so the user has to be able to read and save it. */
+.genwrap { margin: 0 0 16px; }
+.genout {
+  margin: 12px 0 0;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+}
+.genout code {
+  display: block;
+  font-size: 1.05rem;
+  line-height: 1.5;
+  word-break: break-all;
+  user-select: all;
+  color: var(--text);
+}
+.gensaved { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 0; }
+.gensaved input { width: auto; margin-top: 3px; }
+
+.strength { margin: 4px 0 10px; font-size: 0.85rem; color: var(--text-lo); min-height: 1em; }
+.strength.s0, .strength.s1 { color: var(--danger); }
+.strength.s2 { color: #e2a33c; }
+.strength.s3, .strength.s4 { color: #46b17b; }
+
 /* Narrow phones: let the header stack cleanly instead of crowding the logo. */
 @media (max-width: 560px) {
   .bar { padding: 12px 16px; }
