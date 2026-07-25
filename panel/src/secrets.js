@@ -83,62 +83,17 @@ export function isMissingFunctionError(error) {
 
 // ── sticky E2EE state ─────────────────────────────────────────────────────────
 //
-// The server is NOT trusted on whether a profile is encrypted. `get_crypto_state`
-// decides whether the write path encrypts, so a backend answering
-// `{ enabled: false }` (or suddenly 404-ing the crypto RPCs) would get this panel
-// to write every provider credential and API key back as plaintext `format` 0.
-// The server-side format gate is the stated defence, but it lives in the same
-// trust domain as the attacker.
+// Implemented in validate.js (dependency-free, so `node:test` can exercise it —
+// this module cannot load under node, since it transitively imports supabase.js)
+// and re-exported here so callers keep importing it from `secrets`. The full
+// rationale for distrusting the server on E2EE state lives with the code.
 //
-// So: once a profile is *seen* encrypted, that fact is remembered here and only
-// an explicit local action can forget it. localStorage is the right store — it
-// is per-origin, survives reloads, and is exactly as trustworthy as the panel
-// code itself (an XSS'd panel is already outside the threat boundary).
-//
-// A legitimate `disableE2ee` clears the mark for the browser that performed it;
-// any OTHER browser sees the same signal as an attack and must be acknowledged
-// through `acknowledgeDowngrade` (wired to a Security-tab button).
-const E2EE_SEEN_KEY = 'iptvs_e2ee_seen';
+// Imported AND re-exported deliberately: a bare `export … from` re-exports
+// without creating a local binding, which would leave the three call sites below
+// throwing ReferenceError at runtime.
+import { wasE2eeSeen, markE2eeSeen, acknowledgeDowngrade } from './validate.js';
 
-function readSeen() {
-  try {
-    const raw = localStorage.getItem(E2EE_SEEN_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return []; // corrupt/unavailable storage restarts from "nothing known"
-  }
-}
-
-function writeSeen(ids) {
-  try {
-    localStorage.setItem(E2EE_SEEN_KEY, JSON.stringify(ids));
-  } catch {
-    // Private-mode / quota failure: the sticky protection degrades to
-    // per-session only. Never fail the operation over it.
-  }
-}
-
-// Whether this browser has ever seen `profileId` end-to-end encrypted.
-export function wasE2eeSeen(profileId) {
-  return readSeen().includes(profileId);
-}
-
-export function markE2eeSeen(profileId) {
-  const ids = readSeen();
-  if (ids.includes(profileId)) return;
-  ids.push(profileId);
-  writeSeen(ids);
-}
-
-// Forget the mark. Called by `disableE2ee` (this browser just turned it off, so
-// the state change is authenticated by the user's own action) and by the
-// Security tab's explicit acknowledgement.
-export function acknowledgeDowngrade(profileId) {
-  const ids = readSeen();
-  const next = ids.filter((id) => id !== profileId);
-  if (next.length !== ids.length) writeSeen(next);
-}
+export { wasE2eeSeen, markE2eeSeen, acknowledgeDowngrade };
 
 // ── RPC wrappers ──────────────────────────────────────────────────────────────
 

@@ -13,6 +13,10 @@ import {
   deviceNeedsKey,
   SOURCE_SECRET_KEYS,
   METADATA_SECRET_KEYS,
+  wasE2eeSeen,
+  markE2eeSeen,
+  acknowledgeDowngrade,
+  E2EE_SEEN_KEY,
 } from '../src/validate.js';
 
 // ---------------------------------------------------------- validateSource
@@ -258,4 +262,105 @@ test('friendlyError scrubs any embedded URL credentials as a last resort', () =>
   const err = { message: 'iptvs: failed to reach http://user:pass@example.com/portal' };
   const out = friendlyError(err);
   assert.ok(!out.includes('user:pass'));
+});
+
+// ------------------------------------------------- sticky E2EE state
+
+// This is the one piece of client state standing between a lying backend and
+// plaintext provider credentials, so it is pinned directly. A fake store stands
+// in for localStorage — the reason these helpers live in validate.js at all is
+// that secrets.js cannot load under node (it transitively imports supabase.js,
+// which needs Vite's import.meta.env and a DOM).
+function fakeStore(initial = {}) {
+  const data = { ...initial };
+  return {
+    data,
+    getItem: (k) => (k in data ? data[k] : null),
+    setItem: (k, v) => { data[k] = String(v); },
+  };
+}
+
+test('a profile is not marked until it has been seen encrypted', () => {
+  const s = fakeStore();
+  assert.equal(wasE2eeSeen('p1', s), false);
+});
+
+test('markE2eeSeen makes the mark stick and survives a fresh read', () => {
+  const s = fakeStore();
+  markE2eeSeen('p1', s);
+  assert.equal(wasE2eeSeen('p1', s), true);
+  // A different store (i.e. a different browser) knows nothing about it.
+  assert.equal(wasE2eeSeen('p1', fakeStore()), false);
+});
+
+test('marks are per profile, not global', () => {
+  const s = fakeStore();
+  markE2eeSeen('p1', s);
+  assert.equal(wasE2eeSeen('p2', s), false);
+});
+
+test('markE2eeSeen is idempotent and does not duplicate entries', () => {
+  const s = fakeStore();
+  markE2eeSeen('p1', s);
+  markE2eeSeen('p1', s);
+  assert.deepEqual(JSON.parse(s.data[E2EE_SEEN_KEY]), ['p1']);
+});
+
+test('acknowledgeDowngrade clears only the named profile', () => {
+  const s = fakeStore();
+  markE2eeSeen('p1', s);
+  markE2eeSeen('p2', s);
+  acknowledgeDowngrade('p1', s);
+  assert.equal(wasE2eeSeen('p1', s), false);
+  assert.equal(wasE2eeSeen('p2', s), true, 'clearing one mark must not clear the others');
+});
+
+test('acknowledgeDowngrade on an unmarked profile is a no-op', () => {
+  const s = fakeStore();
+  markE2eeSeen('p1', s);
+  acknowledgeDowngrade('never-marked', s);
+  assert.equal(wasE2eeSeen('p1', s), true);
+});
+
+test('corrupt stored data degrades to "nothing known" instead of throwing', () => {
+  // Fails OPEN on purpose: a browser that cannot read its own storage cannot
+  // distinguish a downgrade from a profile that was never encrypted, and
+  // refusing to sync at all would be the worse failure.
+  for (const corrupt of ['not json', '{"not":"an array"}', '[1,2,3]', '']) {
+    const s = fakeStore({ [E2EE_SEEN_KEY]: corrupt });
+    assert.equal(wasE2eeSeen('p1', s), false, `corrupt value: ${corrupt}`);
+    assert.doesNotThrow(() => markE2eeSeen('p1', s));
+  }
+});
+
+test('non-string entries are filtered out rather than trusted', () => {
+  const s = fakeStore({ [E2EE_SEEN_KEY]: JSON.stringify(['p1', 42, null, { p: 2 }]) });
+  assert.equal(wasE2eeSeen('p1', s), true);
+  markE2eeSeen('p2', s);
+  assert.deepEqual(JSON.parse(s.data[E2EE_SEEN_KEY]), ['p1', 'p2']);
+});
+
+test('a storage that throws on write never breaks the caller', () => {
+  // Private mode / quota: the protection degrades to per-session, but the
+  // surrounding operation must still succeed.
+  const hostile = {
+    getItem: () => null,
+    setItem: () => { throw new Error('QuotaExceededError'); },
+  };
+  assert.doesNotThrow(() => markE2eeSeen('p1', hostile));
+  assert.doesNotThrow(() => acknowledgeDowngrade('p1', hostile));
+});
+
+test('a storage that throws on read is treated as empty', () => {
+  const hostile = {
+    getItem: () => { throw new Error('SecurityError'); },
+    setItem: () => {},
+  };
+  assert.equal(wasE2eeSeen('p1', hostile), false);
+});
+
+test('a missing storage (no localStorage at all) does not throw', () => {
+  assert.equal(wasE2eeSeen('p1', null), false);
+  assert.doesNotThrow(() => markE2eeSeen('p1', null));
+  assert.doesNotThrow(() => acknowledgeDowngrade('p1', null));
 });
