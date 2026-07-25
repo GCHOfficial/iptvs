@@ -87,7 +87,43 @@ alter default privileges in schema public grant all on functions to anon, authen
 -- wrapping enough to keep every test file independent.
 -- ---------------------------------------------------------------------------
 
-create schema if not exists auth;
+-- The supabase/postgres image ALREADY ships an `auth` schema, owned by GoTrue's
+-- `supabase_auth_admin` role. That makes `create schema if not exists auth` a
+-- silent no-op while every CREATE inside it fails with "permission denied for
+-- schema auth" — which is exactly how this bootstrap failed on its first CI run.
+-- Take ownership (this is a throwaway CI database) by briefly assuming the
+-- owning role, which `postgres` is a member of in that image. If that ever stops
+-- being true the script fails loudly here with both role names, rather than
+-- 60 lines later with an opaque permission error.
+do $$
+declare
+  schema_owner text;
+  me           text := current_user;
+begin
+  select pg_get_userbyid(nspowner) into schema_owner
+    from pg_namespace where nspname = 'auth';
+
+  if schema_owner is null then
+    execute 'create schema auth';
+    raise notice 'bootstrap: created auth schema owned by %', me;
+    return;
+  end if;
+
+  if schema_owner = me then
+    raise notice 'bootstrap: auth schema already owned by %', me;
+    return;
+  end if;
+
+  begin
+    execute format('set local role %I', schema_owner);
+    execute format('alter schema auth owner to %I', me);
+    raise notice 'bootstrap: took ownership of auth from % (as %)', schema_owner, me;
+  exception when insufficient_privilege then
+    raise exception
+      'bootstrap: auth schema is owned by % and % cannot assume that role; '
+      'the base image changed its role layout', schema_owner, me;
+  end;
+end $$;
 
 create table if not exists auth.users (
   id           uuid primary key default gen_random_uuid(),
