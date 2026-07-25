@@ -201,9 +201,23 @@ adding a new secret-bearing source is blocked. Enable/disable/rotate-content-key
 friendly "changed since read — retry".
 
 All panel pages ship a strict **CSP** (no inline scripts/styles, `connect-src` limited to self +
-the Supabase origin, `frame-ancestors 'none'`; the legal pages run with `script-src 'none'`),
-injected at build time by `panel/vite.config.js`. This is part of the threat boundary below: the
-CSP is what makes "XSS'd panel" a hard target rather than a soft one.
+the Supabase origin; the legal pages run with `script-src 'none'`), injected at build time by
+`panel/vite.config.js`. This is part of the threat boundary below: the CSP is what makes "XSS'd
+panel" a hard target rather than a soft one.
+
+The policy deliberately carries **no `frame-ancestors`**. The panel is static files on GitHub
+Pages, which cannot set response headers, so the CSP can only be delivered by `<meta
+http-equiv>` — and `frame-ancestors` is **ignored by spec** when delivered that way. It enforced
+nothing and only logged a console warning, while advertising clickjacking protection the panel
+did not have. Anti-framing is instead enforced by **`panel/src/framebust.js`**, the mandatory
+*first* import of `main.js`: ES module dependencies evaluate in source order, so it throws before
+the entry graph evaluates and a framed panel builds no UI and attaches no listeners. It refuses
+to run rather than busting out — no `top.location = …`, which would make the panel an
+open-redirect gadget — and offers the user a plain link to the real origin instead. This matters
+because the panel is exactly the surface worth framing: passphrase entry, provider credential
+fields, and the device "Send key" action. Keep that import first. If the panel ever moves to a
+host that can send headers, serve this policy as a real `Content-Security-Policy` header and
+restore `frame-ancestors 'none'` there.
 
 ### Threat boundary
 
