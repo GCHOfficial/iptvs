@@ -10,23 +10,21 @@ legal identity, the Android application ID, and the Microsoft package identity.
 
 ## Android and Google Play
 
-### Identity recovery
+### Package identities
 
-The existing `com.gchofficial.iptvs` GitHub APKs use the public debug key. The
-app has not been distributed through Google Play or another managed-signing
-store. A new application ID is therefore the recommended secure identity.
+Three permanent, deliberately separate application IDs — each with its own secure
+storage and application data, so they install side by side:
 
-Confirmed Google Play ID: `com.gchofficial.iptvs.player`
+| Channel | Application ID |
+|---|---|
+| Google Play | `com.gchofficial.iptvs.player` |
+| GitHub direct | `com.gchofficial.iptvs.player.direct` |
+| Development | `com.gchofficial.iptvs.player.dev` |
 
-The Play Console application **IPTVS Player** was created with that permanent ID
-on 2026-07-14. GitHub-direct Android uses the deliberately separate
-`com.gchofficial.iptvs.player.direct`; development uses `.player.dev`. Each has
-separate secure storage and application data. The cloud migration must be
-device-tested before telling users that profiles migrate.
-
-The selected transition is the existing authenticated cloud push/pull path;
-there is no plaintext manual transfer. Exact retained and reset state plus the
-old-app verification sequence are recorded in `docs/android-signing.md`.
+Package IDs cannot be renamed after publication. Moving a user between channels
+goes through the authenticated cloud push/pull path — there is no plaintext
+manual transfer; see `docs/android-signing.md` for exactly what is retained and
+reset.
 
 ### Keys
 
@@ -100,43 +98,16 @@ Permanent direct-distribution certificate SHA-256:
 6E:36:3B:97:B8:5A:D9:99:20:CC:56:0D:5D:BF:6E:CD:94:80:9E:3D:84:F4:F1:3A:65:5A:15:00:4A:50:D5:3B
 ```
 
-### Play implementation checklist
+### Submission records
 
-Play Console identity verification and application creation completed on
-2026-07-14. Android developer verification registered the Play package with
-the Play-managed certificate and the outside-Play GitHub-direct package with
-its direct-distribution certificate on 2026-07-16. Package IDs cannot be
-renamed after publication.
+One-time launch evidence — completed checklists, dated identity-verification
+records, and the submitted Play Console state (listing copy, App content answers,
+Data safety declarations, asset inventory) — is kept out of the repo in
+`docs/private/store-launch-record.md` and
+`docs/private/google-play-submission-record.md`. It is an audit trail for one
+publisher account, not something another developer can act on.
 
-- [x] Confirm the permanent application ID: `com.gchofficial.iptvs.player`.
-- [x] Generate and back up the separate GitHub-direct app-signing key.
-- [x] Configure the protected GitHub release environment.
-- [x] Document the side-by-side cloud migration path and exact retained/reset
-  state without adding a plaintext credential export.
-- [ ] Exercise the cloud migration from a released old APK into Play and
-  GitHub-direct device installs.
-- [x] Create **IPTVS Player** in Play Console with the new ID.
-- [x] Enroll in Play App Signing with a Play-managed app-signing key by uploading
-  the first signed AAB using Google's recommended default.
-- [x] Generate and configure a separate Play upload key. Permanent upload
-  certificate SHA-256 is `51:3E:75:95:25:81:15:09:1E:5C:EB:44:87:87:97:35:35:D3:90:02:20:15:FE:D0:AD:B9:C4:3C:99:A9:34:41`.
-- [x] Confirm two AES-256 password-protected backups of the Play upload
-  keystore and password in separate local and personal-cloud locations.
-- [x] Add a protected App Bundle build using the upload key.
-- [x] Verify the AAB package name, updater exclusions, archive signature, and
-  expected upload certificate in CI.
-- [x] Record the Play-managed app-signing certificate from Play Console and
-  confirm that Android developer verification registered the same fingerprint.
-- [x] Register `com.gchofficial.iptvs.player.direct` as an outside-Play package
-  with the permanent direct-distribution certificate.
-- [x] Verify that an installed internal-track APK uses the recorded Play-managed
-  app-signing certificate. On 2026-07-16, `apksigner` verified the Play-installed
-  base APK from an SM-S938B against the recorded SHA-256 fingerprint.
-- [x] Complete privacy, data-safety, content-rating, phone, and TV listings.
-- [x] Test internal-track phone and Android TV installs before production.
-
-The exact current Console answers, listing copy, propagation troubleshooting,
-asset checklist, Android TV opt-in, and release smoke tests are tracked in
+The reusable per-release checks are in
 [`google-play-submission.md`](google-play-submission.md).
 
 New Google Play apps and TV apps are published as Android App Bundles. Do not
@@ -168,11 +139,11 @@ and [`REQUEST_INSTALL_PACKAGES` policy](https://support.google.com/googleplay/an
 
 ### Public product name
 
-`iptvs` was unavailable when checked in Partner Center on 2026-07-14. The owner
-reserved **IPTVS Player** instead. Use this customer-facing title on Google Play
-as well, and consistently in Store artwork, the app title, support pages, and
-privacy policy. The repository name may remain `iptvs`; the Store title does not
-determine the executable name or Android application ID.
+The reserved Store name is **IPTVS Player** (`iptvs` itself was unavailable). Use
+that customer-facing title on Google Play as well, and consistently in Store
+artwork, the app title, support pages, and privacy policy. The repository name
+remains `iptvs`; the Store title does not determine the executable name or the
+Android application ID.
 
 ### Recommended package type
 
@@ -215,12 +186,19 @@ These values are exact and case-sensitive:
 | Package Family Name | `George-CosminHanta.IPTVSPlayer_0a4z5zccam0py` |
 | Package SID | `S-1-15-2-2604606762-3968970359-1786003176-2720169948-3773242850-1324970824-1308558992` |
 | Store ID | `9P8KK9T379WN` |
-| Store deep link | Available after the product is live |
-| Web Store URL | Available after the product is live |
+| Store deep link | `ms-windows-store://pdp/?productid=9P8KK9T379WN` |
+| Web Store URL | `https://apps.microsoft.com/detail/9P8KK9T379WN` |
 
-The Store deep link and public Web Store URL must be copied back into this
-table after publication. Do not predict either URL from the Store ID before
-Partner Center marks the product live.
+Whole table verified against Partner Center **Product management → Product
+identity** on 2026-07-25.
+
+The three values that appear in the shipped package —
+`Package/Identity/Name`, `Package/Identity/Publisher` and
+`Package/Properties/PublisherDisplayName` — are pinned by
+`tool/verify_windows_msix.ps1`, so identity drift fails the build rather than the
+submission. The remaining rows (PFN, Package SID, Store ID, the two URLs) are
+Store-assigned and derived from the identity; they are recorded here for
+reference and are not settable in the manifest.
 
 ### Required application changes
 
@@ -238,9 +216,10 @@ Partner Center marks the product live.
   version, capability, executable, Flutter asset, or libmpv drift.
 - Store workflow inputs are three-part versions such as `1.2.3`; the package
   identity is always emitted as `1.2.3.0`. Each component must be at most
-  65535, the major component cannot be zero, and the fourth component is
-  reserved as `0` for Store use. Use `1.0.0` for the first submission, which
-  produces package version `1.0.0.0`.
+  65535, the **major component cannot be zero**, and the fourth component is
+  reserved as `0` for Store use. This is why the Store version scheme is
+  deliberately independent of the app's `0.x` GitHub/Play versions — do not try
+  to keep them in step.
 - Declare the desktop full-trust entry point and only required capabilities.
 - Verify all runtime writes use application-data/cache directories; the installed
   package directory is read-only.
@@ -248,103 +227,42 @@ Partner Center marks the product live.
 - Hide/disable GitHub update checks and detached PowerShell replacement in Store
   builds; Store-managed updates own that lifecycle.
 - Keep the GitHub ZIP/direct updater as a separate `githubDirect` channel.
-- Run the Windows App Certification Kit against the packaged Release build.
-- Test clean install, upgrade, uninstall/reinstall, HDR surface creation, media
-  playback, secure storage, firewall prompts, and file/cache persistence.
-
-### Store submission checklist
-
-- [x] Reserve the product name: `IPTVS Player`.
-- [x] Record the Partner Center identity values above.
-- [x] Choose Windows 10 version 2004 (`10.0.19041.0`) as the minimum and
-  x64-only availability; the manifest records Windows 11 24H2
-  (`10.0.26100.0`) as the highest tested schema target.
-- [x] Add deterministic MSIX packaging in a dedicated Store workflow, separate
-  from the GitHub-direct release workflow.
-- [x] Disable the self-updater in Store builds through build-time ownership:
-  `microsoftStore` and `googlePlay` hide GitHub checks; `githubDirect` alone
-  owns the self-updater.
-- [x] Validate package contents contain `iptvs.exe`, Flutter assets, and libmpv;
-  packaging fails if any required runtime file is absent.
-- [ ] Run the Windows App Certification Kit.
-- [ ] Test installation and upgrade from Partner Center package flighting.
-- [x] Provide an accessible privacy-policy URL and support contact:
-  `https://gchofficial.github.io/iptvs/privacy.html`,
-  `https://gchofficial.github.io/iptvs/support.html`, and
-  `gchofficial@gmail.com`.
-- [ ] Provide accurate screenshots, input requirements, and content disclosures.
-- [x] Give certification a testable demo path that needs no IPTV credentials:
-  on first launch choose **Add profile**, enter any local profile name, and
-  select **Create**. The seeded demo source opens without an account or provider
-  credentials and exercises browsing and playback with public demo media. The
-  Live tab has two open-movie simulcasts (with generated now/next and archive
-  guide rows) plus four protocol/codec fixtures; Movies has Big Buck Bunny,
-  Sintel, Tears of Steel, and Spring; Series has Codec Test Series and the
-  Caminandes open shorts hierarchy.
-- [x] Confirm no bundled or promoted streams imply rights the app does not own.
-  Blender titles are linked from Blender's official video service and labelled
-  with their Creative Commons attribution licence in the item description;
-  Apple URLs are the developer site's testing samples, and Mux URLs are clearly
-  labelled protocol test fixtures, not app-owned programming. The app links to
-  remote media and does not redistribute it; reconfirm the Mux endpoint terms
-  before a production Store submission if those fixtures remain enabled there.
-- [x] Address certification policy 10.2.4.1 from the 2026-07-20 report for
-  product `9P8KK9T379WN`: declare the Store VCLibs framework in the MSIX and put
-  the Microsoft Visual C++ Redistributable disclosure first in the canonical
-  Partner Center description.
 
 The public Store support and privacy contact is `gchofficial@gmail.com`.
 
 ### Build and submission procedure
 
 Run **Microsoft Store MSIX** manually with the next monotonically increasing
-three-part version (`1.0.1` after the certified `1.0.0` submission). The
-workflow compiles with
-`DISTRIBUTION_CHANNEL=microsoftStore`, omits the GitHub update key, packages the
-Release directory, verifies the package by unpacking it, and uploads an unsigned
+three-part version. The Store tracks its own sequence: check the last
+`microsoft-store-msix-<version>` workflow artifact for what was submitted last,
+since the Store version does not follow the app's GitHub/Play version.
+
+The workflow compiles with `DISTRIBUTION_CHANNEL=microsoftStore`, omits the
+GitHub update key, packages the Release directory, verifies the package by
+unpacking it, and uploads an unsigned
 `iptvs-<version>-windows-store-x64.msix` CI artifact for Partner Center. The
 Store signs the package during certification; do not attach this unsigned MSIX
 to GitHub Releases or distribute it for ordinary sideloading.
 
-Before submission:
+Each submission:
 
 1. Replace the Partner Center description with the exact copy in
    `assets/store/microsoft-store/listing.md`; do not place text before its
    dependency disclosure.
-2. Download the workflow artifact and upload only the `.msix` to the reserved
+2. Download the workflow artifact and upload only the `.msix` to the
    **IPTVS Player** product in Partner Center.
-3. Record the workflow run and submitted version here.
-4. Run the Windows App Certification Kit against a locally test-signed copy of
-   the same Release package, then retain the report. Test signing is for WACK
-   and local installation only; it must not alter the submitted artifact.
-5. Complete the package flight matrix below using the Store-delivered package.
-6. After certification, download/install through Microsoft Store and verify the
-   package identity and Microsoft signature with `Get-AppxPackage` and
+3. After certification, install through Microsoft Store and verify the package
+   identity and Microsoft signature with `Get-AppxPackage` and
    `Get-AuthenticodeSignature` before public rollout.
 
-### Certification and flight evidence
-
-| Gate | Evidence |
-|---|---|
-| Packaging workflow | [ ] Run URL, version, and SHA-256 |
-| Windows App Certification Kit | [ ] Report and Windows build |
-| Clean Store flight install/start | [ ] Device and package version |
-| Store flight upgrade | [ ] From/to versions; data retained |
-| Store rollback | [ ] Partner Center action and resulting version |
-| Uninstall/reinstall | [ ] Expected app data and secure-storage result |
-| SDR and HDR playback | [ ] Display/GPU, stream, and result |
-| libmpv loading | [ ] Playback result; packaged DLL version/hash |
-| Firewall behavior | [ ] First-run prompt/result and network playback |
-| Runtime writes | [ ] ProcMon trace limited to package app-data/cache/temp |
-| Certified signature | [ ] Package full name, signer, and status |
-
-For runtime-write validation, filter Process Monitor to `Process Name is
-iptvs.exe`, exercise profile creation, source refresh, EPG, playback, and app
-restart, then check successful write/create/set-information operations. App
-code writes SQLite under `getApplicationSupportDirectory`; update downloads and
-the detached PowerShell replacement path are unreachable in a
-`microsoftStore` build. Keep the trace as device evidence rather than marking
-this gate complete from source inspection.
+Re-run the Windows App Certification Kit (against a locally test-signed copy of
+the same Release package — test signing must not alter the submitted artifact)
+and the full device flight matrix only when something in the packaging surface
+changes: manifest capabilities, the entry point, bundled native libraries such as
+libmpv, or the minimum Windows version. A routine version bump with no packaging
+change does not need them; `tool/verify_windows_msix.ps1` already fails the build
+on identity, capability, executable, Flutter-asset or libmpv drift. The original
+launch matrix and its evidence are in `docs/private/store-launch-record.md`.
 
 ## Release-channel invariant
 
