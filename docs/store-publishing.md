@@ -189,9 +189,16 @@ These values are exact and case-sensitive:
 | Store deep link | `ms-windows-store://pdp/?productid=9P8KK9T379WN` |
 | Web Store URL | `https://apps.microsoft.com/detail/9P8KK9T379WN` |
 
-Both URLs are a function of the Store ID and only became meaningful once the
-product went live. Confirm them against Partner Center before putting either in
-user-facing copy.
+Whole table verified against Partner Center **Product management → Product
+identity** on 2026-07-25.
+
+The three values that appear in the shipped package —
+`Package/Identity/Name`, `Package/Identity/Publisher` and
+`Package/Properties/PublisherDisplayName` — are pinned by
+`tool/verify_windows_msix.ps1`, so identity drift fails the build rather than the
+submission. The remaining rows (PFN, Package SID, Store ID, the two URLs) are
+Store-assigned and derived from the identity; they are recorded here for
+reference and are not settable in the manifest.
 
 ### Required application changes
 

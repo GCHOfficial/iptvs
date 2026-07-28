@@ -57,6 +57,19 @@ try {
     }
   }
 
+  # PublisherDisplayName lives outside <Identity>, so the loop above never saw
+  # it — yet Partner Center matches it exactly like the rest of the identity, and
+  # a mismatch is a rejected submission rather than a build failure. Pinned here
+  # so drift is caught in CI instead of by a reviewer.
+  $PublisherDisplayName = $Manifest.SelectSingleNode(
+    '/f:Package/f:Properties/f:PublisherDisplayName',
+    $Namespace
+  )
+  if ($null -eq $PublisherDisplayName -or
+      $PublisherDisplayName.InnerText -cne 'George-Cosmin Hanta') {
+    throw 'MSIX PublisherDisplayName does not match the Partner Center publisher.'
+  }
+
   $VCLibs = $Manifest.SelectSingleNode(
     '/f:Package/f:Dependencies/f:PackageDependency[@Name="Microsoft.VCLibs.140.00.UWPDesktop"]',
     $Namespace
