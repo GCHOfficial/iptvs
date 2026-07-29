@@ -264,36 +264,41 @@ class _SourcesScreenState extends State<SourcesScreen> {
         icon: const Icon(Icons.add),
         label: const Text('Add source'),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: _PickerStartupCard(),
-                ),
-                if (DistributionConfig.directUpdaterEnabled) ...[
+      // Edge-to-edge (targetSdk 35+): the Scaffold already keeps the FAB clear of
+      // the system bar, but the body underneath it does not inset itself.
+      body: SafeArea(
+        top: false,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
                   const Padding(
                     padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: _UpdateTrackCard(),
+                    child: _PickerStartupCard(),
                   ),
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: _UpdateCard(),
+                  if (DistributionConfig.directUpdaterEnabled) ...[
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: _UpdateTrackCard(),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: _UpdateCard(),
+                    ),
+                  ],
+                  Expanded(
+                    child: _sources.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No sources yet — add one',
+                              style: TextStyle(color: AppColors.textLo),
+                            ),
+                          )
+                        : _buildSourceList(),
                   ),
                 ],
-                Expanded(
-                  child: _sources.isEmpty
-                      ? const Center(
-                          child: Text(
-                            'No sources yet — add one',
-                            style: TextStyle(color: AppColors.textLo),
-                          ),
-                        )
-                      : _buildSourceList(),
-                ),
-              ],
-            ),
+              ),
+      ),
     );
   }
 
@@ -926,56 +931,61 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       appBar: AppBar(
         title: Text(widget.existing == null ? 'Add source' : 'Edit source'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          DropdownButtonFormField<SourceKind>(
-            initialValue: _kind,
-            decoration: const InputDecoration(labelText: 'Type'),
-            dropdownColor: AppColors.panelHi,
-            items: SourceKind.values
-                .map(
-                  (k) => DropdownMenuItem(
-                    value: k,
-                    child: Row(
-                      children: [
-                        Icon(_kindIcon(k), size: 18, color: AppColors.textLo),
-                        const SizedBox(width: 10),
-                        Text(k.name.toUpperCase()),
-                      ],
+      // Edge-to-edge (targetSdk 35+): keep the form — and especially the Save
+      // button at its end — clear of the system bar.
+      body: SafeArea(
+        top: false,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            DropdownButtonFormField<SourceKind>(
+              initialValue: _kind,
+              decoration: const InputDecoration(labelText: 'Type'),
+              dropdownColor: AppColors.panelHi,
+              items: SourceKind.values
+                  .map(
+                    (k) => DropdownMenuItem(
+                      value: k,
+                      child: Row(
+                        children: [
+                          Icon(_kindIcon(k), size: 18, color: AppColors.textLo),
+                          const SizedBox(width: 10),
+                          Text(k.name.toUpperCase()),
+                        ],
+                      ),
                     ),
-                  ),
-                )
-                .toList(),
-            onChanged: (k) => setState(() => _kind = k ?? _kind),
-          ),
-          const SizedBox(height: 16),
-          TvTextField(
-            controller: _label,
-            label: 'Label (optional)',
-            hintText: 'e.g. Living room IPTV',
-            autofocus: widget.existing == null,
-            textInputAction: TextInputAction.next,
-          ),
-          for (final s in _specs(_kind)) ...[
+                  )
+                  .toList(),
+              onChanged: (k) => setState(() => _kind = k ?? _kind),
+            ),
             const SizedBox(height: 16),
             TvTextField(
-              controller: _controller(s.key),
-              label: s.label,
-              hintText: s.hint ?? '',
-              obscureText: s.obscure,
+              controller: _label,
+              label: 'Label (optional)',
+              hintText: 'e.g. Living room IPTV',
+              autofocus: widget.existing == null,
               textInputAction: TextInputAction.next,
             ),
-          ],
-          const SizedBox(height: 28),
-          SizedBox(
-            height: 48,
-            child: FilledButton(
-              onPressed: _save,
-              child: const Text('Save source'),
+            for (final s in _specs(_kind)) ...[
+              const SizedBox(height: 16),
+              TvTextField(
+                controller: _controller(s.key),
+                label: s.label,
+                hintText: s.hint ?? '',
+                obscureText: s.obscure,
+                textInputAction: TextInputAction.next,
+              ),
+            ],
+            const SizedBox(height: 28),
+            SizedBox(
+              height: 48,
+              child: FilledButton(
+                onPressed: _save,
+                child: const Text('Save source'),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1116,108 +1126,112 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Metadata')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                Text(
-                  'Metadata provider',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Pick the preferred poster/details provider. The other configured visual provider is used as fallback; MDBList adds ratings when possible.',
-                  style: TextStyle(color: AppColors.textLo),
-                ),
-                const SizedBox(height: 16),
-                SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'tmdb', label: Text('TMDB')),
-                    ButtonSegment(value: 'tvdb', label: Text('TVDB')),
-                  ],
-                  selected: {_provider},
-                  onSelectionChanged: (value) =>
-                      setState(() => _provider = value.first),
-                ),
-                const SizedBox(height: 16),
-                TvTextField(
-                  controller: _tmdb,
-                  label: 'TMDB API credential',
-                  hintText: 'Paste a v3 API key or v4 Read Access Token',
-                  obscureText: true,
-                  autofocus: true,
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                TvTextField(
-                  controller: _tvdb,
-                  label: 'TVDB API key',
-                  hintText: 'Used as preferred or fallback visual provider',
-                  obscureText: true,
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                TvTextField(
-                  controller: _tvdbPin,
-                  label: 'TVDB PIN',
-                  hintText: 'Optional user-supported key PIN',
-                  obscureText: true,
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 12),
-                TvTextField(
-                  controller: _mdblist,
-                  label: 'MDBList API key',
-                  hintText: 'Optional ratings enrichment',
-                  obscureText: true,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _save(),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Changes apply after returning to the library.',
-                  style: TextStyle(color: AppColors.textLo, fontSize: 12),
-                ),
-                const SizedBox(height: 16),
-                SwitchListTile(
-                  value: _autoEnrich,
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Auto-enrich loaded lists'),
-                  subtitle: const Text(
-                    'Fetch metadata in the background after movies or series load.',
+      // Edge-to-edge (targetSdk 35+): keep the form clear of the system bar.
+      body: SafeArea(
+        top: false,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  Text(
+                    'Metadata provider',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Pick the preferred poster/details provider. The other configured visual provider is used as fallback; MDBList adds ratings when possible.',
                     style: TextStyle(color: AppColors.textLo),
                   ),
-                  onChanged: (value) => setState(() => _autoEnrich = value),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _clearMetadataCache,
-                  icon: const Icon(Icons.delete_sweep_outlined),
-                  label: const Text('Clear metadata cache'),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _resetMetadataAndDisplay,
-                  icon: const Icon(Icons.restore_outlined),
-                  label: const Text('Reset enriched display'),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  height: 48,
-                  child: FilledButton.icon(
-                    onPressed: _saving ? null : _save,
-                    icon: _saving
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.save_outlined),
-                    label: Text(_saving ? 'Saving' : 'Save'),
+                  const SizedBox(height: 16),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'tmdb', label: Text('TMDB')),
+                      ButtonSegment(value: 'tvdb', label: Text('TVDB')),
+                    ],
+                    selected: {_provider},
+                    onSelectionChanged: (value) =>
+                        setState(() => _provider = value.first),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(height: 16),
+                  TvTextField(
+                    controller: _tmdb,
+                    label: 'TMDB API credential',
+                    hintText: 'Paste a v3 API key or v4 Read Access Token',
+                    obscureText: true,
+                    autofocus: true,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 12),
+                  TvTextField(
+                    controller: _tvdb,
+                    label: 'TVDB API key',
+                    hintText: 'Used as preferred or fallback visual provider',
+                    obscureText: true,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 12),
+                  TvTextField(
+                    controller: _tvdbPin,
+                    label: 'TVDB PIN',
+                    hintText: 'Optional user-supported key PIN',
+                    obscureText: true,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 12),
+                  TvTextField(
+                    controller: _mdblist,
+                    label: 'MDBList API key',
+                    hintText: 'Optional ratings enrichment',
+                    obscureText: true,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _save(),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Changes apply after returning to the library.',
+                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                  ),
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    value: _autoEnrich,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Auto-enrich loaded lists'),
+                    subtitle: const Text(
+                      'Fetch metadata in the background after movies or series load.',
+                      style: TextStyle(color: AppColors.textLo),
+                    ),
+                    onChanged: (value) => setState(() => _autoEnrich = value),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _clearMetadataCache,
+                    icon: const Icon(Icons.delete_sweep_outlined),
+                    label: const Text('Clear metadata cache'),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _resetMetadataAndDisplay,
+                    icon: const Icon(Icons.restore_outlined),
+                    label: const Text('Reset enriched display'),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    height: 48,
+                    child: FilledButton.icon(
+                      onPressed: _saving ? null : _save,
+                      icon: _saving
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.save_outlined),
+                      label: Text(_saving ? 'Saving' : 'Save'),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 }

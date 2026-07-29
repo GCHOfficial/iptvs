@@ -83,6 +83,23 @@ the Activity boundary prevents one physical press from being handled once by the
 and again by Android's Back dispatcher. The visible overlay Back arrow remains an explicit Exit
 command rather than a system-Back gesture.
 
+**Immersive fullscreen + display cutout.** `hideSystemUi()` uses
+`WindowInsetsControllerCompat` with `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` (the supported
+equivalent of the old `SYSTEM_UI_FLAG_IMMERSIVE_STICKY`). The pre-API-30 `systemUiVisibility` flag
+set was removed: under edge-to-edge enforcement (targetSdk 35+) its `LAYOUT_*` half is meaningless,
+because `setDecorFitsSystemWindows` is disabled and the window is already edge-to-edge.
+`WindowCompat.setDecorFitsSystemWindows(window, false)` is still called — it is what produces
+edge-to-edge layout on API 26–34, and is the no-op on 35+, not the reverse.
+
+The Activity sets `LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES` (API 28+) so video reaches the
+physical edge of a notched phone instead of being letterboxed away from the cutout — the DEFAULT
+mode letterboxes in landscape, which is the orientation a player is actually used in. That is safe
+**only because the overlay insets itself**: `ControlsOverlay` keeps its scrim full-bleed but wraps
+its control `Column` in `safeDrawingPadding()`, and the menus/info layer is wrapped as one group the
+same way. So only video extends under the cutout, and a transient swipe-revealed system bar never
+covers a control. When changing the overlay layout, keep new chrome inside one of those two inset
+groups rather than aligning it against the raw window edge.
+
 **Live favorite star** (`PlayerUiState.canFavorite`/`isFavorite`, shown only for live channels):
 the Dart host owns the favorites store, so it seeds the initial state via an Intent extra
 (`EXTRA_CAN_FAVORITE`/`EXTRA_IS_FAVORITE`) and reads the final state back on exit
@@ -157,7 +174,13 @@ at visual parity with the GDI overlay (chip buttons, badges, favorite star). It 
 media_kit `Player` through a narrow `EmbeddedControls` seam (`PlayerBackedEmbeddedControls` in
 production) purely so the overlay is widget-testable without a libmpv engine —
 `test/player_overlay_test.dart` pins the gesture layering/latency, the live-vs-VOD control set,
-and the responsive collapse/no-overflow with a stub. **Back/Escape peel + tap-outside parity:** the
+and the responsive collapse/no-overflow with a stub. **It also insets its bars** (`_barInsets`,
+`MediaQuery.paddingOf`) — the same full-bleed-scrim / inset-content split as the Compose overlay.
+This matters on Android, not just desktop: the embedded path is the fallback when
+`HdrPlayerActivity` can't launch, and it renders in the ordinary Flutter window, which is **not**
+immersive (nothing calls `SystemChrome.setEnabledSystemUIMode`), so under edge-to-edge the system
+bars really do sit over the video. Insets are zero in widget tests by default, which is why the
+regression is pinned explicitly rather than left to be noticed visually. **Back/Escape peel + tap-outside parity:** the
 info panel is a non-modal `Positioned`, so it needs an explicit single-press peel to match the
 native overlays' menu→info→hide→exit ladder — `EmbeddedPlayerControlsState.handleBackPeel()` closes
 an open info panel first (consuming the press), and `PlayerScreen`'s Escape binding calls it

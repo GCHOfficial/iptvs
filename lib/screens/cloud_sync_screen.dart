@@ -407,31 +407,36 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Cloud sync')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (_paired) ..._pairedBody() else ..._pairingBody(),
-                  if (_status != null) ...[
-                    const SizedBox(height: 20),
-                    Text(
-                      _status!,
-                      style: const TextStyle(color: AppColors.accent),
-                    ),
+      // Edge-to-edge (targetSdk 35+): keep the pairing/push controls clear of the
+      // system bar.
+      body: SafeArea(
+        top: false,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_paired) ..._pairedBody() else ..._pairingBody(),
+                    if (_status != null) ...[
+                      const SizedBox(height: 20),
+                      Text(
+                        _status!,
+                        style: const TextStyle(color: AppColors.accent),
+                      ),
+                    ],
+                    if (_error != null) ...[
+                      const SizedBox(height: 20),
+                      Text(
+                        _error!,
+                        style: const TextStyle(color: Color(0xFFE5484D)),
+                      ),
+                    ],
                   ],
-                  if (_error != null) ...[
-                    const SizedBox(height: 20),
-                    Text(
-                      _error!,
-                      style: const TextStyle(color: Color(0xFFE5484D)),
-                    ),
-                  ],
-                ],
+                ),
               ),
-            ),
+      ),
     );
   }
 

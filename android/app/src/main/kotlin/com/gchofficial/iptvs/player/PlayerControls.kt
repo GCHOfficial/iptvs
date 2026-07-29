@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -206,15 +207,21 @@ fun PlayerScreen(
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.
+        // Inset as one group (same reasoning as ControlsOverlay) — their
+        // BottomEnd/TopEnd alignment would otherwise put them in the cutout on a
+        // notched phone, which windowLayoutInDisplayCutoutMode=shortEdges now
+        // lets the window extend into.
         if (state.controlsVisible && !state.inPip) {
-            PlayerMenusLayer(state, callbacks) { poke() }
-            if (state.infoOpen) {
-                InfoPanel(
-                    state = state,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 84.dp, end = PlayerDimens.EdgePadding),
-                )
+            Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                PlayerMenusLayer(state, callbacks) { poke() }
+                if (state.infoOpen) {
+                    InfoPanel(
+                        state = state,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 84.dp, end = PlayerDimens.EdgePadding),
+                    )
+                }
             }
         }
     }
@@ -228,7 +235,11 @@ private fun ControlsOverlay(
     nowMillis: Long,
     onInteract: () -> Unit,
 ) {
-    Column(
+    // The scrim stays full-bleed (it has to reach the screen edge to be readable
+    // over the video), while the controls themselves are inset: the display
+    // cutout is always excluded, and the system bars are excluded whenever a
+    // swipe transiently reveals them over our immersive window.
+    Box(
         Modifier
             .fillMaxSize()
             .background(
@@ -240,9 +251,11 @@ private fun ControlsOverlay(
                 ),
             ),
     ) {
-        TopBar(state, callbacks, nowMillis, onInteract)
-        Spacer(Modifier.weight(1f))
-        BottomBar(state, callbacks, playFocus, nowMillis, onInteract)
+        Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+            TopBar(state, callbacks, nowMillis, onInteract)
+            Spacer(Modifier.weight(1f))
+            BottomBar(state, callbacks, playFocus, nowMillis, onInteract)
+        }
     }
 }
 

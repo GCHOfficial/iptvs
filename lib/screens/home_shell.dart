@@ -299,45 +299,50 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             IconButton(
               tooltip: 'Help & about',
               icon: const Icon(Icons.help_outline),
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const LegalScreen()),
-              ),
+              onPressed: () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),
             ),
           ],
         ),
-        body: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'No source configured',
-                    style: TextStyle(fontSize: 18),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Bring your own IPTV provider — a Stalker portal, an Xtream '
-                    'account, or an M3U playlist. No account is needed to try '
-                    'the Demo.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: AppColors.textLo),
-                  ),
-                  const SizedBox(height: 20),
-                  FilledButton.icon(
-                    autofocus: true,
-                    onPressed: _manageSources,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add a source'),
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: _useDemo,
-                    child: const Text('Use demo streams'),
-                  ),
-                ],
+        // Edge-to-edge (targetSdk 35+): centred content can still reach the
+        // system bar on a short landscape viewport.
+        body: SafeArea(
+          top: false,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'No source configured',
+                      style: TextStyle(fontSize: 18),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Bring your own IPTV provider — a Stalker portal, an Xtream '
+                      'account, or an M3U playlist. No account is needed to try '
+                      'the Demo.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: AppColors.textLo),
+                    ),
+                    const SizedBox(height: 20),
+                    FilledButton.icon(
+                      autofocus: true,
+                      onPressed: _manageSources,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add a source'),
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: _useDemo,
+                      child: const Text('Use demo streams'),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

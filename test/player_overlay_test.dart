@@ -34,6 +34,7 @@ void main() {
     String? sourceName,
     double width = 1000,
     double height = 720,
+    EdgeInsets padding = EdgeInsets.zero,
     String Function(VideoParams params)? dynamicRangeLabel,
     VoidCallback? onPlayPause,
     VoidCallback? onToggleFullscreen,
@@ -53,23 +54,28 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: EmbeddedPlayerControls(
-            controls: stub,
-            title: 'Channel One',
-            sourceName: sourceName,
-            epgNow: epgNow,
-            epgNext: epgNext,
-            isLive: isLive,
-            canFavorite: canFavorite,
-            favorite: favorite,
-            liveSynced: liveSynced,
-            dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
-            onBack: () {},
-            onToggleFavorite: onToggleFavorite ?? () {},
-            onPlayPause: () async => onPlayPause?.call(),
-            onGoLive: () async => onGoLive?.call(),
-            onCycleAspect: () async {},
-            onToggleFullscreen: onToggleFullscreen ?? () {},
+          // Inside the Scaffold so this is exactly the padding the overlay
+          // reads (edge-to-edge system-bar insets on Android).
+          body: MediaQuery(
+            data: MediaQueryData(size: Size(width, height), padding: padding),
+            child: EmbeddedPlayerControls(
+              controls: stub,
+              title: 'Channel One',
+              sourceName: sourceName,
+              epgNow: epgNow,
+              epgNext: epgNext,
+              isLive: isLive,
+              canFavorite: canFavorite,
+              favorite: favorite,
+              liveSynced: liveSynced,
+              dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
+              onBack: () {},
+              onToggleFavorite: onToggleFavorite ?? () {},
+              onPlayPause: () async => onPlayPause?.call(),
+              onGoLive: () async => onGoLive?.call(),
+              onCycleAspect: () async {},
+              onToggleFullscreen: onToggleFullscreen ?? () {},
+            ),
           ),
         ),
       ),
@@ -79,6 +85,34 @@ void main() {
     await tester.pump();
     return stub;
   }
+
+  group('edge-to-edge system-bar insets', () {
+    // This overlay is the Android fallback when the native player Activity
+    // can't launch, and it renders in the ordinary (non-immersive) Flutter
+    // window — so under edge-to-edge enforcement the status/navigation bars sit
+    // over the video. Insets default to zero in tests, which is exactly why a
+    // regression here would otherwise be invisible.
+    testWidgets('the bars inset their controls by the system-bar padding', (
+      tester,
+    ) async {
+      const inset = EdgeInsets.fromLTRB(0, 48, 0, 60);
+
+      await pumpOverlay(tester, isLive: false);
+      final backTop = tester.getTopLeft(find.byIcon(Icons.arrow_back)).dy;
+      final playBottom = tester.getBottomLeft(find.byIcon(Icons.play_arrow)).dy;
+
+      await pumpOverlay(tester, isLive: false, padding: inset);
+      final insetBackTop = tester.getTopLeft(find.byIcon(Icons.arrow_back)).dy;
+      final insetPlayBottom = tester
+          .getBottomLeft(find.byIcon(Icons.play_arrow))
+          .dy;
+
+      // Back moves down out of the status bar; the transport moves up out of
+      // the navigation bar. Without the fix both would be unchanged.
+      expect(insetBackTop - backTop, inset.top);
+      expect(playBottom - insetPlayBottom, inset.bottom);
+    });
+  });
 
   group('gesture layering + latency', () {
     testWidgets('a control tap fires without waiting out the double-tap '

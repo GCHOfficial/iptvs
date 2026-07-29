@@ -46,52 +46,57 @@ class DiagnosticsScreen extends StatelessWidget {
           const SizedBox(width: 4),
         ],
       ),
-      body: Column(
-        children: [
-          if (kDebugMode) const _ResourceCountersSection(),
-          if (database != null && sourceId != null)
-            _CacheStatsSection(
-              database: database!,
-              sourceId: sourceId!,
-              onReingest: onReingest,
-            ),
-          Expanded(
-            child: AnimatedBuilder(
-              animation: log,
-              builder: (context, _) {
-                final entries = log.entries.reversed.toList();
-                if (entries.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      'No diagnostics yet',
-                      style: TextStyle(color: AppColors.textLo),
-                    ),
-                  );
-                }
-                return ListView.separated(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: entries.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final entry = entries[index];
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: SelectableText(
-                        '${_time(entry.time)}  ${redactText(entry.scope)}\n'
-                        '${redactText(entry.message)}',
-                        style: const TextStyle(
-                          color: AppColors.textLo,
-                          fontSize: 12,
-                          height: 1.35,
-                        ),
+      // Edge-to-edge (targetSdk 35+): keep the log list clear of the system bar,
+      // which sits on the side in landscape.
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            if (kDebugMode) const _ResourceCountersSection(),
+            if (database != null && sourceId != null)
+              _CacheStatsSection(
+                database: database!,
+                sourceId: sourceId!,
+                onReingest: onReingest,
+              ),
+            Expanded(
+              child: AnimatedBuilder(
+                animation: log,
+                builder: (context, _) {
+                  final entries = log.entries.reversed.toList();
+                  if (entries.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        'No diagnostics yet',
+                        style: TextStyle(color: AppColors.textLo),
                       ),
                     );
-                  },
-                );
-              },
+                  }
+                  return ListView.separated(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: entries.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final entry = entries[index];
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: SelectableText(
+                          '${_time(entry.time)}  ${redactText(entry.scope)}\n'
+                          '${redactText(entry.message)}',
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                            height: 1.35,
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
