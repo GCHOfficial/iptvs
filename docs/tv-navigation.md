@@ -58,7 +58,19 @@ targets (they stay tappable for touch), and the coordinator drives the scroll it
 extents are `kChannelRowExtentWithEpg` 112 / `kChannelRowExtentPlain` 72 /
 `kCategoryRowExtent` 44 in `live_tab_view.dart`; `LiveLayoutMetrics` reduces them within guarded
 minimums on short wide viewports, and the coordinator receives those exact computed values so its
-index→offset calculation cannot drift from the rendered list. It replaced a per-row-focus
+index→offset calculation cannot drift from the rendered list.
+
+Because `_reveal` scrolls a row against `position.viewportDimension`, the **viewport itself** has to
+exclude the system-bar insets, or a revealed row lands underneath the bar. That is why the channel
+list screen's body is wrapped in `SafeArea(top: false)` rather than the list carrying bottom
+padding: `SafeArea` shrinks the body's constraints, so every existing index→offset calculation stays
+correct with no arithmetic change. Padding the list would have left `viewportDimension` including
+the covered strip. Android TV reports zero insets, so this is a no-op there; it matters on phones
+under edge-to-edge (targetSdk 35+), where in **landscape** the bar is a *side* inset, not a bottom
+one. The same reasoning puts the EPG grid's `SafeArea` outside its `LayoutBuilder`, since the
+timeline width is derived from those constraints too.
+
+The selection model replaced a per-row-focus
 design that kept producing bugs: an off-screen row in a lazy `ListView` has no context, so
 `requestFocus` silently no-ops, which forced a *jump-scroll → post-frame requestFocus → re-assert
 retry* pipeline that key auto-repeat outran, that geometry traversal leaked out of, and that stale

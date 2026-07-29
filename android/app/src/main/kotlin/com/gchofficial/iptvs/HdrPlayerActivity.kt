@@ -4,17 +4,20 @@ import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
 import android.util.Rational
 import android.view.KeyEvent
-import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.mutableStateOf
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
@@ -125,6 +128,17 @@ class HdrPlayerActivity : ComponentActivity() {
             },
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Let the video reach the physical screen edge on a notched phone rather
+        // than being letterboxed away from the cutout (the DEFAULT mode letterboxes
+        // in landscape, which is exactly the orientation a player is used in). The
+        // Compose overlay insets itself via safeDrawingPadding, so only the video
+        // extends under the cutout — no control is ever placed there.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         hideSystemUi()
 
         val streamUrl = intent.getStringExtra(EXTRA_URL)
@@ -557,14 +571,27 @@ class HdrPlayerActivity : ComponentActivity() {
         )
     }
 
+    /**
+     * Immersive fullscreen, via the supported inset API.
+     *
+     * The old `systemUiVisibility` flag set has been deprecated since API 30, and
+     * from targetSdk 35 its `LAYOUT_*` half is meaningless anyway: edge-to-edge is
+     * enforced and `setDecorFitsSystemWindows` is disabled, so the window already
+     * extends behind the bars. [WindowInsetsControllerCompat] is the replacement;
+     * `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` reproduces `IMMERSIVE_STICKY` — a
+     * swipe reveals the bars transiently and they hide themselves again.
+     *
+     * [WindowCompat.setDecorFitsSystemWindows] is kept for API 26–34, where it is
+     * still what makes the window lay out edge-to-edge (it is the no-op on 35+,
+     * not the other way round).
+     */
     private fun hideSystemUi() {
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     companion object {

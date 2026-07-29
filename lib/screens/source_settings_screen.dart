@@ -212,120 +212,125 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('${_config.label} · settings')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 32),
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(6, 8, 6, 12),
-                  child: Text(
-                    'Turn categories off to hide them — and everything in them '
-                    '— from browsing for this source.',
-                    style: TextStyle(color: AppColors.textLo),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
-                  child: TvTextField(
-                    controller: _searchController,
-                    hintText: 'Search categories',
-                    autofocus: true,
-                    textInputAction: TextInputAction.search,
-                    prefixIcon: const Icon(Icons.search, size: 20),
-                    // The built-in clear button is a real D-pad stop (a
-                    // suffixIcon sits behind the edit barrier) — TvTextField.
-                    showClear: _query.isNotEmpty,
-                    onClear: () {
-                      _searchController.clear();
-                      setState(() => _query = '');
-                    },
-                    onChanged: (v) => setState(() => _query = v),
-                  ),
-                ),
-                if (_hasAnyMatch)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: _BulkButton(
-                            label: 'Show all',
-                            icon: Icons.visibility,
-                            onTap: () => _bulkAll(hide: false),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _BulkButton(
-                            label: 'Hide all',
-                            icon: Icons.visibility_off_outlined,
-                            onTap: () => _bulkAll(hide: true),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
-                  child: Text(
-                    'Advanced catch-up',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
-                  child: Text(
-                    'Leave these empty to use provider values. A fixed offset '
-                    'takes precedence over the timezone.',
-                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
-                  ),
-                ),
-                TvTextField(
-                  controller: _catchupTimezoneController,
-                  hintText: 'Europe/London or UTC',
-                  label: 'Provider timezone',
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 8),
-                TvTextField(
-                  controller: _catchupOffsetController,
-                  hintText: 'e.g. 120',
-                  label: 'Fixed offset in minutes',
-                  textInputAction: TextInputAction.next,
-                ),
-                const SizedBox(height: 8),
-                TvTextField(
-                  controller: _catchupDaysController,
-                  hintText: 'e.g. 7',
-                  label: 'Maximum archive days',
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _saveCatchupOverrides(),
-                ),
-                if (_catchupError != null)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+      // Edge-to-edge (targetSdk 35+): keep the category list clear of the system
+      // bar (it sits on the side in landscape).
+      body: SafeArea(
+        top: false,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 32),
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(6, 8, 6, 12),
                     child: Text(
-                      _catchupError!,
-                      style: const TextStyle(color: Colors.redAccent),
+                      'Turn categories off to hide them — and everything in them '
+                      '— from browsing for this source.',
+                      style: TextStyle(color: AppColors.textLo),
                     ),
                   ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: FilledButton.icon(
-                      onPressed: _saveCatchupOverrides,
-                      icon: const Icon(Icons.save_outlined),
-                      label: const Text('Save catch-up overrides'),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
+                    child: TvTextField(
+                      controller: _searchController,
+                      hintText: 'Search categories',
+                      autofocus: true,
+                      textInputAction: TextInputAction.search,
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      // The built-in clear button is a real D-pad stop (a
+                      // suffixIcon sits behind the edit barrier) — TvTextField.
+                      showClear: _query.isNotEmpty,
+                      onClear: () {
+                        _searchController.clear();
+                        setState(() => _query = '');
+                      },
+                      onChanged: (v) => setState(() => _query = v),
                     ),
                   ),
-                ),
-                _section('Live TV', ContentKind.live),
-                _section('Movies', ContentKind.movie),
-                _section('Series', ContentKind.series),
-              ],
-            ),
+                  if (_hasAnyMatch)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: _BulkButton(
+                              label: 'Show all',
+                              icon: Icons.visibility,
+                              onTap: () => _bulkAll(hide: false),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _BulkButton(
+                              label: 'Hide all',
+                              icon: Icons.visibility_off_outlined,
+                              onTap: () => _bulkAll(hide: true),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                    child: Text(
+                      'Advanced catch-up',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                    child: Text(
+                      'Leave these empty to use provider values. A fixed offset '
+                      'takes precedence over the timezone.',
+                      style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                    ),
+                  ),
+                  TvTextField(
+                    controller: _catchupTimezoneController,
+                    hintText: 'Europe/London or UTC',
+                    label: 'Provider timezone',
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 8),
+                  TvTextField(
+                    controller: _catchupOffsetController,
+                    hintText: 'e.g. 120',
+                    label: 'Fixed offset in minutes',
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 8),
+                  TvTextField(
+                    controller: _catchupDaysController,
+                    hintText: 'e.g. 7',
+                    label: 'Maximum archive days',
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _saveCatchupOverrides(),
+                  ),
+                  if (_catchupError != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+                      child: Text(
+                        _catchupError!,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
+                    ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 10),
+                      child: FilledButton.icon(
+                        onPressed: _saveCatchupOverrides,
+                        icon: const Icon(Icons.save_outlined),
+                        label: const Text('Save catch-up overrides'),
+                      ),
+                    ),
+                  ),
+                  _section('Live TV', ContentKind.live),
+                  _section('Movies', ContentKind.movie),
+                  _section('Series', ContentKind.series),
+                ],
+              ),
+      ),
     );
   }
 

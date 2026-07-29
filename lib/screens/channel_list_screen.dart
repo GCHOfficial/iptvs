@@ -952,7 +952,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // seamless handoff both ways (no `vo` swap to the native HWND, preview
         // never disposed). HDR keeps the native HWND path for real D3D11 HDR —
         // the same SDR-embedded / HDR-dedicated split Linux uses.
-        preferWindowsEmbedded: decision.adoptsEmbeddedPreview &&
+        preferWindowsEmbedded:
+            decision.adoptsEmbeddedPreview &&
             Platform.isWindows &&
             !streamLikelyHdr,
         favoriteInitial: _isFavorite(ContentKind.live, channel.id),
@@ -1692,9 +1693,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                       await _preview.stop();
                       if (!context.mounted) return;
                       await Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => const LegalScreen(),
-                        ),
+                        MaterialPageRoute(builder: (_) => const LegalScreen()),
                       );
                     },
                   ),
@@ -1726,28 +1725,38 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         ),
         // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
         // arrowing sideways into the AppBar's action cluster.
-        body: FocusTraversalGroup(
-          child: Column(
-            children: [
-              ChannelContentTabs(
-                value: _tab,
-                onChanged: _selectTab,
-                focusNodes: _tabFocusNodes,
-              ),
-              // Toolbar + status line read the data controllers (loading /
-              // enrich / category state) but not the preview, so preview ticks
-              // never rebuild them.
-              ListenableBuilder(
-                listenable: _dataListenable,
-                builder: (context, _) => _buildToolbarAndStatus(context),
-              ),
-              Expanded(
-                child: ListenableBuilder(
-                  listenable: _bodyListenable,
-                  builder: (context, _) => _buildBody(context),
+        //
+        // Edge-to-edge (targetSdk 35+): SafeArea shrinks the body's constraints,
+        // so the live list's Expanded viewport ends above/beside the system bar.
+        // That is what keeps LiveFocusCoordinator._reveal correct — it scrolls a
+        // selected row to `viewportDimension`, so the viewport itself must
+        // exclude the inset or the selected row lands underneath the bar.
+        // Insets are zero on Android TV, so this is a no-op there.
+        body: SafeArea(
+          top: false,
+          child: FocusTraversalGroup(
+            child: Column(
+              children: [
+                ChannelContentTabs(
+                  value: _tab,
+                  onChanged: _selectTab,
+                  focusNodes: _tabFocusNodes,
                 ),
-              ),
-            ],
+                // Toolbar + status line read the data controllers (loading /
+                // enrich / category state) but not the preview, so preview ticks
+                // never rebuild them.
+                ListenableBuilder(
+                  listenable: _dataListenable,
+                  builder: (context, _) => _buildToolbarAndStatus(context),
+                ),
+                Expanded(
+                  child: ListenableBuilder(
+                    listenable: _bodyListenable,
+                    builder: (context, _) => _buildBody(context),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

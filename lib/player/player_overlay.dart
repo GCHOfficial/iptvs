@@ -418,12 +418,30 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     );
   }
 
+  /// System-bar/cutout insets for the overlay chrome.
+  ///
+  /// This overlay is the Android *fallback* path (used when `HdrPlayerActivity`
+  /// can't be launched), and it renders in the ordinary Flutter window, which
+  /// under edge-to-edge enforcement is **not** immersive — nothing here calls
+  /// `SystemChrome.setEnabledSystemUIMode`, so the status and navigation bars
+  /// genuinely sit over the video. Without this the Back button hides under the
+  /// status bar and the scrubber under the navigation bar. Zero on desktop.
+  EdgeInsets get _barInsets => MediaQuery.paddingOf(context);
+
+  // Both bars keep their gradient full-bleed (it has to reach the screen edge to
+  // stay readable over video) and inset only their content — the same split the
+  // native Compose overlay uses.
   Widget _topBar() => Positioned(
     left: 0,
     right: 0,
     top: 0,
     child: Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+      padding: EdgeInsets.fromLTRB(
+        16 + _barInsets.left,
+        12 + _barInsets.top,
+        16 + _barInsets.right,
+        28,
+      ),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -529,7 +547,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       // controls) begins — instead of fading linearly to dark only at the very
       // bottom, so both rows sit on a real backdrop rather than near-transparent
       // scrim. The top inset sets how high the transparent fade starts.
-      padding: const EdgeInsets.fromLTRB(20, 36, 20, 14),
+      padding: EdgeInsets.fromLTRB(
+        20 + _barInsets.left,
+        36,
+        20 + _barInsets.right,
+        14 + _barInsets.bottom,
+      ),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -818,8 +841,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
         ('Frame rate', '${video.fps!.toStringAsFixed(3)} FPS'),
     ];
     return Positioned(
-      top: 76,
-      right: 20,
+      // Tracks the (inset) top bar so the panel stays below it, not under the
+      // status bar — see [_barInsets].
+      top: 76 + _barInsets.top,
+      right: 20 + _barInsets.right,
       width: 320,
       // Absorb taps so a press on the panel itself doesn't fall through to the
       // background tap-outside handler and immediately re-close it.

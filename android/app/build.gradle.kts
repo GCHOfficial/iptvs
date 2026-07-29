@@ -127,6 +127,14 @@ flutter {
 }
 
 dependencies {
+    // Declared explicitly because this module imports it directly — FileProvider
+    // (`MainActivity`) and the WindowCompat/WindowInsetsControllerCompat edge-to-edge
+    // APIs (`HdrPlayerActivity`). It also arrives transitively via media3/activity/
+    // compose, and Gradle resolves to the highest request, so pinning here sets a
+    // floor rather than overriding those; it just stops a direct source dependency
+    // from resting on someone else's transitive graph.
+    implementation("androidx.core:core:1.18.0")
+
     // ExoPlayer/Media3 is the DEFAULT native-player engine: MediaCodec hardware
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
     // compositor switching the panel into HDR — something mpv's GL render path can't

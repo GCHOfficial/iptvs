@@ -391,63 +391,72 @@ class _EpgGridScreenState extends State<EpgGridScreen>
           ),
         ],
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          _timelineWidth = (constraints.maxWidth - _channelColumnWidth).clamp(
-            0.0,
-            double.infinity,
-          );
-          return Focus(
-            focusNode: _gridFocus,
-            autofocus: true,
-            onKeyEvent: _onKey,
-            child: GestureDetector(
-              onHorizontalDragUpdate: (details) =>
-                  _panTo(_hOffset.value - details.delta.dx),
-              child: Column(
-                children: [
-                  _hourHeaderWidget,
-                  const Divider(height: 1, color: AppColors.line),
-                  Expanded(
-                    child: widget.channels.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'No channels',
-                              style: TextStyle(color: AppColors.textLo),
+      // Edge-to-edge (targetSdk 35+). Wrapping *outside* the LayoutBuilder is
+      // deliberate: the timeline width and the row cursor's index→offset maths
+      // are both derived from these constraints, so insetting here keeps the
+      // grid's own geometry self-consistent rather than letting it compute
+      // against a viewport that the system bar partly covers.
+      body: SafeArea(
+        top: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            _timelineWidth = (constraints.maxWidth - _channelColumnWidth).clamp(
+              0.0,
+              double.infinity,
+            );
+            return Focus(
+              focusNode: _gridFocus,
+              autofocus: true,
+              onKeyEvent: _onKey,
+              child: GestureDetector(
+                onHorizontalDragUpdate: (details) =>
+                    _panTo(_hOffset.value - details.delta.dx),
+                child: Column(
+                  children: [
+                    _hourHeaderWidget,
+                    const Divider(height: 1, color: AppColors.line),
+                    Expanded(
+                      child: widget.channels.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'No channels',
+                                style: TextStyle(color: AppColors.textLo),
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: _vController,
+                              itemExtent: _rowHeight,
+                              itemCount: widget.channels.length,
+                              itemBuilder: (context, i) {
+                                final channel = widget.channels[i];
+                                _ensureLoaded(channel.id);
+                                return _ChannelRow(
+                                  channel: channel,
+                                  programmes:
+                                      _programmes[channel.id] ?? const [],
+                                  isSelectedRow: i == _selectedRow,
+                                  selectedIndex: i == _selectedRow
+                                      ? _selectedCol
+                                      : -1,
+                                  windowStart: _windowStart,
+                                  windowEnd: _windowEnd,
+                                  pxPerMinute: _pxPerMinute,
+                                  timelineWidth: _timelineWidth,
+                                  channelColumnWidth: _channelColumnWidth,
+                                  hOffset: _hOffset,
+                                  onTapProgramme: (programme) =>
+                                      _selectAndActivate(i, programme),
+                                );
+                              },
                             ),
-                          )
-                        : ListView.builder(
-                            controller: _vController,
-                            itemExtent: _rowHeight,
-                            itemCount: widget.channels.length,
-                            itemBuilder: (context, i) {
-                              final channel = widget.channels[i];
-                              _ensureLoaded(channel.id);
-                              return _ChannelRow(
-                                channel: channel,
-                                programmes: _programmes[channel.id] ?? const [],
-                                isSelectedRow: i == _selectedRow,
-                                selectedIndex: i == _selectedRow
-                                    ? _selectedCol
-                                    : -1,
-                                windowStart: _windowStart,
-                                windowEnd: _windowEnd,
-                                pxPerMinute: _pxPerMinute,
-                                timelineWidth: _timelineWidth,
-                                channelColumnWidth: _channelColumnWidth,
-                                hOffset: _hOffset,
-                                onTapProgramme: (programme) =>
-                                    _selectAndActivate(i, programme),
-                              );
-                            },
-                          ),
-                  ),
-                  _focusedDetailBar(),
-                ],
+                    ),
+                    _focusedDetailBar(),
+                  ],
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
