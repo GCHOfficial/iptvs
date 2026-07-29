@@ -29,6 +29,13 @@ Copy the list per release; the boxes are a template, not a record.
   Play prohibits `REQUEST_INSTALL_PACKAGES` for self-updates, and the
   `googlePlay` flavor omits it at build time.
 - [ ] Confirm privacy, support, and account-deletion links open.
+- [ ] Play build only: play a **Dolby Vision Profile 5** stream and an
+  **HDR10/HLG** stream from the installed track build. Play's *App optimization*
+  setting lets Play re-generate the APKs from the uploaded bundle, and the
+  vendored libdovi-enabled `libmpv.so` is the least standard thing in the
+  payload. A packaging regression there installs, launches and browses
+  perfectly, and fails only on an HDR stream — so nothing else on this list
+  would catch it.
 
 ## Android TV
 
@@ -38,6 +45,10 @@ Copy the list per release; the boxes are a template, not a record.
   returns.
 - [ ] Verify no keyboard/touchscreen requirement and no focus trap.
 - [ ] Test native fullscreen controls, reconnect, subtitles/tracks, and app exit.
+- [ ] Repeat the DV Profile 5 / HDR10 check from the phone list on the TV build.
+  Same reasoning, higher stakes: the TV is where HDR actually matters, and the
+  ExoPlayer→mpv fallback for DV P5 is the path that depends on the vendored
+  `libmpv.so` surviving Play's APK generation.
 
 ## Cloud account deletion
 
