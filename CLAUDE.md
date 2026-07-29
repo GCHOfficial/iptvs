@@ -9,6 +9,7 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/validation-baseline.md](docs/validation-baseline.md) — reproducible large-ingestion workloads, public schema history, performance evidence, and native-device validation matrix.
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
+- [docs/ios.md](docs/ios.md) — **planned, not implemented.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the AVPlayer-default/libmpv-fallback dual-engine player design. AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -56,19 +57,25 @@ fallback build/link) — native Linux playback runtime-discovers and version-gat
 
 ## Orchestration workflow
 
-The lead session (Fable 5 for now; switch to Opus 4.8 when Fable is no longer available under
-subscription) is the **orchestrator**: plan, decompose, synthesize — and keep its own context
-lean by delegating rather than doing mechanical work itself.
+The lead session (Opus 5) is the **orchestrator**: plan, decompose, synthesize — and keep its own
+context lean by delegating rather than doing mechanical work itself.
 
 - **Reasoning-heavy phases** (architecture, debugging complex issues, algorithm design — in this
   repo: focus/D-pad logic, the player stack, `LibraryRepository` merge paths, migrations, RLS)
-  → **deep-reasoner** (Opus, `.claude/agents/deep-reasoner.md`).
+  → **deep-reasoner** (Opus 5, `.claude/agents/deep-reasoner.md`).
 - **Mechanical work** (boilerplate, tests following existing patterns, formatting, simple edits)
-  → **fast-worker** (Sonnet, `.claude/agents/fast-worker.md`).
-- **Registration:** agent discovery happens at session startup and fails silently, so the
-  definitions are also symlinked into `~/.claude/agents/` (user-level, loads in every session —
-  re-create the symlinks when setting up a new machine). **Fallback** if the named types still
-  aren't registered ("agent type not found"): spawn `general-purpose` with the matching `model`
+  → **fast-worker** (Sonnet 5, `.claude/agents/fast-worker.md`).
+- **Registration:** discovery happens at session startup, reads `.claude/agents/*.md` at
+  **project level**, and **fails silently on malformed YAML frontmatter**. No `~/.claude/agents/`
+  symlinks are needed — that older advice was wrong, and the directory does not exist on the
+  current machine while project-level discovery works fine. The classic failure is an unquoted
+  `description:` whose text contains a `": "` (e.g. "In this repo: writing tests") — YAML rejects
+  the plain scalar and the agent vanishes with no error, which is exactly how `fast-worker` went
+  missing. **Always quote `description:`.** Fixing a definition re-registers the agent *mid-session*
+  (observed), so a restart is not required — but the fixed agent only becomes callable once that
+  re-registration lands. **Fallback** while a named type still isn't registered ("agent type not
+  found"): spawn
+  `general-purpose` with the matching `model`
   override and make the agent's first instruction "read `.claude/agents/<name>.md` and adopt it
   as your operating rules" — keep the definition file the single source of truth instead of
   paraphrasing it into the prompt.
