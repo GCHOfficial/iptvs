@@ -133,7 +133,7 @@ dependencies {
     // compose, and Gradle resolves to the highest request, so pinning here sets a
     // floor rather than overriding those; it just stops a direct source dependency
     // from resting on someone else's transitive graph.
-    implementation("androidx.core:core:1.18.0")
+    implementation("androidx.core:core:1.19.0")
 
     // ExoPlayer/Media3 is the DEFAULT native-player engine: MediaCodec hardware
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
