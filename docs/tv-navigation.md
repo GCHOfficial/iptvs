@@ -194,6 +194,20 @@ after a dialog is dismissed) — that isn't somewhere the user can *be*, so it r
 instead of offering to exit. Pinned end-to-end by `test/channel_list_focus_test.dart` (whose
 `_ManySource` gives both lists enough rows to actually scroll).
 
+**iOS has no hardware Back**, so the player's presented `IptvsPlayerViewController`
+(docs/ios.md, docs/player.md "iOS") renders the same peel/exit shape through touch instead:
+tapping outside the chrome (on the scrim, or the exposed-video area with the chrome already
+open) closes an open menu, then the info panel — the same menu → info ladder rungs Android's
+`ControlsOverlay` and the Windows/Linux overlays use — while tapping the exposed video with
+chrome hidden just toggles the chrome visible, matching every other platform's tap-to-show.
+The overlay's **X** is a dedicated Exit control that skips the ladder entirely and dismisses
+outright, mirroring the other platforms' explicit back-arrow-always-exits behavior (docs/player.md
+Windows: "the on-screen back-*arrow* button still exits directly"). `isModalInPresentation = true`
+(docs/ios.md "Native player") disables the system interactive-swipe dismiss gesture for the same
+reason the ladder is enforced everywhere else: a stray edge swipe must not exit the player outside
+an explicit control, since nothing else on iOS plays the role a hardware/remote Back press does on
+the other platforms.
+
 ## The EPG grid (TV-guide timeline)
 
 `epg_grid_screen.dart` is the TV-guide timeline (one row per channel on a shared time axis) — it

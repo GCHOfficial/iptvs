@@ -9,9 +9,9 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/validation-baseline.md](docs/validation-baseline.md) — reproducible large-ingestion workloads, public schema history, performance evidence, and native-device validation matrix.
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
-- [docs/ios.md](docs/ios.md) — **planned, not implemented.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the AVPlayer-default/libmpv-fallback dual-engine player design. AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
+- [docs/ios.md](docs/ios.md) — **in progress, nothing shipped yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player plan — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
-- [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, the shared-engine preview handoff, auto-reconnect, PiP.
+- [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (in progress), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
 - [docs/updates.md](docs/updates.md) — the self-update pipeline: release changelog, per-platform install, update-dialog focus behavior.
 
@@ -378,10 +378,13 @@ best-effort dev-era repair paths outside the claim.
 
 `player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with native-HDR paths on
 Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when ExoPlayer can't
-decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR) and Windows (native
+decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR), Windows (native
 HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
 texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
-PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses). Linux: embedded
+PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses), and iOS (**in progress** —
+a presented `UIViewController` owning an `AVPlayerLayer`, the `HdrPlayerActivity` analogue: **AVPlayer
+default** for real HDR/PiP/AirPlay, **libmpv via `media_kit` fallback**, always SDR on iOS, for
+containers AVFoundation refuses; see docs/ios.md and docs/player.md "iOS"). Linux: embedded
 `media_kit_video`/libmpv (with the shared Flutter
 overlay) is the default fullscreen path, and a host-discovered (not bundled), version-gated
 (>= 0.40, 0.41 recommended) native mpv window with an IPTVS-specific GPU/OSD Lua overlay is used
@@ -400,6 +403,10 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `_openLivePlayer` — even one previewing a *different* channel — or its audio doubles up behind the
   new pipeline: a same-channel preview is *paused* (resumed on return, `pausedPreview`), a
   different-channel one is *stopped* (`stoppedPreview`, releases the 2nd connection; not restarted).
+  **iOS's AVPlayer↔mpv engine switch is a cross-engine case of the same rule: stop + re-resolve,
+  never pause** — a paused media_kit engine still holds its provider connection, and accounts are
+  single-connection, so pausing across a Dart↔Swift handoff would double-connect exactly like an
+  unpaused different-channel preview would.
 - On a TV remote the preview is **deliberate and locked**: only OK starts/switches it; D-pad
   focus movement never does. The preview engine is stopped when the app backgrounds or exits.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
@@ -408,9 +415,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   **favorite star** in both overlays; the native one round-trips state via Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
-  keeps the manual error/Retry overlay. Three independent watchdogs (Kotlin for Android native;
-  Dart for Windows/embedded; Dart-over-IPC for Linux native mpv), sharing one timing policy
-  (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy`). A **clean server-side EOF** maps
+  keeps the manual error/Retry overlay. Four independent watchdogs (Kotlin for Android native;
+  Dart for Windows/embedded; Dart-over-IPC for Linux native mpv; Swift for iOS native, in progress),
+  sharing one timing policy (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy` and Swift
+  `ReconnectPolicy`). iOS's reload is planned to go through `PlayerScreen.resolveAgain` first —
+  Android's native watchdog currently does not, so it retries the same URL that just failed. A
+  **clean server-side EOF** maps
   to media_kit `completed=true`/`buffering=false` — invisible to the buffering-gated stall poll —
   so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
   legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
@@ -428,9 +438,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
   channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
   `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays`/`windowsOverlayDibs` (the last is
-  the cached overlay back-buffer DIB) — all release-inert
+  the cached overlay back-buffer DIB), Swift (`iosAvPlayers`/`iosPlayerViews`/`iosPipControllers`/
+  `iosTimeObservers`/`iosAudioClients`, planned — `iosTimeObservers` matters because an un-removed
+  periodic time observer retains the `AVPlayer` forever) — all release-inert
   (`kDebugMode`/`BuildConfig.DEBUG`/`#ifndef NDEBUG`) and merged by `ResourceCounters.snapshot()`
-  via a `debugCounters` method on the existing HDR channel. Counters must return to zero after an
+  via a `debugCounters` method on the existing HDR channel, called on Android/Windows/iOS.
+  Counters must return to zero after an
   open/close cycle; `integration_test/player_soak_test.dart` (owner-run on hardware, never CI)
   asserts it over 100 cycles. When adding a lifecycle resource or a new create/dispose path, keep
   the counting balanced. Detail: docs/player.md "Debug resource counters + lifecycle soak".
@@ -438,9 +451,21 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `iptvs/native_preview` are process-static; handler registration goes through
   `ChannelHandlerOwner` (`lib/player/channel_owner.dart`): claim bumps a monotonic token,
   release clears only if still current, superseded owners' calls are ignored — so an old
-  route's dispose can't null a newer route's handler. Cleanup is identical on Android and
-  Windows (Dart-side; natives are owner-agnostic). Real handlers keep a `mounted`/`_disposed`
-  second gate. Pinned by `test/channel_owner_test.dart`.
+  route's dispose can't null a newer route's handler. Cleanup is identical on Android, Windows
+  and iOS (Dart-side; natives are owner-agnostic — the iOS plugin reuses the same
+  `iptvs/native_hdr_player` channel name Android already registers). Real handlers keep a
+  `mounted`/`_disposed` second gate. Pinned by `test/channel_owner_test.dart`.
+- **`iosManageAudioSession: false` is set at both `PlayerConfiguration` sites**
+  (`lib/player/player_screen.dart`, `lib/screens/live_preview_controller.dart`) — done, not
+  pending. The option defaults to `true`, so dropping it at either site silently reintroduces
+  mpv's `ao_audiounit` clobbering the process-wide `AVAudioSession` state AVPlayer owns.
+  `media_kit` is git-pinned to the commit that adds the option (unreleased upstream — docs/ios.md
+  Constraint 1). Both sites construct a `PlayerConfiguration` independently, so keep the line at
+  each one when either site's construction changes.
+- **iOS `engineFailed` never dead-ends** — the reopen gate is three vetoes (native PiP, native app
+  state, Flutter lifecycle), any absence is not a veto, and a deferral that outlasts
+  `kIosFallbackSurfaceAfter` surfaces Retry rather than waiting silently. Detail: docs/ios.md
+  "What routes to which engine", docs/player.md "iOS".
 
 ## In-app updates (essentials)
 
