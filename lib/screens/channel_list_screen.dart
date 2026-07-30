@@ -14,6 +14,7 @@ import '../sources/source_config.dart';
 import '../theme.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
+import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
@@ -40,15 +41,21 @@ import 'media_tab_view.dart';
 ///   seamless on every non-Android platform, including Linux for **SDR streams
 ///   and all of X11** (the native mpv window buys nothing there). The one
 ///   exception is a **Wayland HDR** source (see [stopResolveFresh]).
-/// - [stopResolveFresh]: a same-channel handoff where Linux's native mpv
-///   process is about to be used — only for a **Wayland HDR** source
-///   (`linuxNativeLikely` is Wayland-gated and `streamLikelyHdr` is true), the
-///   one case where the native window earns its cost (real HDR passthrough).
-///   The native mpv can't adopt a running engine, so the preview must be
-///   *stopped* outright — pausing it would leave its provider connection open
-///   (a single-connection portal then sees two), and the preview's
-///   already-resolved stream carries a spent single-use Stalker `play_token` —
-///   so the channel is re-resolved fresh too. SDR/X11 stay [adoptEmbedded].
+/// - [stopResolveFresh]: a same-channel handoff where the fullscreen player is
+///   about to run on a **different engine than the preview**, so there is
+///   nothing to adopt. Two cases reach it:
+///   * **Linux Wayland HDR** — the native mpv *process* takes over
+///     (`linuxNativeLikely` is Wayland-gated and `streamLikelyHdr` is true),
+///     the one case where the native window earns its cost (real HDR
+///     passthrough). SDR/X11 stay [adoptEmbedded].
+///   * **iOS AVPlayer** (`crossEngineFullscreen`) — the preview always runs on
+///     embedded media_kit/libmpv, but an AVPlayer-routed channel goes
+///     fullscreen on a presented `AVPlayerLayer` controller. AVPlayer cannot
+///     adopt an mpv session.
+///   Either way the preview must be *stopped* outright — pausing it would
+///   leave its provider connection open (a single-connection portal then sees
+///   two), and the preview's already-resolved stream carries a spent
+///   single-use Stalker `play_token` — so the channel is re-resolved fresh too.
 /// - [pausePreview]: a same-channel handoff that isn't adopted and doesn't
 ///   need [stopResolveFresh]'s connection teardown (chiefly Android falling
 ///   back to its embedded media_kit preview) — paused and resumed on return.
@@ -75,6 +82,15 @@ enum FullscreenHandoff {
 /// other Linux same-channel handoff (SDR, or X11) stays the seamless
 /// [FullscreenHandoff.adoptEmbedded]. (A source that starts SDR then turns out
 /// HDR still escalates later, inside `PlayerScreen._maybeEscalateLinuxNative`.)
+///
+/// [crossEngineFullscreen] is the iOS analogue of that pair, collapsed into one
+/// flag because the caller already knows the answer with no probe: the preview
+/// runs on embedded media_kit/libmpv, and `selectIosEngine` says this channel
+/// goes fullscreen on **AVPlayer**. AVPlayer cannot adopt an mpv session, and a
+/// merely *paused* media_kit engine still holds its provider connection —
+/// provider accounts are single-connection, so two live engines break playback.
+/// Hence the same stop-and-re-resolve treatment Wayland HDR gets. Defaults
+/// false, so every non-iOS caller and every existing case is unaffected.
 FullscreenHandoff decideFullscreenHandoff({
   required bool reusePreview,
   required bool sameChannelPreview,
@@ -84,12 +100,15 @@ FullscreenHandoff decideFullscreenHandoff({
   required bool linuxNativeLikely,
   required bool previewPlaying,
   bool streamLikelyHdr = false,
+  bool crossEngineFullscreen = false,
 }) {
   final adoptPreview = reusePreview && sameChannelPreview && previewHasStream;
   if (adoptPreview && isAndroid && nativePreviewActive) {
     return FullscreenHandoff.adoptNative;
   }
-  if (adoptPreview && !isAndroid && linuxNativeLikely && streamLikelyHdr) {
+  if (adoptPreview &&
+      !isAndroid &&
+      (crossEngineFullscreen || (linuxNativeLikely && streamLikelyHdr))) {
     return FullscreenHandoff.stopResolveFresh;
   }
   if (adoptPreview && !isAndroid) {
@@ -765,6 +784,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               // single-use, so the originally resolved URL is dead after any
               // portal-side kill.
               resolveAgain: () => widget.repo.resolve(channel),
+              iosEngineKey: channel.id,
             ),
           ),
         );
@@ -865,7 +885,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // as adoptable at the `existingPlayer`/restore-mute call sites below.
       final previewChannelId = _preview.channelId;
       final previewNativeActive = _preview.nativeActive;
-      final previewHasStream = _preview.stream != null;
+      final previewStreamUrl = _preview.stream?.url;
+      final previewHasStream = previewStreamUrl != null;
       final previewMuted = _preview.isMuted;
       final previewPlaying = previewChannelId != null || previewNativeActive;
       final sameChannelPreview = previewChannelId == channel.id;
@@ -881,6 +902,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               matrix: _preview.player.state.videoParams.colormatrix,
             )
           : false;
+      // iOS: the preview is always embedded media_kit/libmpv, but an
+      // AVPlayer-routed channel goes fullscreen on a presented AVPlayerLayer
+      // controller — a different engine, so nothing can be adopted. Cheap to
+      // decide (a pure function of the already-resolved preview URL, no probe),
+      // so it's computed inline with the rest of the once-only preview read.
+      final crossEngine =
+          Platform.isIOS &&
+          previewStreamUrl != null &&
+          selectIosEngine(
+                url: previewStreamUrl,
+                memoKey: channel.id,
+                forcedMpv: IosEngineMemo.forcedMpv,
+              ) ==
+              IosPlaybackEngine.avPlayer;
       final decision = decideFullscreenHandoff(
         reusePreview: reusePreview,
         sameChannelPreview: sameChannelPreview,
@@ -890,9 +925,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         linuxNativeLikely: linuxNative,
         previewPlaying: previewPlaying,
         streamLikelyHdr: streamLikelyHdr,
+        crossEngineFullscreen: crossEngine,
       );
       final adoptNative = decision.adoptsNativePreview;
-      final linuxNativeStopResolve = decision.stopsAndResolvesFresh;
+      // Covers both cross-engine shapes: Linux Wayland-HDR native mpv and iOS
+      // AVPlayer. Only the Linux one sets `preferLinuxNative` below.
+      final stopResolveFresh = decision.stopsAndResolvesFresh;
       // Same channel (a media_kit-fallback preview going native-fullscreen):
       // pause and resume on return. A *different* channel (the "last channel"
       // zap / EPG-grid play, which resolve fresh with reusePreview: false and so
@@ -910,19 +948,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       DiagnosticsLog.instance.add(
         'library',
         'fullscreen open decision=${decision.name} linuxNative=$linuxNative '
-            'hdr=$streamLikelyHdr',
+            'hdr=$streamLikelyHdr crossEngine=$crossEngine',
       );
       if (stoppedPreview) {
         await _preview.stop();
       } else if (pausedPreview) {
         await _preview.pause();
-      } else if (linuxNativeStopResolve) {
-        // The native mpv process opens its own provider connection — a
-        // merely-paused media_kit engine would still hold its connection
-        // open (a single-connection portal then sees two, fighting each
-        // other in a create_link storm), and the preview's already-resolved
-        // stream carries a spent single-use Stalker play_token — so stop
-        // outright and re-resolve fresh instead of reusing `stream`.
+      } else if (stopResolveFresh) {
+        // The incoming engine (Linux native mpv process / iOS AVPlayer) opens
+        // its own provider connection — a merely-paused media_kit engine would
+        // still hold its connection open (a single-connection portal then sees
+        // two, fighting each other in a create_link storm), and the preview's
+        // already-resolved stream carries a spent single-use Stalker
+        // play_token — so stop outright and re-resolve fresh instead of
+        // reusing `stream`.
         await _preview.stop();
         // If resolve() or the route setup below throws before the push goes
         // through, the catch block restarts this same preview — otherwise it
@@ -947,7 +986,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // Wayland+HDR: open straight to native mpv (the preview was stopped and
         // `playbackStream` re-resolved fresh above). SDR/X11 open embedded and
         // escalate to native later only if the source turns out to be HDR.
-        preferLinuxNative: linuxNativeStopResolve,
+        // Explicitly Linux-gated: iOS reaches `stopResolveFresh` too (the
+        // AVPlayer cross-engine case), and must not ask for a Linux mpv process.
+        preferLinuxNative: Platform.isLinux && stopResolveFresh,
+        // iOS: stable content id for the AVPlayer-failure memo, so a container
+        // sniff that turns out wrong is remembered per channel.
+        iosEngineKey: channel.id,
         // Windows: keep an adopted **SDR** preview on its embedded texture for a
         // seamless handoff both ways (no `vo` swap to the native HWND, preview
         // never disposed). HDR keeps the native HWND path for real D3D11 HDR —
@@ -998,10 +1042,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       } else if (!resumePreviewOnReturn) {
         // Phone sheet handoff: nothing shows the preview after fullscreen.
         await _preview.stop(clearSelection: true);
-      } else if (linuxNativeStopResolve) {
-        // Same-channel native-stop is the one stop case that restarts: the
-        // preview was stopped only to free the connection/token for native
-        // mpv, not because the user left the channel.
+      } else if (stopResolveFresh) {
+        // Same-channel cross-engine stop is the one stop case that restarts: the
+        // preview was stopped only to free the connection/token for the other
+        // engine (Linux native mpv / iOS AVPlayer), not because the user left
+        // the channel.
         await _preview.start(channel, muted: previewWasMuted);
       } else if (decision.seamless && _preview.stream != null) {
         await _preview.play();
@@ -1194,6 +1239,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             stream: stream,
             sourceName: widget.repo.source.name,
             epgNow: programme,
+            // Catch-up is deliberately memoised under its own key rather than
+            // the live channel's: an archive URL can be a different container
+            // than the live one, and conflating them would let a catch-up
+            // AVPlayer failure permanently downgrade the live channel to SDR
+            // (or vice versa).
+            iosEngineKey: 'catchup:${channel.id}',
           ),
         ),
       );
@@ -1268,6 +1319,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               itemId: item.id,
               resumeFrom: resume?.position,
             ),
+            iosEngineKey: item.id,
           ),
         ),
       );

@@ -10,7 +10,7 @@ import 'package:flutter/services.dart';
 /// is a no-op outside [kDebugMode], so this never touches release behavior.
 ///
 /// [snapshot] merges these Dart-side counts with the native debug counters
-/// exposed by the Android/Windows `iptvs/native_hdr_player` channel's
+/// exposed by the Android/Windows/iOS `iptvs/native_hdr_player` channel's
 /// `debugCounters` method (engine/surface/view counts on the native side) —
 /// release builds return an empty native map, and any native error (not yet
 /// implemented, unsupported platform, etc.) is tolerated by simply omitting
@@ -66,7 +66,7 @@ class ResourceCounters {
   }
 
   /// Snapshot of Dart-side counters merged with the native `debugCounters`
-  /// map (Android/Windows only). Empty in release; never throws — any native
+  /// map (Android/Windows/iOS only). Empty in release; never throws — any native
   /// failure (missing method, platform exception, wrong shape) just omits the
   /// native keys.
   static Future<Map<String, int>> snapshot() async {
@@ -77,7 +77,7 @@ class ResourceCounters {
       'channelOwners': channelOwners,
       'linuxNativeSessions': linuxNativeSessions,
     };
-    if (Platform.isAndroid || Platform.isWindows) {
+    if (Platform.isAndroid || Platform.isWindows || Platform.isIOS) {
       try {
         final native = await _nativeHdrPlayer.invokeMethod('debugCounters');
         if (native is Map) {

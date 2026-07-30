@@ -47,19 +47,29 @@ jobs:
           xcodebuild -version
           pod --version || true
       - run: flutter pub get
+      - name: swift test (IptvsPlayerCore pure-logic package)
+        # Runs before anything iOS-build-shaped: no simulator, no CocoaPods, no
+        # Flutter build — just the Foundation-only Core package compiling and
+        # its XCTest tables passing. This is the cheap canary on the packaging
+        # skeleton (packages/iptvs_ios_player/ios/Core) and on the three-way
+        # drift between this Swift copy, the Kotlin originals, and the Dart
+        # mirrors — see docs/ios.md "Native code layout".
+        working-directory: packages/iptvs_ios_player/ios/Core
+        run: swift test
       - name: Build iOS (no codesign, no signing/provisioning)
         id: build_ios
         # Same dart-define shape as build.yml's non-Android platform builds:
         # SUPABASE_URL/SUPABASE_ANON_KEY are repo Variables (not secrets), empty
         # in forks, which just keeps the optional cloud-sync panel off rather
-        # than failing the build. DISTRIBUTION_CHANNEL=development mirrors the
-        # Windows/Linux jobs since iOS has no shipped distribution channel yet
-        # (docs/ios.md's `altStore` channel is still planned, not merged).
+        # than failing the build. DISTRIBUTION_CHANNEL=altStore is the real
+        # shipping channel for the sideload path (docs/ios.md) -- it disables
+        # the in-app updater, which cannot work inside the iOS sandbox; AltStore
+        # owns updates instead.
         run: |
           set -o pipefail
           flutter build ios --release --no-codesign \
             --build-number "${{ github.run_number }}" \
-            --dart-define=DISTRIBUTION_CHANNEL=development \
+            --dart-define=DISTRIBUTION_CHANNEL=altStore \
             --dart-define=SUPABASE_URL="${{ vars.SUPABASE_URL }}" \
             --dart-define=SUPABASE_ANON_KEY="${{ vars.SUPABASE_ANON_KEY }}" \
             2>&1 | tee "$RUNNER_TEMP/flutter-build-ios.log"
@@ -79,4 +89,69 @@ jobs:
         with:
           name: ios-build-probe-log
           path: ${{ runner.temp }}/flutter-build-ios.log
+          if-no-files-found: warn
+      - name: Package unsigned .ipa
+        # AltStore Classic / Sideloadly both consume a plain unsigned .ipa (the
+        # standard Payload/ zip of the .app) and re-sign it with the end user's
+        # own free Apple ID -- see docs/ios.md "Distribution". Named with the
+        # pubspec version plus the run number so two dispatches of this probe
+        # (including two on the same version) are distinguishable once
+        # downloaded.
+        if: steps.build_ios.outcome == 'success'
+        run: |
+          set -o pipefail
+          version="$(grep '^version:' pubspec.yaml | sed 's/version: *//; s/+.*//')"
+          IPA_NAME="iptvs-altstore-v${version}-${{ github.run_number }}"
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r -X "${IPA_NAME}.ipa" Payload
+          echo "IPA_NAME=${IPA_NAME}" >> "$GITHUB_ENV"
+      - name: Upload unsigned .ipa
+        if: steps.build_ios.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_NAME }}.ipa
+          if-no-files-found: error
+      - name: Build iOS Simulator (debug, no signing)
+        id: build_ios_simulator
+        # This answers a question that changes the whole project's risk
+        # profile: whether media_kit_libs_ios_video's vendored xcframeworks
+        # carry a simulator (arm64/x86_64-simulator) slice at all. If they
+        # don't, this step fails with a linker/xcframework-slice error, and
+        # it means NO runtime testing of the mpv fallback engine is possible
+        # without a physical device -- everything (Constraint 2's teardown
+        # race, the codec floor, AVAudioSession interaction) would have to
+        # wait for the on-device protocol in docs/ios.md. Deliberately a
+        # separate, later step from the device release build above so a
+        # missing simulator slice doesn't block that build's artifact upload.
+        run: |
+          set -o pipefail
+          flutter build ios --debug --simulator \
+            --dart-define=DISTRIBUTION_CHANNEL=development \
+            --dart-define=SUPABASE_URL="${{ vars.SUPABASE_URL }}" \
+            --dart-define=SUPABASE_ANON_KEY="${{ vars.SUPABASE_ANON_KEY }}" \
+            2>&1 | tee "$RUNNER_TEMP/flutter-build-ios-simulator.log"
+      - name: Report simulator build verdict
+        # Explicit pass/fail verdict line so the answer to "does a simulator
+        # slice exist" is readable from the Actions summary without opening
+        # any log -- the whole point of this step per docs/ios.md.
+        if: always()
+        run: |
+          if [ "${{ steps.build_ios_simulator.outcome }}" = "success" ]; then
+            echo "::notice::iOS Simulator build SUCCEEDED — media_kit_libs_ios_video carries a simulator slice; the mpv fallback engine can be exercised on a Simulator (HDR/native-decode work still needs a device)."
+          else
+            echo "::warning::iOS Simulator build FAILED — see 'Surface simulator build log tail on failure' below. Most likely cause: media_kit_libs_ios_video's xcframeworks have no simulator slice, meaning no runtime testing is possible without a physical device (see docs/ios.md 'On-device test protocol')."
+          fi
+      - name: Surface simulator build log tail on failure
+        if: failure() && steps.build_ios_simulator.outcome == 'failure'
+        run: |
+          echo "----- Last 400 lines of flutter build ios --simulator output -----"
+          tail -n 400 "$RUNNER_TEMP/flutter-build-ios-simulator.log"
+      - name: Upload simulator build log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-build-probe-simulator-log
+          path: ${{ runner.temp }}/flutter-build-ios-simulator.log
           if-no-files-found: warn

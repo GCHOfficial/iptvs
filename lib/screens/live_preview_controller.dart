@@ -100,7 +100,18 @@ class LivePreviewController extends ChangeNotifier {
 
   Player _createPlayer() {
     final player = Player(
-      configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn),
+      configuration: const PlayerConfiguration(
+        logLevel: MPVLogLevel.warn,
+        // iOS: mpv's `ao_audiounit` driver unconditionally calls
+        // `AVAudioSession.setActive:` on init/dispose, and the session is
+        // process-wide — a preview engine starting or stopping would clobber
+        // the fullscreen AVPlayer engine's background audio and lock-screen
+        // controls. The upstream opt-out **defaults to true**, so it has to be
+        // set at both PlayerConfiguration sites (here and
+        // `_PlayerScreenState._createPlayer`); missing either reintroduces the
+        // bug the media_kit git pin exists to fix. Inert off iOS.
+        iosManageAudioSession: false,
+      ),
     );
     ResourceCounters.incMediaKitPlayers();
     // Unlike the fullscreen player, previews never get a native HDR/HWND surface —
