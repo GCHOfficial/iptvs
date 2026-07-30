@@ -391,6 +391,13 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  iptvs_ios_player:
+    dependency: "direct main"
+    description:
+      path: "packages/iptvs_ios_player"
+      relative: true
+    source: path
+    version: "0.0.1"
   jni:
     dependency: transitive
     description:
@@ -482,10 +489,11 @@ packages:
   media_kit:
     dependency: "direct main"
     description:
-      name: media_kit
-      sha256: ae9e79597500c7ad6083a3c7b7b7544ddabfceacce7ae5c9709b0ec16a5d6643
-      url: "https://pub.dev"
-    source: hosted
+      path: media_kit
+      ref: d7b68a584e545a9e4fa5f9a600bfab556a106654
+      resolved-ref: d7b68a584e545a9e4fa5f9a600bfab556a106654
+      url: "https://github.com/media-kit/media-kit.git"
+    source: git
     version: "1.2.6"
   media_kit_libs_android_video:
     dependency: transitive
