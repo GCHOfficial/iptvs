@@ -1,9 +1,9 @@
 import Flutter
 import UIKit
 
-/// Lets `IptvsPlayerViewController` (not yet written) tell the plugin whether
-/// Picture-in-Picture is currently running, without the plugin importing AVKit
-/// or holding a reference to the controller's internals.
+/// Lets `IptvsPlayerViewController` tell the plugin whether Picture-in-Picture
+/// is currently running, without the plugin importing AVKit or holding a
+/// reference to the controller's internals.
 ///
 /// **While no conforming object is registered the plugin reports PiP as
 /// *unknown*, never as `false`.** That is deliberate and load-bearing: Dart
@@ -53,11 +53,27 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
   /// as it is presented, and nothing should keep it alive past its dismissal —
   /// a strong reference here would leak an `AVPlayer` per open, which the
   /// `debugCounters` soak (docs/player.md "Debug resource counters + lifecycle
-  /// soak") is specifically built to catch. **Step 7 changes this:** entering
-  /// Picture-in-Picture dismisses the controller while its `AVPlayerLayer` keeps
-  /// feeding the PiP window, so that step must add a *separate* strong hold that
-  /// lasts exactly as long as PiP does — not promote this one.
+  /// soak") is specifically built to catch.
+  ///
+  /// It stays weak. Picture-in-Picture, which dismisses the controller while its
+  /// `AVPlayerLayer` keeps feeding the PiP window, is handled by the *separate*
+  /// strong hold below rather than by promoting this one — so the exceptional
+  /// lifetime is scoped to the exceptional case, and every ordinary open still
+  /// deallocates on dismissal.
   private weak var activeController: IptvsPlayerViewController?
+
+  /// The **PiP-lifetime strong hold**, and the whole reason `activeController`
+  /// can stay weak.
+  ///
+  /// Entering PiP dismisses `IptvsPlayerViewController` — UIKit then releases
+  /// it, and with only a weak reference left it would deallocate mid-session,
+  /// taking the `AVPlayer` feeding the PiP window with it. This holds it for
+  /// exactly as long as PiP is running: set on `willStart`, cleared on `didStop`
+  /// (or on the failure path, or by whichever teardown runs first).
+  ///
+  /// Never assigned outside that window, so an ordinary open/close cycle still
+  /// settles `iosPlayerControllers` back to zero.
+  private var pictureInPictureRetainedController: IptvsPlayerViewController?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(
@@ -67,6 +83,22 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
     let instance = IptvsIosPlayerPlugin()
     instance.channel = channel
     instance.startObservingHostVisibility()
+    // Category only — no activation. `setCategory` does not interrupt other
+    // apps; only `setActive(true)` does, and that is per-client
+    // (`IosAudioSession`). It buys one concrete thing on its own, and it is the
+    // thing a tester would never diagnose: `.playback` is not muted by the ring
+    // switch, where the default `soloAmbient` is. That matters *specifically*
+    // for the mpv fallback, which no longer touches the session itself
+    // (`iosManageAudioSession: false`) and, until Dart claims a client, has
+    // nothing else setting a category for it.
+    //
+    // **Verify on device:** the claim that a launch-time `setCategory` leaves
+    // other apps' audio alone is Apple's documented behaviour but is untestable
+    // here. If launching iptvs turns out to stop a playing podcast, move this
+    // call into `IosAudioSession.activate()` only — the cost is that an
+    // mpv-routed stream goes silent again on a phone with the ring switch on,
+    // until the Dart-side `acquireAudioSession` wiring lands.
+    IosAudioSession.shared.configureCategory()
     IptvsIosPlayerPlugin.current = instance
     registrar.addMethodCallDelegate(instance, channel: channel)
   }
@@ -130,13 +162,52 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
       )
       result(true)
 
+    case "setControlState":
+      // Presentation metadata push, the same call the Windows GDI overlay is
+      // driven by. The controller reads *only* the presentation half — see
+      // `IptvsPlayerViewController.applyControlState` for why position/duration/
+      // playing state are deliberately ignored.
+      guard let controller = activeController,
+        let map = call.arguments as? [AnyHashable: Any]
+      else {
+        result(false)
+        return
+      }
+      controller.applyControlState(map)
+      result(true)
+
+    case "acquireAudioSession":
+      // The mpv/media_kit half of the audio session.
+      //
+      // `iosManageAudioSession: false` means mpv no longer activates
+      // `AVAudioSession` itself (docs/ios.md Constraint 1), so an mpv-routed
+      // stream — every extension-less Stalker locator, every raw `.ts` — is
+      // **silent** until something claims a session on its behalf. That claim
+      // comes through here, keyed by client id so it survives overlapping with
+      // the AVPlayer controller's own claim during an `engineFailed` handoff.
+      guard let clientId = PlayerOpenRequest.nonBlankString(argument(call, "client")) else {
+        result(false)
+        return
+      }
+      IosAudioSession.shared.acquire(clientId)
+      result(true)
+
+    case "releaseAudioSession":
+      guard let clientId = PlayerOpenRequest.nonBlankString(argument(call, "client")) else {
+        result(false)
+        return
+      }
+      IosAudioSession.shared.release(clientId)
+      result(true)
+
     case "debugCounters":
       // Shape matches the Android/Windows `debugCounters` reply
-      // (`ResourceCounters.snapshot()`). Still empty: the counters themselves
-      // (`iosAvPlayers`, `iosPlayerControllers`, `iosTimeObservers`,
-      // `iosPipControllers`, `iosAudioClients`) land with the resources they
-      // count, in steps 6–7. See docs/player.md "Debug resource counters".
-      result([:])
+      // (`ResourceCounters.snapshot()`): `iosAvPlayers`,
+      // `iosPlayerControllers`, `iosPipControllers`, `iosTimeObservers`,
+      // `iosAudioClients`, all `#if DEBUG` and empty in release. Every one must
+      // settle back to zero after an open/close cycle — see docs/player.md
+      // "Debug resource counters + lifecycle soak".
+      result(IosDebugCounters.snapshot())
 
     default:
       result(FlutterMethodNotImplemented)
@@ -263,6 +334,26 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
   /// app-state half is observed here; PiP is not observable from the plugin.
   public func pictureInPictureStateChanged() {
     publishHostVisibility()
+  }
+
+  // MARK: - Picture-in-Picture lifetime
+
+  /// Takes the PiP-lifetime strong hold. Called from
+  /// `pictureInPictureControllerWillStartPictureInPicture`, i.e. **before** the
+  /// controller dismisses itself — after the dismissal there may be nothing left
+  /// holding it.
+  func retainForPictureInPicture(_ controller: IptvsPlayerViewController) {
+    pictureInPictureRetainedController = controller
+  }
+
+  /// Drops the hold — **identity-checked**, the same discipline
+  /// `ChannelHandlerOwner.release(token)` uses on the Dart side: a controller
+  /// that has been superseded must not clear a newer one's hold. Without the
+  /// check, a late PiP teardown from an outgoing player would deallocate the
+  /// incoming one mid-PiP.
+  func releasePictureInPictureRetain(_ controller: IptvsPlayerViewController) {
+    guard pictureInPictureRetainedController === controller else { return }
+    pictureInPictureRetainedController = nil
   }
 
   private func startObservingHostVisibility() {

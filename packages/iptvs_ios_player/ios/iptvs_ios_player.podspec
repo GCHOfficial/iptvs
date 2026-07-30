@@ -19,6 +19,11 @@ implementations. See docs/ios.md.
   s.source           = { :path => '.' }
   s.source_files     = 'Classes/**/*.swift', 'Core/Sources/**/*.swift'
   s.dependency 'Flutter'
+  # Explicit rather than relying on Swift autolinking: AVKit (PiP) and
+  # MediaPlayer (Now Playing / remote commands) are only reached through
+  # Swift, and an autolink miss surfaces as an opaque link failure on a CI
+  # runner rather than anywhere reproducible locally.
+  s.frameworks = 'AVFoundation', 'AVKit', 'MediaPlayer'
   s.platform = :ios, '15.0'
   s.static_framework = true
   s.swift_version = '5.0'

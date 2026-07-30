@@ -204,11 +204,15 @@ public enum PlayerAutoHide {
 ///   audio-plays-but-no-picture state: an unplayable container is
 ///   `engineFailed`, a whole cross-language handoff, not an in-place notice.
 ///
+/// `supportsPip` is live as of step 7 — driven from
+/// ``shouldOfferPictureInPicture(isSupported:isPossible:)``, which is why the
+/// button stays hidden on a Simulator and on audio-only content.
+///
 /// Fields the later steps fill in are present and inert: `dynamicRange`,
 /// `videoCodec`, `audioCodec`, `audioChannels`, `fps` (step 9),
 /// `audioTracks`/`subtitleTracks` (step 9's media-selection read),
-/// `supportsPip` (step 7), `reconnecting` (step 8). Each one's chrome is
-/// already written and simply renders nothing until its step lands.
+/// `reconnecting` (step 8). Each one's chrome is already written and simply
+/// renders nothing until its step lands.
 public struct PlayerChromeState: Equatable, Sendable {
   // MARK: Presentation
 
