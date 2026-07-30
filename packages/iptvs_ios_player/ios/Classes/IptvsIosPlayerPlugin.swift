@@ -30,8 +30,9 @@ public protocol IptvsPipStateProviding: AnyObject {
 ///
 /// See docs/ios.md "engineFailed is a cross-language handoff" and
 /// `decideIosFallbackAction` in `lib/player/player_screen.dart` for the Dart
-/// half of the contract. No AVFoundation is touched here yet — the player
-/// surface itself lands with `IptvsPlayerViewController`.
+/// half of the contract. The player surface itself is
+/// `IptvsPlayerViewController`, which this plugin presents on `open` and
+/// forwards transport calls to.
 public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
   /// The live plugin instance, so `IptvsPlayerViewController` can register
   /// itself as the PiP state provider and emit `engineFailed` through the one
@@ -45,6 +46,18 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
   /// automatically when it deallocates (weak). See `IptvsPipStateProviding`
   /// for why `nil` means *unknown* rather than *not in PiP*.
   public weak var pipStateProvider: IptvsPipStateProviding?
+
+  /// The presented player, while one exists.
+  ///
+  /// **Weak on purpose:** UIKit retains a presented view controller for as long
+  /// as it is presented, and nothing should keep it alive past its dismissal —
+  /// a strong reference here would leak an `AVPlayer` per open, which the
+  /// `debugCounters` soak (docs/player.md "Debug resource counters + lifecycle
+  /// soak") is specifically built to catch. **Step 7 changes this:** entering
+  /// Picture-in-Picture dismisses the controller while its `AVPlayerLayer` keeps
+  /// feeding the PiP window, so that step must add a *separate* strong hold that
+  /// lasts exactly as long as PiP does — not promote this one.
+  private weak var activeController: IptvsPlayerViewController?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(
@@ -65,20 +78,136 @@ public class IptvsIosPlayerPlugin: NSObject, FlutterPlugin {
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
     case "open":
-      // No engine wired up yet — always report "did not open" rather than
-      // silently pretending to play. Dart falls through to the embedded
-      // media_kit surface (`_tryOpenNativeHdrPlayer` returning false).
-      result(false)
+      // A payload that cannot describe a playable stream is answered `false`,
+      // not as a channel error: Dart treats both identically (fall through to
+      // the embedded media_kit surface), and `false` keeps a routing decision
+      // out of the diagnostics log as if it were a fault.
+      guard let request = PlayerOpenRequest(arguments: call.arguments) else {
+        result(false)
+        return
+      }
+      presentPlayer(request, result: result)
+
     case "close":
+      guard let controller = activeController else {
+        result(true)
+        return
+      }
+      controller.forceClose { result(true) }
+
+    case "play":
+      activeController?.play()
+      result(activeController != nil)
+
+    case "pause":
+      activeController?.pause()
+      result(activeController != nil)
+
+    case "seekTo":
+      guard let controller = activeController,
+        let positionMs = PlayerOpenRequest.int64(argument(call, "positionMs"))
+      else {
+        result(false)
+        return
+      }
+      controller.seek(toMs: positionMs)
       result(true)
+
+    case "load":
+      // The live reload the reconnect watchdog and "Go to live" both use. The
+      // watchdog itself lives in the controller (step 8) and re-resolves through
+      // Dart's inbound `resolveAgain`; this entry point is for a Dart-side
+      // caller that already has a fresh URL.
+      guard let controller = activeController,
+        let url = PlayerOpenRequest.nonBlankString(argument(call, "url"))
+      else {
+        result(false)
+        return
+      }
+      controller.load(
+        url: url,
+        headers: PlayerOpenRequest.parseHeaders(argument(call, "headers"))
+      )
+      result(true)
+
     case "debugCounters":
       // Shape matches the Android/Windows `debugCounters` reply
-      // (`ResourceCounters.snapshot()`): an empty map until real lifecycle
-      // resources exist to count.
+      // (`ResourceCounters.snapshot()`). Still empty: the counters themselves
+      // (`iosAvPlayers`, `iosPlayerControllers`, `iosTimeObservers`,
+      // `iosPipControllers`, `iosAudioClients`) land with the resources they
+      // count, in steps 6–7. See docs/player.md "Debug resource counters".
       result([:])
+
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  private func argument(_ call: FlutterMethodCall, _ key: String) -> Any? {
+    (call.arguments as? [AnyHashable: Any])?[key]
+  }
+
+  /// Presents the native player over whatever is currently on screen.
+  ///
+  /// An already-active controller is torn down **first, and the new one is
+  /// presented from its dismissal completion**. UIKit rejects a `present` issued
+  /// while a dismissal is still in flight ("Attempt to present … while a
+  /// presentation is in progress"), and the failure mode is a silently missing
+  /// player rather than an error Dart can react to. Dart pushes one player route
+  /// at a time, so this path is defensive — but "defensive" here means the
+  /// difference between a recoverable stale controller and a dead black screen.
+  private func presentPlayer(_ request: PlayerOpenRequest, result: @escaping FlutterResult) {
+    let present: () -> Void = { [weak self] in
+      guard let self else {
+        result(false)
+        return
+      }
+      // Resolved *after* any dismissal above: the top view controller changes
+      // when a presentation is undone.
+      guard let host = IptvsIosPlayerPlugin.topViewController() else {
+        result(false)
+        return
+      }
+      // A new `open` means a new Dart `PlayerScreen` owns the channel, and it
+      // has seen none of the host-visibility events the previous owner did.
+      self.visibilityTracker.reset()
+
+      let controller = IptvsPlayerViewController(request: request, channel: self.channel)
+      self.activeController = controller
+      host.present(controller, animated: false) { [weak self] in
+        // The controller registered itself as the PiP state provider during
+        // `viewDidLoad`, so this first snapshot carries a real `pipActive`
+        // rather than "unknown".
+        self?.publishHostVisibility()
+      }
+      result(true)
+    }
+
+    if let existing = activeController {
+      existing.forceClose { present() }
+    } else {
+      present()
+    }
+  }
+
+  /// The view controller to present from: the frontmost presented controller of
+  /// the active window scene, which is normally the `FlutterViewController`.
+  ///
+  /// Read off `connectedScenes` rather than the deprecated
+  /// `UIApplication.keyWindow` because this app runs a `UISceneDelegate`
+  /// (`ios/Runner/Info.plist` declares a `UIApplicationSceneManifest`, and
+  /// `SceneDelegate.swift` subclasses `FlutterSceneDelegate`), so the
+  /// application-level window accessors are not the source of truth.
+  static func topViewController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    let keyWindow = scene?.keyWindow ?? scene?.windows.first(where: { $0.isKeyWindow })
+    let window = keyWindow ?? scene?.windows.first
+    guard var controller = window?.rootViewController else { return nil }
+    while let presented = controller.presentedViewController {
+      controller = presented
+    }
+    return controller
   }
 
   // MARK: - Host visibility

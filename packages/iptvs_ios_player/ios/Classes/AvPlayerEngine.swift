@@ -1,0 +1,360 @@
+import AVFoundation
+import Foundation
+import UIKit
+
+/// The `UIView` the video is rendered into.
+///
+/// `layerClass` rather than a manually inserted sublayer: the `AVPlayerLayer`
+/// *is* the view's backing layer, so it resizes with the view automatically. A
+/// hand-added sublayer needs its `frame` re-synced in `layoutSubviews` on every
+/// bounds change (rotation, safe-area change, the split-second layout pass right
+/// after presentation), and forgetting one of those leaves the video stretched or
+/// clipped in a way that only shows on a device in the wrong orientation.
+///
+/// Step 7 (PiP) reads `playerLayer` from here — `AVPictureInPictureController`
+/// is constructed from an `AVPlayerLayer`, not from an `AVPlayer`.
+final class PlayerLayerView: UIView {
+  override class var layerClass: AnyClass { AVPlayerLayer.self }
+
+  /// Safe by construction: `layerClass` above guarantees the backing layer's
+  /// type.
+  var playerLayer: AVPlayerLayer {
+    // swiftlint:disable:next force_cast
+    layer as! AVPlayerLayer
+  }
+}
+
+/// AVFoundation playback for the native iOS player — the counterpart of
+/// Android's `ExoPlayerEngine` (`android/app/src/main/kotlin/.../player/`), and
+/// deliberately the same shape: a thin engine that owns the decoder and reports
+/// engine-agnostic state through **mutable callback properties**, so the host
+/// (`IptvsPlayerViewController`) can rebind them. Kotlin's `PlaybackEngine`
+/// keeps `onUnsupportedVideo`/`onRecoverableError` as `var`s for exactly this
+/// reason.
+///
+/// Deliberately *not* here: the audio session (step 6 — `IosAudioSession`), the
+/// PiP controller (step 7), colorimetry/HDR reads (step 9), and the live
+/// reconnect watchdog (step 8, which lives in the view controller alongside the
+/// `ReconnectPolicy` it drives, mirroring `HdrPlayerActivity.pollLiveReconnect`
+/// rather than the Dart watchdogs). This type stays a state reporter.
+final class AvPlayerEngine {
+  /// Undocumented but universally used `AVURLAsset` option for per-request HTTP
+  /// headers. It is load-bearing here rather than a nicety: Stalker/MAG portals
+  /// reject a stream request without the portal's `User-Agent`/`Referer`, so
+  /// without it every MAG channel routed to AVPlayer would 403. The public
+  /// alternative is an `AVAssetResourceLoaderDelegate` that re-implements HLS
+  /// fetching by hand, which would forfeit the hardware/EDR path this engine
+  /// exists for. The usual objection — App Review — does not apply: iOS ships
+  /// through AltStore sideloading and never goes through review (docs/ios.md
+  /// "Why not the App Store").
+  private static let httpHeaderFieldsKey = "AVURLAssetHTTPHeaderFieldsKey"
+
+  /// How often position/duration are sampled. Android's `HdrPlayerActivity`
+  /// ticker runs at 500 ms and drives both the scrubber and the reconnect
+  /// watchdog; matching it here means step 4's scrubber and step 8's watchdog
+  /// both already have the cadence they need.
+  private static let progressInterval = CMTime(seconds: 0.5, preferredTimescale: 600)
+
+  let player = AVPlayer()
+
+  // MARK: - Callbacks (rebindable by the host, like Kotlin's PlaybackEngine)
+
+  /// A playback-state transition. `message` is a short machine code or nil —
+  /// never human-readable error text, which can embed the credential-bearing
+  /// stream URL.
+  var onStateEvent: ((PlaybackStateEvent, String?) -> Void)?
+
+  /// Fired on every progress tick (0.5 Hz-resolution position/duration).
+  var onProgressTick: (() -> Void)?
+
+  /// The item reached `.readyToPlay`. The host uses this to apply a VOD resume
+  /// seek, which is only meaningful once the item can accept one.
+  var onReadyToPlay: (() -> Void)?
+
+  /// A hard failure **before anything ever played** — the signature of AVPlayer
+  /// having accepted a URL whose container it cannot actually handle. The host
+  /// turns this into the `engineFailed` cross-language handoff so Dart reopens
+  /// the same content on the embedded mpv surface (docs/ios.md "engineFailed is
+  /// a cross-language handoff"). A failure *after* playback started is a network
+  /// drop instead and arrives as `.dropped`.
+  var onFatalError: ((String) -> Void)?
+
+  // MARK: - State
+
+  /// True once the item has actually produced playback. This is the iOS
+  /// counterpart of Linux's `_linuxNativeStarted` gate, and it exists for the
+  /// same reason: an `AVPlayerItem` reports `isPlaybackBufferEmpty == true`
+  /// before it has loaded anything, so reporting that as a stall would start the
+  /// reconnect clock on every single open.
+  private(set) var hasStarted = false
+
+  /// Whether the buffer is currently empty (post-start). Step 8's watchdog reads
+  /// this the way `HdrPlayerActivity.pollLiveReconnect` reads
+  /// `PlayerUiState.isBuffering`.
+  private(set) var isBuffering = true
+
+  /// Set once the stream ends cleanly. Live treats this as a drop; VOD
+  /// completing is a legitimate end.
+  private(set) var hasEnded = false
+
+  private var itemObservations: [NSKeyValueObservation] = []
+  private var playerObservations: [NSKeyValueObservation] = []
+  private var notificationTokens: [NSObjectProtocol] = []
+  private var timeObserver: Any?
+  private var released = false
+
+  init() {
+    observePlayer()
+    addProgressObserver()
+  }
+
+  deinit {
+    // Belt and braces: `release()` is idempotent and the host calls it on every
+    // exit path, but a periodic time observer that outlives its player is the
+    // classic AVFoundation leak, so never rely on that alone.
+    release()
+  }
+
+  // MARK: - Transport
+
+  /// Replaces the current item. Used both for the initial open and for a live
+  /// reload (reconnect / "Go to live"), which is why it resets the start/stall
+  /// bookkeeping — the same call `HdrPlayerActivity.reconnectLive` makes into
+  /// `engine.load(url, subtitles)`.
+  ///
+  /// `subtitles` (external sidecar tracks) are accepted and currently ignored:
+  /// composing them onto an `AVURLAsset` needs an `AVMutableComposition`, which
+  /// belongs with the track-selection menu in step 5. Taking them in the
+  /// signature now keeps that a one-file change.
+  func load(url: String, headers: [String: String], subtitles: [PlayerSubtitleSpec] = []) {
+    guard !released else { return }
+    _ = subtitles
+    guard let assetURL = URL(string: url) else {
+      onFatalError?("invalid-url")
+      return
+    }
+
+    teardownItemObservers()
+    hasStarted = false
+    isBuffering = true
+    hasEnded = false
+
+    var options: [String: Any] = [:]
+    if !headers.isEmpty { options[AvPlayerEngine.httpHeaderFieldsKey] = headers }
+    let asset = AVURLAsset(url: assetURL, options: options.isEmpty ? nil : options)
+    let item = AVPlayerItem(asset: asset)
+    observeItem(item)
+    player.replaceCurrentItem(with: item)
+    player.play()
+  }
+
+  func play() {
+    guard !released else { return }
+    player.play()
+  }
+
+  func pause() {
+    guard !released else { return }
+    player.pause()
+  }
+
+  var isPlaying: Bool {
+    player.timeControlStatus == .playing
+  }
+
+  /// Seeks to `positionMs`. Tolerance is zero so a VOD resume lands where the
+  /// user actually stopped rather than at the nearest keyframe, which on a long
+  /// film can be many seconds away.
+  func seek(toMs positionMs: Int64, completion: ((Bool) -> Void)? = nil) {
+    guard !released, player.currentItem != nil else {
+      completion?(false)
+      return
+    }
+    let target = CMTime(value: CMTimeValue(max(0, positionMs)), timescale: 1_000)
+    player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { finished in
+      completion?(finished)
+    }
+  }
+
+  /// Current position in ms, or `0` when not yet known.
+  var positionMs: Int64 {
+    AvPlayerEngine.milliseconds(from: player.currentTime())
+  }
+
+  /// Duration in ms, or `0` for live and anything not yet known. A live HLS
+  /// item reports `CMTime.indefinite`, which is deliberately *not* numeric — see
+  /// `milliseconds(from:)`.
+  var durationMs: Int64 {
+    guard let item = player.currentItem else { return 0 }
+    return AvPlayerEngine.milliseconds(from: item.duration)
+  }
+
+  /// Natural video size, `.zero` until the first frame is decoded (and forever
+  /// for an audio-only item). Step 4's resolution badge and step 7's PiP aspect
+  /// ratio both read this.
+  var presentationSize: CGSize {
+    player.currentItem?.presentationSize ?? .zero
+  }
+
+  /// Tears everything down. Idempotent, and safe to call from `deinit`.
+  func release() {
+    guard !released else { return }
+    released = true
+    teardownItemObservers()
+    for observation in playerObservations { observation.invalidate() }
+    playerObservations.removeAll()
+    if let timeObserver {
+      player.removeTimeObserver(timeObserver)
+      self.timeObserver = nil
+    }
+    player.pause()
+    player.replaceCurrentItem(with: nil)
+  }
+
+  // MARK: - Observation
+
+  private func observePlayer() {
+    playerObservations = [
+      player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+        let status = player.timeControlStatus
+        DispatchQueue.main.async { self?.handleTimeControlStatus(status) }
+      }
+    ]
+  }
+
+  private func addProgressObserver() {
+    timeObserver = player.addPeriodicTimeObserver(
+      forInterval: AvPlayerEngine.progressInterval,
+      queue: .main
+    ) { [weak self] _ in
+      self?.onProgressTick?()
+    }
+  }
+
+  private func observeItem(_ item: AVPlayerItem) {
+    itemObservations = [
+      item.observe(\.status, options: [.new]) { [weak self] item, _ in
+        let status = item.status
+        let error = item.error as NSError?
+        DispatchQueue.main.async { self?.handleItemStatus(status, error: error) }
+      },
+      item.observe(\.isPlaybackBufferEmpty, options: [.new]) { [weak self] item, _ in
+        let empty = item.isPlaybackBufferEmpty
+        DispatchQueue.main.async { self?.handleBufferEmpty(empty) }
+      },
+      item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
+        let likely = item.isPlaybackLikelyToKeepUp
+        DispatchQueue.main.async { self?.handleLikelyToKeepUp(likely) }
+      },
+    ]
+
+    let center = NotificationCenter.default
+    notificationTokens = [
+      center.addObserver(
+        forName: AVPlayerItem.didPlayToEndTimeNotification,
+        object: item,
+        queue: .main
+      ) { [weak self] _ in
+        self?.handleEndOfStream()
+      },
+      center.addObserver(
+        forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+        object: item,
+        queue: .main
+      ) { [weak self] notification in
+        // Global constant, not a member of `AVPlayerItem`: the two
+        // notification *names* were renamed onto the class in Swift, this
+        // userInfo key was not.
+        let error =
+          notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
+        self?.handleFailure(error, notification: true)
+      },
+    ]
+  }
+
+  private func teardownItemObservers() {
+    for observation in itemObservations { observation.invalidate() }
+    itemObservations.removeAll()
+    let center = NotificationCenter.default
+    for token in notificationTokens { center.removeObserver(token) }
+    notificationTokens.removeAll()
+  }
+
+  // MARK: - State handling (main thread)
+
+  private func handleTimeControlStatus(_ status: AVPlayer.TimeControlStatus) {
+    guard !released, status == .playing, !hasStarted else { return }
+    hasStarted = true
+    isBuffering = false
+    onStateEvent?(.started, nil)
+  }
+
+  private func handleItemStatus(_ status: AVPlayerItem.Status, error: NSError?) {
+    guard !released else { return }
+    switch status {
+    case .readyToPlay:
+      onReadyToPlay?()
+    case .failed:
+      handleFailure(error, notification: false)
+    case .unknown:
+      break
+    @unknown default:
+      break
+    }
+  }
+
+  private func handleBufferEmpty(_ empty: Bool) {
+    // Only meaningful after playback has actually started — see `hasStarted`.
+    guard !released, hasStarted, empty, !isBuffering else { return }
+    isBuffering = true
+    onStateEvent?(.stalled, nil)
+  }
+
+  private func handleLikelyToKeepUp(_ likely: Bool) {
+    guard !released, hasStarted, likely, isBuffering else { return }
+    isBuffering = false
+    onStateEvent?(.resumed, nil)
+  }
+
+  private func handleEndOfStream() {
+    guard !released, !hasEnded else { return }
+    hasEnded = true
+    onStateEvent?(.ended, nil)
+  }
+
+  /// The one discriminator that matters in this file.
+  ///
+  /// A hard failure **before anything played** is the fingerprint of a container
+  /// AVPlayer could not actually handle, and the honest response is to hand the
+  /// stream to mpv (`engineFailed`). A failure **after** playback started is a
+  /// network drop — the stream was demonstrably playable a moment ago — and
+  /// switching engines for it would permanently downgrade a working HDR channel
+  /// to tone-mapped SDR for the rest of the session, because
+  /// `_handleIosEngineFailed` writes the content id into `IosEngineMemo`.
+  private func handleFailure(_ error: NSError?, notification: Bool) {
+    guard !released else { return }
+    let code = error.map { PlaybackEventPayload.errorCode(domain: $0.domain, code: $0.code) }
+      ?? (notification ? "failed-to-play-to-end" : "item-failed")
+    if hasStarted {
+      onStateEvent?(.dropped, code)
+    } else {
+      onFatalError?(code)
+    }
+  }
+
+  // MARK: - Time conversion
+
+  /// `CMTime` → ms, mapping every "unknown" spelling to `0`.
+  ///
+  /// A live HLS item's duration is `CMTime.indefinite` and a cold position is
+  /// `CMTime.invalid`; both are non-numeric and `CMTimeGetSeconds` on them
+  /// yields NaN. Collapsing all of those to `0` is what lets Dart keep using
+  /// `durationMs > 0` as the single meaning of "no useful duration" across
+  /// Android and iOS.
+  static func milliseconds(from time: CMTime) -> Int64 {
+    guard time.isNumeric else { return 0 }
+    let seconds = time.seconds
+    guard seconds.isFinite, seconds > 0 else { return 0 }
+    return Int64(seconds * 1_000)
+  }
+}
