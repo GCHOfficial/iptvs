@@ -273,6 +273,191 @@ void main() {
     });
   });
 
+  /// iOS's cross-engine case, folded into the same `stopResolveFresh` outcome
+  /// as Wayland HDR (docs/ios.md "What routes to which engine", docs/player.md
+  /// "iOS"). The preview always runs on embedded media_kit/libmpv; an
+  /// AVPlayer-routed channel goes fullscreen on a presented `AVPlayerLayer`
+  /// controller, which cannot adopt an mpv session. A merely *paused* media_kit
+  /// engine still holds its provider connection, and provider accounts are
+  /// single-connection — so the preview is stopped outright and the channel
+  /// re-resolved (its stream carries a spent single-use Stalker `play_token`).
+  ///
+  /// `crossEngineFullscreen` defaults false, which is what keeps every case
+  /// above passing unmodified.
+  group('decideFullscreenHandoff — crossEngineFullscreen (iOS AVPlayer)', () {
+    test('a cross-engine same-channel preview stops and re-resolves', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.stopResolveFresh,
+      );
+    });
+
+    test('same-engine (mpv-routed) iOS channel adopts the preview embedded', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: false,
+        ),
+        FullscreenHandoff.adoptEmbedded,
+      );
+    });
+
+    test('it needs no HDR signal — the engine split alone decides, unlike the '
+        'Linux native path which also requires streamLikelyHdr', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          streamLikelyHdr: false,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.stopResolveFresh,
+      );
+    });
+
+    test('ignored when reusePreview is false — a zap / EPG-grid play still just '
+        'stops the (different-channel) preview', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: false,
+          sameChannelPreview: false,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.stopPreview,
+      );
+    });
+
+    test('ignored when reusePreview is false even for the same channel', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: false,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('a still-loading same-channel preview (no stream yet) is not '
+        'adoptable, so it pauses rather than stop-resolving', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('no preview running at all still resolves to none', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: false,
+          previewHasStream: false,
+          isAndroid: false,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: false,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.none,
+      );
+    });
+
+    test('Android is unaffected: its shared-engine adoption still wins, and a '
+        'fallback preview still pauses', () {
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: true,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.adoptNative,
+      );
+      expect(
+        decideFullscreenHandoff(
+          reusePreview: true,
+          sameChannelPreview: true,
+          previewHasStream: true,
+          isAndroid: true,
+          nativePreviewActive: false,
+          linuxNativeLikely: false,
+          previewPlaying: true,
+          crossEngineFullscreen: true,
+        ),
+        FullscreenHandoff.pausePreview,
+      );
+    });
+
+    test('it composes with the Wayland HDR condition rather than replacing it: '
+        'either alone yields stopResolveFresh', () {
+      for (final values in [
+        (cross: true, native: false, hdr: false),
+        (cross: false, native: true, hdr: true),
+        (cross: true, native: true, hdr: true),
+      ]) {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: values.native,
+            previewPlaying: true,
+            streamLikelyHdr: values.hdr,
+            crossEngineFullscreen: values.cross,
+          ),
+          FullscreenHandoff.stopResolveFresh,
+          reason:
+              'cross=${values.cross} native=${values.native} hdr=${values.hdr}',
+        );
+      }
+    });
+  });
+
   group('FullscreenHandoffDerived', () {
     // _openLivePlayer derives every downstream boolean from the decision via
     // these getters (a duplicate raw-input formula at the call site once

@@ -13,6 +13,7 @@ import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import 'channel_owner.dart';
+import 'ios_engine.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
@@ -62,6 +63,96 @@ bool shouldReconnectOnCompleted({
   required bool isLive,
   required bool nativeSessionActive,
 }) => completed && isLive && !nativeSessionActive;
+
+/// How long an iOS AVPlayer→mpv fallback may sit deferred *invisibly* before
+/// the route stops waiting in silence and puts a Retry affordance on screen.
+///
+/// This is the value that makes the deferral un-stuck-able. Every automatic
+/// wake path (Flutter lifecycle edges, the native `hostVisibility` event, the
+/// 1 Hz re-evaluation poll) is a *prediction* that the app is visible again;
+/// a user tapping Retry is **proof**, because an off-screen route cannot be
+/// tapped. So the worst case degrades from "playback is silently dead forever"
+/// to "one tap", with no dependency on any UIKit→`AppLifecycleState` mapping
+/// being correct. Long enough that a control-centre pull or a two-second app
+/// switch never flashes an error; short enough that a genuinely wrong
+/// visibility predicate is obvious immediately.
+const Duration kIosFallbackSurfaceAfter = Duration(seconds: 10);
+
+/// User-facing text for a fallback that has been deferred long enough to
+/// surface (see [kIosFallbackSurfaceAfter]). Deliberately carries no URL, no
+/// AVFoundation error text and no engine name — `engineFailed` payloads embed
+/// the failing locator, which carries provider credentials.
+const String kIosFallbackDeferredMessage =
+    'Playback was interrupted while the app was in the background.';
+
+/// What to do *right now* with an iOS AVPlayer→mpv fallback that has been
+/// accepted but not yet started.
+enum IosFallbackAction {
+  /// Safe to reopen on the embedded media_kit/libmpv surface immediately.
+  run,
+
+  /// Not safe yet, and not yet worth bothering the user about — keep waiting.
+  wait,
+
+  /// Not safe yet, and it has been unsafe long enough that continuing to wait
+  /// invisibly would be indistinguishable from a hang. Put the error/Retry
+  /// overlay up **and keep waiting** — whichever happens first (a safe window
+  /// or a tap) recovers playback.
+  surface,
+}
+
+/// Decides whether a pending iOS AVPlayer→mpv fallback may open libmpv now.
+///
+/// The reopen must not happen while nothing of this route is on screen:
+/// libmpv would take a provider connection (single-connection accounts) and
+/// start decoding — with background audio enabled for PiP, audibly — behind
+/// the launcher or a PiP window, and media_kit's iOS GLES render context is
+/// exactly the thing whose teardown/creation races (upstream #1361) when the
+/// Flutter raster thread isn't running. See docs/ios.md "engineFailed is a
+/// cross-language handoff".
+///
+/// **Three independent opinions, any one of which can veto** — belt and
+/// braces, because no single one of them is trustworthy on its own:
+///
+/// - [nativePipActive] — `AVPictureInPictureController.isPictureInPictureActive`,
+///   read in Swift at emit time. **Flutter cannot see PiP at all**, and PiP is
+///   the realistic trigger for a mid-playback `engineFailed`, so this is the
+///   only *authoritative* answer to the question the deferral was written for.
+/// - [nativeAppActive] — `UIApplication.shared.applicationState == .active`,
+///   also read in Swift. Guards the direction where Flutter's lifecycle is
+///   stale or was never delivered: the player is presented `.overFullScreen`
+///   precisely so that opening it does **not** fire a Flutter lifecycle
+///   transition, which means Flutter's view of foregroundedness around the
+///   native player is untrusted by construction.
+/// - [flutterLifecycle] — Flutter's own state. Kept as the conservative
+///   third opinion: anything other than `resumed` vetoes.
+///
+/// **A `null` opinion is an absence, not a veto.** Swift may omit either
+/// native fact (an older/partial `IptvsPlayerViewController`, or a plugin
+/// build with no PiP provider registered yet), and `lifecycleState` is null
+/// before the first lifecycle message. Treating absence as "unsafe" would
+/// manufacture exactly the silent stall this function exists to prevent, so
+/// only an explicit `false`/non-`resumed` blocks.
+///
+/// [deferredFor] is the time since the fallback was first deferred; once it
+/// reaches [surfaceAfter] the answer stops being a silent [IosFallbackAction.wait].
+IosFallbackAction decideIosFallbackAction({
+  required AppLifecycleState? flutterLifecycle,
+  required bool? nativeAppActive,
+  required bool? nativePipActive,
+  required Duration deferredFor,
+  Duration surfaceAfter = kIosFallbackSurfaceAfter,
+}) {
+  final blocked =
+      nativePipActive == true ||
+      nativeAppActive == false ||
+      (flutterLifecycle != null &&
+          flutterLifecycle != AppLifecycleState.resumed);
+  if (!blocked) return IosFallbackAction.run;
+  return deferredFor >= surfaceAfter
+      ? IosFallbackAction.surface
+      : IosFallbackAction.wait;
+}
 
 /// Pure dynamic-range label from colorimetry (gamma/primaries/matrix). Shared
 /// by the embedded/Windows path (media_kit [VideoParams]), the native Linux
@@ -200,6 +291,16 @@ class PlayerScreen extends StatefulWidget {
   /// policy Linux uses (SDR embedded, HDR native mpv). Ignored off Windows.
   final bool preferWindowsEmbedded;
 
+  /// iOS only: stable content id for the per-session AVPlayer-failure memo
+  /// ([IosEngineMemo]). A channel id for live, a media item id for VOD, or a
+  /// catch-up-scoped key. When an AVPlayer attempt fails at runtime
+  /// (`engineFailed`), this key is marked mpv-only so `selectIosEngine`'s rule
+  /// 1 catches the same content on any later open. **Null disables the memo**
+  /// for this playback — the fallback still happens, it just isn't remembered,
+  /// so a caller with no stable id degrades to "retry AVPlayer next time"
+  /// rather than poisoning some other content's routing. Ignored off iOS.
+  final String? iosEngineKey;
+
   /// Debug-only: when non-null (and only honored under [kDebugMode]), passed
   /// through as `soakAutoCloseMs` on the Android native `open` call so the
   /// native Activity self-closes after this many milliseconds — lets
@@ -224,13 +325,15 @@ class PlayerScreen extends StatefulWidget {
     this.resolveAgain,
     this.preferLinuxNative = false,
     this.preferWindowsEmbedded = false,
+    this.iosEngineKey,
   });
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen>
+    with WidgetsBindingObserver {
   static const MethodChannel _nativeHdrPlayer = MethodChannel(
     'iptvs/native_hdr_player',
   );
@@ -267,9 +370,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // 64 MB forward demuxer cache (default is 32) — smoother VOD seeking.
         bufferSize: 64 * 1024 * 1024,
         logLevel: MPVLogLevel.warn,
+        // iOS: mpv's `ao_audiounit` driver unconditionally calls
+        // `AVAudioSession.setActive:` YES/NO on init and dispose, and the audio
+        // session is *process-wide* — so an mpv engine starting or tearing down
+        // would clobber the AVPlayer engine's session state (background audio,
+        // lock-screen controls). Upstream's opt-out (media-kit/media-kit #1419,
+        // the git pin in pubspec.yaml) **defaults to true**, so this must be set
+        // explicitly at every PlayerConfiguration site — there are exactly two,
+        // here and `LivePreviewController._createPlayer`. Inert off iOS.
+        iosManageAudioSession: false,
       ),
     );
   }
+
+  /// iOS engine choice for this playback, decided once from the resolved URL
+  /// (plus the per-session AVPlayer-failure memo) — the iOS counterpart of
+  /// `HdrPlayerActivity`'s Exo-default/mpv-fallback split, except the decision
+  /// is made in Dart because the trigger is the container. Null off iOS.
+  ///
+  /// Not `final`: a Swift-detected AVPlayer failure (`engineFailed`) flips this
+  /// to [IosPlaybackEngine.mpv] and reopens on the embedded surface — see
+  /// [_handleIosEngineFailed].
+  late IosPlaybackEngine? _iosEngine = Platform.isIOS
+      ? selectIosEngine(
+          url: widget.stream.url,
+          memoKey: widget.iosEngineKey,
+          forcedMpv: IosEngineMemo.forcedMpv,
+        )
+      : null;
+
+  /// True while the natively presented `IptvsPlayerViewController` (AVPlayer /
+  /// `AVPlayerLayer`) owns playback, so this route renders nothing and the
+  /// embedded media_kit surface is never built.
+  bool get _usesIosAvPlayer => _iosEngine == IosPlaybackEngine.avPlayer;
 
   /// The embedded (texture) video output. **Deliberately `late`**: reading it
   /// is what constructs it, and constructing a [VideoController] is not free —
@@ -335,8 +468,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   /// True while a *native* surface owns playback, so [_playbackSurface] renders
   /// a bare black fill instead of the embedded media_kit surface.
   ///
-  /// Starts true on Windows (which always opens on its native HWND) **and on
-  /// Android**: `MainActivity` answers the `open` call `true` unconditionally —
+  /// Starts true on Windows (which always opens on its native HWND), **on
+  /// Android**, and **on iOS when [_usesIosAvPlayer]** (the presented
+  /// `IptvsPlayerViewController` owns playback exactly the way the Android
+  /// Activity does): `MainActivity` answers the `open` call `true` unconditionally —
   /// engine selection, including the mpv fallback, happens inside
   /// `HdrPlayerActivity` — so the Dart embedded path is only ever reached when
   /// the *channel* itself fails (`MissingPluginException`, the 10s timeout, a
@@ -345,7 +480,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   /// [_open] sets it back to false (and calls [_ensureEmbeddedController]) so
   /// the embedded path still works when the native launch really did fail.
   late bool _nativePlaybackLaunched =
-      _usesWindowsNativeSurface || Platform.isAndroid;
+      _usesWindowsNativeSurface ||
+      Platform.isAndroid ||
+      (Platform.isIOS && _usesIosAvPlayer);
   // Android adopted-handoff: set once the native launch failed and the
   // embedded fallback is taking over (ends the transparent handoff window).
   bool _nativeLaunchFailed = false;
@@ -434,8 +571,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // when its native Activity finishes. Without the Android handler, backing out
     // of the native player leaves this route stranded on the black overlay until a
     // second Back press — register it so `nativeClosed` pops us straight to the list.
-    if (Platform.isWindows || Platform.isAndroid) {
+    // iOS shares the same channel: the presented IptvsPlayerViewController
+    // sends `nativeClosed` on dismiss, `nativePlayback`/`engineFailed` when
+    // AVPlayer can't play the container, and *calls in* for `resolveAgain`.
+    if (Platform.isWindows || Platform.isAndroid || Platform.isIOS) {
       _hdrToken = _hdrOwner.claim(_handleNativeHdrMethodCall);
+    }
+    // Only iOS needs lifecycle awareness here, for the deferred engineFailed
+    // fallback (see [_handleIosEngineFailed]): reopening libmpv while the app
+    // is backgrounded behind a PiP window would burn a provider connection with
+    // nothing on screen. Registering unconditionally would add a no-op observer
+    // on every platform, so gate it. This is deliberately only *one* of the
+    // deferral's wake paths — see [decideIosFallbackAction] — because whether
+    // iOS delivers a Flutter lifecycle transition around an `.overFullScreen`
+    // presentation or a PiP entry is not knowable from this repo.
+    if (Platform.isIOS) {
+      WidgetsBinding.instance.addObserver(this);
+      _lifecycleObserverRegistered = true;
     }
 
     // Show errors once as an overlay rather than a stream of snackbars. On a live
@@ -466,12 +618,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // (mpv presents via a `vo` swap), so `_nativePlaybackLaunched` being
         // true there must NOT suppress the reconnect — its `completed` is a real
         // live EOF and `_reconnectLive` reopens `_player` on the HWND surface.
+        // iOS's AVPlayer *is* a separate engine (a presented view controller,
+        // like Android's Activity), so it suppresses like Android: this
+        // `_player` is idle and its `completed` describes nothing.
         if (!shouldReconnectOnCompleted(
           completed: completed,
           isLive: _isLive,
           nativeSessionActive:
               _linuxNativeSession != null ||
-              (Platform.isAndroid && _nativePlaybackLaunched),
+              ((Platform.isAndroid || Platform.isIOS) &&
+                  _nativePlaybackLaunched),
         )) {
           return;
         }
@@ -729,7 +885,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<bool> _tryOpenNativeHdrPlayer() async {
-    if (!Platform.isAndroid) return false;
+    // Android always tries (engine selection happens inside HdrPlayerActivity).
+    // iOS only tries when `selectIosEngine` picked AVPlayer — an mpv-routed
+    // stream must never present the native controller, since the presented
+    // controller has no libmpv of its own (libmpv is only reachable from Dart
+    // via media_kit; see docs/ios.md "engineFailed is a cross-language
+    // handoff").
+    if (!Platform.isAndroid && !(Platform.isIOS && _usesIosAvPlayer)) {
+      return false;
+    }
+    final platformName = Platform.isIOS ? 'ios' : 'android';
     try {
       final opened = await _nativeHdrPlayer
           .invokeMethod<bool>('open', {
@@ -738,7 +903,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             if (widget.sourceName != null) 'sourceName': widget.sourceName,
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
-            'adoptShared': widget.adoptNativePreview,
+            // Android-only: iOS has no shared-engine adoption to ask for (see
+            // docs/ios.md "Known parity gaps" — every AVPlayer open is a fresh
+            // resolve, and an `IosSharedEngine` analogue is a deferred idea).
+            if (Platform.isAndroid) 'adoptShared': widget.adoptNativePreview,
             'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
             'canFavorite': _canFavorite,
             'isFavorite': _favorite,
@@ -759,12 +927,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
           .timeout(_nativeOpenTimeout);
       _logPlayback(
         opened == true
-            ? 'native hdr player launched platform=android'
-            : 'native hdr player unavailable platform=android',
+            ? 'native hdr player launched platform=$platformName'
+            : 'native hdr player unavailable platform=$platformName',
       );
       return opened == true;
     } on TimeoutException {
-      _logPlayback('native hdr player timed out platform=android');
+      _logPlayback('native hdr player timed out platform=$platformName');
       return false;
     } on MissingPluginException catch (error) {
       _logPlayback('native hdr player missing: $error');
@@ -882,6 +1050,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } else if (call.method == 'nativeControl') {
       final command = call.arguments?.toString();
       if (command != null) await _handleNativeControlCommand(command);
+    } else if (call.method == 'resolveAgain') {
+      // Inbound re-resolve for a native watchdog that owns playback out of
+      // process (iOS's presented controller): Stalker `create_link` URLs carry
+      // single-use `play_token`s, so after a portal-side kill the URL the
+      // native side is holding is permanently dead and reloading it can never
+      // succeed. `_freshLiveStream` already falls back to the original stream
+      // when `resolveAgain` is unwired or throws, so this always answers with
+      // something playable. `ChannelHandlerOwner`'s wrapper propagates the
+      // return value straight back to the platform side.
+      final fresh = await _freshLiveStream();
+      return <String, Object?>{'url': fresh.url, 'headers': fresh.headers};
+    } else if (call.method == 'nativePlayback') {
+      final args = call.arguments;
+      if (args is! Map) return null;
+      switch (args['event']) {
+        case 'engineFailed':
+          _handleIosEngineFailed(args);
+        case 'hostVisibility':
+          // Authoritative UIApplication/PiP state straight from Swift — the
+          // wake signal for a deferred fallback that does not route through
+          // Flutter's lifecycle plumbing (see [_handleIosHostVisibility]).
+          _handleIosHostVisibility(args);
+      }
     } else if (call.method == 'nativeClosed') {
       // The native Activity reports its final VOD position on exit; persist it
       // as the resume point (live playback sends no args).
@@ -911,17 +1102,268 @@ class _PlayerScreenState extends State<PlayerScreen> {
           await widget.onSetFavorite?.call(favorite);
         }
       }
-      await _finishAndroidNativePlayback();
+      await _finishNativePlayback();
     }
   }
 
-  Future<void> _finishAndroidNativePlayback() async {
-    if (!Platform.isAndroid || !mounted) return;
+  /// The out-of-Flutter native player (Android `HdrPlayerActivity`, iOS
+  /// `IptvsPlayerViewController`) closed itself — pop this route so the caller
+  /// lands back on the list.
+  ///
+  /// The one case that must **not** pop is an iOS `engineFailed` fallback: the
+  /// controller dismisses itself there too, but Dart has deliberately kept the
+  /// route alive and reopened the same content on the embedded mpv surface. The
+  /// contract is that Swift sends `engineFailed` *instead of* `nativeClosed`,
+  /// so this is belt-and-braces — but honoring a straggler would tear down the
+  /// playback the fallback just recovered.
+  Future<void> _finishNativePlayback() async {
+    if ((!Platform.isAndroid && !Platform.isIOS) || !mounted) return;
+    if (_iosEngineFallbackStarted) return;
     if (Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
     } else {
       setState(() => _nativePlaybackLaunched = false);
     }
+  }
+
+  /// One-shot guard for the iOS AVPlayer→mpv runtime fallback. Set the moment
+  /// an `engineFailed` event is accepted — *before* the (possibly deferred)
+  /// reopen actually runs — so a second failure report, or a straggling
+  /// `nativeClosed` from the dismissing controller, can't double-open the
+  /// embedded player or pop the route out from under it.
+  bool _iosEngineFallbackStarted = false;
+
+  /// An accepted `engineFailed` that has not yet reopened on the embedded mpv
+  /// surface, because [decideIosFallbackAction] says nothing of this route is
+  /// on screen. Holds the position to resume at (null for live / no useful
+  /// position) until a safe window appears.
+  bool _iosFallbackPending = false;
+  Duration? _iosFallbackPosition;
+  DateTime? _iosFallbackDeferredAt;
+
+  /// **Level-triggered** re-evaluation while a fallback is pending. Every other
+  /// wake path is edge-triggered (a Flutter lifecycle transition, a native
+  /// `hostVisibility` event) and can therefore be *missed* — an edge that never
+  /// arrives is indistinguishable from one that arrived before we listened.
+  /// A poll cannot miss an edge, and it is also what advances the deferral
+  /// clock toward [kIosFallbackSurfaceAfter]. Armed only while pending,
+  /// cancelled on run/dispose — bounded by the route, like the VOD
+  /// position-persist timer, so it stays out of `ResourceCounters` for the
+  /// same reason (docs/player.md "Debug resource counters").
+  Timer? _iosFallbackTimer;
+
+  /// True once the pending fallback has put the Retry overlay on screen.
+  bool _iosFallbackSurfaced = false;
+
+  /// Last **authoritative** host facts reported by Swift over
+  /// `nativePlayback`/`hostVisibility` (and on the `engineFailed` payload
+  /// itself). `null` means Swift has never stated them — an absence, never a
+  /// veto; see [decideIosFallbackAction].
+  bool? _iosHostAppActive;
+  bool? _iosHostPipActive;
+  bool _lifecycleObserverRegistered = false;
+
+  /// AVPlayer couldn't play this container after all — the cross-language
+  /// runtime fallback (docs/ios.md "What routes to which engine"). Swift has
+  /// already torn down and dismissed `IptvsPlayerViewController` and sends
+  /// this *instead of* `nativeClosed`, because the Dart route must survive to
+  /// host the embedded mpv surface.
+  ///
+  /// Same one-shot / re-resolve / position-capture discipline as
+  /// [_maybeEscalateLinuxNative], with one iOS-specific rule: **the reopen only
+  /// happens while something of this route can actually be on screen** — see
+  /// [decideIosFallbackAction] for the three opinions that gate it and why no
+  /// single one of them is trusted alone. Everything cheap and safe happens
+  /// here regardless (the one-shot guard, the [IosEngineMemo] write, the
+  /// position capture); only the `open()` waits.
+  ///
+  /// The wait can never dead-end: it is re-evaluated on every Flutter lifecycle
+  /// edge, on every native `hostVisibility` event, on a 1 Hz poll, and it puts
+  /// a Retry affordance on screen after [kIosFallbackSurfaceAfter].
+  ///
+  /// Deliberately **synchronous** end to end (the reopen itself is fired off
+  /// separately): there is then no `await` window between setting the one-shot
+  /// guard and reading the visibility signals, so a lifecycle change can never
+  /// land in the middle of the decision.
+  void _handleIosEngineFailed(Map<Object?, Object?> args) {
+    if (!Platform.isIOS || _iosEngineFallbackStarted) return;
+    _iosEngineFallbackStarted = true;
+    // AVFoundation error payloads (`AVError`, `NSUnderlyingError`) routinely
+    // embed the failing URL, which carries provider credentials — never log
+    // this raw.
+    final reason = args['reason']?.toString();
+    _logPlayback(
+      'ios engine failed engine=avPlayer '
+      'reason=${reason == null ? 'unknown' : _redactPlayback(reason)} '
+      'pipWasActive=${args['pipWasActive'] == true}',
+    );
+    // Rule 1 of `selectIosEngine`: this content never gets AVPlayer again this
+    // session, so a re-entry (zap back, retry) skips straight to mpv instead of
+    // replaying the failure. A null `iosEngineKey` opts out (no-op).
+    IosEngineMemo.markMpvOnly(widget.iosEngineKey);
+    final positionMs = (args['positionMs'] as num?)?.toInt() ?? 0;
+    final position = positionMs > 0
+        ? Duration(milliseconds: positionMs)
+        : null;
+    // The emit-time host snapshot Swift stated on this very payload. Absent
+    // keys stay `null` (no opinion) rather than defaulting either way.
+    _applyIosHostVisibility(args);
+    _iosFallbackPending = true;
+    _iosFallbackPosition = position;
+    _iosFallbackDeferredAt = DateTime.now();
+    _evaluateIosFallback();
+  }
+
+  /// Records the authoritative host facts Swift stated on an `engineFailed` or
+  /// `hostVisibility` payload. Only explicit booleans are taken — a missing or
+  /// wrongly-typed key leaves the previous opinion (or none) in place.
+  void _applyIosHostVisibility(Map<Object?, Object?> args) {
+    final appActive = args['appActive'];
+    if (appActive is bool) _iosHostAppActive = appActive;
+    final pipActive = args['pipActive'];
+    if (pipActive is bool) _iosHostPipActive = pipActive;
+  }
+
+  /// Swift reported that the host application state or PiP state changed. This
+  /// is the wake signal that does **not** route through Flutter's lifecycle
+  /// plumbing at all, so it still arrives if presenting/dismissing
+  /// `.overFullScreen` (or entering PiP) turns out to fire no Flutter
+  /// transition — the mapping this design deliberately refuses to depend on.
+  void _handleIosHostVisibility(Map<Object?, Object?> args) {
+    if (!Platform.isIOS) return;
+    _applyIosHostVisibility(args);
+    if (!_iosFallbackPending) return;
+    _logPlayback(
+      'ios host visibility appActive=$_iosHostAppActive '
+      'pipActive=$_iosHostPipActive',
+    );
+    _evaluateIosFallback();
+  }
+
+  /// The single decision point for a pending fallback: asks the pure
+  /// [decideIosFallbackAction] and acts. Safe to call from any wake path and
+  /// any number of times — it is idempotent and no-ops once nothing is pending.
+  void _evaluateIosFallback() {
+    if (!_iosFallbackPending || !mounted) return;
+    final since = _iosFallbackDeferredAt;
+    final action = decideIosFallbackAction(
+      flutterLifecycle: WidgetsBinding.instance.lifecycleState,
+      nativeAppActive: _iosHostAppActive,
+      nativePipActive: _iosHostPipActive,
+      deferredFor: since == null
+          ? Duration.zero
+          : DateTime.now().difference(since),
+    );
+    if (action == IosFallbackAction.run) {
+      _runIosFallbackNow();
+      return;
+    }
+    // Still blocked. Arm the poll once (the log rides on the arming so a
+    // multi-minute deferral doesn't spam the exportable diagnostics log at
+    // 1 Hz), then surface the Retry affordance once the clock runs out.
+    if (_iosFallbackTimer == null) {
+      _logPlayback(
+        'ios engine fallback deferred (host not visible) '
+        'flutter=${WidgetsBinding.instance.lifecycleState} '
+        'appActive=$_iosHostAppActive pipActive=$_iosHostPipActive',
+      );
+      _iosFallbackTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _evaluateIosFallback(),
+      );
+    }
+    if (action == IosFallbackAction.surface && !_iosFallbackSurfaced) {
+      _iosFallbackSurfaced = true;
+      _logPlayback(
+        'ios engine fallback still deferred after '
+        '${kIosFallbackSurfaceAfter.inSeconds}s — surfacing retry',
+      );
+      setState(() => _error = kIosFallbackDeferredMessage);
+    }
+  }
+
+  /// Starts the pending fallback unconditionally. Reached either because
+  /// [decideIosFallbackAction] said it is safe, or because the user tapped
+  /// Retry on the surfaced overlay — which is the strongest visibility proof
+  /// available, since an off-screen route cannot be tapped.
+  void _runIosFallbackNow() {
+    if (!_iosFallbackPending) return;
+    _iosFallbackPending = false;
+    _iosFallbackTimer?.cancel();
+    _iosFallbackTimer = null;
+    _iosFallbackDeferredAt = null;
+    _iosFallbackSurfaced = false;
+    final position = _iosFallbackPosition;
+    _iosFallbackPosition = null;
+    _logPlayback('ios engine fallback starting');
+    // The reopen is the last recovery this route has, so a throw inside it must
+    // land on the visible error/Retry overlay rather than as an unhandled async
+    // error behind a black surface. Retry then re-runs `_open`, which by now
+    // routes to the embedded surface (`_iosEngine` is mpv).
+    unawaited(
+      _startIosMpvFallback(position).catchError((Object error) {
+        _logPlayback(
+          'ios engine fallback failed: ${_redactPlayback(error.toString())}',
+        );
+        if (mounted) {
+          setState(() => _error = "Couldn't restart playback on this device.");
+        }
+      }),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Re-evaluate on *every* transition, not just `resumed`: the deferral is
+    // released by a predicate over three signals, and a transition to any of
+    // them can be the one that unblocks it.
+    if (!_iosFallbackPending) return;
+    _evaluateIosFallback();
+  }
+
+  /// Reopens the current content on the embedded media_kit/libmpv surface after
+  /// AVPlayer failed. Live re-resolves first ([_freshLiveStream]) — a failed
+  /// AVPlayer attempt still burned the single-use Stalker `play_token` the URL
+  /// carried, so reopening the same locator could never work. VOD reuses the
+  /// existing [_pendingEmbeddedResume] seek so it continues where AVPlayer got
+  /// to rather than rewinding.
+  Future<void> _startIosMpvFallback(Duration? position) async {
+    if (!mounted) return;
+    setState(() {
+      _iosEngine = IosPlaybackEngine.mpv;
+      _nativePlaybackLaunched = false;
+      _error = null;
+    });
+    // Force the lazily-built VideoController into existence *before* the mpv
+    // option sweep below — its creation sets `vo`/`hwdec` itself, the same
+    // ordering the Android embedded fallback in `_open` relies on.
+    _ensureEmbeddedController();
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      await _configureNativePlayer(platform, null);
+      if (widget.stream.headers.isNotEmpty) {
+        await _setNativeHeaderOptions(platform, widget.stream.headers);
+      }
+    }
+    if (!mounted) return;
+    final stream = _isLive ? await _freshLiveStream() : widget.stream;
+    if (!mounted) return;
+    // Set before open(): the seek runs off the duration stream once the
+    // demuxer reports it (a cold seek right after open lands too early).
+    if (!_isLive && position != null && position > Duration.zero) {
+      _pendingEmbeddedResume = position;
+    }
+    _logPlayback(
+      'ios engine fallback opening embedded mpv live=$_isLive '
+      'resume=${position?.inSeconds ?? 0}s',
+    );
+    await _player.open(
+      Media(
+        stream.url,
+        httpHeaders: stream.headers.isEmpty ? null : stream.headers,
+      ),
+    );
   }
 
   Future<void> _finishLinuxNativePlayback(LinuxNativeSession session) async {
@@ -2133,7 +2575,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   /// Persist the embedded or Linux-native player's current VOD position. The
-  /// Android native Activity reports its position via `nativeClosed` instead.
+  /// Android native Activity and the iOS presented controller report their
+  /// position via `nativeClosed` instead.
   ///
   /// Returns the write's Future so exit paths can await it — the "Continue
   /// watching" rail is reloaded right after this route pops, and `pop()`'s
@@ -2145,7 +2588,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _persistPlaybackPosition() async {
     final playback = widget.playback;
     if (playback == null || _isLive) return;
-    if (Platform.isAndroid && _nativePlaybackLaunched) return;
+    // Android's Activity and iOS's presented controller both own the position
+    // and report it back through `nativeClosed`; this `_player` is idle, so
+    // reading its (zero) position here would overwrite the real one.
+    if ((Platform.isAndroid || Platform.isIOS) && _nativePlaybackLaunched) {
+      return;
+    }
     final linuxSession = _linuxNativeSession;
     if (linuxSession != null) {
       final linuxState = await linuxSession.playbackState();
@@ -2174,11 +2622,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _logPlayback('player dispose instance=${identityHashCode(this)}');
+    if (_lifecycleObserverRegistered) {
+      WidgetsBinding.instance.removeObserver(this);
+      _lifecycleObserverRegistered = false;
+    }
     final token = _hdrToken;
     if (token != null) {
       _hdrOwner.release(token);
     }
     _positionPersistTimer?.cancel();
+    // The route is going away, so a pending iOS fallback is moot — but the
+    // poll must not outlive it (it captures `this` and calls setState).
+    _iosFallbackPending = false;
+    _iosFallbackTimer?.cancel();
+    _iosFallbackTimer = null;
     // Last-resort safety net (e.g. dispose without an explicit exit path) —
     // the real save-before-pop is in _exitAndPop/nativeClosed, both of which
     // run and complete well before this.
@@ -2352,7 +2809,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     child: PlayerErrorOverlay(
                       message: error,
                       onBack: _back,
-                      onRetry: _open,
+                      // A surfaced iOS fallback must retry *the fallback*, not
+                      // `_open`: `_open` would reuse `widget.stream`, whose
+                      // single-use Stalker `play_token` the failed AVPlayer
+                      // attempt already burned. `_runIosFallbackNow` re-resolves
+                      // through `_freshLiveStream` and keeps the VOD resume
+                      // position. The tap itself is the visibility proof the
+                      // deferral was waiting for.
+                      onRetry: _iosFallbackPending ? _runIosFallbackNow : _open,
                     ),
                   ),
                 // Windows draws its own "Reconnecting…" in the native overlay;
