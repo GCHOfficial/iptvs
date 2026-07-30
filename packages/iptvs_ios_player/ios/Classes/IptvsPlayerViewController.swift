@@ -32,21 +32,31 @@ import UIKit
 ///   as the Android Compose overlay's `safeDrawingPadding()` groups. Only
 ///   video and scrim may run under the notch.
 ///
-/// **Scope so far.** Steps 3–5: the presentation, the engine, the
-/// `nativeClosed` round-trip, and the full control overlay
-/// (`PlayerControlsView` + `ListMenuView` + `InfoPanelView`, all rendering from
-/// one `PlayerChromeState`). The controller itself holds no chrome policy — it
+/// **Scope so far.** Steps 3–7: the presentation, the engine, the
+/// `nativeClosed` round-trip, the full control overlay (`PlayerControlsView` +
+/// `ListMenuView` + `InfoPanelView`, all rendering from one
+/// `PlayerChromeState`), the audio session with Now Playing and the system
+/// remote transport (`IosAudioSession`), and Picture-in-Picture
+/// (`IosPipController`). The controller itself holds no chrome policy — it
 /// translates overlay actions into engine calls and state edits, and every
-/// decision it appears to make (the ladder, auto-hide, which control exists) is
-/// a `Core` function `swift test` already covers.
+/// decision it appears to make (the ladder, auto-hide, which control exists,
+/// what the lock screen says, what a PiP stop means) is a `Core` function
+/// `swift test` already covers.
+///
+/// Step 6 is the one that makes an install audible: without an activated
+/// `.playback` session the process sits in `soloAmbient` and there is no sound
+/// at all on a phone with the ring switch on silent, however good the chrome
+/// looks. `IosAudioSession` is now the process's *only* owner of
+/// `AVAudioSession` — `iosManageAudioSession: false` at both Dart
+/// `PlayerConfiguration` sites means mpv no longer touches it either, so the
+/// **fallback engine depends on this class as well** (docs/ios.md Constraint 1).
 ///
 /// **Still to attach**, each marked with a `MARK: Step N attaches here` at the
-/// exact call site: the audio session and Now Playing (6), Picture-in-Picture
-/// (7), the live reconnect watchdog and the `resolveAgain` round trip (8), and
-/// colorimetry/stream-info plus the audio/subtitle track lists (9). The chrome
-/// for all four is written and inert — the PiP button, the "Reconnecting…"
-/// chip, the HDR/fps badges, the info panel and the two track menus render
-/// nothing until their step supplies the state.
+/// exact call site: the live reconnect watchdog and the `resolveAgain` round
+/// trip (8), and colorimetry/stream-info plus the audio/subtitle track lists
+/// (9). The chrome for both is written and inert — the "Reconnecting…" chip,
+/// the HDR/fps badges, the info panel and the two track menus render nothing
+/// until their step supplies the state.
 final class IptvsPlayerViewController: UIViewController {
   private let request: PlayerOpenRequest
   private weak var channel: FlutterMethodChannel?
@@ -91,12 +101,41 @@ final class IptvsPlayerViewController: UIViewController {
   /// Backing store for `IptvsPipStateProviding`. Registered with the plugin on
   /// `viewDidLoad` so `hostVisibility`/`engineFailed` payloads carry a *real*
   /// `pipActive` rather than the "unknown" a plugin with no controller reports.
-  /// Truthful today: no PiP controller exists yet, so PiP genuinely cannot be
-  /// running. Step 7 drives this from the
-  /// `AVPictureInPictureControllerDelegate` did-start/did-stop callbacks and
-  /// calls `IptvsIosPlayerPlugin.current?.pictureInPictureStateChanged()` from
-  /// both.
+  ///
+  /// Driven from the `AVPictureInPictureControllerDelegate` did-start/did-stop
+  /// callbacks, and forced to `false` synchronously when a teardown stops PiP —
+  /// `reportEngineFailed` must not ship a snapshot claiming PiP is running when
+  /// it has just been stopped, because Dart reads that snapshot as authoritative
+  /// and would veto its own fallback on it (docs/ios.md "Stop PiP before
+  /// emitting `engineFailed`").
   private(set) var pictureInPictureActive = false
+
+  /// Picture-in-Picture, or nil when the device cannot do it at all — which is
+  /// **every Simulator**. A nil here keeps `supportsPip` false, the button
+  /// hidden and `.enterPictureInPicture` unreachable, so a simulator run
+  /// exercises everything else exactly as a device would.
+  private var pipController: IosPipController?
+
+  /// True between `restoreUserInterfaceForPictureInPictureStop` and the
+  /// following `didStop`. It is the difference between "the user tapped restore"
+  /// (re-present, keep playing) and "the user closed the PiP window" (finish, so
+  /// the Dart route pops instead of dead-ending on a black screen).
+  private var restoringFromPictureInPicture = false
+
+  /// Lock-screen / Control-Centre transport. Enabled on `viewDidAppear`,
+  /// disabled on every exit path — `MPRemoteCommandCenter` is a process-wide
+  /// singleton, so a target left wired outlives this controller.
+  private let nowPlaying = IosNowPlayingCenter()
+
+  /// This controller's audio-session claim.
+  ///
+  /// **Per-instance, not the bare constant.** Two controllers coexist for a
+  /// moment when one `open` replaces another (`presentPlayer` force-closes the
+  /// old one and presents the new one from its dismissal completion), and with a
+  /// shared id the outgoing controller's teardown would drop the incoming one's
+  /// claim and deactivate the session under it.
+  private let audioClientId =
+    "\(AudioSessionClientId.fullscreenPlayer)#\(UUID().uuidString)"
 
   private var soakAutoCloseTimer: Timer?
   private var pendingResumeMs: Int64?
@@ -107,6 +146,7 @@ final class IptvsPlayerViewController: UIViewController {
     self.channel = channel
     uiState = PlayerUiState(PlayerChromeState(request: request))
     super.init(nibName: nil, bundle: nil)
+    IosDebugCounters.increment(.playerControllers)
     modalPresentationStyle = .overFullScreen
     isModalInPresentation = true
     // Required for `prefersStatusBarHidden` to be honoured: `.overFullScreen`
@@ -127,6 +167,14 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer?.invalidate()
     autoHideTimer?.invalidate()
     engine.release()
+    // Belt and braces. Every exit path already runs `releasePlaybackServices`,
+    // but a controller that is deallocated some other way must not leave the
+    // process-wide audio session activated for a player that no longer exists.
+    // Safe because the claim id is per-instance: releasing an id nobody holds is
+    // a no-op, so this can never deactivate a *newer* controller's session
+    // (`AudioSessionPolicyTests.testPrefixedControllerIdsAreIndependentClaims`).
+    IosAudioSession.shared.release(audioClientId)
+    IosDebugCounters.decrement(.playerControllers)
   }
 
   // MARK: - Immersive presentation
@@ -144,6 +192,10 @@ final class IptvsPlayerViewController: UIViewController {
     view.backgroundColor = .black
     buildViewHierarchy()
     bindEngine()
+    // After `buildViewHierarchy`, which is what puts the `AVPlayer` on the
+    // layer: `AVPictureInPictureController(playerLayer:)` needs a layer that
+    // already has a player.
+    setUpPictureInPicture()
 
     if request.resumeMs > 0 && !request.isLive {
       pendingResumeMs = request.resumeMs
@@ -157,6 +209,9 @@ final class IptvsPlayerViewController: UIViewController {
     // `viewDidDisappear` it stays awake for the rest of the process. Neither
     // failure is observable in the Simulator.
     UIApplication.shared.isIdleTimerDisabled = true
+    // Idempotent on purpose: this runs again when a Picture-in-Picture restore
+    // re-presents the controller.
+    acquirePlaybackServices()
     scheduleSoakAutoCloseIfRequested()
   }
 
@@ -215,6 +270,180 @@ final class IptvsPlayerViewController: UIViewController {
     render(uiState.value)
   }
 
+  // MARK: - Audio session, Now Playing, remote transport
+
+  /// Claims the audio session and wires the system transport.
+  ///
+  /// **This is what makes the app audible.** Before it the process sits in the
+  /// default `soloAmbient` category: muted by the ring switch, silent the
+  /// instant the app leaves the foreground. `IosAudioSession` is the process's
+  /// only owner of `AVAudioSession` now that `iosManageAudioSession: false`
+  /// stops mpv touching it (docs/ios.md Constraint 1).
+  ///
+  /// Idempotent — the claim is a set membership, and `IosNowPlayingCenter.enable`
+  /// guards on its own flag — because `viewDidAppear` runs again after a
+  /// Picture-in-Picture restore.
+  private func acquirePlaybackServices() {
+    IosAudioSession.shared.acquire(audioClientId)
+    IosAudioSession.shared.isPlayingProvider = { [weak self] in
+      self?.engine.isPlaying ?? false
+    }
+    IosAudioSession.shared.onInterruption = { [weak self] reaction in
+      self?.handleAudioInterruption(reaction)
+    }
+
+    nowPlaying.onPlay = { [weak self] in self?.resumeFromRemote() }
+    nowPlaying.onPause = { [weak self] in self?.pauseFromRemote() }
+    nowPlaying.onTogglePlayPause = { [weak self] in self?.togglePlayPause() }
+    nowPlaying.onSkip = { [weak self] deltaMs in self?.seekBy(deltaMs) }
+    nowPlaying.onSeek = { [weak self] positionMs in
+      guard let self, !self.request.isLive else { return }
+      self.engine.seek(toMs: positionMs)
+      self.refreshNowPlaying()
+    }
+    nowPlaying.enable(policy: remoteCommandPolicy(isLive: request.isLive))
+    refreshNowPlaying()
+  }
+
+  /// Drops the claim and unwires the transport. Runs on **every** exit path —
+  /// `finish`, `forceClose`, `reportEngineFailed` — because a claim left behind
+  /// keeps the session activated for a player that no longer exists, and a
+  /// remote-command target left behind keeps a dead closure wired to the user's
+  /// headphone button for the rest of the process.
+  private func releasePlaybackServices() {
+    // Clear the callbacks before releasing so a late notification can't reach a
+    // controller that is already tearing down. The closures capture `self`
+    // weakly, so this is hygiene rather than a leak fix.
+    IosAudioSession.shared.onInterruption = nil
+    IosAudioSession.shared.isPlayingProvider = nil
+    IosAudioSession.shared.release(audioClientId)
+    nowPlaying.disable()
+  }
+
+  /// Publishes the current state to the lock screen / Control Centre.
+  ///
+  /// Called on transitions (start, play/pause, seek, reload) plus a slow
+  /// periodic correction — deliberately **not** on every progress tick: the
+  /// system extrapolates the elapsed time from the reported playback rate
+  /// between updates, so a 2 Hz rewrite is pure churn.
+  private func refreshNowPlaying() {
+    let state = uiState.value
+    nowPlaying.update(
+      nowPlayingSnapshot(
+        title: state.title,
+        sourceName: state.sourceName,
+        isLive: state.isLive,
+        positionMs: engine.positionMs,
+        durationMs: engine.durationMs,
+        isPlaying: engine.isPlaying,
+        speed: state.speed
+      )
+    )
+  }
+
+  /// A phone call, Siri, or a yanked pair of headphones.
+  ///
+  /// The decision itself is `audioInterruptionReaction` in `Core` (pinned by
+  /// `AudioSessionPolicyTests`); this only applies it, and routes through the
+  /// same chrome updates a button press would so the play/pause icon can't
+  /// disagree with the engine.
+  private func handleAudioInterruption(_ reaction: AudioInterruptionReaction) {
+    switch reaction {
+    case .pause:
+      guard engine.isPlaying else { return }
+      pauseFromRemote()
+    case .resume:
+      guard !engine.isPlaying else { return }
+      resumeFromRemote()
+    case .ignore:
+      break
+    }
+  }
+
+  /// Play/pause arriving from outside the overlay (lock screen, headphone
+  /// button, an interruption ending). Same state edits as `togglePlayPause`,
+  /// minus the chrome poke — there is no on-screen interaction to keep the
+  /// controls up for, and the controller may not even be presented (PiP).
+  private func resumeFromRemote() {
+    engine.play()
+    applyPlaybackSpeed()
+    uiState.value.isPlaying = true
+    refreshNowPlaying()
+  }
+
+  private func pauseFromRemote() {
+    engine.pause()
+    uiState.batch { state in
+      state.isPlaying = false
+      if state.isLive { state.liveSynced = false }
+    }
+    refreshNowPlaying()
+  }
+
+  // MARK: - Picture-in-Picture
+
+  /// Builds the PiP controller, or leaves it nil where PiP does not exist.
+  ///
+  /// The nil case is not exceptional: it is every Simulator, and it must stay
+  /// completely inert rather than fail — `supportsPip` stays false,
+  /// `showPictureInPictureButton` keeps the button hidden, and the
+  /// `.enterPictureInPicture` action is unreachable.
+  ///
+  /// PiP additionally needs `UIBackgroundModes = [audio]`
+  /// (`ios/Runner/Info.plist`) and an activated `.playback` session; without
+  /// either, `startPictureInPicture()` reports through `pipFailedToStart`
+  /// instead of throwing — which is why that callback simply undoes the
+  /// speculative bookkeeping and leaves playback exactly where it was.
+  private func setUpPictureInPicture() {
+    guard let controller = IosPipController(playerLayer: videoView.playerLayer) else { return }
+    controller.delegate = self
+    pipController = controller
+    // `isPictureInPicturePossible` is false until an item with a video track is
+    // ready, so the button appears a beat after playback starts rather than at
+    // present time. The KVO observation is seeded with `.initial`, so this call
+    // is only the belt-and-braces first value.
+    syncPictureInPictureAvailability(controller.isPossible)
+  }
+
+  private func syncPictureInPictureAvailability(_ possible: Bool) {
+    let supported = pipController != nil && IosPipController.isSupported
+    uiState.value.supportsPip = shouldOfferPictureInPicture(
+      isSupported: supported,
+      isPossible: possible
+    )
+  }
+
+  /// Stops PiP as part of a teardown and settles `pictureInPictureActive`
+  /// **synchronously**.
+  ///
+  /// The synchronous part is the contract: `didStopPictureInPicture` arrives on
+  /// a later runloop turn, and `reportEngineFailed` ships
+  /// `currentHostVisibility()` on its payload immediately after calling this. A
+  /// stale `pipActive: true` there is read by Dart as an authoritative veto and
+  /// would defer the mpv fallback for no reason (docs/ios.md "Stop PiP before
+  /// emitting `engineFailed`, not after").
+  private func stopPictureInPictureForTeardown() {
+    pipController?.stop()
+    guard pictureInPictureActive else { return }
+    pictureInPictureActive = false
+    IptvsIosPlayerPlugin.current?.pictureInPictureStateChanged()
+  }
+
+  /// Drops the plugin's PiP-lifetime strong reference to this controller.
+  ///
+  /// **Deferred by one runloop turn on purpose.** That reference is frequently
+  /// the *only* thing keeping this object alive — the plugin's `activeController`
+  /// is weak and UIKit released it when the controller dismissed itself for PiP
+  /// — so dropping it from inside one of this object's own methods would
+  /// deallocate `self` mid-call. The async block's own capture of `self` is what
+  /// bridges the gap.
+  private func releasePictureInPictureRetain() {
+    guard let plugin = IptvsIosPlayerPlugin.current else { return }
+    DispatchQueue.main.async {
+      plugin.releasePictureInPictureRetain(self)
+    }
+  }
+
   // MARK: - Engine wiring
 
   private func bindEngine() {
@@ -245,6 +474,10 @@ final class IptvsPlayerViewController: UIViewController {
     // reloading the URL this controller is holding can never succeed after a
     // portal-side kill (docs/player.md "Live auto-reconnect").
     applyToChrome(event)
+    // Every one of these moves the reported playback rate, which is what the
+    // lock screen extrapolates its elapsed time from — a stall that isn't
+    // reported leaves the system counting forward through dead air.
+    refreshNowPlaying()
     emit(
       PlaybackEventPayload.playbackState(
         event,
@@ -319,6 +552,11 @@ final class IptvsPlayerViewController: UIViewController {
     let second = positionMs / 1_000
     guard second != lastEmittedProgressSecond else { return }
     lastEmittedProgressSecond = second
+    // Slow correction for the lock screen's extrapolated clock. Every 5s rather
+    // than every tick: the system already advances the elapsed time itself from
+    // the reported rate, and rewriting `nowPlayingInfo` at 2 Hz is churn with a
+    // visible cost (the Control Centre scrubber jitters).
+    if second % 5 == 0 { refreshNowPlaying() }
     emit(
       PlaybackEventPayload.progress(
         positionMs: positionMs,
@@ -352,6 +590,50 @@ final class IptvsPlayerViewController: UIViewController {
   func load(url: String, headers: [String: String]) {
     lastEmittedProgressSecond = -1
     engine.load(url: url, headers: headers, subtitles: request.subtitles)
+    refreshNowPlaying()
+  }
+
+  /// Presentation metadata pushed from Dart through the plugin's
+  /// `setControlState` — the iOS counterpart of the same call the Windows GDI
+  /// overlay is driven by (`_syncWindowsNativeControlState`).
+  ///
+  /// **Deliberately narrow: presentation only.** Position, duration, playing
+  /// state and track lists are *not* read, and that is a correctness rule rather
+  /// than laziness — while a native engine owns playback Dart's embedded
+  /// `_player` is idle and reports zeros (docs/player.md: `_persistPlaybackPosition`
+  /// is a no-op for exactly this reason), so honouring them here would rewrite
+  /// the lock screen with a stopped player's state mid-film. This controller's
+  /// own `AvPlayerEngine` is the only authority on those.
+  func applyControlState(_ map: [AnyHashable: Any]) {
+    uiState.batch { state in
+      if let title = PlayerOpenRequest.string(map["title"]) { state.title = title }
+      if map.index(forKey: "sourceName") != nil {
+        state.sourceName = PlayerOpenRequest.nonBlankString(map["sourceName"])
+      }
+      if let canFavorite = map["canFavorite"] as? Bool { state.canFavorite = canFavorite }
+      if let isFavorite = map["isFavorite"] as? Bool { state.isFavorite = isFavorite }
+      if let liveSynced = map["liveSynced"] as? Bool, state.isLive { state.liveSynced = liveSynced }
+      if let reconnecting = map["reconnecting"] as? Bool { state.reconnecting = reconnecting }
+      if let now = PlayerOpenRequest.parseEpg(
+        map,
+        titleKey: "epgNowTitle",
+        startKey: "epgNowStartMs",
+        stopKey: "epgNowStopMs",
+        descriptionKey: "epgNowDesc"
+      ) {
+        state.epgNow = now
+      }
+      if let next = PlayerOpenRequest.parseEpg(
+        map,
+        titleKey: "epgNextTitle",
+        startKey: "epgNextStartMs",
+        stopKey: "epgNextStopMs",
+        descriptionKey: nil
+      ) {
+        state.epgNext = next
+      }
+    }
+    refreshNowPlaying()
   }
 
   // MARK: - Chrome
@@ -401,10 +683,9 @@ final class IptvsPlayerViewController: UIViewController {
     case .cycleAspect:
       cycleAspect()
     case .enterPictureInPicture:
-      // MARK: Step 7 attaches here — `pictureInPictureController?
-      // .startPictureInPicture()`. The button is hidden until that step sets
-      // `supportsPip`, so this case is unreachable today.
-      break
+      // Unreachable unless `supportsPip` is true, which needs both a real device
+      // and an item with a ready video track — see `shouldOfferPictureInPicture`.
+      pipController?.start()
     case .toggleMenu(let menu):
       uiState.batch { $0.toggleMenu(menu) }
     case .toggleInfo:
@@ -428,12 +709,16 @@ final class IptvsPlayerViewController: UIViewController {
       applyPlaybackSpeed()
       uiState.value.isPlaying = true
     }
+    refreshNowPlaying()
   }
 
   private func seekBy(_ deltaMs: Int64) {
     // Belt and braces behind `showSkipButtons`: live is never seekable here.
+    // The remote transport agrees by construction — `remoteCommandPolicy`
+    // disables the skip commands for live off the same predicate.
     guard !request.isLive else { return }
     engine.seek(toMs: max(0, engine.positionMs + deltaMs))
+    refreshNowPlaying()
   }
 
   private func seekToFraction(_ fraction: Double) {
@@ -441,6 +726,7 @@ final class IptvsPlayerViewController: UIViewController {
     let duration = engine.durationMs
     guard duration > 0 else { return }
     engine.seek(toMs: Int64(Double(duration) * min(max(fraction, 0), 1)))
+    refreshNowPlaying()
   }
 
   private func toggleMute() {
@@ -654,13 +940,19 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    // PiP first, then the engine — a PiP window left running over a released
+    // `AVPlayer` is a black floating rectangle the user cannot dismiss from the
+    // app.
+    stopPictureInPictureForTeardown()
+    releasePlaybackServices()
     engine.release()
-    if !dismissedForPictureInPicture {
-      UIApplication.shared.isIdleTimerDisabled = false
-    }
+    UIApplication.shared.isIdleTimerDisabled = false
+    releasePictureInPictureRetain()
 
     let channel = self.channel
     dismissThen {
+      // `dismissalEmitsNativeClosed(.exit)` — this is the one dismissal that
+      // pops the Dart route.
       channel?.invokeMethod("nativeClosed", arguments: payload)
     }
   }
@@ -679,10 +971,15 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopPictureInPictureForTeardown()
+    releasePlaybackServices()
     engine.release()
-    if !dismissedForPictureInPicture {
-      UIApplication.shared.isIdleTimerDisabled = false
-    }
+    // Unconditional now that PiP has just been stopped above: the previous
+    // `!dismissedForPictureInPicture` guard existed only because nothing could
+    // stop PiP yet, and it would leave the screen awake for the rest of the
+    // process on a close-while-in-PiP.
+    UIApplication.shared.isIdleTimerDisabled = false
+    releasePictureInPictureRetain()
     dismissThen { completion?() }
   }
 
@@ -749,16 +1046,24 @@ final class IptvsPlayerViewController: UIViewController {
     let positionMs = request.isLive ? 0 : engine.positionMs
     let pipWasActive = pictureInPictureActive
 
-    // MARK: Step 7 attaches here — `pictureInPictureController?.stopPictureInPicture()`
-    // goes immediately below, before the engine teardown, and must leave
-    // `pictureInPictureActive` false by the time the emit runs.
+    // Contractual ordering: stop PiP **before** the engine teardown, and settle
+    // `pictureInPictureActive` synchronously — the emit below ships
+    // `currentHostVisibility()`, and a stale `pipActive: true` there is an
+    // authoritative veto Dart would defer its whole fallback on.
+    stopPictureInPictureForTeardown()
 
     soakAutoCloseTimer?.invalidate()
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    // The audio session goes back to the pool here rather than being held for
+    // the successor: Dart reopens on the embedded media_kit surface, which
+    // claims it under its own client id (`AudioSessionClientId.embeddedPlayer`).
+    // Overlapping claims are exactly what the client set exists to survive.
+    releasePlaybackServices()
     engine.release()
     UIApplication.shared.isIdleTimerDisabled = false
+    releasePictureInPictureRetain()
 
     dismissThen {
       IptvsIosPlayerPlugin.current?.emitEngineFailed(
@@ -797,6 +1102,97 @@ final class IptvsPlayerViewController: UIViewController {
 
 extension IptvsPlayerViewController: IptvsPipStateProviding {
   var isPictureInPictureActive: Bool { pictureInPictureActive }
+}
+
+// MARK: - IosPipControllerDelegate
+
+/// The Picture-in-Picture lifecycle. Three things here are contractual rather
+/// than incidental, and each has a matching `Core` function so the rule is
+/// pinned even though **none of these callbacks can ever fire in a Simulator**
+/// (`isPictureInPictureSupported()` is false there, so no PiP controller exists
+/// and the button is never shown):
+///
+/// 1. **PiP never sends `nativeClosed`** (``dismissalEmitsNativeClosed``). The
+///    controller dismisses itself so the `AVPlayerLayer` can keep feeding the
+///    PiP window; the Dart route must survive completely untouched, or the
+///    restore control would have nothing to return to.
+/// 2. **Something must retain the controller across that dismissal.** The
+///    plugin's `activeController` is weak *by design* (a strong one would leak an
+///    `AVPlayer` per open), so a separate strong hold is taken for exactly the
+///    duration of PiP.
+/// 3. **A PiP window closed without a restore must `finish()`**
+///    (``pipStopOutcome(restoreRequested:)``). Otherwise the app is left with a
+///    dismissed controller, a live `AVPlayer` and a Dart route on a black
+///    screen — a dead end only a force-quit escapes.
+extension IptvsPlayerViewController: IosPipControllerDelegate {
+  func pipWillStart() {
+    // Both of these must land *before* the dismissal in `pipDidStart`: the flag
+    // so `viewDidDisappear` reads the disappearance as PiP rather than an exit,
+    // and the retain so the dismissal isn't this object's last release.
+    dismissedForPictureInPicture = true
+    IptvsIosPlayerPlugin.current?.retainForPictureInPicture(self)
+  }
+
+  func pipDidStart() {
+    pictureInPictureActive = true
+    IptvsIosPlayerPlugin.current?.pictureInPictureStateChanged()
+    guard presentingViewController != nil else { return }
+    // Deliberately no `nativeClosed` here — see the extension doc.
+    dismiss(animated: false)
+  }
+
+  func pipRestoreUserInterface(completion: @escaping (Bool) -> Void) {
+    restoringFromPictureInPicture = true
+    dismissedForPictureInPicture = false
+
+    if presentingViewController != nil {
+      completion(true)
+      return
+    }
+    guard let host = IptvsIosPlayerPlugin.topViewController(), host !== self else {
+      // Nothing to present from. Telling AVKit the restore failed would leave
+      // the user with a dismissed player and a live engine, so exit properly
+      // instead: `finish()` pops the Dart route back to the channel list.
+      completion(false)
+      finish()
+      return
+    }
+    host.present(self, animated: false) { completion(true) }
+  }
+
+  func pipDidStop(restoreRequested: Bool) {
+    pictureInPictureActive = false
+    IptvsIosPlayerPlugin.current?.pictureInPictureStateChanged()
+
+    // `restoringFromPictureInPicture` is redundant with the controller's own
+    // record and kept as belt and braces: mistaking a restore for a close would
+    // tear down playback the user just asked to come back to.
+    let restored = restoreRequested || restoringFromPictureInPicture
+    restoringFromPictureInPicture = false
+    dismissedForPictureInPicture = false
+
+    switch pipStopOutcome(restoreRequested: restored) {
+    case .restoreHost:
+      // Presented again (or about to be) — UIKit owns the lifetime once more.
+      releasePictureInPictureRetain()
+    case .finishPlayback:
+      // Drops the retain itself, after `nativeClosed` has been delivered.
+      finish()
+    }
+  }
+
+  func pipFailedToStart(_ error: Error) {
+    // Not fatal: the controller is still presented and still playing. Undo the
+    // speculative bookkeeping `pipWillStart` did and carry on.
+    dismissedForPictureInPicture = false
+    pictureInPictureActive = false
+    releasePictureInPictureRetain()
+    IptvsIosPlayerPlugin.current?.pictureInPictureStateChanged()
+  }
+
+  func pipPossibleChanged(_ possible: Bool) {
+    syncPictureInPictureAvailability(possible)
+  }
 }
 
 // MARK: - UIGestureRecognizerDelegate

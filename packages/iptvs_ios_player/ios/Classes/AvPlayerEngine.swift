@@ -32,11 +32,13 @@ final class PlayerLayerView: UIView {
 /// keeps `onUnsupportedVideo`/`onRecoverableError` as `var`s for exactly this
 /// reason.
 ///
-/// Deliberately *not* here: the audio session (step 6 — `IosAudioSession`), the
-/// PiP controller (step 7), colorimetry/HDR reads (step 9), and the live
-/// reconnect watchdog (step 8, which lives in the view controller alongside the
-/// `ReconnectPolicy` it drives, mirroring `HdrPlayerActivity.pollLiveReconnect`
-/// rather than the Dart watchdogs). This type stays a state reporter.
+/// Deliberately *not* here, and staying that way: the audio session
+/// (`IosAudioSession`, which is process-wide and outlives any one engine), the
+/// PiP controller (`IosPipController`, which is built from the *layer*, not the
+/// player), colorimetry/HDR reads (step 9), and the live reconnect watchdog
+/// (step 8, which lives in the view controller alongside the `ReconnectPolicy`
+/// it drives, mirroring `HdrPlayerActivity.pollLiveReconnect` rather than the
+/// Dart watchdogs). This type stays a state reporter.
 final class AvPlayerEngine {
   /// Undocumented but universally used `AVURLAsset` option for per-request HTTP
   /// headers. It is load-bearing here rather than a nicety: Stalker/MAG portals
@@ -104,6 +106,10 @@ final class AvPlayerEngine {
   private var released = false
 
   init() {
+    // Counted here rather than at the property initialiser so the increment and
+    // the matching decrement in `release()` sit in the same file, one screen
+    // apart (docs/player.md "Debug resource counters + lifecycle soak").
+    IosDebugCounters.increment(.avPlayers)
     observePlayer()
     addProgressObserver()
   }
@@ -206,9 +212,11 @@ final class AvPlayerEngine {
     if let timeObserver {
       player.removeTimeObserver(timeObserver)
       self.timeObserver = nil
+      IosDebugCounters.decrement(.timeObservers)
     }
     player.pause()
     player.replaceCurrentItem(with: nil)
+    IosDebugCounters.decrement(.avPlayers)
   }
 
   // MARK: - Observation
@@ -229,6 +237,11 @@ final class AvPlayerEngine {
     ) { [weak self] _ in
       self?.onProgressTick?()
     }
+    // A periodic time observer **retains its `AVPlayer`** until it is removed,
+    // which is why this gets its own counter rather than folding into
+    // `iosAvPlayers`: leak it and the player simply never deallocates, with
+    // nothing else in the system to say so.
+    IosDebugCounters.increment(.timeObservers)
   }
 
   private func observeItem(_ item: AVPlayerItem) {
