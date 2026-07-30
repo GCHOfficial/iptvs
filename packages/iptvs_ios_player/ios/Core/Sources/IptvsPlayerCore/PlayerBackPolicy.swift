@@ -30,3 +30,44 @@ public func nextPlayerBackAction(
   if controlsVisible { return .hideControls }
   return .exit
 }
+
+/// What a tap on the scrim or the exposed video area does.
+///
+/// **iOS has no hardware Back**, so docs/tv-navigation.md's Back-ladder section
+/// specifies touch as the ladder's input here: a tap outside the chrome peels
+/// menu → info exactly as Back does on every other platform, and a tap with the
+/// chrome already hidden reveals it (every platform's tap-to-show) rather than
+/// exiting. Exiting is the overlay's **X** alone, which skips the ladder
+/// outright — the same "the on-screen back-arrow button still exits directly"
+/// parity the Windows and Linux overlays keep.
+public enum PlayerTapAction: Equatable {
+  case closeMenu
+  case closeInfo
+  case hideControls
+  case showControls
+}
+
+/// The tap ladder, defined *as* the Back ladder with its terminal rung
+/// replaced.
+///
+/// Deliberately delegating to ``nextPlayerBackAction(menuOpen:infoOpen:controlsVisible:)``
+/// rather than restating the table: the two must never disagree about which
+/// rung comes first, and the only honest difference between them is what
+/// happens once there is nothing left to peel — Back exits, a tap brings the
+/// chrome back.
+public func playerTapAction(
+  menuOpen: Bool,
+  infoOpen: Bool,
+  controlsVisible: Bool
+) -> PlayerTapAction {
+  switch nextPlayerBackAction(
+    menuOpen: menuOpen,
+    infoOpen: infoOpen,
+    controlsVisible: controlsVisible
+  ) {
+  case .closeMenu: return .closeMenu
+  case .closeInfo: return .closeInfo
+  case .hideControls: return .hideControls
+  case .exit: return .showControls
+  }
+}

@@ -32,29 +32,49 @@ import UIKit
 ///   as the Android Compose overlay's `safeDrawingPadding()` groups. Only
 ///   video and scrim may run under the notch.
 ///
-/// **Step 3 scope.** This is the presentation, the engine, and the
-/// `nativeClosed` round-trip. Chrome is an X button and nothing else; the
-/// attachment points for steps 4–8 are marked with `MARK:` sections below.
+/// **Scope so far.** Steps 3–5: the presentation, the engine, the
+/// `nativeClosed` round-trip, and the full control overlay
+/// (`PlayerControlsView` + `ListMenuView` + `InfoPanelView`, all rendering from
+/// one `PlayerChromeState`). The controller itself holds no chrome policy — it
+/// translates overlay actions into engine calls and state edits, and every
+/// decision it appears to make (the ladder, auto-hide, which control exists) is
+/// a `Core` function `swift test` already covers.
+///
+/// **Still to attach**, each marked with a `MARK: Step N attaches here` at the
+/// exact call site: the audio session and Now Playing (6), Picture-in-Picture
+/// (7), the live reconnect watchdog and the `resolveAgain` round trip (8), and
+/// colorimetry/stream-info plus the audio/subtitle track lists (9). The chrome
+/// for all four is written and inert — the PiP button, the "Reconnecting…"
+/// chip, the HDR/fps badges, the info panel and the two track menus render
+/// nothing until their step supplies the state.
 final class IptvsPlayerViewController: UIViewController {
   private let request: PlayerOpenRequest
   private weak var channel: FlutterMethodChannel?
   private let engine = AvPlayerEngine()
 
   private let videoView = PlayerLayerView()
-  private let scrimView = UIView()
-  private let controlsContainer = UIView()
-  private let closeButton = UIButton(type: .system)
+  private let controlsView = PlayerControlsView()
 
   // MARK: Chrome state
   //
-  // Step 4 lifts these into `PlayerUiState.swift` (the port of Kotlin's
-  // `PlayerUiState`). They are named after their Kotlin counterparts so that
-  // move is mechanical. `menuOpen`/`infoOpen` exist here only as the inputs
-  // `nextPlayerBackAction` needs; nothing sets them yet.
-  private var controlsVisible = true
-  private var menuOpen = false
-  private var infoOpen = false
-  private var isFavorite: Bool
+  // The whole overlay renders from one `PlayerChromeState` (in `Core`, where
+  // `swift test` can reach every derived rule), held in the `PlayerUiState` box
+  // so that one mutation means one render. `handleBack`/`videoTapped` read
+  // `menu`/`infoOpen`/`controlsVisible` straight off it, which is what makes the
+  // Back ladder live rather than inert.
+  private let uiState: PlayerUiState
+
+  /// Fires the auto-hide. Re-armed on every interaction and on every change to
+  /// the (visible, pinned, playing) triple — never on a plain progress tick,
+  /// which would re-arm it twice a second and mean it never fired at all.
+  private var autoHideTimer: Timer?
+  private var autoHideKey: AutoHideKey?
+
+  private struct AutoHideKey: Equatable {
+    let controlsVisible: Bool
+    let pinned: Bool
+    let isPlaying: Bool
+  }
 
   /// Whether this controller has already run its exit path. Every exit route —
   /// the X button, a Dart-side `close`, the debug soak timer — funnels through
@@ -85,7 +105,7 @@ final class IptvsPlayerViewController: UIViewController {
   init(request: PlayerOpenRequest, channel: FlutterMethodChannel?) {
     self.request = request
     self.channel = channel
-    isFavorite = request.isFavorite
+    uiState = PlayerUiState(PlayerChromeState(request: request))
     super.init(nibName: nil, bundle: nil)
     modalPresentationStyle = .overFullScreen
     isModalInPresentation = true
@@ -94,6 +114,9 @@ final class IptvsPlayerViewController: UIViewController {
     // concerned, so without this the bar keeps whatever the Flutter view
     // controller last asked for.
     modalPresentationCapturesStatusBarAppearance = true
+    uiState.onChange = { [weak self] state in
+      self?.render(state)
+    }
   }
 
   required init?(coder: NSCoder) {
@@ -102,6 +125,7 @@ final class IptvsPlayerViewController: UIViewController {
 
   deinit {
     soakAutoCloseTimer?.invalidate()
+    autoHideTimer?.invalidate()
     engine.release()
   }
 
@@ -147,38 +171,22 @@ final class IptvsPlayerViewController: UIViewController {
   // MARK: - View hierarchy
 
   private func buildViewHierarchy() {
-    // Video and scrim are full-bleed: video may run under the notch/Dynamic
-    // Island, which is the whole point of not letterboxing away from the
-    // cutout (Android sets LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES for the
-    // same reason).
+    // Video is full-bleed: it may run under the notch/Dynamic Island, which is
+    // the whole point of not letterboxing away from the cutout (Android sets
+    // LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES for the same reason).
     videoView.translatesAutoresizingMaskIntoConstraints = false
     videoView.playerLayer.player = engine.player
     videoView.playerLayer.videoGravity = .resizeAspect
     view.addSubview(videoView)
 
-    // The scrim is full-bleed *horizontally and to the physical top edge* —
-    // deliberately not inset by the safe area, so it runs under the status bar
-    // and notch the way the Compose overlay's full-bleed scrim and the Windows
-    // GDI overlay's bars do. It is a plain top band here because step 3 has only
-    // one control; step 4 replaces it with the top+bottom gradient pair that
-    // backs the real bars. What must not change is the split: scrim full-bleed,
-    // controls inside `safeAreaLayoutGuide`.
-    scrimView.translatesAutoresizingMaskIntoConstraints = false
-    scrimView.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-    scrimView.isUserInteractionEnabled = false
-    view.addSubview(scrimView)
-
-    // Controls, by contrast, are inset to the safe area — no control may ever
-    // sit under the cutout or the home indicator.
-    controlsContainer.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(controlsContainer)
-
-    closeButton.translatesAutoresizingMaskIntoConstraints = false
-    closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
-    closeButton.tintColor = .white
-    closeButton.accessibilityLabel = "Close player"
-    closeButton.addTarget(self, action: #selector(closeButtonTapped), for: .touchUpInside)
-    controlsContainer.addSubview(closeButton)
+    // The overlay is *also* full-bleed, and owns the scrim/controls split
+    // internally: its gradient scrim reaches the physical edges while every
+    // control lives inside its `safeAreaLayoutGuide`. Step 3's plain dim band +
+    // lone X are gone; the split they existed to establish is unchanged.
+    controlsView.onAction = { [weak self] action in
+      self?.handle(action)
+    }
+    view.addSubview(controlsView)
 
     NSLayoutConstraint.activate([
       videoView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -186,35 +194,25 @@ final class IptvsPlayerViewController: UIViewController {
       videoView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       videoView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-      scrimView.topAnchor.constraint(equalTo: view.topAnchor),
-      scrimView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      scrimView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      // Ends below the close button rather than covering the frame: a
-      // full-screen dim during bring-up reads as "the video isn't rendering",
-      // which is the one thing the first simulator run needs to be able to tell.
-      scrimView.bottomAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 60),
-
-      controlsContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-      controlsContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-      controlsContainer.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-      controlsContainer.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-
-      closeButton.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 8),
-      closeButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 8),
-      // 44pt is Apple's minimum comfortable hit target; the glyph itself is
-      // much smaller.
-      closeButton.widthAnchor.constraint(equalToConstant: 44),
-      closeButton.heightAnchor.constraint(equalToConstant: 44),
+      controlsView.topAnchor.constraint(equalTo: view.topAnchor),
+      controlsView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      controlsView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      controlsView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
 
     let tap = UITapGestureRecognizer(target: self, action: #selector(videoTapped))
-    // Both of these matter: without them a tap recogniser on the ancestor view
-    // swallows or cancels the close button's own touch tracking, and the button
-    // reads as dead — a failure that looks like a broken exit path rather than
-    // a gesture-arena problem.
+    // Both of these matter, and now more than ever: without them a tap
+    // recogniser on the ancestor view swallows or cancels the *whole overlay's*
+    // button tracking, and every control reads as dead — a failure that looks
+    // like broken wiring rather than a gesture-arena problem. See the delegate
+    // at the bottom of this file for the other half.
     tap.cancelsTouchesInView = false
     tap.delegate = self
     view.addGestureRecognizer(tap)
+
+    // Paint the seeded state before the first frame, so the bar is populated
+    // (title, LIVE pill, favorite star) rather than appearing a tick later.
+    render(uiState.value)
   }
 
   // MARK: - Engine wiring
@@ -246,6 +244,7 @@ final class IptvsPlayerViewController: UIViewController {
     // round-trip Android lacks — Stalker `create_link` tokens are single-use, so
     // reloading the URL this controller is holding can never succeed after a
     // portal-side kill (docs/player.md "Live auto-reconnect").
+    applyToChrome(event)
     emit(
       PlaybackEventPayload.playbackState(
         event,
@@ -256,20 +255,76 @@ final class IptvsPlayerViewController: UIViewController {
     )
   }
 
+  /// Folds an engine state transition into the chrome. One `batch` per event, so
+  /// a transition that moves several fields still renders once.
+  private func applyToChrome(_ event: PlaybackStateEvent) {
+    uiState.batch { state in
+      switch event {
+      case .started:
+        state.isPlaying = true
+        state.isBuffering = false
+        state.ended = false
+        // A fresh start is by definition at the live edge — this is what clears
+        // the greyed LIVE pill and the go-to-live button after a reload.
+        if state.isLive { state.liveSynced = true }
+      case .stalled:
+        state.isBuffering = true
+      case .resumed:
+        state.isBuffering = false
+      case .ended:
+        state.ended = true
+        state.isPlaying = false
+      case .dropped:
+        state.isPlaying = false
+      }
+    }
+  }
+
   private func handleProgressTick() {
-    // MARK: Step 4 attaches here — the scrubber and the live EPG progress strip
-    // both redraw off this tick, which is why the engine samples at 500 ms
-    // (Android's ticker cadence) rather than at the 1 Hz this emit uses.
+    // The scrubber, its time labels and the live EPG progress bar all redraw off
+    // this tick, which is why the engine samples at 500 ms (Android's ticker
+    // cadence) rather than at the 1 Hz the Dart emit below uses. `PlayerUiState`
+    // diffs, so a tick that moves nothing costs one struct comparison and no
+    // layout at all.
     let positionMs = engine.positionMs
+    let durationMs = engine.durationMs
+    let playing = engine.isPlaying
+    let buffering = engine.isBuffering
+    // `presentationSize` is `.zero` until the first frame decodes, and
+    // `resolutionBadge` is nil for a zero size, so the badge simply appears when
+    // the picture does.
+    //
+    // MARK: Step 9 attaches here.
+    //
+    // `fps`, `dynamicRange`, `videoCodec`, `audioCodec`/`audioChannels` are the
+    // remaining `PlayerChromeState` stream-info fields, and everything that
+    // renders them — the HDR and fps badges, the whole info panel — is already
+    // written and simply shows nothing while they are empty. Feed them from the
+    // item's track format descriptions here (or from a `readyToPlay` one-shot,
+    // since they don't change mid-item), and build the label itself with
+    // `dynamicRangeLabel(gamma:primaries:matrix:)` from Core rather than
+    // assembling a string, so the iOS badge text agrees with the Android,
+    // Windows and Linux ones by construction. Note HDR10+ is permanently
+    // absent on this platform (docs/ios.md "Known parity gaps").
+    let size = engine.presentationSize
+    uiState.batch { state in
+      state.positionMs = positionMs
+      state.durationMs = durationMs
+      state.isPlaying = playing
+      state.isBuffering = buffering
+      state.videoWidth = Int(size.width)
+      state.videoHeight = Int(size.height)
+    }
+
     let second = positionMs / 1_000
     guard second != lastEmittedProgressSecond else { return }
     lastEmittedProgressSecond = second
     emit(
       PlaybackEventPayload.progress(
         positionMs: positionMs,
-        durationMs: engine.durationMs,
-        playing: engine.isPlaying,
-        buffering: engine.isBuffering
+        durationMs: durationMs,
+        playing: playing,
+        buffering: buffering
       )
     )
   }
@@ -299,52 +354,284 @@ final class IptvsPlayerViewController: UIViewController {
     engine.load(url: url, headers: headers, subtitles: request.subtitles)
   }
 
-  // MARK: - Chrome (steps 4–5 attach here)
-  //
-  // Step 4 replaces `setControlsVisible` with the real `ControlsOverlay`
-  // equivalent — top bar, badge cluster, live EPG strip, bottom transport bar,
-  // scrubber, favorite star, go-to-live — plus the auto-hide timer that is
-  // deliberately absent now (auto-hiding an X-button-only overlay would look
-  // like a hung player). Step 5 adds the list menus and info panel, which set
-  // `menuOpen`/`infoOpen` and thereby light up the Back ladder below.
+  // MARK: - Chrome
 
+  /// The single render entry point. Every state change funnels here through
+  /// `PlayerUiState.onChange`, so there is exactly one place that turns state
+  /// into pixels and exactly one place that re-evaluates the auto-hide clock.
+  private func render(_ state: PlayerChromeState) {
+    // Wall clock read here rather than inside the view: the EPG progress bar is
+    // the only thing that needs it, and a view with a hidden time dependency is
+    // a view that can't be reasoned about from its inputs.
+    controlsView.render(state, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+    syncAutoHide(state)
+  }
+
+  // MARK: Overlay actions
+
+  private func handle(_ action: PlayerControlsAction) {
+    // Every control press is an interaction, exactly as Kotlin's `onInteract()`
+    // runs on every button: it re-arms the auto-hide clock and, if the chrome
+    // was on its way out, keeps it up.
+    pokeControls()
+
+    switch action {
+    case .close:
+      // Parity with every other platform: the visible close control is an
+      // explicit Exit and skips the peel ladder (docs/player.md — "the
+      // on-screen back-*arrow* button still exits directly"; docs/tv-navigation
+      // .md — "The overlay's **X** is a dedicated Exit control that skips the
+      // ladder entirely").
+      finish()
+    case .playPause:
+      togglePlayPause()
+    case .seekBy(let deltaMs):
+      seekBy(deltaMs)
+    case .seekToFraction(let fraction):
+      seekToFraction(fraction)
+    case .toggleMute:
+      toggleMute()
+    case .toggleFavorite:
+      // Local-only, reported back on `nativeClosed` — the controller has no
+      // live channel to the Dart favorites store (docs/player.md "Live favorite
+      // star").
+      uiState.value.isFavorite.toggle()
+    case .goLive:
+      goToLive()
+    case .cycleAspect:
+      cycleAspect()
+    case .enterPictureInPicture:
+      // MARK: Step 7 attaches here — `pictureInPictureController?
+      // .startPictureInPicture()`. The button is hidden until that step sets
+      // `supportsPip`, so this case is unreachable today.
+      break
+    case .toggleMenu(let menu):
+      uiState.batch { $0.toggleMenu(menu) }
+    case .toggleInfo:
+      uiState.batch { $0.toggleInfo() }
+    case .selectMenuOption(let id):
+      selectMenuOption(id)
+    }
+  }
+
+  private func togglePlayPause() {
+    if engine.isPlaying {
+      engine.pause()
+      uiState.batch { state in
+        state.isPlaying = false
+        // Pausing live drops you behind the edge: grey the LIVE pill and reveal
+        // go-to-live, matching the Android and Windows overlays.
+        if state.isLive { state.liveSynced = false }
+      }
+    } else {
+      engine.play()
+      applyPlaybackSpeed()
+      uiState.value.isPlaying = true
+    }
+  }
+
+  private func seekBy(_ deltaMs: Int64) {
+    // Belt and braces behind `showSkipButtons`: live is never seekable here.
+    guard !request.isLive else { return }
+    engine.seek(toMs: max(0, engine.positionMs + deltaMs))
+  }
+
+  private func seekToFraction(_ fraction: Double) {
+    guard !request.isLive else { return }
+    let duration = engine.durationMs
+    guard duration > 0 else { return }
+    engine.seek(toMs: Int64(Double(duration) * min(max(fraction, 0), 1)))
+  }
+
+  private func toggleMute() {
+    let muted = !uiState.value.muted
+    // No volume slider on iOS — the hardware buttons and the AirPlay route
+    // picker own volume (docs/ios.md). Mute has no hardware equivalent, so it
+    // stays.
+    engine.player.isMuted = muted
+    uiState.value.muted = muted
+  }
+
+  private func cycleAspect() {
+    uiState.batch { $0.cycleAspect() }
+    videoView.playerLayer.videoGravity =
+      uiState.value.aspect == .fill ? .resizeAspectFill : .resizeAspect
+  }
+
+  /// Applies the chosen speed to the player. VOD only, and only while already
+  /// playing — writing `rate` on a paused player *starts* it, which would turn
+  /// "pick a speed" into "pick a speed and resume".
+  private func applyPlaybackSpeed() {
+    guard !request.isLive else { return }
+    let speed = Float(uiState.value.speed)
+    guard speed != 1, engine.player.rate != 0 else { return }
+    engine.player.rate = speed
+  }
+
+  private func selectMenuOption(_ id: String) {
+    switch uiState.value.menu {
+    case .speed:
+      guard let speed = Double(id) else { return }
+      uiState.batch { state in
+        state.speed = speed
+        state.menu = .none
+      }
+      applyPlaybackSpeed()
+    case .audio:
+      // MARK: Step 9 attaches here — `AVPlayerItem.select(_:in:)` against the
+      // `.audible` media-selection group. The menu, its rows and this callback
+      // are complete; nothing populates `audioTracks` yet, so
+      // `showAudioButton` keeps the button hidden and this case is unreachable
+      // today. The option ids must be whatever key that step uses to find the
+      // `AVMediaSelectionOption` again.
+      uiState.batch { state in
+        state.selectedAudioId = id
+        state.menu = .none
+      }
+    case .subtitles:
+      // MARK: Step 9 attaches here too — the `.legible` group, plus the
+      // `playerSubtitleOffId` sentinel mapping to `select(nil, in:)`. External
+      // sidecar tracks (`request.subtitles`) additionally need an
+      // `AVMutableComposition`, which is why `AvPlayerEngine.load` already
+      // takes them and ignores them.
+      uiState.batch { state in
+        state.selectedSubtitleId = id
+        state.menu = .none
+      }
+    case .none:
+      break
+    }
+  }
+
+  /// Jump back to the live edge.
+  ///
+  /// Prefers a seek to the end of the item's seekable window: it keeps the
+  /// current connection and the current locator, where a reload would need a
+  /// fresh one. Falls back to reloading the URL this controller holds.
+  ///
+  /// MARK: Step 8 attaches here — that fallback must become the `resolveAgain`
+  /// round trip into Dart *before* the reload. A Stalker `play_token` is
+  /// single-use, so re-opening the URL this controller is holding can never
+  /// succeed after a portal-side kill (docs/player.md "Live reloads
+  /// re-resolve"). The same call is what the reconnect watchdog will make.
+  private func goToLive() {
+    guard request.isLive else { return }
+    if let edgeMs = liveEdgeMs() {
+      engine.seek(toMs: edgeMs)
+    } else {
+      load(url: request.url, headers: request.headers)
+    }
+    uiState.value.liveSynced = true
+  }
+
+  /// End of the item's last seekable range, in ms, or nil when the stream
+  /// exposes no window (a non-seekable live feed).
+  private func liveEdgeMs() -> Int64? {
+    guard let item = engine.player.currentItem else { return nil }
+    guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
+    let ms = AvPlayerEngine.milliseconds(from: CMTimeRangeGetEnd(range))
+    return ms > 0 ? ms : nil
+  }
+
+  // MARK: Tap ladder
+
+  /// A tap on the scrim or the exposed video.
+  ///
+  /// **This is the iOS Back ladder** (docs/tv-navigation.md, Back-ladder
+  /// section): with no hardware Back, touch is the ladder's input — a tap
+  /// outside the chrome peels menu → info exactly as Back does elsewhere, and a
+  /// tap with the chrome hidden reveals it rather than exiting. `playerTapAction`
+  /// is defined in Core *as* `nextPlayerBackAction` with its terminal rung
+  /// swapped, so the two can never disagree about rung order.
   @objc private func videoTapped() {
-    setControlsVisible(!controlsVisible)
-  }
-
-  @objc private func closeButtonTapped() {
-    // Parity with every other platform: the visible back/close control is an
-    // explicit Exit and skips the peel ladder (docs/player.md — "The on-screen
-    // back-arrow button still exits directly").
-    finish()
-  }
-
-  private func setControlsVisible(_ visible: Bool) {
-    controlsVisible = visible
-    controlsContainer.isHidden = !visible
-    scrimView.isHidden = !visible
-  }
-
-  /// The Back ladder, for the gesture/remote paths step 4 wires up. Kept here
-  /// (rather than inline in a gesture handler) for the same reason Android keeps
-  /// it in `PlayerBackPolicy`: one press must never be interpreted once by a
-  /// control and again by the screen. `nextPlayerBackAction` is in Core and
-  /// already pinned by `PlayerBackPolicyTests`.
-  func handleBack() {
-    switch nextPlayerBackAction(
-      menuOpen: menuOpen,
-      infoOpen: infoOpen,
-      controlsVisible: controlsVisible
+    let state = uiState.value
+    switch playerTapAction(
+      menuOpen: state.menu != .none,
+      infoOpen: state.infoOpen,
+      controlsVisible: state.controlsVisible
     ) {
     case .closeMenu:
-      menuOpen = false
+      uiState.batch { $0.menu = .none }
     case .closeInfo:
-      infoOpen = false
+      uiState.batch { $0.infoOpen = false }
     case .hideControls:
-      setControlsVisible(false)
+      uiState.batch { $0.setControlsVisible(false) }
+    case .showControls:
+      pokeControls()
+    }
+  }
+
+  /// The Back ladder proper, kept for any Back-*equivalent* input this
+  /// controller grows (a Dart-driven close-with-peel, a hardware keyboard's
+  /// Escape on an iPad). Kept here rather than inline in a handler for the same
+  /// reason Android keeps it in `PlayerBackPolicy`: one press must never be
+  /// interpreted once by a control and again by the screen.
+  func handleBack() {
+    let state = uiState.value
+    switch nextPlayerBackAction(
+      menuOpen: state.menu != .none,
+      infoOpen: state.infoOpen,
+      controlsVisible: state.controlsVisible
+    ) {
+    case .closeMenu:
+      uiState.batch { $0.menu = .none }
+    case .closeInfo:
+      uiState.batch { $0.infoOpen = false }
+    case .hideControls:
+      uiState.batch { $0.setControlsVisible(false) }
     case .exit:
       finish()
     }
+  }
+
+  // MARK: Auto-hide
+
+  /// Re-arms the auto-hide clock whenever the (visible, pinned, playing) triple
+  /// changes — and *only* then.
+  ///
+  /// The subtlety worth stating: `render` runs on every progress tick, so
+  /// re-arming unconditionally from here would push the deadline out twice a
+  /// second and the controls would never hide at all. Kotlin gets this for free
+  /// from `LaunchedEffect`'s key list; this is the same key list, compared by
+  /// hand.
+  private func syncAutoHide(_ state: PlayerChromeState) {
+    let key = AutoHideKey(
+      controlsVisible: state.controlsVisible,
+      pinned: state.pinned,
+      isPlaying: state.isPlaying
+    )
+    guard key != autoHideKey else { return }
+    autoHideKey = key
+    armAutoHide(state)
+  }
+
+  private func armAutoHide(_ state: PlayerChromeState) {
+    autoHideTimer?.invalidate()
+    autoHideTimer = nil
+    guard
+      PlayerAutoHide.shouldSchedule(
+        controlsVisible: state.controlsVisible,
+        pinned: state.pinned,
+        isPlaying: state.isPlaying
+      )
+    else { return }
+    // Block form, not target/action: a `Timer` retains its target, and this one
+    // outlives nothing.
+    autoHideTimer = Timer.scheduledTimer(
+      withTimeInterval: TimeInterval(PlayerAutoHide.delayMs(isLive: state.isLive)) / 1000,
+      repeats: false
+    ) { [weak self] _ in
+      self?.uiState.batch { $0.setControlsVisible(false) }
+    }
+  }
+
+  /// Interaction: show the chrome and restart its clock. The forced re-arm is
+  /// why this exists separately from `syncAutoHide` — tapping a button while
+  /// the controls are already up changes none of the three keys, but must still
+  /// buy another few seconds.
+  private func pokeControls() {
+    uiState.batch { $0.setControlsVisible(true) }
+    armAutoHide(uiState.value)
   }
 
   // MARK: - Exit
@@ -365,6 +652,8 @@ final class IptvsPlayerViewController: UIViewController {
     let payload = closePayload()
     soakAutoCloseTimer?.invalidate()
     soakAutoCloseTimer = nil
+    autoHideTimer?.invalidate()
+    autoHideTimer = nil
     engine.release()
     if !dismissedForPictureInPicture {
       UIApplication.shared.isIdleTimerDisabled = false
@@ -388,6 +677,8 @@ final class IptvsPlayerViewController: UIViewController {
     finishing = true
     soakAutoCloseTimer?.invalidate()
     soakAutoCloseTimer = nil
+    autoHideTimer?.invalidate()
+    autoHideTimer = nil
     engine.release()
     if !dismissedForPictureInPicture {
       UIApplication.shared.isIdleTimerDisabled = false
@@ -435,7 +726,7 @@ final class IptvsPlayerViewController: UIViewController {
       }
     }
     if request.canFavorite {
-      map["favorite"] = isFavorite
+      map["favorite"] = uiState.value.isFavorite
     }
     return map.isEmpty ? nil : map
   }
@@ -464,6 +755,8 @@ final class IptvsPlayerViewController: UIViewController {
 
     soakAutoCloseTimer?.invalidate()
     soakAutoCloseTimer = nil
+    autoHideTimer?.invalidate()
+    autoHideTimer = nil
     engine.release()
     UIApplication.shared.isIdleTimerDisabled = false
 
@@ -509,12 +802,35 @@ extension IptvsPlayerViewController: IptvsPipStateProviding {
 // MARK: - UIGestureRecognizerDelegate
 
 extension IptvsPlayerViewController: UIGestureRecognizerDelegate {
-  /// Let controls handle their own touches. Without this the tap-to-toggle
-  /// recogniser competes with every button in the overlay.
+  /// Decides what counts as a tap on *exposed video or scrim* — the only thing
+  /// the tap ladder should act on.
+  ///
+  /// Two exclusions, and both are load-bearing:
+  ///
+  /// - **`UIControl`.** Every button and the scrubber are `UIControl`s. Without
+  ///   this the root recogniser competes with their own tracking and they read
+  ///   as dead — the classic version of this bug, and the reason
+  ///   `cancelsTouchesInView = false` alone is not enough.
+  /// - **``PlayerTapAbsorbing``** (the list menu and the info panel). A tap
+  ///   *inside* an open panel is not a tap outside it, and treating it as one
+  ///   would let the panel dismiss itself on its own hit — exactly the case the
+  ///   Windows/embedded overlay calls out ("the panel itself absorbs taps so it
+  ///   isn't re-closed by its own hit", docs/player.md).
+  ///
+  /// Walks ancestors rather than testing `touch.view` alone, because the hit
+  /// view is often a decorative subview: a label inside a menu row, or the
+  /// stack view inside the info panel. Stops at the controller's own view so
+  /// the walk is bounded.
   func gestureRecognizer(
     _ gestureRecognizer: UIGestureRecognizer,
     shouldReceive touch: UITouch
   ) -> Bool {
-    !(touch.view is UIControl)
+    var node = touch.view
+    while let current = node, current !== view {
+      if current is UIControl { return false }
+      if current is PlayerTapAbsorbing { return false }
+      node = current.superview
+    }
+    return true
   }
 }
