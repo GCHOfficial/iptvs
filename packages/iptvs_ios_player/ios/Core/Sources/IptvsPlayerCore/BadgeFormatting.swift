@@ -40,17 +40,27 @@ public enum BadgeFormatting {
   /// whole frame rates print without a decimal point.
   public static func fpsBadge(fps: Double) -> String? {
     guard fps > 0 else { return nil }
-    let rounded = (fps * 1000).rounded() / 1000
-    let n: String
+    return "\(trimmedDecimal(fps))fps"
+  }
+
+  /// A number rendered the way every player label in this repo renders one:
+  /// rounded to 3 decimal places, then stripped of trailing zeros so a whole
+  /// value prints without a decimal point (`25`, `23.976`, `0.75`, `1`).
+  ///
+  /// Extracted from `fpsBadge` because three surfaces need the identical rule —
+  /// the fps badge, the info panel's "Frame rate" row (`25 fps`), and the speed
+  /// menu/button labels (`1×`, `0.75×`) — and Kotlin duplicates it in all three
+  /// (`PlayerUiState.fpsBadge`, `InfoPanel.formatFps`, `speedOptionLabel`),
+  /// which is exactly how they would drift.
+  public static func trimmedDecimal(_ value: Double) -> String {
+    let rounded = (value * 1000).rounded() / 1000
     if rounded == rounded.rounded(.towardZero) {
-      n = String(Int64(rounded))
-    } else {
-      var formatted = String(format: "%.3f", rounded)
-      while formatted.hasSuffix("0") { formatted.removeLast() }
-      if formatted.hasSuffix(".") { formatted.removeLast() }
-      n = formatted
+      return String(Int64(rounded))
     }
-    return "\(n)fps"
+    var formatted = String(format: "%.3f", rounded)
+    while formatted.hasSuffix("0") { formatted.removeLast() }
+    if formatted.hasSuffix(".") { formatted.removeLast() }
+    return formatted
   }
 
   /// Short source-name badge, truncated so a long provider label can't crowd
