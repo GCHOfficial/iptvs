@@ -159,6 +159,19 @@ final class IptvsPlayerViewController: UIViewController {
   /// thresholds. See `PlaybackStartBackstop`'s type doc for the full argument.
   private var startBackstop: PlaybackStartBackstop
 
+  /// The "this load plays but shows nothing" backstop — docs/ios.md's *second*
+  /// `engineFailed` detection shape, and the one the other two structurally
+  /// cannot see.
+  ///
+  /// An item rendering no picture still reaches `.playing`, so `hasEverStarted`
+  /// latches, `startBackstop` disarms, and `watchdog` sees a full buffer and a
+  /// moving timebase — healthy, by every signal either of them reads. This one
+  /// owns the remaining window: **started, healthy, and no picture**, which is
+  /// complementary to the reconnect watchdog's `isBuffering || ended` on one
+  /// boolean, so at most one of the three can act on any tick. See
+  /// `VideoPresenceBackstop`'s type doc for the full argument.
+  private var videoBackstop = VideoPresenceBackstop()
+
   /// The 500 ms watchdog tick, mirroring Android's progress-ticker cadence.
   ///
   /// **A `Timer`, deliberately not `AvPlayerEngine.onProgressTick`**, even though
@@ -577,6 +590,9 @@ final class IptvsPlayerViewController: UIViewController {
       // tick, so this is the prompt edge rather than the only path.
       startBackstop.markStarted()
       watchdog.markStarted()
+      // …and the third window opens on the same edge. From here on the question
+      // stops being "did this load start" and becomes "is it showing anything".
+      videoBackstop.markStarted(nowMs: IptvsPlayerViewController.nowMs())
     case .resumed:
       liveDropped = false
     case .dropped:
@@ -625,6 +641,10 @@ final class IptvsPlayerViewController: UIViewController {
   /// playback".
   private func startPlayback(url: String, headers: [String: String]) {
     startBackstop.markLoaded(nowMs: IptvsPlayerViewController.nowMs())
+    // The mirror of the line above: the two backstops are always in opposite
+    // states, because the video-presence window only opens at the first frame —
+    // the same instant `startBackstop` closes.
+    videoBackstop.markLoaded()
     startWatchdogTicker()
     engine.load(url: url, headers: headers, subtitles: request.subtitles)
   }
@@ -655,8 +675,8 @@ final class IptvsPlayerViewController: UIViewController {
     liveReloadInFlight = false
   }
 
-  /// The level-triggered half of both watchdogs, port of
-  /// `HdrPlayerActivity.pollLiveReconnect` with the start backstop in front.
+  /// The level-triggered half of all three watchdogs, port of
+  /// `HdrPlayerActivity.pollLiveReconnect` with the two backstops around it.
   ///
   /// Reads engine facts rather than chrome fields: `handleProgressTick`
   /// overwrites `PlayerChromeState.isBuffering` from the engine twice a second,
@@ -672,6 +692,14 @@ final class IptvsPlayerViewController: UIViewController {
   /// `hasEverStarted` is false: the two own disjoint windows either side of that
   /// one monotonic fact, so at most one of them can act on any tick and the 8s
   /// and 10s figures never compete.
+  ///
+  /// `VideoPresenceBackstop` sits between them on the same construction — armed
+  /// only at the current load's first frame (so it cannot overlap the start
+  /// backstop) and acting only on `!isBuffering && !ended` (the complement of the
+  /// reconnect watchdog's trigger). Three deciders, three disjoint windows, at
+  /// most one action per tick, each boundary a boolean fact rather than a
+  /// threshold comparison. Its position in the sequence is documentation, not the
+  /// safety property.
   private func pollWatchdogs() {
     guard !finishing else { return }
     let nowMs = IptvsPlayerViewController.nowMs()
@@ -696,13 +724,17 @@ final class IptvsPlayerViewController: UIViewController {
       break
     }
 
+    // The second detection shape, in the window neither of the other two can
+    // see. `reportEngineFailed` tears down and dismisses, so return immediately.
+    if pollVideoPresence(nowMs: nowMs) { return }
+
     // VOD has nothing else on this ticker: the reconnect watchdog is inert for
-    // VOD by construction, so don't even poll it. Once the backstop disarms —
-    // first frame, or a fired decision — stop the ticker rather than run it at
-    // 2 Hz for the length of a film; a later Retry re-arms both through
-    // `startPlayback`.
+    // VOD by construction, so don't even poll it. Once *both* backstops have
+    // settled — first frame plus a picture, a fired decision, or the
+    // video-presence give-up — stop the ticker rather than run it at 2 Hz for
+    // the length of a film; a later Retry re-arms both through `startPlayback`.
     guard request.isLive else {
-      if !startBackstop.isArmed { stopWatchdogTicker() }
+      if !startBackstop.isArmed, !videoBackstop.isArmed { stopWatchdogTicker() }
       return
     }
 
@@ -722,6 +754,61 @@ final class IptvsPlayerViewController: UIViewController {
     case .reconnect:
       startLiveReload(showsReconnecting: true)
     }
+  }
+
+  /// docs/ios.md's **second** `engineFailed` detection shape: playback is
+  /// healthy, the stream promised video, and nothing has ever appeared on the
+  /// layer. Returns `true` when it fired, in which case the controller is already
+  /// tearing down and the caller must stop touching it.
+  ///
+  /// The `isArmed` guard is not just an optimisation: it keeps the AVFoundation
+  /// reads below off the ticker for the whole of a normal film, since the window
+  /// settles as soon as a picture appears.
+  private func pollVideoPresence(nowMs: Int64) -> Bool {
+    guard videoBackstop.isArmed else { return false }
+    let action = videoBackstop.poll(
+      // Per-item, not `hasEverStarted`: the question is whether *this* item is
+      // producing playback, which is exactly the boundary `startBackstop` uses.
+      isPlaying: engine.hasStarted,
+      isBuffering: engine.isBuffering || liveDropped,
+      ended: engine.hasEnded,
+      evidence: engine.declaredVideoEvidence,
+      isPresentingVideo: isPresentingVideo,
+      isSuppressed: isPictureSuppressed,
+      nowMs: nowMs
+    )
+    guard action == .handOffEngine else { return false }
+    reportEngineFailed(reason: VideoPresenceBackstop.engineFailedReason)
+    return true
+  }
+
+  /// Any sign that a real picture exists, from the two independent facts iOS
+  /// offers — **either one settles the window**, because the failure being
+  /// detected is "never rendered", not "stopped rendering".
+  ///
+  /// `presentationSize` is a property of the *item* and `isReadyForDisplay` a
+  /// property of the *layer*; requiring both to say "nothing" is what keeps a
+  /// stream that renders in some way the other read misses from being handed off.
+  private var isPresentingVideo: Bool {
+    engine.presentationSize != .zero || videoView.playerLayer.isReadyForDisplay
+  }
+
+  /// The picture is legitimately somewhere other than this layer.
+  ///
+  /// Each of these makes a working video stream look picture-less from here, and
+  /// handing off in any of them would be actively harmful — mpv has neither PiP
+  /// nor AirPlay, so the "fix" would remove the very feature in use. Suppression
+  /// only blocks firing; it never extends the window, so a load that spends its
+  /// whole evaluation window suppressed gives up unjudged instead of firing the
+  /// moment the user comes back.
+  private var isPictureSuppressed: Bool {
+    if pictureInPictureActive || dismissedForPictureInPicture { return true }
+    if engine.isExternalPlaybackActive { return true }
+    // A backgrounded app is not decoding video (background *audio* is the mode
+    // this app declares). `nil` — no plugin to ask — reads as "active", the same
+    // absence-is-not-a-veto rule `decideIosFallbackAction` applies to its own
+    // native opinions.
+    return !(IptvsIosPlayerPlugin.current?.currentHostVisibility().appActive ?? true)
   }
 
   /// Reloads the live stream **through a fresh locator**.
@@ -1516,21 +1603,26 @@ final class IptvsPlayerViewController: UIViewController {
   /// `nativeClosed`: the Dart route has to survive to host the mpv surface, and
   /// `_finishNativePlayback` would pop it.
   ///
-  /// Two of docs/ios.md's three detection shapes arrive here: a hard
-  /// `AVPlayerItem.status == .failed` via `AvPlayerEngine.onFatalError`, and
-  /// **never-started-within-10s** via `PlaybackStartBackstop` on the watchdog
-  /// ticker. They are distinguishable downstream only by `reason`, which is why
-  /// that stays a short machine code.
+  /// All three of docs/ios.md's detection shapes arrive here, distinguishable
+  /// downstream **only by `reason`** — which is why that stays a short machine
+  /// code rather than error text:
   ///
-  /// **Shape 2 (ready-but-no-video-track) is NOT implemented** — an earlier
-  /// version of this comment claimed it was. There is no such detector anywhere
-  /// in the plugin, and `PlaybackStartBackstop` does not cover it: an audio-only
-  /// item does reach `.playing`, so `hasEverStarted` latches and the backstop
-  /// disarms. The symptom is a black screen with audio, indefinitely. It is
-  /// deliberately unbuilt rather than overlooked — the obvious detector
-  /// ("playing but `presentationSize == .zero`") misfires on legitimately
-  /// audio-only content, which `selectIosEngine` rule 3 routes here on purpose
-  /// (`m4a`, `mp3`, `aac`). Tracked separately; it needs a decision, not code.
+  /// 1. a hard `AVPlayerItem.status == .failed` before anything played, via
+  ///    `AvPlayerEngine.onFatalError` (`item-failed`, `failed-to-play-to-end`,
+  ///    `invalid-url`, or `domain:code`);
+  /// 2. **ready but no picture** — healthy playback, video declared, nothing ever
+  ///    rendered — via `VideoPresenceBackstop` (`no-video-picture`);
+  /// 3. **never started within 10s** via `PlaybackStartBackstop`
+  ///    (`no-first-start`).
+  ///
+  /// Shape 2 was specified and deliberately left unbuilt for a while, because the
+  /// obvious detector ("playing but `presentationSize == .zero`") misfires on
+  /// legitimately audio-only content, which `selectIosEngine` rule 3 routes here
+  /// on purpose (`m4a`, `mp3`, `aac`, and radio channels served as audio-only
+  /// HLS). It is safe now only because it requires **positive evidence that video
+  /// was promised** (`AvPlayerEngine.declaredVideoEvidence`) rather than inferring
+  /// failure from an absent picture; see that property and
+  /// `VideoPresenceBackstop`'s type doc.
   private func reportEngineFailed(reason: String) {
     guard !finishing else { return }
     // **Handing off is only possible while there is somewhere to hand off to.**

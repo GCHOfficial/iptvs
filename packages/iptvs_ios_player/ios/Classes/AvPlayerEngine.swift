@@ -126,6 +126,13 @@ final class AvPlayerEngine {
   /// completing is a legitimate end.
   private(set) var hasEnded = false
 
+  /// Cached answer for ``declaredVideoEvidence``, reset by every load.
+  ///
+  /// `.unknown` doubles as "not answered yet", which is why only a *conclusive*
+  /// read is stored: an early tick on an item whose tracks/variants have not
+  /// loaded must not freeze the answer.
+  private var videoEvidence: DeclaredVideoEvidence = .unknown
+
   private var itemObservations: [NSKeyValueObservation] = []
   private var playerObservations: [NSKeyValueObservation] = []
   private var notificationTokens: [NSObjectProtocol] = []
@@ -171,6 +178,9 @@ final class AvPlayerEngine {
     hasStarted = false
     isBuffering = true
     hasEnded = false
+    // Per-item, like `hasStarted`: a reload builds a whole new `AVPlayerItem`,
+    // and "does this item declare video" is a fact about *that* item.
+    videoEvidence = .unknown
 
     var options: [String: Any] = [:]
     if !headers.isEmpty { options[AvPlayerEngine.httpHeaderFieldsKey] = headers }
@@ -227,6 +237,83 @@ final class AvPlayerEngine {
   /// ratio both read this.
   var presentationSize: CGSize {
     player.currentItem?.presentationSize ?? .zero
+  }
+
+  /// Whether AVPlayer is sending this item to an external device (AirPlay).
+  ///
+  /// Read only by ``IptvsPlayerViewController``'s video-presence backstop, as a
+  /// *suppression*: during external playback the local `AVPlayerLayer` renders
+  /// nothing and the item's presentation size can legitimately stay zero on a
+  /// perfectly good video stream. Firing the mpv handoff there would move an
+  /// AirPlaying stream onto an engine with no AirPlay at all (docs/ios.md "Known
+  /// parity gaps").
+  var isExternalPlaybackActive: Bool {
+    player.isExternalPlaybackActive
+  }
+
+  /// **Whether the current item declares a video track at all** — the positive
+  /// evidence `VideoPresenceBackstop` requires before it will ever hand off.
+  ///
+  /// This is what makes docs/ios.md's second detection shape shippable. The naive
+  /// form of that detector — "playing, but `presentationSize == .zero`" —
+  /// cannot distinguish a video stream that is not rendering from legitimately
+  /// audio-only content, which `selectIosEngine` rule 3 routes to this engine on
+  /// purpose (`m4a`, `mp3`, `aac`, and radio channels served as audio-only HLS).
+  ///
+  /// **Two sources, the same two `readStreamFormat` already has to use**, and no
+  /// new AVFoundation spellings beyond them:
+  ///
+  /// 1. Progressive assets answer through `AVPlayerItemTrack.assetTrack` →
+  ///    `formatDescriptions` → `CMFormatDescriptionGetMediaType`.
+  /// 2. HLS does not — `assetTrack` is documented `nil` there — so the ladder's
+  ///    `AVAssetVariant.videoAttributes` answers instead: a variant with video
+  ///    has attributes, an audio-only rendition has `nil`.
+  ///
+  /// Anything neither source can answer (most importantly an HLS **media**
+  /// playlist, which has no variants) stays ``DeclaredVideoEvidence/unknown`` and
+  /// therefore never fires. That is a deliberate coverage gap in the safe
+  /// direction: a missed detection is a black screen the user can back out of, a
+  /// false one is a working stream pinned to the SDR/no-PiP/no-AirPlay engine for
+  /// the rest of the session.
+  ///
+  /// Gated on ``hasStarted`` for the same reason ``readStreamFormat()`` is: these
+  /// synchronous accessors are views of asynchronously loaded state and can block
+  /// the main thread on an unloaded asset. After the first frame they are cache
+  /// hits.
+  var declaredVideoEvidence: DeclaredVideoEvidence {
+    if videoEvidence != .unknown { return videoEvidence }
+    guard !released, hasStarted, let item = player.currentItem else { return .unknown }
+    let evidence = AvPlayerEngine.readVideoEvidence(item)
+    videoEvidence = evidence
+    return evidence
+  }
+
+  private static func readVideoEvidence(_ item: AVPlayerItem) -> DeclaredVideoEvidence {
+    var sawFormatDescriptions = false
+    for track in item.tracks {
+      guard let assetTrack = track.assetTrack else { continue }
+      let descriptions = assetTrack.formatDescriptions
+        .compactMap { AvPlayerEngine.formatDescription($0) }
+      guard !descriptions.isEmpty else { continue }
+      sawFormatDescriptions = true
+      if descriptions.contains(where: {
+        CMFormatDescriptionGetMediaType($0) == kCMMediaType_Video
+      }) {
+        return .present
+      }
+    }
+    // Tracks that described themselves, none of them video: genuinely audio-only.
+    if sawFormatDescriptions { return .absent }
+
+    // The HLS route. `variants` is on `AVURLAsset`, not `AVAsset` — every item
+    // this engine builds carries one, so a failed cast means `load` changed.
+    guard let asset = item.asset as? AVURLAsset else { return .unknown }
+    let variants = asset.variants
+    guard !variants.isEmpty else { return .unknown }
+    // `contains(where:)` spelled out rather than as a trailing closure: a
+    // trailing closure immediately followed by `?` is exactly the shape Swift's
+    // parser is unreliable about, and there is no local toolchain to find out.
+    return variants.contains(where: { $0.videoAttributes != nil }) ? .present : .absent
   }
 
   /// Tears everything down. Idempotent, and safe to call from `deinit`.

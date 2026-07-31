@@ -26,13 +26,13 @@ public enum PlaybackStartAction: Equatable, Sendable {
 /// **"never started within ~10s of open"** — plus the bound that stops a
 /// *reload* of an already-proven stream from hanging silently.
 ///
-/// The other two shapes are edge-triggered facts `AvPlayerEngine` already
-/// reports (`AVPlayerItem.status == .failed`, and ready-but-no-video-track).
-/// This one is the absence of a fact, so it needs a clock, and the clock is
-/// polled from the same 500 ms ticker the live reconnect watchdog runs on
-/// rather than from its own `Timer`: one ticker means the two decisions are
-/// evaluated in a fixed order on the same instant instead of racing two
-/// independent timers.
+/// Shape 1 is an edge-triggered fact `AvPlayerEngine` reports outright
+/// (`AVPlayerItem.status == .failed`). This one and shape 2
+/// (``VideoPresenceBackstop``) are both the *absence* of a fact, so they need a
+/// clock, and the clock is the same 500 ms ticker the live reconnect watchdog
+/// runs on rather than a `Timer` each: one ticker means the decisions are
+/// evaluated in a fixed order on the same instant instead of racing independent
+/// timers.
 ///
 /// ## Why this and `LiveReconnectWatchdog` can never fight
 ///
@@ -57,6 +57,11 @@ public enum PlaybackStartAction: Equatable, Sendable {
 /// So the numbers never compete: on any given tick at most one of the two can
 /// return a non-`wait` action, and which one is decided by a fact, not by a
 /// threshold comparison.
+///
+/// ``VideoPresenceBackstop`` is a **third** window on the same construction,
+/// not an exception to it: it is armed only at the current load's first frame —
+/// the same instant this one disarms — and acts only on healthy playback, which
+/// is the complement of the reconnect watchdog's `isBuffering || ended`.
 public struct PlaybackStartBackstop: Equatable, Sendable {
   /// How long a load may go without producing playback.
   ///
