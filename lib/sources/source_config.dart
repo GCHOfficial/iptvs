@@ -78,6 +78,13 @@ class SourceConfig {
           host: fields['host']!,
           username: fields['username']!,
           password: fields['password']!,
+          // Per-source escape hatch over the platform default (`ts`, or `m3u8`
+          // on iOS so live routes to AVPlayer rather than the SDR mpv
+          // fallback — docs/ios.md "The `streamExtension` lever"). Needed
+          // because a panel that doesn't serve the chosen container answers
+          // 404, which is a dead channel rather than a degraded one; an
+          // unrecognised value falls back to the platform default.
+          streamExtension: settings['streamExtension']?.toString(),
           playlistExpiryHint: fields['playlistExpiryHint'],
           catchupTimezone: catchupTimezone,
           catchupOffsetMinutes: catchupOffsetMinutes,

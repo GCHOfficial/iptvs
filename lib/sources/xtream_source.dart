@@ -12,6 +12,42 @@ import 'expiry.dart';
 import 'source.dart';
 import 'xmltv.dart';
 
+/// Container extensions an Xtream panel can be asked for on the live and
+/// timeshift endpoints. Most panels serve both.
+const kXtreamStreamExtensions = <String>{'ts', 'm3u8'};
+
+/// Which container extension [XtreamSource] asks the panel for.
+///
+/// **`m3u8` on iOS, `ts` everywhere else — a per-platform default, not a
+/// feature.** `AVPlayer` cannot play a naked continuous MPEG-TS stream (TS
+/// segments *inside* an HLS playlist are fine), so on iOS a `.ts` locator routes
+/// straight to the libmpv fallback, which is permanently tone-mapped SDR with no
+/// PiP and no AirPlay (docs/ios.md "Known parity gaps"). Since the extension is
+/// something this source *chooses* rather than something the provider dictates,
+/// preferring `m3u8` there is what decides whether AVPlayer is the common path
+/// or a rare one — see docs/ios.md "The `streamExtension` lever".
+///
+/// This deliberately does **not** help Stalker, whose `create_link` returns
+/// whatever the portal chooses and is typically extension-less (and therefore
+/// routes to mpv by `selectIosEngine` rule 4), nor M3U playlists that name `.ts`
+/// directly.
+///
+/// [override] is the per-source escape hatch (`SourceConfig.settings`
+/// `streamExtension`). It exists because the failure mode of a wrong default is
+/// not graceful: a panel that does *not* serve `m3u8` answers 404, AVPlayer
+/// reports `engineFailed`, and Dart's fallback reopens the **same** 404 URL on
+/// mpv — so the channel is dead rather than merely SDR. Anything not in
+/// [kXtreamStreamExtensions] falls back to the platform default rather than
+/// being passed through to the URL builder.
+///
+/// Pure and platform-injected so `flutter test` can assert both branches from a
+/// desktop VM.
+String resolveXtreamStreamExtension(String? override, {required bool isIOS}) {
+  final value = override?.trim().toLowerCase() ?? '';
+  if (kXtreamStreamExtensions.contains(value)) return value;
+  return isIOS ? 'm3u8' : 'ts';
+}
+
 /// A [Source] backed by an Xtream Codes panel (host + username + password).
 ///
 /// Implements live TV; VOD and series can be layered on the same interface
@@ -27,7 +63,11 @@ class XtreamSource
   final String host; // e.g. http://host:port
   final String username;
   final String password;
-  final String streamExtension; // 'ts' (most compatible) or 'm3u8'
+  /// `'ts'` (most compatible) or `'m3u8'`. Resolved once at construction by
+  /// [resolveXtreamStreamExtension] — see there for the iOS default and the
+  /// per-source override.
+  final String streamExtension;
+
   /// Expiry carried by an M3U/get.php URL before it was converted to an
   /// Xtream source. Some panels expose it in the playlist URL but omit it
   /// from `player_api.php`.
@@ -58,14 +98,17 @@ class XtreamSource
     required this.host,
     required this.username,
     required this.password,
-    this.streamExtension = 'ts',
+    String? streamExtension,
     this.playlistExpiryHint,
     this.catchupTimezone,
     this.catchupOffsetMinutes,
     this.catchupMaxDays,
     this.debugApi,
     this.displayName,
-  });
+  }) : streamExtension = resolveXtreamStreamExtension(
+         streamExtension,
+         isIOS: Platform.isIOS,
+       );
 
   /// User-assigned label (from SourceConfig); preferred over the derived name.
   final String? displayName;
