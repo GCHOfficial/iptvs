@@ -268,9 +268,9 @@ class LiveTabView extends StatelessWidget {
   Widget _buildChannelList(
     BuildContext context,
     LiveLayoutMetrics metrics, {
+    required bool wide,
     EdgeInsets padding = const EdgeInsets.fromLTRB(12, 4, 12, 16),
   }) {
-    final wide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
     return Focus(
       focusNode: focus.channelsFocusNode,
       autofocus: true,
@@ -373,74 +373,87 @@ class LiveTabView extends StatelessWidget {
         ),
       );
     }
+    final size = MediaQuery.sizeOf(context);
     // Computed once here rather than per row in [_ChannelTile.build]: it is the
     // same value for every row (it only reads the window size), and resolving it
     // per row also made every row a MediaQuery dependent.
     final metrics = LiveLayoutMetrics.forSize(
-      MediaQuery.sizeOf(context),
+      size,
       compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
     );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (constraints.maxWidth < kWideLayoutMinWidth) {
-          return _buildChannelList(context, metrics);
-        }
-        return Padding(
-          padding: EdgeInsets.fromLTRB(
-            metrics.outerPadding,
-            4,
-            metrics.outerPadding,
-            8,
+    // **One width authority for the whole live tab.** Everything else that
+    // branches on "wide" reads the *window* width through `MediaQuery`:
+    // `ChannelListScreen._isWide()` (which the coordinator takes as its `isWide`
+    // callback, so it decides where Up escapes to and whether Left/Back reach
+    // the sidebar), `_play` (wide = preview-first, phone = straight to
+    // fullscreen), the long-press gate below, and `LiveLayoutMetrics.forSize`
+    // itself. This used to be a `LayoutBuilder` reading `constraints.maxWidth`
+    // instead — the body's *own* width, which the screen's `SafeArea` shrinks by
+    // the left/right system-bar and cutout insets in Android landscape. A window
+    // just over `kWideLayoutMinWidth` therefore rendered the **phone** layout
+    // while every other branch still believed it was wide, and that band was a
+    // dead zone: no preview panel and no long-press sheet (so the preview was
+    // unreachable), a tap starting an audible preview with nothing on screen to
+    // show it, and — worst — the Back ladder stalling forever at rung 2, because
+    // `focusCategories()` requested focus on a sidebar node that was never built.
+    // A body narrower than the window now simply renders the two-pane layout a
+    // little tighter, which is what the rest of the screen already assumes.
+    if (size.width < kWideLayoutMinWidth) {
+      return _buildChannelList(context, metrics, wide: false);
+    }
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        metrics.outerPadding,
+        4,
+        metrics.outerPadding,
+        8,
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: metrics.categoryPaneWidth,
+            // Only the category cursor + the sidebar's own focus repaint
+            // this pane; walking the channel list must not.
+            child: ListenableBuilder(
+              listenable: focus.categorySelection,
+              builder: (context, _) => _LiveCategoryPane(
+                categories: categories,
+                selectedCategoryId: selectedCategoryId,
+                selectedIndex: focus.selectedCategoryIndex,
+                focusNode: focus.categoriesFocusNode,
+                onKey: focus.handleCategoriesKey,
+                scrollController: categoryScrollController,
+                onSelected: onCategorySelected,
+                onSelectIndex: (i) => focus.selectCategory(i, reveal: false),
+                rowExtent: categoryRowExtent,
+              ),
+            ),
           ),
-          child: Row(
-            children: [
-              SizedBox(
-                width: metrics.categoryPaneWidth,
-                // Only the category cursor + the sidebar's own focus repaint
-                // this pane; walking the channel list must not.
-                child: ListenableBuilder(
-                  listenable: focus.categorySelection,
-                  builder: (context, _) => _LiveCategoryPane(
-                    categories: categories,
-                    selectedCategoryId: selectedCategoryId,
-                    selectedIndex: focus.selectedCategoryIndex,
-                    focusNode: focus.categoriesFocusNode,
-                    onKey: focus.handleCategoriesKey,
-                    scrollController: categoryScrollController,
-                    onSelected: onCategorySelected,
-                    onSelectIndex: (i) =>
-                        focus.selectCategory(i, reveal: false),
-                    rowExtent: categoryRowExtent,
+          SizedBox(width: metrics.paneGap),
+          Expanded(
+            child: Column(
+              children: [
+                // The panel follows the channel cursor (it shows the
+                // selected channel until a preview locks it) and its own
+                // controls' focus — but not which list holds the D-pad.
+                ListenableBuilder(
+                  listenable: focus.previewRegion,
+                  builder: (context, _) => _buildPreviewPanel(context, metrics),
+                ),
+                SizedBox(height: metrics.paneGap),
+                Expanded(
+                  child: _buildChannelList(
+                    context,
+                    metrics,
+                    wide: true,
+                    padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
                   ),
                 ),
-              ),
-              SizedBox(width: metrics.paneGap),
-              Expanded(
-                child: Column(
-                  children: [
-                    // The panel follows the channel cursor (it shows the
-                    // selected channel until a preview locks it) and its own
-                    // controls' focus — but not which list holds the D-pad.
-                    ListenableBuilder(
-                      listenable: focus.previewRegion,
-                      builder: (context, _) =>
-                          _buildPreviewPanel(context, metrics),
-                    ),
-                    SizedBox(height: metrics.paneGap),
-                    Expanded(
-                      child: _buildChannelList(
-                        context,
-                        metrics,
-                        padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
@@ -676,11 +689,34 @@ class _LivePreviewPanel extends StatelessWidget {
     required this.metrics,
   });
 
+  /// How this platform's pointer reads in the hints below. `deliberate` is a
+  /// *touch/remote* posture (Android today, iOS next), so this is "tap" wherever
+  /// the deliberate hints actually render; the desktop wording only exists so a
+  /// future non-deliberate/deliberate reshuffle can't silently start telling a
+  /// mouse user to tap.
+  static String get _pointerVerb =>
+      defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS
+      ? 'tap'
+      : 'click';
+
+  /// The hint under (or, when compact, over) the thumbnail.
+  ///
+  /// **It must never name an input the device doesn't have.** A `deliberate`
+  /// preview is started by OK *or* by a pointer — a tap on a channel row runs
+  /// the same `onPlayChannel` → `_play` path OK does, previewing first and
+  /// going fullscreen on the second activation. The old wording said only
+  /// "Press OK/Select", which on a touch tablet in landscape (wide layout, no
+  /// remote) read as an instruction the user could not follow even though
+  /// tapping a row worked. Kept short: the compact variant renders as a chip on
+  /// a ~170 px thumbnail and ellipsizes past roughly 22 characters.
   String? get _hint {
     if (previewActive && previewError == null) {
-      return 'Press OK/Select to play fullscreen';
+      return deliberate
+          ? 'OK or $_pointerVerb again for fullscreen'
+          : 'Press OK/Select to play fullscreen';
     }
-    if (deliberate) return 'Press OK/Select to preview';
+    if (deliberate) return 'OK or $_pointerVerb to preview';
     return null;
   }
 
