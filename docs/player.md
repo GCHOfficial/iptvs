@@ -115,6 +115,19 @@ to the live edge; the LIVE badge greys when behind. Most control logic lives in 
 Dart `open` call passes `title`/`sourceName`/`isLive`/EPG now-next/headers/subtitles, and
 `MainActivity` calls back `nativeClosed` so the Dart route pops on exit.
 
+**"Go to live" re-resolves through the same single-flight gate the reconnect watchdog uses**
+(`ResolveGate` in `android/.../player/LiveResolve.kt`, `HdrPlayerActivity.withFreshLiveLocator`):
+the currently-held locator may already be spent (a Stalker `play_token` the portal killed), and
+two concurrent `create_link` calls would exceed a single-connection account, so whichever of "Go
+to live" or the watchdog gets there first owns the round trip and the other bails. This makes
+`pollLiveReconnect`'s early-return necessary, not just tidy: while a resolve is in flight, both
+`ended` and `isBuffering` read `false` (the engine sits in its terminal state with no further
+transition callback, and `reconnectLive` already cleared `ended` before the round trip started),
+which the 500ms progress ticker would otherwise read as "healthy" and use to clear the
+reconnecting chip and reset the backoff counter every single tick of the wait — so the ticker
+checks `resolveGate.inFlight` and returns immediately whenever a re-resolve already owns the next
+reload.
+
 The embedded media_kit top bar compacts EPG now/next into one ellipsized line. This keeps the
 overlay within short desktop/Linux video heights while retaining both programme labels; native
 Android/Windows overlays keep their existing platform-specific EPG layout.
@@ -143,8 +156,9 @@ requirement).
 
 ## iOS
 
-**Status: in progress — see docs/ios.md for the full design, decision record, and on-device test
-protocol.** iOS gets a native surface too, the same shape as Android and Windows:
+**Status: implemented; on-device validation pending — see docs/ios.md for the full design,
+decision record, and on-device test protocol.** iOS gets a native surface too, the same shape as
+Android and Windows:
 `IptvsPlayerViewController` (`packages/iptvs_ios_player/`) is a **presented** `UIViewController`
 owning an `AVPlayerLayer` — `.overFullScreen`, not `.fullScreen` (the latter delivers a Flutter
 `AppLifecycleState` transition to the preview-stop observer, the update flow, and the
@@ -197,10 +211,25 @@ docs/ios.md "Why not `AVPlayerViewController`").
   proof there is, since an off-screen route can't be tapped. One visible black beat on the happy
   path, on a route the routing rules already keep rare; see docs/ios.md "What routes to which
   engine" for the full gate design.
-- **`resolveAgain` round-trips on reconnect**, which Android's native watchdog currently does not
-  — see "Live auto-reconnect" below.
+- **`resolveAgain` round-trips on reconnect and "Go to live"**, single-flight with each other via
+  Swift's own gate — the same shape Android's watchdog now shares (see "Android" and "Live
+  auto-reconnect" below); iOS was designed with the round trip from the start rather than
+  retrofitted.
 - No hardware Back: the Back ladder is expressed through gesture + an explicit exit control — see
   the iOS paragraph in docs/tv-navigation.md's Back-ladder section.
+- **`setControlState` is no longer Windows-only** — `_drivesNativeControlState`
+  (`lib/player/player_screen.dart`) is true for Windows (once its HWND exists) *and* iOS (once
+  `IptvsPlayerViewController` owns playback), and the payload Dart pushes is split in two:
+  `_presentationControlState()` — title, source name, EPG now/next, `isLive`/`liveSynced`,
+  favorite state, `reconnecting` — is sent to **both** platforms, while the transport half
+  (`playing`, `positionMs`/`durationMs`, volume, track lists, speed, aspect, `_streamInfoPayload()`)
+  is appended **only for Windows**. iOS receives presentation fields exclusively because the
+  presented controller's own `AvPlayerEngine` is the transport-truth authority there — the
+  embedded `_player` sits idle reporting zeros while AVPlayer owns playback (the same reason
+  `_persistPlaybackPosition` is a no-op on that path), so pushing Dart's transport state would
+  overwrite the lock screen and chrome with a stopped player's numbers. On Windows the native HWND
+  renders *this* `_player` (mpv via a `vo` swap), so Dart genuinely is the transport authority
+  there and the full payload applies.
 - **PiP** needs `UIBackgroundModes = [audio]` (already required just to background audio at all —
   docs/ios.md) and the same lifecycle discipline as the Android shared-preview handoff: the
   app-pause observer must stop the **preview** engine, never the fullscreen one, or a muted
@@ -644,18 +673,26 @@ unwired or the resolve fails). **Four independent watchdogs** because the platfo
 different stacks:
 
 - **Android** in `HdrPlayerActivity` (its 500ms progress ticker watches `PlayerUiState`;
-  ExoPlayer network errors that leave it idle trigger an immediate reconnect). Its reload is a
-  plain retry of the same URL — it has **no** `resolveAgain`-equivalent re-resolve step, so a
-  portal-side `create_link` kill currently needs the user to back out and re-enter the channel
-  before a fresh locator is issued.
-- **iOS**, Swift-side and Kotlin-shaped: `IptvsPlayerViewController` (not yet written — see the
-  iOS section above) is designed to run its own progress watchdog against `ReconnectPolicy`
-  (`packages/iptvs_ios_player/ios/Core/Sources/IptvsPlayerCore/ReconnectPolicy.swift`, already
-  landed) — same constants, same `minGapMs` shape as Android's Kotlin `ReconnectPolicy` and
-  Dart's `reconnectMinGapMs`, so backoff timing is identical regardless of engine. Unlike
-  Android, its reload is planned to go through Dart's `PlayerScreen.resolveAgain` round-trip
-  first, so it never retries a locator it already knows just failed — a real backport
-  opportunity for the Android path, not yet done.
+  ExoPlayer network errors that leave it idle trigger an immediate reconnect). Its reload
+  **re-resolves first** through `withFreshLiveLocator`/`ResolveGate`
+  (`android/.../player/LiveResolve.kt`) — a Stalker `play_token` the portal already killed can
+  never work a second time — single-flight with "Go to live" (see "Android" above) and falling
+  back to the held locator if the round trip times out or fails.
+- **iOS**, Swift-side and Kotlin-shaped: `IptvsPlayerViewController` runs its own progress
+  watchdog (`LiveReconnectWatchdog`,
+  `packages/iptvs_ios_player/ios/Core/Sources/IptvsPlayerCore/LiveReconnectWatchdog.swift`) —
+  same constants, same `minGapMs` shape as Android's Kotlin `ReconnectPolicy` and Dart's
+  `reconnectMinGapMs`, so backoff timing is identical regardless of engine. Its reload
+  **re-resolves first**, through the same `resolveAgain` round trip live opens use (a
+  `FreshLocator` parsed from Dart's reply, falling back to the held locator on timeout/failure —
+  see docs/ios.md). Two iOS-specific traits: the watchdog is **inert before the stream's first
+  frame** (`hasEverStarted`) — that pre-start window belongs entirely to
+  `PlaybackStartBackstop` — and a live stream that never starts within 10s hands off to the mpv
+  fallback (`engineFailed`, `reason: "no-first-start"`) rather than reconnecting on the usual
+  8s/16s/24s/30s backoff cadence, because a stream that has never once played is indistinguishable
+  from an unplayable container. Once a stream *has* played, a later drop reconnects exactly like
+  every other platform's watchdog — switching engines at that point would permanently downgrade a
+  working HDR channel to tone-mapped SDR over what is really just a network blip.
 - **Windows/embedded** in `player_screen.dart` (a 1s `Timer` watching media_kit's buffering/error
   streams — the Dart `_player` only plays on these paths). A **clean server-side EOF** needs its
   own trigger here: mpv maps it to `eof-reached`, which media_kit surfaces as `completed=true`
@@ -714,6 +751,18 @@ open/close cycles stay balanced.
 surface). A VOD stream that errors/ends does *not* auto-reconnect (contract); mpv's
 `--keep-open=yes` holds the last frame and Back (ESC / overlay back → `quit`) exits cleanly. A
 terminal VOD error therefore looks like a frozen last frame from which Back returns to the list.
+
+**iOS is the opposite of Linux native here: it does have a native terminal error/Retry overlay.**
+`IptvsPlayerViewController.surfaceTerminalError` puts up the same three things
+`PlayerErrorOverlay` (`player_overlay.dart`) does — scrim, message, Back + Retry — deliberately a
+mirror rather than a new design, reached only where nothing else can act: a VOD hard failure (live
+reconnects instead), a VOD reload that never comes back, and an `engineFailed` that has no plugin
+channel left to hand off through (see docs/ios.md "New contracts"). Retry goes through the same
+`resolveAgain` round trip a live reload uses rather than replaying the original request URL —
+Dart leaves `resolveAgain` unwired for VOD (only live channels pass it,
+`channel_list_screen.dart`), so `_freshLiveStream` answers with the original stream, which is
+exactly what a VOD retry wants, at the cost of one extra method call and no VOD-specific branch on
+the Swift side.
 
 ## Headers and logging
 
@@ -800,13 +849,20 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   doesn't count), decremented on real destroys; `windowsOverlayDibs` — the cached overlay
   back-buffer DIB (0/1), created lazily on first paint and freed in `DestroyNativeControls`.
   Platform-thread-confined plain ints.
-- **Swift** (`packages/iptvs_ios_player/`, planned alongside `IptvsPlayerViewController`, debug
-  builds only): `iosAvPlayers`, `iosPlayerViews`, `iosPipControllers`, `iosTimeObservers`,
-  `iosAudioClients`. `iosTimeObservers` earns its own counter rather than folding into
-  `iosAvPlayers` because an un-removed periodic time observer (`AVPlayer.addPeriodicTimeObserver`)
-  **retains the `AVPlayer` itself for the lifetime of the observer** — the classic AVFoundation
-  leak, and one that would otherwise show up only as "the player never deallocates," not as an
-  obviously-linked counter mismatch.
+- **Swift** (`IosDebugCounters.swift`, `packages/iptvs_ios_player/`, landed, `#if DEBUG` only):
+  `iosAvPlayers` (`AvPlayerEngine` init ↔ idempotent `release()`), `iosPlayerControllers`
+  (`IptvsPlayerViewController` init ↔ deinit — stays at 1 for the whole of a PiP session, since
+  the plugin holds a deliberate strong reference so the layer keeps feeding the PiP window),
+  `iosPipControllers` (`IosPipController` init ↔ deinit), `iosTimeObservers`, `iosAudioClients`
+  (a *set size* — `IosDebugCounters.set`, mirroring `AudioSessionClients.count` directly rather
+  than an increment/decrement pair, so a claim that's never released is visible as a nonzero
+  settled count instead of silently drifting). `iosTimeObservers` earns its own counter rather
+  than folding into `iosAvPlayers` because an un-removed periodic time observer
+  (`AVPlayer.addPeriodicTimeObserver`) **retains the `AVPlayer` itself for the lifetime of the
+  observer** — the classic AVFoundation leak, and one that would otherwise show up only as "the
+  player never deallocates," not as an obviously-linked counter mismatch. A plain `NSLock`
+  guards the map rather than main-thread confinement, because `AvPlayerEngine.deinit`/
+  `IosPipController.deinit` are not guaranteed to run on the main queue.
 
 `ResourceCounters.snapshot()` merges the Dart counts with the natives' reply to a `debugCounters`
 method on `iptvs/native_hdr_player`, called on **Android, Windows, and iOS**

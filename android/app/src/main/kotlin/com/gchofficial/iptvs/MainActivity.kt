@@ -324,6 +324,40 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
+     * Asks the Dart player route for a freshly resolved live locator and hands
+     * the raw reply to [onReply] — `{url, headers}` on success, **null** for
+     * every failure shape (no channel yet, no/superseded Dart handler, an
+     * unmounted route, a platform error, `notImplemented`). The caller decides
+     * the fallback; see [com.gchofficial.iptvs.player.ResolveAgainReply].
+     *
+     * Exists because [HdrPlayerActivity] is a separate Activity with no Flutter
+     * engine of its own: this MethodChannel lives here, and both Activities run
+     * on the same process main thread, which is where MethodChannel calls and
+     * their replies must happen.
+     *
+     * The reply is never logged: a Dart-side resolve error message can embed
+     * the provider URL, and therefore credentials.
+     */
+    fun requestFreshLiveLocator(onReply: (Any?) -> Unit) {
+        if (!::nativeHdrChannel.isInitialized) {
+            onReply(null)
+            return
+        }
+        nativeHdrChannel.invokeMethod(
+            "resolveAgain",
+            null,
+            object : MethodChannel.Result {
+                override fun success(result: Any?) = onReply(result)
+
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) =
+                    onReply(null)
+
+                override fun notImplemented() = onReply(null)
+            },
+        )
+    }
+
+    /**
      * Fails closed unless [apk] is a cache-owned APK for this exact application
      * and is signed by the same certificate as the installed build. Dart has
      * already verified the signed release-manifest digest; this native check

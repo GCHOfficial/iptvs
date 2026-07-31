@@ -13,6 +13,47 @@ import XCTest
 /// only thing keeping the two implementations from drifting.
 final class PlayerChromeStateTests: XCTestCase {
 
+  // MARK: - Terminal error surface
+
+  func testFreshStateHasNoTerminalError() {
+    let state = PlayerChromeState()
+    XCTAssertNil(state.errorMessage)
+    XCTAssertFalse(state.showErrorOverlay)
+  }
+
+  /// The error surface renders **outside** the `controlsVisible` gate, like the
+  /// reconnect chip: a failure the viewer only learns about if they happen to
+  /// tap first is indistinguishable from the silent hang it exists to replace.
+  func testErrorOverlayIsIndependentOfControlVisibility() {
+    var state = PlayerChromeState()
+    state.errorMessage = PlayerErrorMessages.playbackStopped
+    state.setControlsVisible(false)
+    XCTAssertTrue(state.showErrorOverlay)
+  }
+
+  /// "Reconnecting…" promises a retry is under way; a terminal error says it
+  /// isn't. They must never render together, and the error wins.
+  func testReconnectChipYieldsToATerminalError() {
+    var state = PlayerChromeState()
+    state.reconnecting = true
+    XCTAssertTrue(state.showReconnectChip)
+    state.errorMessage = PlayerErrorMessages.cannotPlay
+    XCTAssertFalse(state.showReconnectChip)
+    XCTAssertTrue(state.showErrorOverlay)
+  }
+
+  /// Fixed strings, never an `AVError` description — those interpolate the
+  /// failing URL, and provider URLs carry credentials in the query string and in
+  /// path segments (CLAUDE.md: secrets must never reach on-screen errors).
+  func testErrorMessagesCarryNoLocatorShapedText() {
+    for message in [PlayerErrorMessages.playbackStopped, PlayerErrorMessages.cannotPlay] {
+      XCTAssertFalse(message.isEmpty)
+      XCTAssertFalse(message.contains("://"))
+      XCTAssertFalse(message.contains("http"))
+    }
+    XCTAssertNotEqual(PlayerErrorMessages.playbackStopped, PlayerErrorMessages.cannotPlay)
+  }
+
   // MARK: - Live vs VOD
 
   /// The CLAUDE.md invariant, pinned at the one place the iOS chrome decides

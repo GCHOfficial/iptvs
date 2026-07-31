@@ -89,12 +89,33 @@ final class AvPlayerEngine {
 
   // MARK: - State
 
-  /// True once the item has actually produced playback. This is the iOS
-  /// counterpart of Linux's `_linuxNativeStarted` gate, and it exists for the
+  /// True once the **current item** has actually produced playback. This is the
+  /// iOS counterpart of Linux's `_linuxNativeStarted` gate, and it exists for the
   /// same reason: an `AVPlayerItem` reports `isPlaybackBufferEmpty == true`
   /// before it has loaded anything, so reporting that as a stall would start the
   /// reconnect clock on every single open.
+  ///
+  /// Reset by every ``load(url:headers:subtitles:)``, because it gates per-item
+  /// reads (`readStreamFormat`, which must wait for the *new* item's tracks).
   private(set) var hasStarted = false
+
+  /// True once AVPlayer has produced playback at **any** point in this engine's
+  /// life — and never cleared, not even by a reload.
+  ///
+  /// The discriminator the whole failure taxonomy hangs off. "AVPlayer can play
+  /// this container" is a fact about the content, and a reload does not
+  /// un-prove it, so per-item ``hasStarted`` is the wrong thing to ask:
+  ///
+  /// - a failure with this **false** is an unplayable container → `onFatalError`
+  ///   → the `engineFailed` handoff to mpv;
+  /// - a failure with this **true** is a network drop → `.dropped` → the live
+  ///   reconnect watchdog (or, for VOD, the terminal error surface).
+  ///
+  /// Keying the split on `hasStarted` instead would misread every failed live
+  /// reconnect as an unplayable container and permanently downgrade a working
+  /// HDR channel to tone-mapped SDR, because `_handleIosEngineFailed` writes
+  /// the content id into `IosEngineMemo` for the rest of the session.
+  private(set) var hasEverStarted = false
 
   /// Whether the buffer is currently empty (post-start). Step 8's watchdog reads
   /// this the way `HdrPlayerActivity.pollLiveReconnect` reads
@@ -304,6 +325,9 @@ final class AvPlayerEngine {
   private func handleTimeControlStatus(_ status: AVPlayer.TimeControlStatus) {
     guard !released, status == .playing, !hasStarted else { return }
     hasStarted = true
+    // Never reset — see the property doc. This is the moment the host's start
+    // backstop disarms and its live reconnect watchdog arms.
+    hasEverStarted = true
     isBuffering = false
     onStateEvent?(.started, nil)
   }
@@ -343,18 +367,25 @@ final class AvPlayerEngine {
 
   /// The one discriminator that matters in this file.
   ///
-  /// A hard failure **before anything played** is the fingerprint of a container
-  /// AVPlayer could not actually handle, and the honest response is to hand the
-  /// stream to mpv (`engineFailed`). A failure **after** playback started is a
-  /// network drop — the stream was demonstrably playable a moment ago — and
-  /// switching engines for it would permanently downgrade a working HDR channel
-  /// to tone-mapped SDR for the rest of the session, because
+  /// A hard failure **before anything ever played** is the fingerprint of a
+  /// container AVPlayer could not actually handle, and the honest response is to
+  /// hand the stream to mpv (`engineFailed`). A failure **after** playback
+  /// started is a network drop — the stream was demonstrably playable a moment
+  /// ago — and switching engines for it would permanently downgrade a working
+  /// HDR channel to tone-mapped SDR for the rest of the session, because
   /// `_handleIosEngineFailed` writes the content id into `IosEngineMemo`.
+  ///
+  /// **``hasEverStarted``, not ``hasStarted``.** A live reconnect reload builds a
+  /// fresh `AVPlayerItem`, so the per-item flag is false again the instant the
+  /// watchdog retries — and a portal that is simply down would have had every
+  /// failed retry read as "unplayable container" and thrown a working channel at
+  /// mpv on the *first* one. The engine-lifetime flag is what makes the two
+  /// cases distinguishable at all.
   private func handleFailure(_ error: NSError?, notification: Bool) {
     guard !released else { return }
     let code = error.map { PlaybackEventPayload.errorCode(domain: $0.domain, code: $0.code) }
       ?? (notification ? "failed-to-play-to-end" : "item-failed")
-    if hasStarted {
+    if hasEverStarted {
       onStateEvent?(.dropped, code)
     } else {
       onFatalError?(code)

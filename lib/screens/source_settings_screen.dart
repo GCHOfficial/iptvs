@@ -4,6 +4,7 @@ import '../data/app_database.dart';
 import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import '../sources/xtream_source.dart' show kXtreamStreamExtensions;
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -24,6 +25,17 @@ Set<String> bulkToggleHidden(
     next.removeAll(affected);
   }
   return next;
+}
+
+/// The next value in the [_StreamFormatTile] cycle: unset (platform default)
+/// → `ts` → `m3u8` → unset. Pure so the tri-state cycle stays unit-testable;
+/// [current] outside `{null, 'ts', 'm3u8'}` (including a value this screen
+/// never wrote) is treated as unset, matching
+/// `resolveXtreamStreamExtension`'s own fallback.
+String? nextStreamExtension(String? current) {
+  const order = <String?>[null, 'ts', 'm3u8'];
+  final idx = order.indexOf(current);
+  return order[((idx < 0 ? 0 : idx) + 1) % order.length];
 }
 
 /// Per-source preferences. The first capability is enabling/disabling
@@ -205,6 +217,29 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     ).showSnackBar(const SnackBar(content: Text('Catch-up overrides saved')));
   }
 
+  /// The explicit override, or `null` for "unset" (platform default). Any
+  /// stored value outside [kXtreamStreamExtensions] — including one this
+  /// screen never wrote — is treated as unset too, matching
+  /// `resolveXtreamStreamExtension`'s own fallback.
+  String? get _streamExtension {
+    final v = _config.settings['streamExtension']?.toString();
+    return kXtreamStreamExtensions.contains(v) ? v : null;
+  }
+
+  /// Cycles Automatic → .ts → .m3u8 → Automatic. Only ever called from a user
+  /// tap, so opening this screen never writes a value that pins a source away
+  /// from tracking the platform default.
+  Future<void> _cycleStreamExtension() async {
+    final next = nextStreamExtension(_streamExtension);
+    final settings = <String, dynamic>{..._config.settings};
+    if (next == null) {
+      settings.remove('streamExtension');
+    } else {
+      settings['streamExtension'] = next;
+    }
+    await _save(_config.copyWith(settings: settings));
+  }
+
   bool get _hasAnyMatch =>
       ContentKind.values.any((k) => _filtered(k).isNotEmpty);
 
@@ -325,6 +360,27 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                       ),
                     ),
                   ),
+                  if (_config.kind == SourceKind.xtream) ...[
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                      child: Text(
+                        'Live stream format',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                      child: Text(
+                        'Some providers only serve one stream format — '
+                        'switch this if channels fail to load.',
+                        style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                      ),
+                    ),
+                    _StreamFormatTile(
+                      value: _streamExtension,
+                      onTap: _cycleStreamExtension,
+                    ),
+                  ],
                   _section('Live TV', ContentKind.live),
                   _section('Movies', ContentKind.movie),
                   _section('Series', ContentKind.series),
@@ -429,6 +485,71 @@ class _BulkButton extends StatelessWidget {
               style: TextStyle(
                 color: AppColors.textHi,
                 fontSize: dense ? 12 : 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "OK to cycle" tri-state row for the per-source Xtream stream format
+/// override (`SourceConfig.settings['streamExtension']`). A single focus
+/// stop, like [_CategoryToggleRow]; OK/tap cycles Automatic → .ts → .m3u8.
+/// [value] is `null` for "unset" — kept distinct from an explicit choice so
+/// merely opening this screen never pins a source away from the platform
+/// default.
+class _StreamFormatTile extends StatelessWidget {
+  final String? value;
+  final VoidCallback onTap;
+
+  const _StreamFormatTile({required this.value, required this.onTap});
+
+  String get _valueLabel => switch (value) {
+    'ts' => 'Always .ts',
+    'm3u8' => 'Always .m3u8',
+    _ => 'Automatic',
+  };
+
+  String get _hint => switch (value) {
+    'ts' => 'Live channels always request the .ts format.',
+    'm3u8' => 'Live channels always request the .m3u8 format.',
+    _ => "Uses this device's default format.",
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      scrollOnFocus: false,
+      debugLabel: 'sourceSettings.streamFormat',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.swap_horiz, size: 20, color: AppColors.textLo),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Stream format'),
+                  Text(
+                    _hint,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              _valueLabel,
+              style: const TextStyle(
+                color: AppColors.accent,
                 fontWeight: FontWeight.w600,
               ),
             ),
