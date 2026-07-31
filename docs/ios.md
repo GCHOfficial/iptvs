@@ -4,7 +4,7 @@
 document records the scope, the two distribution paths, and the player design (a single
 full-hybrid release — no staged `v1`/`v2` split; see "Shipping plan" under Player).
 `IptvsPlayerViewController` **exists and works**: all nine implementation steps of the native
-player are merged, with 143 Swift `Core` tests and 678 Dart tests green, plus a CI probe
+player are merged, with 184 Swift `Core` tests and 678 Dart tests green, plus a CI probe
 (`.github/workflows/ios-build-probe.yml`) that builds an installable unsigned `.ipa` for a real
 device *and* a separate `flutter build ios --debug --simulator` build.
 
@@ -38,7 +38,7 @@ engine shim (`AvPlayerEngine`), PiP (`IosPipController`), and the audio session
 (`UIApplication` notification observers, `currentHostVisibility()`, `emitEngineFailed`, the
 `IptvsPipStateProviding` registration point), all backed by the Foundation-only `Core` SwiftPM
 target's pure logic (`HostVisibility`/`HostVisibilityTracker`/`PlaybackEventPayload`,
-`LiveReconnectWatchdog`, `PlaybackStartBackstop`, `AudioSessionPolicy`, `PlaybackStateEvents`,
+`LiveReconnectWatchdog`, `PlaybackStartBackstop`, `VideoPresenceBackstop`, `AudioSessionPolicy`, `PlaybackStateEvents`,
 `PlayerChromeState`, `PlayerOpenRequest`, `StreamInfoMapping`, `NowPlayingPolicy`,
 `PictureInPicturePolicy`, `ReconnectPolicy`, `EngineSelection`, `PlayerBackPolicy`,
 `DynamicRangeLabel`, `BadgeFormatting`), covered by `swift test`. **What is not done is a device
@@ -299,32 +299,95 @@ than a nicety — defaulting Xtream to `m3u8` on iOS is what actually makes AVPl
 the common path.
 
 Container sniffing can still be wrong — a `.m3u8` AVPlayer accepts and then chokes on. A
-**runtime fallback** is therefore mandatory, not optional. **Two of the three detection shapes
-this design specifies are implemented; the third is not, and the gap is real:**
+**runtime fallback** is therefore mandatory, not optional. **All three detection shapes this
+design specifies are implemented:**
 
 1. **Hard failure** — `AVPlayerItem.status == .failed` before anything ever played
    (`AvPlayerEngine.handleFailure`, gated on `!hasEverStarted`) or a
-   `failedToPlayToEndTimeNotification` with the same gate. **Implemented.**
-2. **Ready-but-no-video-track** — an item that reaches `.readyToPlay`/starts producing a timebase
-   but never actually has a video track (an audio-only response, a manifest AVPlayer parses but
-   can't render). **Not implemented.** There is no code anywhere in `AvPlayerEngine.swift` that
-   inspects whether a played item actually has a video track — `hasStarted`/`hasEverStarted`
-   latches purely from `AVPlayer.TimeControlStatus == .playing`
-   (`AvPlayerEngine.handleTimeControlStatus`), and AVPlayer reaches `.playing` perfectly happily
-   on audio-only content. **Consequence, stated plainly: an audio-only response to a video
-   request produces a black screen with working audio, forever.** `hasEverStarted` latches true,
-   which disarms `PlaybackStartBackstop` for that load (it only owns the *pre-start* window) and
-   hands the load to `LiveReconnectWatchdog`, which sees healthy, non-buffering, non-ended
-   playback and has nothing to reconnect. Nothing ever calls `engineFailed`; nothing ever hands
-   off to mpv. (One stale comment in `IptvsPlayerViewController.swift` — "a ready-but-no-video-track
-   item via `AvPlayerEngine.onFatalError`" — claims this shape is wired; it is not, and should not
-   be trusted as evidence it exists.) **Tracked separately, not fixed by this pass.**
+   `failedToPlayToEndTimeNotification` with the same gate. `reason`: `item-failed`,
+   `failed-to-play-to-end`, `invalid-url`, or `domain:code`.
+2. **Ready but no picture** (`VideoPresenceBackstop`, `reason: "no-video-picture"`) — an item that
+   reaches `.readyToPlay`, produces a timebase, and renders **nothing**. The realistic trigger on
+   this app's providers is a container AVFoundation parses and *partly* decodes: an HLS ladder
+   whose video codec AVPlayer cannot handle (MPEG-2 video in TS-in-HLS is the classic IPTV case)
+   but whose audio it can. Without this detector the symptom was a **black screen with working
+   audio, forever** — `hasEverStarted` latches, which disarms `PlaybackStartBackstop` (it owns
+   only the *pre-start* window), and `LiveReconnectWatchdog` sees healthy, non-buffering,
+   non-ended playback and has nothing to reconnect.
 3. **Never-started-within-10s** (`PlaybackStartBackstop`, `reason: "no-first-start"`) — a load
    that never reaches `.playing` inside 10s hands off to mpv, distinct from a reload of a stream
    that *has* played before, which surfaces the terminal error/Retry overlay instead (see
-   "Native player" and docs/player.md "Native VOD terminal behavior"). **Implemented.**
+   "Native player" and docs/player.md "Native VOD terminal behavior").
 
-All three, where implemented, emit one `engineFailed` event over the plugin's method channel.
+All three emit one `engineFailed` event over the plugin's method channel, and are
+distinguishable downstream **only by `reason`** — which is why that stays a coarse machine code
+that can never carry a URL.
+
+**Shape 2 needs its own paragraph, because the obvious detector for it is a trap and was
+deliberately left unbuilt until it could be closed properly.** "Playing but `presentationSize ==
+.zero` after a grace period" cannot tell a video stream that is not rendering from legitimately
+audio-only content — and `selectIosEngine` rule 3 routes audio to AVPlayer *on purpose*
+(`m4a`/`mp3`/`aac`, plus the radio channels IPTV providers carry in the live list, which on iOS
+arrive as audio-only HLS once Xtream defaults to `m3u8`). Firing there would bounce working audio
+to mpv and pin it in `IosEngineMemo` for the session — costing AirPlay, PiP and lock-screen
+transport on content whose only output is audio, and gaining nothing, since mpv has no video to
+render either. **Gating on the request's container does not rescue it**: the extension that
+actually matters is `m3u8`, which is ambiguous (an HLS ladder can be audio-only) *and* is the
+common AVPlayer path, so a container gate would either keep the misfire or give up the coverage
+that matters.
+
+So the detector is built on **positive evidence that video was promised**, never on the absence
+of a picture:
+
+- `AvPlayerEngine.declaredVideoEvidence` is three-valued (`present`/`absent`/`unknown`) and reads
+  the same two sources `readStreamFormat` already uses — per-track format descriptions
+  (`CMFormatDescriptionGetMediaType == kCMMediaType_Video`) for progressive assets, and
+  `AVURLAsset.variants` → `AVAssetVariant.videoAttributes` for HLS, where `assetTrack` is nil.
+  **Only `present` can ever fire.** `unknown` is an absence, not a vote — the same rule
+  `decideIosFallbackAction` applies to its native opinions. That leaves a deliberate coverage gap:
+  an HLS **media** playlist (no master, so no variants) is unjudgeable and never fires. A missed
+  detection is a black screen the user can back out of; a false one is a working stream pinned to
+  the SDR/no-PiP/no-AirPlay engine for the rest of the session, so the gap is on the safe side.
+- "No picture" requires **both** of the two independent facts iOS offers to say nothing:
+  `AVPlayerItem.presentationSize == .zero` (an item fact) *and* `AVPlayerLayer.isReadyForDisplay
+  == false` (a layer fact). Either one settles the load permanently, because the failure being
+  detected is "never rendered", not "stopped rendering" — losing video mid-stream is a drop, which
+  is the reconnect watchdog's business.
+- **Suppression, because a working stream can legitimately look picture-less from this layer.**
+  PiP, external playback (`AVPlayer.isExternalPlaybackActive` — AirPlay), and a backgrounded app
+  all block firing. This is not politeness: mpv has neither PiP nor AirPlay, so handing off during
+  either would remove the very feature in use. Suppression blocks firing but never *extends* the
+  window, so a load that spends its whole evaluation window in PiP gives up unjudged rather than
+  firing the instant the user comes back.
+- Timing: the window opens at the current load's **first frame** (not at the load), fires after
+  `timeoutMs` = 10s — the same "playback round trip that should have answered by now" unit as
+  `PlaybackStartBackstop`, `LiveReconnectWatchdog.resolveTimeoutMs` and `kIosFallbackSurfaceAfter`
+  — and stops evaluating at `giveUpMs` = 30s. The give-up is what lets the VOD ticker stop
+  (`pollWatchdogs` runs the ticker while *either* backstop is armed), and it keeps the semantics
+  honest: this shape is "the load never had a picture", so a stream half a minute in is out of
+  scope whatever it renders afterwards. 10s is deliberately generous for what it measures — video
+  and audio start together on a healthy item — and buys tolerance for a stream that opens on an
+  audio-only segment.
+
+**Three watchdogs, three disjoint windows, decided by facts rather than by threshold ordering** —
+the same construction the start-backstop/reconnect-watchdog exclusion already used, extended by
+one axis rather than layered on top of it:
+
+| Window | Condition | Owner |
+|---|---|---|
+| The current load has not produced playback | `hasStarted == false` | `PlaybackStartBackstop` |
+| Playing, but stalled or ended | `hasStarted && (isBuffering \|\| ended)` | `LiveReconnectWatchdog` |
+| Playing and healthy, with no picture | `hasStarted && !isBuffering && !ended` | `VideoPresenceBackstop` |
+
+The last two are complementary on one boolean and the first is excluded because
+`VideoPresenceBackstop` is only *armed* at the first frame — the same instant
+`PlaybackStartBackstop.markStarted()` disarms. At most one of the three can act on any tick.
+Note the deliberate inversion from shape 3: that backstop keys on the **engine-lifetime**
+`hasEverStarted` (so a failed live reconnect is never misread as an unplayable container), while
+this one keys on the **per-item** `hasStarted`, because "is *this* item showing a picture" is a
+question about the item on screen. `PlaybackStartBackstopTests` and `VideoPresenceBackstopTests`
+both drive all the relevant deciders off one synthetic clock and assert exactly one non-`wait`
+decision, so the exclusion is executable rather than asserted in prose.
 
 **This is not Android's in-process engine swap.** `HdrPlayerActivity.fallbackToMpv()` swaps
 `PlaybackEngine` implementations *inside the same Activity*, because both ExoPlayer and mpv are
@@ -748,6 +811,10 @@ and already specified and tested, and the iOS controller must honour them:
   looks; the instant it flips true the backstop disarms for that load and the reconnect watchdog
   owns everything from then on, including a reload that never comes back. On any given tick at
   most one of the two can act, decided by a boolean fact, never by comparing two numbers.
+  **`VideoPresenceBackstop` is a third window on the same construction**, not an exception to it:
+  it is armed only at the current load's first frame (so it cannot overlap the start backstop) and
+  acts only on `!isBuffering && !ended` (so it cannot overlap the reconnect watchdog, which acts
+  only on the complement). See "What routes to which engine" for the table and the reasoning.
 - **The native terminal error/Retry overlay exists, is reached only where nothing else can act,
   and fails closed when the plugin/channel is gone.** `IptvsPlayerViewController.surfaceTerminalError`
   mirrors `PlayerErrorOverlay` (`lib/player/player_overlay.dart`) — scrim, message, Back + Retry —
@@ -1032,3 +1099,30 @@ that a "no" reopens part of the design rather than just narrowing a gap:
     partially occluded by the primary app); confirm the error/Retry overlay actually renders
     within the app's reduced bounds and the Retry button is reachable and tappable there,
     not just in full-screen single-app mode.
+13. **`VideoPresenceBackstop` must not misfire — three reads decide that, and none can be
+    checked without a device.** The Simulator cannot decode video at all, so every one of these is
+    a *no picture* reading there and the detector's whole safety rests on facts CI cannot observe.
+    In order of how much damage a wrong answer does:
+    - **Play a normal video channel and confirm the detector stays silent.** Specifically that
+      `AVPlayerLayer.isReadyForDisplay` goes true (or `AVPlayerItem.presentationSize` goes
+      non-zero) within 10s of the first frame on real provider HLS. If neither does on a stream
+      that is visibly playing, the detector would hand every channel to mpv — the single worst
+      outcome available here, and the first thing to check.
+    - **AirPlay a playing video channel to an Apple TV and leave it for a minute.** External
+      playback is suppressed via `AVPlayer.isExternalPlaybackActive`; confirm that property
+      actually reads true for a *route*-based AirPlay session (not just mirroring), because the
+      suppression is the only thing stopping an AirPlaying stream from being handed to an engine
+      with no AirPlay.
+    - **Enter PiP on a video channel and leave it for a minute**, then restore. Confirms the PiP
+      suppression and that the give-up (30s) settles the window rather than firing on return.
+    - **Play a radio / audio-only channel** (audio-only HLS, and a `.mp3`/`.m4a` VOD if one is
+      reachable) and confirm it stays on AVPlayer indefinitely — i.e. that
+      `AVAssetVariant.videoAttributes` really is nil for an audio-only rendition and that
+      `item.tracks`' format descriptions report audio only. This is the case the naive detector
+      would have broken.
+    - **Then the case it exists for:** find a channel that plays audio over a black picture on
+      AVPlayer (an MPEG-2-video HLS ladder is the likeliest) and confirm it hands off to mpv
+      within ~10s of the audio starting, and that mpv then renders it. If real provider HLS turns
+      out to be served as *media* playlists rather than masters, `variants` is empty, the evidence
+      stays `unknown` and this case is a documented miss — worth recording either way, since it
+      decides whether the HLS half of the detector has any reach at all.

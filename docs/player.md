@@ -199,7 +199,8 @@ docs/ios.md "Why not `AVPlayerViewController`").
   not immediate.** Android's `HdrPlayerActivity.fallbackToMpv()` switches `PlaybackEngine`
   implementations inside the same Activity, because both engines are reachable from Kotlin. On iOS
   libmpv is only reachable from Dart, so a Swift-detected AVPlayer failure (hard failure,
-  ready-but-no-video-track, never-started-within-10s) tears down `IptvsPlayerViewController` and
+  never-started-within-10s, or started-but-never-showed-a-picture) tears down
+  `IptvsPlayerViewController` and
   dismisses it; Dart re-resolves first for live (the failed AVPlayer attempt already burned the
   single-use Stalker `play_token`) and then reopens the same content on the embedded media_kit
   surface — but only once `decideIosFallbackAction` (`lib/player/player_screen.dart`) says
