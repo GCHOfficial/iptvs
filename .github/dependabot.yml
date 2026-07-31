@@ -38,13 +38,3 @@ updates:
       gradle-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
-    ignore:
-      # androidx.core 1.19.0+ requires consumers to compile against API 37, but
-      # `compileSdk` is `flutter.compileSdkVersion` (36 on Flutter 3.44.5), so a
-      # bump here fails `checkAarMetadata` and can only be taken by hard-coding
-      # compileSdk and diverging from the SDK level Flutter tests against. That
-      # is a deliberate change, not a grouped minor bump — see the comment on the
-      # dependency in android/app/build.gradle.kts. Drop this ignore when
-      # Flutter's own compileSdkVersion reaches 37.
-      - dependency-name: "androidx.core:core"
-        versions: [">=1.19.0"]
