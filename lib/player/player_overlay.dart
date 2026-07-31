@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -119,12 +120,27 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
 
   @override
   Widget build(BuildContext context) {
-    // Desktop embedded surfaces (Linux always; Windows for the SDR
-    // preview→fullscreen handoff, where the native HWND path is skipped) use
-    // the full-featured Flutter overlay so they stay at parity with the native
-    // Windows GDI / Android Compose overlays. Other embedded fallbacks (Android,
-    // macOS) keep media_kit's default Material controls.
-    if (Platform.isLinux || Platform.isWindows) {
+    // Embedded surfaces that get the full-featured Flutter overlay, so they
+    // stay at parity with the native Windows GDI / Android Compose / iOS UIKit
+    // overlays:
+    //  * Linux — always (the embedded path is the default fullscreen path).
+    //  * Windows — the SDR preview→fullscreen handoff, where the native HWND
+    //    path is skipped.
+    //  * iOS — the **mpv engine** path (`selectIosEngine`). That is not a rare
+    //    fallback: an extension-less Stalker/MAG `create_link` locator routes
+    //    to mpv by rule, so for a Stalker user this overlay *is* the player.
+    //    media_kit's stock Material controls were wrong there twice over — they
+    //    ignore `isLive` and expose the HLS live window as a scrubbable
+    //    duration, violating "Live = no seek bar", and they carry none of the
+    //    app's chrome (EPG, badges, go-to-live, favorite, track menus).
+    // Android keeps media_kit's default Material controls: its embedded surface
+    // is a true fallback (only reached when `HdrPlayerActivity` can't launch)
+    // and it must stay usable from an Android TV D-pad, which this overlay's
+    // Material sliders/menus are not built for.
+    //
+    // [touch] tunes the overlay for a finger instead of a pointer — see the
+    // flag's doc on [EmbeddedPlayerControls].
+    if (Platform.isLinux || Platform.isWindows || Platform.isIOS) {
       return Video(
         controller: widget.controller,
         controls: (state) {
@@ -132,6 +148,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
           return EmbeddedPlayerControls(
             key: _controlsKey,
             controls: _controls,
+            touch: Platform.isIOS,
             title: widget.title,
             sourceName: widget.sourceName,
             epgNow: widget.epgNow,
@@ -287,6 +304,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.onGoLive,
     required this.onCycleAspect,
     required this.onToggleFullscreen,
+    this.touch = false,
   });
 
   final EmbeddedControls controls;
@@ -308,11 +326,56 @@ class EmbeddedPlayerControls extends StatefulWidget {
   /// Enters/exits fullscreen. Injected (rather than calling media_kit's
   /// `toggleFullscreen(context)` inline) so the double-tap and fullscreen-button
   /// behavior is exercisable in a widget test without a `Video` ancestor.
+  ///
+  /// Unused when [touch] is set — the route is already fullscreen there, so the
+  /// control and the double-tap gesture are both absent (see [touch]).
   final VoidCallback onToggleFullscreen;
+
+  /// Tunes the overlay for a **finger** rather than a mouse pointer. False
+  /// everywhere but iOS, so Linux/Windows keep their existing pointer behavior
+  /// byte-for-byte; every difference below is additive and gated on this flag.
+  ///
+  /// Four things change, each to agree with the native iOS
+  /// `IptvsPlayerViewController` this overlay now sits beside (the two are
+  /// reached by different *streams* on the same device — AVPlayer vs mpv — so a
+  /// user can meet both in one session and they must not behave differently):
+  ///
+  ///  1. **Tap is the Back ladder.** With no hardware Back and no hover, touch
+  ///     is the ladder's input (docs/tv-navigation.md, Back-ladder section):
+  ///     a tap peels the info panel, else *hides* visible chrome, else reveals
+  ///     it. That is Swift's `playerTapAction` — `nextPlayerBackAction` with the
+  ///     terminal rung swapped from exit to show — reproduced here. On a pointer
+  ///     platform a tap only ever *shows* (hover already handles reveal, and
+  ///     hiding out from under the cursor is wrong), which is why this is gated.
+  ///     The explicit control still exits outright, skipping the ladder, exactly
+  ///     as the back arrow does on Windows/Linux and the **X** does on native
+  ///     iOS — it takes that platform's glyph and label here.
+  ///  2. **No fullscreen affordance.** The Flutter route *is* fullscreen on iOS;
+  ///     media_kit's `toggleFullscreen` would push a second route with its own
+  ///     `Video`, above the one [PlayerScreen] owns. The native controller has
+  ///     no fullscreen button either. Dropping the double-tap recognizer also
+  ///     makes rung 1 resolve immediately instead of after `kDoubleTapTimeout`.
+  ///  3. **≥44pt hit targets** (Apple HIG) instead of the 44×40 / 34×32 chips
+  ///     sized for a cursor.
+  ///  4. **Two-row compact layout**, the same reparenting the native overlay's
+  ///     `applyCompactLayout` does: below [kCompactControlsWidth] the badges get
+  ///     their own row under the title and the button cluster its own row under
+  ///     the transport. A phone in portrait cannot fit either on one line, and
+  ///     the alternative is a `RenderFlex` overflow.
+  ///
+  /// Auto-hide timing is deliberately *not* varied: this overlay's flat 4s sits
+  /// between the native controller's 3.5s (VOD) and 4.5s (live), and a shared
+  /// widget diverging by half a second buys nothing.
+  final bool touch;
 
   @override
   State<EmbeddedPlayerControls> createState() => EmbeddedPlayerControlsState();
 }
+
+/// Width below which the control row can no longer carry its optional pieces.
+/// Shared by the pointer collapse (volume slider → mute, "Go to live" → icon)
+/// and, under [EmbeddedPlayerControls.touch], the two-row reflow.
+const double kCompactControlsWidth = 720;
 
 class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Timer? _hideTimer;
@@ -370,6 +433,34 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     return true;
   }
 
+  void _hideNow() {
+    _hideTimer?.cancel();
+    if (_visible && mounted) setState(() => _visible = false);
+  }
+
+  /// One tap on the scrim / exposed video area.
+  ///
+  /// Under [EmbeddedPlayerControls.touch] this is the iOS Back ladder, and it
+  /// is deliberately the same table as Swift's `playerTapAction`
+  /// (`PlayerBackPolicy.swift`): info panel first, then hide visible chrome,
+  /// else reveal it. (The list menus are modal `PopupMenuButton` routes whose
+  /// own barrier eats the outside tap, so they self-close on the same single
+  /// press — they are the ladder's first rung in effect, just not one this
+  /// handler ever sees.) On a pointer platform the terminal rung stays
+  /// "reveal", since hover already reveals and hiding under the cursor is not
+  /// what any desktop player does.
+  void _handleSurfaceTap() {
+    if (_showInfo) {
+      handleBackPeel();
+      return;
+    }
+    if (widget.touch && _visible) {
+      _hideNow();
+      return;
+    }
+    _show();
+  }
+
   @override
   void dispose() {
     _hideTimer?.cancel();
@@ -400,15 +491,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               // Tapping the exposed video area closes an open info panel first
-              // (tap-outside-to-dismiss), else just reveals the chrome.
-              onTap: () {
-                if (_showInfo) {
-                  handleBackPeel();
-                } else {
-                  _show();
-                }
-              },
-              onDoubleTap: widget.onToggleFullscreen,
+              // (tap-outside-to-dismiss), then — on touch only — hides visible
+              // chrome, else reveals it. See [_handleSurfaceTap].
+              onTap: _handleSurfaceTap,
+              // No double-tap recognizer under touch: there is no fullscreen to
+              // toggle on iOS, and without one in the arena the show/hide tap
+              // resolves immediately instead of after kDoubleTapTimeout.
+              onDoubleTap: widget.touch ? null : widget.onToggleFullscreen,
             ),
           ),
           if (_visible) ...[_topBar(), _bottomBar(context)],
@@ -428,6 +517,24 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// status bar and the scrubber under the navigation bar. Zero on desktop.
   EdgeInsets get _barInsets => MediaQuery.paddingOf(context);
 
+  /// Under [EmbeddedPlayerControls.touch], makes a bar swallow taps that miss
+  /// its controls.
+  ///
+  /// The bars are `Container`s, which don't hit-test themselves, so a tap on
+  /// the gradient between two buttons falls through to the background layer —
+  /// harmless while that layer only ever *shows* the chrome, but under the touch
+  /// ladder it would hide everything the user was reaching for. UIKit's bars
+  /// absorb by default, so this is also what keeps the two iOS overlays
+  /// agreeing. Left untouched on pointer platforms, where that fall-through is
+  /// also what carries double-tap-to-fullscreen over the bars.
+  Widget _absorbChromeTaps(Widget bar) => widget.touch
+      ? GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _show,
+          child: bar,
+        )
+      : bar;
+
   // Both bars keep their gradient full-bleed (it has to reach the screen edge to
   // stay readable over video) and inset only their content — the same split the
   // native Compose overlay uses.
@@ -435,84 +542,114 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     left: 0,
     right: 0,
     top: 0,
-    child: Container(
-      padding: EdgeInsets.fromLTRB(
-        16 + _barInsets.left,
-        12 + _barInsets.top,
-        16 + _barInsets.right,
-        28,
-      ),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xB3000000), Color(0x00000000)],
+    child: _absorbChromeTaps(
+      Container(
+        padding: EdgeInsets.fromLTRB(
+          16 + _barInsets.left,
+          12 + _barInsets.top,
+          16 + _barInsets.right,
+          28,
         ),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) => Row(
-          children: [
-            _button(Icons.arrow_back, 'Back', widget.onBack),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xB3000000), Color(0x00000000)],
+          ),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // On a touch phone the badges can't share the row with the title:
+            // capped at 0.55 of a ~390pt bar they leave the title ~30pt. Give
+            // them their own row instead — the same reparenting the native iOS
+            // overlay's `applyCompactLayout` does with its `compactBadgeRow`.
+            final stackBadges =
+                widget.touch && constraints.maxWidth < kCompactControlsWidth;
+            final titleRow = Row(
+              children: [
+                _button(
+                  // The explicit exit control takes the host platform's glyph:
+                  // an X on iOS, matching the native controller's `xmark`
+                  // (docs/tv-navigation.md). Same role either way — it skips
+                  // the ladder and exits outright.
+                  widget.touch ? Icons.close : Icons.arrow_back,
+                  widget.touch ? 'Exit' : 'Back',
+                  widget.onBack,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (widget.epgNow case final now?)
+                        Text(
+                          PlayerVideoSurfaceState._programmeLine(
+                            now,
+                            widget.epgNext,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Badges are capped to a fraction of the bar and wrap onto a
+                // second line when the window is narrow, so a full EPG + long
+                // resolution/HDR/FPS/source/clock set can never overflow the
+                // row.
+                if (!stackBadges)
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: constraints.maxWidth * 0.55,
+                    ),
+                    child: Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: _badges(),
                     ),
                   ),
-                  if (widget.epgNow case final now?)
-                    Text(
-                      PlayerVideoSurfaceState._programmeLine(
-                        now,
-                        widget.epgNext,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textLo,
-                        fontSize: 12,
-                      ),
-                    ),
+                if (widget.canFavorite) ...[
+                  const SizedBox(width: 10),
+                  _button(
+                    widget.favorite
+                        ? Icons.star_rounded
+                        : Icons.star_outline_rounded,
+                    widget.favorite ? 'Remove favorite' : 'Add favorite',
+                    widget.onToggleFavorite,
+                    color: widget.favorite ? AppColors.accent : Colors.white,
+                    compact: true,
+                  ),
                 ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            // Badges are capped to a fraction of the bar and wrap onto a
-            // second line when the window is narrow, so a full EPG + long
-            // resolution/HDR/FPS/source/clock set can never overflow the row.
-            ConstrainedBox(
-              constraints: BoxConstraints(
-                maxWidth: constraints.maxWidth * 0.55,
-              ),
-              child: Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 6,
-                runSpacing: 6,
-                children: _badges(),
-              ),
-            ),
-            if (widget.canFavorite) ...[
-              const SizedBox(width: 10),
-              _button(
-                widget.favorite
-                    ? Icons.star_rounded
-                    : Icons.star_outline_rounded,
-                widget.favorite ? 'Remove favorite' : 'Add favorite',
-                widget.onToggleFavorite,
-                color: widget.favorite ? AppColors.accent : Colors.white,
-                compact: true,
-              ),
-            ],
-          ],
+              ],
+            );
+            if (!stackBadges) return titleRow;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                titleRow,
+                const SizedBox(height: 8),
+                Wrap(spacing: 6, runSpacing: 6, children: _badges()),
+              ],
+            );
+          },
         ),
       ),
     ),
@@ -541,40 +678,46 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     left: 0,
     right: 0,
     bottom: 0,
-    child: Container(
-      // The gradient fills this (bottom-anchored) container. It ramps to a
-      // solid dark value by ~45% down — where the two-row live bar (progress +
-      // controls) begins — instead of fading linearly to dark only at the very
-      // bottom, so both rows sit on a real backdrop rather than near-transparent
-      // scrim. The top inset sets how high the transparent fade starts.
-      padding: EdgeInsets.fromLTRB(
-        20 + _barInsets.left,
-        36,
-        20 + _barInsets.right,
-        14 + _barInsets.bottom,
-      ),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
-          stops: [0.0, 0.45, 1.0],
+    child: _absorbChromeTaps(
+      Container(
+        // The gradient fills this (bottom-anchored) container. It ramps to a
+        // solid dark value by ~45% down — where the two-row live bar (progress +
+        // controls) begins — instead of fading linearly to dark only at the very
+        // bottom, so both rows sit on a real backdrop rather than near-transparent
+        // scrim. The top inset sets how high the transparent fade starts.
+        padding: EdgeInsets.fromLTRB(
+          20 + _barInsets.left,
+          36,
+          20 + _barInsets.right,
+          14 + _barInsets.bottom,
         ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
-          const SizedBox(height: 4),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              // Below this width the fixed controls + volume slider stop
-              // fitting alongside the left/right split, so collapse the two
-              // widest optional pieces: the volume slider (mute stays) and the
-              // "Go to live" text label (its icon stays).
-              final compact = constraints.maxWidth < 720;
-              return Row(
-                children: [
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
+            stops: [0.0, 0.45, 1.0],
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
+            const SizedBox(height: 4),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                // Below this width the fixed controls + volume slider stop
+                // fitting alongside the left/right split, so collapse the two
+                // widest optional pieces: the volume slider (mute stays) and the
+                // "Go to live" text label (its icon stays).
+                final compact = constraints.maxWidth < kCompactControlsWidth;
+                // Even collapsed, a phone in portrait can't fit the transport and
+                // the right-hand cluster on one line (they overflow at ~390pt as
+                // soon as a stream carries a second audio track). Split them onto
+                // two rows, exactly as the native iOS overlay's
+                // `applyCompactLayout` reparents its cluster into `secondaryRow`.
+                final twoRow = widget.touch && compact;
+                final transport = <Widget>[
                   _button(
                     widget.controls.state.playing
                         ? Icons.pause
@@ -603,8 +746,16 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     }),
                   ],
                   _volumeControls(context, showSlider: !compact),
-                  if (!widget.isLive) _positionRebuild(_timeLabel),
-                  const Spacer(),
+                  if (!widget.isLive)
+                    // Flexible only in the two-row layout: on one row it would
+                    // share the free space with the `Spacer` and shift the
+                    // cluster left. Here it just lets a long VOD timestamp
+                    // ellipsize instead of overflowing a phone-width row.
+                    twoRow
+                        ? Flexible(child: _positionRebuild(_timeLabel))
+                        : _positionRebuild(_timeLabel),
+                ];
+                final cluster = <Widget>[
                   if (widget.isLive && !widget.liveSynced)
                     compact
                         ? _button(
@@ -629,16 +780,37 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     setState(() => _showInfo = !_showInfo);
                     _show(keep: _showInfo);
                   }),
-                  _button(
-                    Icons.fullscreen,
-                    'Fullscreen (F)',
-                    widget.onToggleFullscreen,
-                  ),
-                ],
-              );
-            },
-          ),
-        ],
+                  // The iOS route is already fullscreen and media_kit's
+                  // `toggleFullscreen` would push a second `Video` route above
+                  // the one PlayerScreen owns — the native controller has no
+                  // fullscreen button either.
+                  if (!widget.touch)
+                    _button(
+                      Icons.fullscreen,
+                      'Fullscreen (F)',
+                      widget.onToggleFullscreen,
+                    ),
+                ];
+                if (!twoRow) {
+                  return Row(
+                    children: [...transport, const Spacer(), ...cluster],
+                  );
+                }
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(children: transport),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: cluster,
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -761,6 +933,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   Widget _timeLabel() => Text(
     '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',
+    // Inert on a pointer platform (the label is never width-constrained
+    // there); under the touch two-row layout it keeps a long `1:23:45 /
+    // 2:00:00` on one line instead of wrapping the transport row.
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
     style: const TextStyle(color: Colors.white70),
   );
 
@@ -845,7 +1022,15 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       // status bar — see [_barInsets].
       top: 76 + _barInsets.top,
       right: 20 + _barInsets.right,
-      width: 320,
+      // 320 is wider than the usable width of a small phone in portrait once
+      // both insets and the right offset are taken out, so clamp rather than
+      // let it run off the left edge. No-op on any desktop-sized surface.
+      width: math.min(
+        320.0,
+        MediaQuery.sizeOf(context).width -
+            _barInsets.horizontal -
+            40, // the 20pt right offset above, mirrored as a left margin
+      ),
       // Absorb taps so a press on the panel itself doesn't fall through to the
       // background tap-outside handler and immediately re-close it.
       child: GestureDetector(
@@ -928,12 +1113,15 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             _show();
             onPressed();
           },
+          // A finger needs Apple's 44pt minimum in *both* axes; the pointer
+          // sizes below are deliberately shorter than they are wide, which is
+          // fine for a cursor and not for a thumb.
           child: SizedBox(
-            width: compact ? 34 : 44,
-            height: compact ? 32 : 40,
+            width: widget.touch ? (compact ? 44 : 48) : (compact ? 34 : 44),
+            height: widget.touch ? (compact ? 44 : 48) : (compact ? 32 : 40),
             child: Icon(
               icon,
-              size: compact ? 18 : 20,
+              size: widget.touch ? (compact ? 20 : 22) : (compact ? 18 : 20),
               color: color ?? (active ? Colors.white : AppColors.textHi),
             ),
           ),
