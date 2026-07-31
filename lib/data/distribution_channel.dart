@@ -4,6 +4,7 @@ enum DistributionChannel {
   githubDirect,
   googlePlay,
   microsoftStore,
+  altStore,
 }
 
 DistributionChannel parseDistributionChannel(String value) {
@@ -11,6 +12,7 @@ DistributionChannel parseDistributionChannel(String value) {
     'githubDirect' => DistributionChannel.githubDirect,
     'googlePlay' => DistributionChannel.googlePlay,
     'microsoftStore' => DistributionChannel.microsoftStore,
+    'altStore' => DistributionChannel.altStore,
     _ => DistributionChannel.development,
   };
 }
@@ -27,6 +29,7 @@ extension DistributionChannelPolicy on DistributionChannel {
     DistributionChannel.githubDirect => 'GitHub direct',
     DistributionChannel.googlePlay => 'Google Play',
     DistributionChannel.microsoftStore => 'Microsoft Store',
+    DistributionChannel.altStore => 'AltStore',
   };
 }
 

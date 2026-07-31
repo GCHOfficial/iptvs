@@ -51,6 +51,29 @@ dependencies:
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1
+  # Local plugin packaging the native iOS player engine shim (AVPlayer +
+  # libmpv fallback method channel, plus the Foundation-only pure-logic Core
+  # package). See docs/ios.md "Native code layout". The app has no Dart
+  # import of this package's own code — it registers automatically through
+  # `GeneratedPluginRegistrant` — but it must be a dependency for that
+  # registration and the iOS pod to exist at all.
+  iptvs_ios_player:
+    path: packages/iptvs_ios_player
+
+# media_kit_video and media_kit_libs_video (pub.dev) both declare
+# `media_kit: ^1.2.6`. Pinning media_kit itself to a git ref for
+# iosManageAudioSession (media-kit/media-kit#1419, merged 2026-06-24) puts
+# the same package name on two different sources, which pub refuses to
+# resolve without an override. Upstream main still self-declares
+# `version: 1.2.6`, so only the source conflicts, not the version — the
+# override below is the minimum needed to unblock resolution. Only
+# media_kit is pinned; media_kit_video/media_kit_libs_video stay on pub.dev.
+dependency_overrides:
+  media_kit:
+    git:
+      url: https://github.com/media-kit/media-kit.git
+      ref: d7b68a584e545a9e4fa5f9a600bfab556a106654
+      path: media_kit
 
 dev_dependencies:
   flutter_test:

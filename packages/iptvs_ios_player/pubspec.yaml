@@ -1,0 +1,25 @@
+name: iptvs_ios_player
+description: >
+  iptvs's native iOS player engine shim (AVPlayer + libmpv fallback). Local-only
+  plugin, never published; see docs/ios.md for the design this packages.
+publish_to: 'none'
+version: 0.0.1
+
+environment:
+  sdk: ^3.12.2
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      ios:
+        pluginClass: IptvsIosPlayerPlugin

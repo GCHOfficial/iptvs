@@ -70,6 +70,24 @@ under edge-to-edge (targetSdk 35+), where in **landscape** the bar is a *side* i
 one. The same reasoning puts the EPG grid's `SafeArea` outside its `LayoutBuilder`, since the
 timeline width is derived from those constraints too.
 
+**`MediaQuery`'s window width is the sole wide/narrow authority for the live tab — never the
+SafeArea-shrunk body constraints.** `ChannelListScreen._isWide()` (`MediaQuery.sizeOf(context).width
+>= kWideLayoutMinWidth`) is what the coordinator takes as its `isWide` callback (deciding where Up
+escapes to and whether Left/Back reach the sidebar) and what the Back ladder's `wideLive` reads
+(`_handleRootBack`); `live_tab_view.dart`'s own wide/narrow branch and `LiveLayoutMetrics.forSize`
+read the same window size. This used to be a `LayoutBuilder` reading `constraints.maxWidth` — the
+body's *own* width, which `SafeArea` shrinks by the left/right system-bar and cutout insets in
+Android landscape — instead. **A real shipping bug on tablets with a landscape nav bar**: a window
+just over `kWideLayoutMinWidth` rendered the phone layout from `constraints.maxWidth` while every
+other branch, reading the unshrunk window width, still believed it was wide. That band was a dead
+zone — no preview panel and no long-press sheet, so the preview was unreachable, a tap started an
+audible preview with nothing on screen to show it, and, worst, **the Back ladder stalled forever at
+rung 2**: `focusCategories()` requested focus on a sidebar node the mismatched layout had never
+built, and Flutter's `FocusNode.requestFocus` silently no-ops on a node that isn't attached to the
+tree — no exception, no fallback, just a Back press that does nothing. Keep every future
+wide/narrow branch in the live tab reading `MediaQuery`'s window size, never a `LayoutBuilder`'s
+post-`SafeArea` constraints.
+
 The selection model replaced a per-row-focus
 design that kept producing bugs: an off-screen row in a lazy `ListView` has no context, so
 `requestFocus` silently no-ops, which forced a *jump-scroll → post-frame requestFocus → re-assert
@@ -152,9 +170,16 @@ with no dialog to route focus through and no hold-timing gesture to discover.
   The selected row's `panelHi` fill stays either way, so the row remains visible. The star cell
   fits well inside the fixed `itemExtent`s (72 / 112) — the extents are unchanged.
 - **Touch**: tapping the star toggles directly (selecting the row first, so cursor and pointer
-  never disagree); tapping the row body plays. On a **phone**, long-press opens the audible
-  preview sheet (`PhonePreviewSheet` — Play / favorite / catch-up); on wide layouts long-press
-  does nothing (the preview panel is always on screen).
+  never disagree). Tapping the row body **plays only on a phone** — on a wide layout the first tap
+  starts/switches the preview and a second tap (or tap while already previewing that channel) goes
+  fullscreen, the same `onPlayChannel` → `_play` path OK runs (`channel_list_screen.dart`), because
+  that's the only touch affordance that can reach the preview panel on a wide touch layout (no
+  remote, so there's no OK to fall back to). The hint text under the panel is deliberately
+  **input-neutral** ("OK or tap/click to preview") rather than naming an input the device might not
+  have, and the compact chip variant is length-bounded to ellipsize past roughly 22 characters on
+  its ~170 px thumbnail. On a **phone**, long-press opens the audible preview sheet
+  (`PhonePreviewSheet` — Play / favorite / catch-up); on wide layouts long-press does nothing (the
+  preview panel is always on screen).
 - **Deliberately dropped**: the menu's per-row **Catch-up** entry on TV. Catch-up stays reachable
   from the preview panel's catch-up button (`live.preview.catchup`) and from the EPG grid's past
   programmes.
@@ -193,6 +218,20 @@ exception is a bare `FocusScopeNode` / nothing actually focused (a transient sta
 after a dialog is dismissed) — that isn't somewhere the user can *be*, so it recovers to the tabs
 instead of offering to exit. Pinned end-to-end by `test/channel_list_focus_test.dart` (whose
 `_ManySource` gives both lists enough rows to actually scroll).
+
+**iOS has no hardware Back**, so the player's presented `IptvsPlayerViewController`
+(docs/ios.md, docs/player.md "iOS") renders the same peel/exit shape through touch instead:
+tapping outside the chrome (on the scrim, or the exposed-video area with the chrome already
+open) closes an open menu, then the info panel — the same menu → info ladder rungs Android's
+`ControlsOverlay` and the Windows/Linux overlays use — while tapping the exposed video with
+chrome hidden just toggles the chrome visible, matching every other platform's tap-to-show.
+The overlay's **X** is a dedicated Exit control that skips the ladder entirely and dismisses
+outright, mirroring the other platforms' explicit back-arrow-always-exits behavior (docs/player.md
+Windows: "the on-screen back-*arrow* button still exits directly"). `isModalInPresentation = true`
+(docs/ios.md "Native player") disables the system interactive-swipe dismiss gesture for the same
+reason the ladder is enforced everywhere else: a stray edge swipe must not exit the player outside
+an explicit control, since nothing else on iOS plays the role a hardware/remote Back press does on
+the other platforms.
 
 ## The EPG grid (TV-guide timeline)
 

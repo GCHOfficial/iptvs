@@ -35,4 +35,18 @@ void main() {
       expect(bulkToggleHidden({'a'}, const [], hide: false), {'a'});
     });
   });
+
+  group('nextStreamExtension', () {
+    test('cycles unset -> ts -> m3u8 -> unset', () {
+      expect(nextStreamExtension(null), 'ts');
+      expect(nextStreamExtension('ts'), 'm3u8');
+      expect(nextStreamExtension('m3u8'), null);
+    });
+
+    test('an unrecognised stored value is treated as unset', () {
+      // Same fallback resolveXtreamStreamExtension applies — anything outside
+      // {null, 'ts', 'm3u8'} starts the cycle over rather than getting stuck.
+      expect(nextStreamExtension('mkv'), 'ts');
+    });
+  });
 }
