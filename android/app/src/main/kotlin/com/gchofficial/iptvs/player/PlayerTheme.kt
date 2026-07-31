@@ -13,12 +13,16 @@ import com.gchofficial.iptvs.R
  * These mirror `lib/theme.dart` `AppColors` exactly so the Android player shares
  * the app's (and the Windows native overlay's) visual language: dark surfaces,
  * a purple accent, and the Inter typeface.
+ *
+ * `lib/theme.dart` `AppColors` is the source of truth — these are hand-copied,
+ * not generated, so re-check every value here against it whenever either file
+ * changes.
  */
 object PlayerColors {
     val Ink = Color(0xFF0E0F13) // app background / scrims
     val Panel = Color(0xFF16181F) // cards / surfaces
-    val PanelHi = Color(0xFF1E212B) // hover / focus lift
-    val Line = Color(0xFF262A36) // hairlines / borders
+    val PanelHi = Color(0xFF272B36) // hover / focus lift
+    val Line = Color(0xFF353B49) // hairlines / borders
     val TextHi = Color(0xFFF2F4F8)
     val TextLo = Color(0xFF9AA3B2)
     val Accent = Color(0xFF7B6CF6) // brand / progress
