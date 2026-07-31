@@ -133,7 +133,16 @@ dependencies {
     // compose, and Gradle resolves to the highest request, so pinning here sets a
     // floor rather than overriding those; it just stops a direct source dependency
     // from resting on someone else's transitive graph.
-    implementation("androidx.core:core:1.19.0")
+    //
+    // **Held at 1.18.0 deliberately — do not let Dependabot move it.** 1.19.0
+    // requires consumers to compile against API 37 or later, and `compileSdk`
+    // above is `flutter.compileSdkVersion` (36 on Flutter 3.44.5). Taking 1.19.0
+    // means hard-coding `compileSdk = 37` and no longer tracking the SDK level
+    // Flutter actually tests against — a real decision that belongs in its own
+    // change, not riding along in a grouped minor bump. Revisit when Flutter's
+    // own compileSdkVersion reaches 37. `androidx.core:core-ktx` is version-
+    // aligned with this, so it follows automatically.
+    implementation("androidx.core:core:1.18.0")
 
     // ExoPlayer/Media3 is the DEFAULT native-player engine: MediaCodec hardware
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
