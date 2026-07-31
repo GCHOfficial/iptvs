@@ -31,7 +31,15 @@ val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
 
 android {
     namespace = "com.gchofficial.iptvs"
-    compileSdk = flutter.compileSdkVersion
+    // Deliberately ahead of `flutter.compileSdkVersion` (36 on Flutter 3.44.5).
+    // androidx.core 1.19.0+ requires consumers to compile against 37, and raising
+    // compileSdk is the intended response to `checkAarMetadata` rather than a
+    // workaround: it only selects which android.jar we compile against. Runtime
+    // behaviour is `targetSdk` (still Flutter's) and device reach is `minSdk` —
+    // neither moves here. Flutter lists API 37 as supported for deployment
+    // (CI-tested only to 36), so this is supported-but-less-travelled, not
+    // unsupported. Drop the override once flutter.compileSdkVersion reaches 37.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -133,7 +141,13 @@ dependencies {
     // compose, and Gradle resolves to the highest request, so pinning here sets a
     // floor rather than overriding those; it just stops a direct source dependency
     // from resting on someone else's transitive graph.
-    implementation("androidx.core:core:1.18.0")
+    //
+    // 1.19.0+ requires consumers to compile against API 37, which is why
+    // `compileSdk` above is pinned to 37 rather than inherited. If that override
+    // is ever reverted, this must go back to 1.18.0 or the build fails
+    // `checkAarMetadata`. `androidx.core:core-ktx` is version-aligned with this
+    // and follows automatically — it appears in that failure alongside `core`.
+    implementation("androidx.core:core:1.19.0")
 
     // ExoPlayer/Media3 is the DEFAULT native-player engine: MediaCodec hardware
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
