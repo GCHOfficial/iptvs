@@ -244,6 +244,46 @@ docs/ios.md "Why not `AVPlayerViewController`").
   shape as Linux's Wayland-HDR "Preview→fullscreen handoff (HDR-escalation only)" below. See
   docs/ios.md "Known parity gaps" for the residual non-seamless beat and the benign
   preview-vs-fresh-URL race that follows from deciding it ahead of the final resolve.
+- **The mpv path renders the shared Flutter overlay, in touch mode.** `PlayerVideoSurface`
+  (`player_overlay.dart`) builds `EmbeddedPlayerControls` on **iOS as well as Linux/Windows**, with
+  `touch: true`. This is not a cosmetic upgrade of a rare fallback: `selectIosEngine` rule 4 routes
+  every extension-less `create_link` locator to mpv, so for a Stalker/MAG portal the embedded
+  surface *is* the player, and it used to fall through to media_kit's stock `MaterialVideoControls`
+  — which ignore `StreamInfo.isLive` and expose the HLS live window as a scrubbable
+  `00:04 / 00:30`, breaking CLAUDE.md's "Live = no seek bar", on top of shipping none of the app's
+  chrome (EPG, badges, go-to-live, favorite, track menus). **Android deliberately stays on the
+  stock controls**: there the embedded surface really is a launch-failure fallback, and it has to
+  survive an Android TV D-pad, which this overlay's Material sliders/`PopupMenuButton`s are not
+  built for. The `touch` flag (default false, so Linux/Windows are unchanged) carries four
+  gated differences, each chosen to agree with the native `IptvsPlayerViewController` the same
+  device reaches on AVPlayer-routed channels:
+  - **Tap is the Back ladder**, the Dart twin of Swift's `playerTapAction`: peel info → hide
+    visible chrome → reveal it. The pointer path keeps "a tap only ever shows" (hover already
+    reveals; hiding under a cursor is wrong). The list menus are modal `PopupMenuButton` routes
+    whose own barrier eats the outside tap, so they self-close on one press just like the native
+    `closeMenu` rung. The bars **absorb** taps that miss a control under `touch` — a Flutter
+    `Container` doesn't hit-test itself, and without that a press on bare gradient would fall to
+    the background layer and hide the chrome the user was reaching for (UIKit views absorb by
+    default). The explicit control still exits outright, skipping the ladder, and wears the native
+    controller's **X** rather than a back arrow.
+  - **No fullscreen affordance** — the Flutter route is already fullscreen, media_kit's
+    `toggleFullscreen` would push a second `Video` route above the one `PlayerScreen` owns, and the
+    native controller has no fullscreen button either. Dropping the double-tap recognizer also
+    makes the show/hide tap resolve on the next frame instead of after `kDoubleTapTimeout`.
+  - **≥44pt hit targets** in both axes, replacing chip sizes that are deliberately shorter than
+    they are wide for a cursor.
+  - **Two-row compact reflow** below 720px, mirroring the native overlay's `applyCompactLayout`
+    reparenting: badges move under the title, the button cluster under the transport. Measured, not
+    precautionary — a 390pt portrait phone overflows by 227px (live, full badge set) and 360px
+    (VOD) on one row.
+  Aspect cycling stays at the full four mpv modes here (Fit/Fill/16:9/4:3) rather than being cut to
+  the native controller's two: that limit is an `AVPlayerLayer`/`videoGravity` constraint
+  (docs/ios.md "Known parity gaps"), not a design choice, and mpv genuinely does all four.
+  Auto-hide stays flat 4s, between the native 3.5s (VOD) and 4.5s (live). Nothing sets
+  `SystemChrome.setEnabledSystemUIMode`, so the iOS status bar really does sit over this surface —
+  `_barInsets` (`MediaQuery.paddingOf`) is what keeps the chrome clear of it and of the home
+  indicator. Pinned by `test/player_overlay_touch_test.dart` (the pointer behavior stays in
+  `test/player_overlay_test.dart`, which is untouched).
 - **Parity gaps** (docs/ios.md "Known parity gaps"): no HDR10+, ever (AVFoundation exposes no
   per-scene ST2094-40 metadata, unlike the Android/Windows/Linux decoder-level reads); and no
   *seamless* preview→fullscreen handoff for AVPlayer-routed channels — the handoff itself is
@@ -285,7 +325,8 @@ back via `setControlState` (mouse-clickable, not yet in the keyboard-focus ring)
 overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
 when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
-the shared Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's), kept
+the shared Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's and —
+in `touch` mode — iOS's mpv path, see "iOS"), kept
 at visual parity with the GDI overlay (chip buttons, badges, favorite star). It reads/drives the
 media_kit `Player` through a narrow `EmbeddedControls` seam (`PlayerBackedEmbeddedControls` in
 production) purely so the overlay is widget-testable without a libmpv engine —
@@ -302,7 +343,8 @@ native overlays' menu→info→hide→exit ladder — `EmbeddedPlayerControlsSta
 an open info panel first (consuming the press), and `PlayerScreen`'s Escape binding calls it
 (via `PlayerVideoSurfaceState.handleBackPeel`) before falling through to exit. Tapping the exposed
 video area also dismisses an open info panel (the panel itself absorbs taps so it isn't re-closed
-by its own hit). The on-screen back-*arrow* button still exits directly (documented parity with the
+by its own hit). Under `touch` (iOS) that same tap carries one rung further — it *hides* visible
+chrome once there is nothing left to peel, and the bars absorb near-misses; see "iOS". The on-screen back-*arrow* button still exits directly (documented parity with the
 native overlays); the modal `PopupMenuButton` menus dismiss themselves and aren't a peel rung.
 Two layout/latency
 invariants there: (1) **tap-to-show / double-tap-fullscreen sits on a background `Positioned.fill`
@@ -539,7 +581,7 @@ scene metadata's semantics itself).
 
 The overlay is a from-scratch ASS-events renderer at parity with the embedded
 Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, shared by
-Linux and the Windows SDR embedded path), not a
+Linux, the Windows SDR embedded path, and iOS's mpv path), not a
 generic mpv skin: text renders in bundled **Inter** and icons as glyphs from
 bundled **Material Icons** (`linux/mpv/fonts/`, installed by
 `tool/package_linux_appimage.sh` into `usr/share/iptvs/fonts/` and pointed at

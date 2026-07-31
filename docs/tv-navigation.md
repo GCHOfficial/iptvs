@@ -219,8 +219,15 @@ after a dialog is dismissed) — that isn't somewhere the user can *be*, so it r
 instead of offering to exit. Pinned end-to-end by `test/channel_list_focus_test.dart` (whose
 `_ManySource` gives both lists enough rows to actually scroll).
 
-**iOS has no hardware Back**, so the player's presented `IptvsPlayerViewController`
-(docs/ios.md, docs/player.md "iOS") renders the same peel/exit shape through touch instead:
+**iOS has no hardware Back**, so *both* iOS player surfaces render the same peel/exit shape
+through touch. This paragraph describes the presented `IptvsPlayerViewController`
+(docs/ios.md, docs/player.md "iOS"); the **embedded Flutter overlay on the mpv-routed path**
+(`EmbeddedPlayerControls` with `touch: true` — docs/player.md "iOS") deliberately mirrors it,
+tap-peeling the info panel, then hiding the chrome, then revealing it, with an **X** that exits
+outright. They must not diverge: a Stalker source always routes to mpv (`create_link` returns
+extension-less locators, so `selectIosEngine` rule 4 applies), so for those users the embedded
+overlay is the *only* player surface they ever see — a different interaction model there would
+be a different app, not a fallback. The presented controller:
 tapping outside the chrome (on the scrim, or the exposed-video area with the chrome already
 open) closes an open menu, then the info panel — the same menu → info ladder rungs Android's
 `ControlsOverlay` and the Windows/Linux overlays use — while tapping the exposed video with
