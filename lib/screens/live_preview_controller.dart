@@ -11,7 +11,12 @@ import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../player/channel_owner.dart';
 import '../player/mpv_options.dart';
-import '../player/player_screen.dart' show kReconnectStallMs, reconnectMinGapMs;
+import '../player/player_screen.dart'
+    show
+        IosAudioSessionClaim,
+        IosAudioSessionClient,
+        kReconnectStallMs,
+        reconnectMinGapMs;
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
 
@@ -62,6 +67,30 @@ class LivePreviewController extends ChangeNotifier {
     _nativeChannel,
   );
   int? _previewToken;
+
+  /// The preview's claim on the process-wide iOS audio session.
+  ///
+  /// The preview is always the embedded media_kit/libmpv engine on iOS (the
+  /// shared-engine native path is Android-only), and since
+  /// `iosManageAudioSession: false` mpv no longer activates `AVAudioSession`
+  /// itself — so without this claim the preview is simply **silent**.
+  ///
+  /// Its release discipline is deliberately *stricter* than the fullscreen
+  /// player's: [stop] and [dispose] release it, and because the app-pause
+  /// lifecycle observer in `channel_list_screen.dart` stops the preview, the
+  /// pause release rides that existing path rather than a second observer. That
+  /// asymmetry — preview releases on `AppLifecycleState.paused`, `PlayerScreen`
+  /// does not — is the load-bearing half of `UIBackgroundModes = [audio]`: the
+  /// fullscreen player *should* keep playing behind the launcher, a muted
+  /// preview must not keep decoding and holding a (single-connection) provider
+  /// connection. See docs/ios.md "Other work required".
+  ///
+  /// Uses its own client id, so it can coexist with the fullscreen player's
+  /// claim through an adopted handoff without either one deactivating the
+  /// session under the other. No-op off iOS.
+  final IosAudioSessionClaim _audioSession = IosAudioSessionClaim(
+    IosAudioSessionClient.livePreview,
+  );
 
   /// Channels whose video the native engine can't decode (e.g. Dolby Vision
   /// P5 on non-DV hardware) — they preview via media_kit for this session.
@@ -160,7 +189,8 @@ class LivePreviewController extends ChangeNotifier {
     // A completed landing well after the last restart is a fresh incident
     // (the restart held for a full stall window), not a continuation of a
     // stuck loop — forget the earlier attempts.
-    if (_lastEofRestartMs != 0 && now - _lastEofRestartMs >= kReconnectStallMs) {
+    if (_lastEofRestartMs != 0 &&
+        now - _lastEofRestartMs >= kReconnectStallMs) {
       _eofRestartAttempts = 0;
     }
     if (_eofRestartAttempts >= _maxConsecutiveEofRestarts) {
@@ -293,6 +323,11 @@ class LivePreviewController extends ChangeNotifier {
         nativeActive = false;
         unawaited(_stopNative());
       }
+      // iOS: claim the audio session before libmpv brings its output up, or the
+      // preview plays silently (`iosManageAudioSession: false` — mpv no longer
+      // activates the session itself). Only the embedded path needs it; the
+      // Android shared-engine path above returns before here. Inert off iOS.
+      await _audioSession.acquire();
       await player.open(Media(resolved.url, httpHeaders: resolved.headers));
       await player.setVolume(muted ? 0 : 100);
       if (_disposed || requestId != _requestId) return;
@@ -405,6 +440,11 @@ class LivePreviewController extends ChangeNotifier {
     try {
       if (_player != null) await _player!.stop();
     } catch (_) {}
+    // Nothing is decoding any more, so the preview must stop holding the
+    // process-wide session open. This is also the app-pause release path: the
+    // lifecycle observer in `channel_list_screen.dart` calls `stop()`, so the
+    // pause behaviour rides here rather than in a second observer.
+    await _audioSession.release();
     if (_disposed) return;
     _set(() {
       loading = false;
@@ -477,6 +517,8 @@ class LivePreviewController extends ChangeNotifier {
     error = null;
     stream = null;
     if (!_disposed) notifyListeners();
+    // The engine this claim was taken for is being destroyed outright.
+    await _audioSession.release();
     if (player != null) {
       await player.dispose();
       ResourceCounters.decMediaKitPlayers();
@@ -496,6 +538,12 @@ class LivePreviewController extends ChangeNotifier {
     }
     unawaited(_hwdecProbe?.cancel());
     unawaited(_completedSub?.cancel());
+    // Last-resort balance: the controller can be disposed without a preceding
+    // `stop()` (the whole screen going away with a preview still running). An
+    // acquire this never released would leave the process-wide session active
+    // for the rest of the app's life, so other apps could not resume audio.
+    // Idempotent — a no-op when `stop()`/`discardPlayer()` already released.
+    unawaited(_audioSession.release());
     _activeChannel = null;
     final player = _player;
     if (player != null) {
