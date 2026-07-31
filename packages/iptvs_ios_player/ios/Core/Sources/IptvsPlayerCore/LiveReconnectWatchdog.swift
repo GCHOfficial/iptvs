@@ -60,6 +60,20 @@ public struct LiveReconnectWatchdog: Equatable, Sendable {
   /// circuits to ``LiveReconnectAction/healthy``.
   public let isLive: Bool
 
+  /// Whether AVPlayer has produced a frame at **any** point in this controller's
+  /// life. Monotonic: latched by ``markStarted()`` (and by any `poll` that is
+  /// told so), never cleared, deliberately *not* per-`AVPlayerItem`.
+  ///
+  /// **This is the boundary between the two watchdogs.** While it is false the
+  /// pre-start window belongs to ``PlaybackStartBackstop`` exclusively and every
+  /// entry point here reports healthy, however empty the buffer looks — see that
+  /// type's doc for why the ordering is expressed as a disjoint-window fact
+  /// rather than as an 8s-vs-10s threshold race. Once it is true this watchdog
+  /// owns everything, *including a reload that never comes back*, which is what
+  /// keeps a genuine network drop reconnecting on AVPlayer instead of being
+  /// mistaken for an unplayable container and handed to mpv.
+  public private(set) var hasEverStarted: Bool = false
+
   /// Reconnect attempts made so far. Feeds `ReconnectPolicy.minGapMs`, and is
   /// reset by a healthy poll.
   public private(set) var attempts: Int = 0
@@ -74,6 +88,15 @@ public struct LiveReconnectWatchdog: Equatable, Sendable {
     self.isLive = isLive
   }
 
+  /// Latches ``hasEverStarted``. Called when the engine reports its first frame.
+  ///
+  /// Idempotent and one-way — there is no `markStopped`, because "AVPlayer has
+  /// played this content at least once" is a fact about the *container*, and a
+  /// later drop does not un-prove it.
+  public mutating func markStarted() {
+    hasEverStarted = true
+  }
+
   /// The periodic tick (500 ms, matching Android's progress ticker).
   ///
   /// `ended` picks the faster `ReconnectPolicy.endedReconnectMs` threshold: a
@@ -81,16 +104,33 @@ public struct LiveReconnectWatchdog: Equatable, Sendable {
   /// (``shouldReconnectOnCompleted(isLive:)``), and there is nothing to wait for
   /// the way there is with a buffer that might refill.
   ///
+  /// `hasEverStarted` is passed in on every tick *and* latched, rather than only
+  /// being set through ``markStarted()``: the engine owns the fact, so reading
+  /// it each tick means the two can never drift, and latching means a caller
+  /// that later reports `false` (a fresh item mid-reload) cannot re-disable a
+  /// watchdog that is legitimately live.
+  ///
   /// `nowMs` must be a positive wall-clock instant. `0` is the "not stalled"
   /// sentinel for ``stalledSinceMs``, exactly as it is for Kotlin's
   /// `stalledSinceMs`, so a caller passing a zero clock would re-prime the stall
   /// on every tick. Every real caller uses epoch milliseconds.
   public mutating func poll(
+    hasEverStarted: Bool,
     isBuffering: Bool,
     ended: Bool,
     nowMs: Int64
   ) -> LiveReconnectAction {
     guard isLive else { return .healthy }
+    if hasEverStarted { markStarted() }
+    // The pre-first-start window is ``PlaybackStartBackstop``'s, exclusively.
+    // Returning `.healthy` rather than `.wait` also keeps the stall clock clean,
+    // so the 8s threshold is measured from the first frame rather than from a
+    // buffer that was empty because nothing had loaded yet — the same role
+    // `_markLinuxNativeStarted` plays for the Linux native watchdog.
+    guard self.hasEverStarted else {
+      stalledSinceMs = 0
+      return .healthy
+    }
     guard isBuffering || ended else {
       stalledSinceMs = 0
       attempts = 0
@@ -106,8 +146,15 @@ public struct LiveReconnectWatchdog: Equatable, Sendable {
   /// `onRecoverableError` to `reconnectLive(force = true)`. Skips the stall
   /// threshold, but is still rate-limited by `ReconnectPolicy.minGapMs`, so a
   /// stream erroring in a tight loop can't become a `create_link` storm.
+  ///
+  /// Gated on ``hasEverStarted`` for the same reason ``poll(hasEverStarted:isBuffering:ended:nowMs:)``
+  /// is: a hard error before anything ever played is an unplayable container, not
+  /// a drop, and belongs to the `engineFailed` handoff rather than to a reload.
+  /// `AvPlayerEngine` already routes it that way (`handleFailure` sends
+  /// `onFatalError` instead of `.dropped`), so this is belt and braces — the
+  /// exclusion holds even if that wiring changes.
   public mutating func forceReconnect(nowMs: Int64) -> LiveReconnectAction {
-    guard isLive else { return .healthy }
+    guard isLive, hasEverStarted else { return .healthy }
     return attempt(force: true, nowMs: nowMs)
   }
 

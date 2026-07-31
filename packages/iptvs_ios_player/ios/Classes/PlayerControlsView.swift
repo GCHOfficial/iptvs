@@ -19,6 +19,10 @@ enum PlayerControlsAction {
   case toggleMenu(PlayerMenu)
   case toggleInfo
   case selectMenuOption(String)
+  /// Retry from the terminal error surface. Its sibling "Back" button reuses
+  /// ``close`` — on the Dart overlay that button pops the route, which is what
+  /// ``close`` already does here.
+  case retry
 }
 
 /// The native player's control overlay — the port of Android's `ControlsOverlay`
@@ -153,6 +157,7 @@ final class PlayerControlsView: UIView {
   private let listMenu = ListMenuView()
   private let infoPanel = InfoPanelView()
   private let reconnectChip = UIView()
+  private let errorView = PlayerErrorView()
 
   /// Nil until the first layout pass, so whichever arrangement the real width
   /// calls for is applied once rather than assumed.
@@ -183,6 +188,7 @@ final class PlayerControlsView: UIView {
     buildBottomBar()
     buildPanels()
     buildReconnectChip()
+    buildErrorView()
 
     NSLayoutConstraint.activate([
       // Full-bleed scrim: to the physical edges, deliberately not the safe area.
@@ -457,6 +463,24 @@ final class PlayerControlsView: UIView {
     ])
   }
 
+  /// The terminal error surface. Added **last** so it sits above every bar and
+  /// panel, and **outside `safeContainer`** so it survives the chrome being
+  /// hidden — same reasoning as the reconnect chip: a failure the viewer only
+  /// learns about if they happen to tap first is indistinguishable from the hang
+  /// it exists to replace.
+  private func buildErrorView() {
+    errorView.isHidden = true
+    errorView.onBack = { [weak self] in self?.onAction?(.close) }
+    errorView.onRetry = { [weak self] in self?.onAction?(.retry) }
+    addSubview(errorView)
+    NSLayoutConstraint.activate([
+      errorView.topAnchor.constraint(equalTo: topAnchor),
+      errorView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      errorView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      errorView.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+
   private static func flexibleSpacer() -> UIView {
     let spacer = UIView()
     spacer.isUserInteractionEnabled = false
@@ -517,7 +541,11 @@ final class PlayerControlsView: UIView {
   ///   in rather than read here so the clock stays a controller concern and the
   ///   view has no hidden time dependency.
   func render(_ state: PlayerChromeState, nowMs: Int64) {
-    reconnectChip.isHidden = !state.reconnecting
+    // Both render outside the `controlsVisible` gate, and they are mutually
+    // exclusive by `showReconnectChip` — a spinner promising a retry must not
+    // sit behind a card saying the retry failed.
+    reconnectChip.isHidden = !state.showReconnectChip
+    errorView.render(message: state.errorMessage)
 
     let visible = state.controlsVisible
     topScrim.isHidden = !visible
@@ -620,6 +648,126 @@ final class PlayerControlsView: UIView {
     aspectButton.setLabel(state.aspectLabel)
     // Step 7 flips `supportsPip` once an `AVPictureInPictureController` exists.
     pipButton.isHidden = !state.showPictureInPictureButton
+  }
+}
+
+/// The terminal error/Retry surface — the native mirror of Dart's
+/// `PlayerErrorOverlay` (`lib/player/player_overlay.dart`), down to the same
+/// three elements in the same order: icon, message, Back + Retry.
+///
+/// Kept to that and no further on purpose. This is the *last* recovery on a
+/// platform whose primary recovery is the mpv handoff, so its job is to be
+/// unmistakable and impossible to get stuck behind, not to explain itself:
+/// anything more detailed would mean putting an `AVError` description on screen,
+/// and those interpolate the credential-bearing stream URL (CLAUDE.md).
+///
+/// ``PlayerTapAbsorbing`` because it is a modal surface: the root tap recogniser
+/// drives the Back ladder, and a tap on the card must not also toggle the chrome
+/// underneath it. Hidden it is not hit-testable at all, so the ladder is
+/// untouched the rest of the time.
+final class PlayerErrorView: UIView, PlayerTapAbsorbing {
+  var onBack: (() -> Void)?
+  var onRetry: (() -> Void)?
+
+  private let messageLabel = UILabel()
+  private lazy var backButton = PlayerTextButton(
+    title: "Back",
+    accessibilityLabel: "Back"
+  ) { [weak self] in self?.onBack?() }
+  private lazy var retryButton = PlayerTextButton(
+    title: "Retry",
+    accessibilityLabel: "Retry"
+  ) { [weak self] in self?.onRetry?() }
+
+  /// Preferred column width. A message centred across a landscape iPad would
+  /// otherwise stretch into a single unreadable line.
+  private static let maxContentWidth: CGFloat = 420
+
+  init() {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    // Matches the Dart overlay's `Colors.black.withValues(alpha: 0.88)`.
+    backgroundColor = UIColor.black.withAlphaComponent(0.88)
+
+    let icon = UIImageView()
+    icon.tintColor = PlayerColors.textLo
+    // `.center`, not `.scaleAspectFit`: the stack fills the column width (see
+    // below), and a symbol scaled to that width would be enormous.
+    icon.contentMode = .center
+    icon.image = UIImage(
+      systemName: "exclamationmark.circle",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 44, weight: .regular)
+    )
+    // Same failing-visibly rule as `PlayerIconButton`: a nil SF Symbol is an
+    // invisible view, so collapse it rather than leave a mystery gap.
+    icon.isHidden = icon.image == nil
+
+    messageLabel.font = PlayerFonts.notice
+    messageLabel.textColor = PlayerColors.textLo
+    messageLabel.textAlignment = .center
+    messageLabel.numberOfLines = 0
+
+    let buttons = UIStackView(arrangedSubviews: [backButton, retryButton])
+    buttons.axis = .horizontal
+    buttons.alignment = .center
+    buttons.spacing = 12
+    buttons.translatesAutoresizingMaskIntoConstraints = false
+
+    // The buttons ride in a filled container and are centred inside it, rather
+    // than being centred by the stack's own alignment: the column is `.fill` so
+    // the label can wrap to the full width, and `.fill` would otherwise stretch
+    // the two buttons across it.
+    let buttonsContainer = UIView()
+    buttonsContainer.addSubview(buttons)
+
+    let column = UIStackView(arrangedSubviews: [icon, messageLabel, buttonsContainer])
+    column.axis = .vertical
+    column.alignment = .fill
+    column.spacing = 16
+    column.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(column)
+
+    let preferredWidth = column.widthAnchor.constraint(
+      equalToConstant: PlayerErrorView.maxContentWidth
+    )
+    // High, not required, so the required inset constraints below win on a
+    // narrow phone instead of the layout becoming unsatisfiable.
+    preferredWidth.priority = .defaultHigh
+
+    NSLayoutConstraint.activate([
+      buttons.topAnchor.constraint(equalTo: buttonsContainer.topAnchor),
+      buttons.bottomAnchor.constraint(equalTo: buttonsContainer.bottomAnchor),
+      buttons.centerXAnchor.constraint(equalTo: buttonsContainer.centerXAnchor),
+
+      column.centerXAnchor.constraint(equalTo: centerXAnchor),
+      column.centerYAnchor.constraint(equalTo: centerYAnchor),
+      preferredWidth,
+      // Inset to the safe area: the card is content, not scrim, so it keeps the
+      // same full-bleed-scrim / inset-content split as the rest of the overlay.
+      // Only the dimming behind it runs under the notch.
+      column.leadingAnchor.constraint(
+        greaterThanOrEqualTo: safeAreaLayoutGuide.leadingAnchor,
+        constant: PlayerDimens.edgePadding
+      ),
+      column.trailingAnchor.constraint(
+        lessThanOrEqualTo: safeAreaLayoutGuide.trailingAnchor,
+        constant: -PlayerDimens.edgePadding
+      ),
+    ])
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerErrorView is created in code, never from a nib")
+  }
+
+  /// Shows `message`, or hides the whole surface when it is nil.
+  func render(message: String?) {
+    guard let message else {
+      isHidden = true
+      return
+    }
+    if messageLabel.text != message { messageLabel.text = message }
+    isHidden = false
   }
 }
 

@@ -176,6 +176,27 @@ public enum PlayerAutoHide {
   }
 }
 
+/// The two messages the native terminal error surface can show.
+///
+/// **Fixed strings, never an `NSError`'s `localizedDescription`.** `AVError` and
+/// its `NSUnderlyingError` routinely interpolate the failing URL, and provider
+/// URLs carry credentials in the query string *and* in path segments (CLAUDE.md:
+/// "Secrets must never reach logs, on-screen errors, or exported diagnostics").
+/// A constant has nothing to leak; the machine-readable half of the failure goes
+/// to Dart's diagnostics log as a `domain:code` through
+/// ``PlaybackEventPayload/errorCode(domain:code:)`` instead.
+///
+/// Phrased to match the Dart overlay's existing voice ("Couldn't create the
+/// video surface.", "Couldn't restart playback on this device.").
+public enum PlayerErrorMessages {
+  /// Playback was running and stopped hard. VOD only — live reconnects.
+  public static let playbackStopped = "Playback stopped and couldn't be resumed."
+
+  /// The stream never started and there is no way to hand it to the fallback
+  /// engine.
+  public static let cannotPlay = "Couldn't play this stream."
+}
+
 /// Everything the iOS player chrome renders from — the port of Android's
 /// `PlayerUiState` (`android/app/src/main/kotlin/.../player/PlayerUiState.kt`),
 /// minus the D-pad/TV-only pieces iOS has no counterpart for.
@@ -233,6 +254,27 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// **not** gated on `controlsVisible` — a stream that dropped while the
   /// chrome was hidden must still say so.
   public var reconnecting: Bool = false
+
+  /// A **terminal** playback failure this controller cannot recover from on its
+  /// own, or `nil` for the normal case.
+  ///
+  /// The native counterpart of Dart's `PlayerErrorOverlay`
+  /// (`lib/player/player_overlay.dart`), and deliberately no more elaborate than
+  /// it: a message plus Back and Retry. It exists because two paths otherwise
+  /// dead-end on this platform, both VOD-only by construction —
+  ///
+  /// 1. a hard `AVPlayerItem` failure **mid-film** (``PlaybackDropOutcome``):
+  ///    live reloads through the reconnect watchdog, but the watchdog is inert
+  ///    for VOD, so nothing at all happened and the viewer was left with a
+  ///    stopped picture under working chrome;
+  /// 2. a load that never starts and cannot be handed to the fallback engine —
+  ///    either because the plugin channel Dart listens on is gone, or because
+  ///    the stream already played once so ``PlaybackStartAction/surfaceError``
+  ///    applies rather than a handoff.
+  ///
+  /// Never carries error text from AVFoundation: `AVError` userInfo embeds the
+  /// failing URL, which carries provider credentials. See ``PlayerErrorMessages``.
+  public var errorMessage: String?
 
   public var positionMs: Int64 = 0
   public var durationMs: Int64 = 0
@@ -332,6 +374,17 @@ public struct PlayerChromeState: Equatable, Sendable {
   public var showFavoriteButton: Bool { canFavorite }
   public var showPictureInPictureButton: Bool { supportsPip }
   public var showLiveBadge: Bool { isLive }
+
+  /// The terminal error surface. Like the reconnect chip it renders outside the
+  /// `controlsVisible` gate — an error that only appeared if you happened to tap
+  /// first would be indistinguishable from the hang it exists to replace.
+  public var showErrorOverlay: Bool { errorMessage != nil }
+
+  /// "Reconnecting…" **and** a terminal error are mutually exclusive: the chip
+  /// promises a retry is in progress, which a terminal error contradicts. The
+  /// error wins, so a live reconnect that ends in a surfaced failure does not
+  /// leave a spinner running behind it.
+  public var showReconnectChip: Bool { reconnecting && errorMessage == nil }
 
   // MARK: - Derived labels
 

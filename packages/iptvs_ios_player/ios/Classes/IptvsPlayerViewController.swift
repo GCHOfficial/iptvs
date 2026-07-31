@@ -147,6 +147,18 @@ final class IptvsPlayerViewController: UIViewController {
   /// engine facts and does what it is told.
   private var watchdog: LiveReconnectWatchdog
 
+  /// The "this load never produced a frame" backstop — docs/ios.md's third
+  /// `engineFailed` detection shape, and the one thing that keeps a VOD open
+  /// from hanging forever behind chrome on a black screen.
+  ///
+  /// Polled from the **same ticker** as `watchdog`, immediately before it, so
+  /// the two decisions are evaluated in a fixed order on one instant. They can
+  /// never both act: `PlaybackStartBackstop` owns the window before AVPlayer has
+  /// ever produced a frame and `LiveReconnectWatchdog` owns everything after,
+  /// split by `AvPlayerEngine.hasEverStarted` rather than by comparing their
+  /// thresholds. See `PlaybackStartBackstop`'s type doc for the full argument.
+  private var startBackstop: PlaybackStartBackstop
+
   /// The 500 ms watchdog tick, mirroring Android's progress-ticker cadence.
   ///
   /// **A `Timer`, deliberately not `AvPlayerEngine.onProgressTick`**, even though
@@ -155,6 +167,10 @@ final class IptvsPlayerViewController: UIViewController {
   /// playback stalls or the item fails, the timebase stops and the callback
   /// stops with it — precisely the condition the watchdog exists to notice. A
   /// watchdog that can only run while playback is healthy is not a watchdog.
+  ///
+  /// Runs for **VOD as well as live** now that it also drives `startBackstop`;
+  /// on VOD it stops itself the moment that backstop disarms, so an ordinary
+  /// film does not carry a 2 Hz no-op timer for two hours.
   private var reconnectTicker: Timer?
 
   /// True from a hard `.dropped` until the engine reports playing again.
@@ -167,10 +183,11 @@ final class IptvsPlayerViewController: UIViewController {
   private var liveDropped = false
 
   /// Guards against a second reload starting while a `resolveAgain` round trip
-  /// is still in flight — otherwise the watchdog's 500 ms tick and a "Go to
-  /// live" press could each ask the portal for a locator at the same time, which
-  /// on a single-connection account is exactly the `create_link` storm the
-  /// backoff exists to prevent.
+  /// is still in flight — otherwise the watchdog's 500 ms tick, a "Go to live"
+  /// press and a Retry from the error surface could each ask the portal for a
+  /// locator at the same time, which on a single-connection account is exactly
+  /// the `create_link` storm the backoff exists to prevent. Shared by all three
+  /// for that reason, despite the `live` in the name.
   private var liveReloadInFlight = false
 
   /// Monotonic token for the in-flight `resolveAgain`, so the reply and the
@@ -203,6 +220,7 @@ final class IptvsPlayerViewController: UIViewController {
     // Provider-declared liveness, never inferred — a VOD watchdog is inert by
     // construction rather than by a guard someone can forget.
     watchdog = LiveReconnectWatchdog(isLive: request.isLive)
+    startBackstop = PlaybackStartBackstop(isLive: request.isLive)
     uiState = PlayerUiState(PlayerChromeState(request: request))
     super.init(nibName: nil, bundle: nil)
     IosDebugCounters.increment(.playerControllers)
@@ -264,14 +282,15 @@ final class IptvsPlayerViewController: UIViewController {
     if request.resumeMs > 0 && !request.isLive {
       pendingResumeMs = request.resumeMs
     }
-    engine.load(url: request.url, headers: request.headers, subtitles: request.subtitles)
-    // Started here rather than in `viewDidAppear`, and never stopped on
-    // disappearance: playback deliberately outlives visibility on this platform
-    // (Picture-in-Picture, and background audio, which PiP requires anyway), and
-    // a stream that drops while the app is in PiP must still reconnect. Android
-    // can tie its ticker to `onStart`/`onStop` because it pauses playback there;
-    // this controller does not.
-    startLiveWatchdogIfNeeded()
+    // Arms the start backstop and the ticker as well as loading — every load in
+    // this class goes through here so no path can start a stream without a clock
+    // bounding it. Started here rather than in `viewDidAppear`, and never
+    // stopped on disappearance: playback deliberately outlives visibility on
+    // this platform (Picture-in-Picture, and background audio, which PiP
+    // requires anyway), and a stream that drops while the app is in PiP must
+    // still reconnect. Android can tie its ticker to `onStart`/`onStop` because
+    // it pauses playback there; this controller does not.
+    startPlayback(url: request.url, headers: request.headers)
   }
 
   override func viewDidAppear(_ animated: Bool) {
@@ -548,19 +567,36 @@ final class IptvsPlayerViewController: UIViewController {
     )
 
     // The live reconnect watchdog's edge-triggered half; the level-triggered
-    // half is `pollLiveReconnect` on the 500 ms ticker.
+    // half is `pollWatchdogs` on the 500 ms ticker.
     switch event {
-    case .started, .resumed:
+    case .started:
+      liveDropped = false
+      // The handover between the two watchdogs, in one place: the start backstop
+      // disarms for this load and the reconnect watchdog latches "AVPlayer can
+      // play this". Both are also derived from `engine.hasEverStarted` on every
+      // tick, so this is the prompt edge rather than the only path.
+      startBackstop.markStarted()
+      watchdog.markStarted()
+    case .resumed:
       liveDropped = false
     case .dropped:
-      // A hard player error while playing. Forced, so it skips the 8s stall
-      // threshold — but `ReconnectPolicy.minGapMs` still rate-limits it, so a
-      // stream erroring in a tight loop cannot become a `create_link` storm.
-      // Direct port of Android wiring `onRecoverableError` to
-      // `reconnectLive(force = true)`.
       liveDropped = true
-      if watchdog.forceReconnect(nowMs: IptvsPlayerViewController.nowMs()) == .reconnect {
-        startLiveReload(showsReconnecting: true)
+      switch playbackDropOutcome(isLive: request.isLive) {
+      case .reconnect:
+        // A hard player error while playing. Forced, so it skips the 8s stall
+        // threshold — but `ReconnectPolicy.minGapMs` still rate-limits it, so a
+        // stream erroring in a tight loop cannot become a `create_link` storm.
+        // Direct port of Android wiring `onRecoverableError` to
+        // `reconnectLive(force = true)`.
+        if watchdog.forceReconnect(nowMs: IptvsPlayerViewController.nowMs()) == .reconnect {
+          startLiveReload(showsReconnecting: true)
+        }
+      case .surfaceError:
+        // VOD. Nothing else in this controller would ever act on it — the
+        // reconnect watchdog is inert for VOD by construction — so without this
+        // a mid-film failure left a stopped picture under working chrome and no
+        // way forward but backing out.
+        surfaceTerminalError(PlayerErrorMessages.playbackStopped)
       }
     case .ended:
       // **A clean server-side EOF on live is a drop, not an end**
@@ -575,43 +611,106 @@ final class IptvsPlayerViewController: UIViewController {
     }
   }
 
-  // MARK: - Live reconnect watchdog
+  // MARK: - Watchdogs (start backstop + live reconnect)
 
   private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
-  private func startLiveWatchdogIfNeeded() {
-    guard request.isLive, reconnectTicker == nil else { return }
+  /// The **only** place a stream is handed to the engine.
+  ///
+  /// Every load — the initial open, a reconnect reload, "Go to live", a Retry
+  /// from the error surface — arms the start backstop and (re-)starts the
+  /// ticker, so there is no way to begin playback without a clock bounding it.
+  /// That is the property that closes the original hole: the missing detector
+  /// was missing precisely because nothing owned "a load that never became
+  /// playback".
+  private func startPlayback(url: String, headers: [String: String]) {
+    startBackstop.markLoaded(nowMs: IptvsPlayerViewController.nowMs())
+    startWatchdogTicker()
+    engine.load(url: url, headers: headers, subtitles: request.subtitles)
+  }
+
+  private func startWatchdogTicker() {
+    guard reconnectTicker == nil, !finishing else { return }
     // `.common` run-loop mode rather than `Timer.scheduledTimer`'s default:
     // scrolling an open track menu puts the main run loop in tracking mode, and
     // a watchdog that stops ticking while the user is scrolling is a watchdog
     // with a hole in it.
     let ticker = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-      self?.pollLiveReconnect()
+      self?.pollWatchdogs()
     }
     RunLoop.main.add(ticker, forMode: .common)
     reconnectTicker = ticker
   }
 
-  private func stopLiveWatchdog() {
+  private func stopWatchdogTicker() {
     reconnectTicker?.invalidate()
     reconnectTicker = nil
+  }
+
+  private func stopLiveWatchdog() {
+    stopWatchdogTicker()
     resolveTimer?.invalidate()
     resolveTimer = nil
     pendingResolveCompletion = nil
     liveReloadInFlight = false
   }
 
-  /// The level-triggered half, port of `HdrPlayerActivity.pollLiveReconnect`.
+  /// The level-triggered half of both watchdogs, port of
+  /// `HdrPlayerActivity.pollLiveReconnect` with the start backstop in front.
   ///
   /// Reads engine facts rather than chrome fields: `handleProgressTick`
   /// overwrites `PlayerChromeState.isBuffering` from the engine twice a second,
   /// so a chrome-derived watchdog would be reading its own echo.
-  private func pollLiveReconnect() {
+  ///
+  /// **Order is load-bearing, and it is an exclusion rather than a priority.**
+  /// The backstop is asked first, but that alone would still be a race — a live
+  /// stream that never starts looks stalled from the first tick, so
+  /// `ReconnectPolicy.stallReconnectMs` (8s) would fire a reload before the
+  /// backstop's 10s ever elapsed and AVPlayer would retry, forever, a container
+  /// it has already proved it cannot play. What actually makes this
+  /// deterministic is that `LiveReconnectWatchdog.poll` reports `.healthy` while
+  /// `hasEverStarted` is false: the two own disjoint windows either side of that
+  /// one monotonic fact, so at most one of them can act on any tick and the 8s
+  /// and 10s figures never compete.
+  private func pollWatchdogs() {
     guard !finishing else { return }
+    let nowMs = IptvsPlayerViewController.nowMs()
+    let hasEverStarted = engine.hasEverStarted
+
+    switch startBackstop.poll(hasEverStarted: hasEverStarted, nowMs: nowMs) {
+    case .handOffEngine:
+      // Nothing has ever played: the container is one AVFoundation accepted and
+      // then could not decode. Hand it to mpv rather than retrying the engine
+      // that already failed — `reportEngineFailed` tears down and dismisses, so
+      // return immediately.
+      reportEngineFailed(reason: PlaybackStartBackstop.engineFailedReason)
+      return
+    case .surfaceError:
+      // A reload of a stream that *did* play never came back, and only VOD gets
+      // here (live is the reconnect watchdog's, which is still retrying). No
+      // handoff: the container is proven, so switching engines would downgrade a
+      // working stream over what is really a network failure.
+      surfaceTerminalError(PlayerErrorMessages.playbackStopped)
+      return
+    case .wait:
+      break
+    }
+
+    // VOD has nothing else on this ticker: the reconnect watchdog is inert for
+    // VOD by construction, so don't even poll it. Once the backstop disarms —
+    // first frame, or a fired decision — stop the ticker rather than run it at
+    // 2 Hz for the length of a film; a later Retry re-arms both through
+    // `startPlayback`.
+    guard request.isLive else {
+      if !startBackstop.isArmed { stopWatchdogTicker() }
+      return
+    }
+
     switch watchdog.poll(
+      hasEverStarted: hasEverStarted,
       isBuffering: engine.isBuffering || liveDropped,
       ended: engine.hasEnded,
-      nowMs: IptvsPlayerViewController.nowMs()
+      nowMs: nowMs
     ) {
     case .healthy:
       // Clearing the chip here rather than on `.started` is deliberate: the
@@ -712,6 +811,10 @@ final class IptvsPlayerViewController: UIViewController {
         state.isPlaying = true
         state.isBuffering = false
         state.ended = false
+        // Playback is the only thing that clears a surfaced terminal error: a
+        // Retry that actually worked must not leave the overlay sitting over
+        // moving video.
+        state.errorMessage = nil
         // A fresh start is by definition at the live edge — this is what clears
         // the greyed LIVE pill and the go-to-live button after a reload.
         if state.isLive { state.liveSynced = true }
@@ -882,7 +985,7 @@ final class IptvsPlayerViewController: UIViewController {
     // same channel, so clearing them would only make the badges flicker.
     streamInfoResolved = false
     streamInfoAttempts = 0
-    engine.load(url: url, headers: headers, subtitles: request.subtitles)
+    startPlayback(url: url, headers: headers)
     refreshNowPlaying()
   }
 
@@ -979,6 +1082,8 @@ final class IptvsPlayerViewController: UIViewController {
       // Unreachable unless `supportsPip` is true, which needs both a real device
       // and an item with a ready video track — see `shouldOfferPictureInPicture`.
       pipController?.start()
+    case .retry:
+      retryAfterTerminalError()
     case .toggleMenu(let menu):
       uiState.batch { $0.toggleMenu(menu) }
     case .toggleInfo:
@@ -1117,6 +1222,75 @@ final class IptvsPlayerViewController: UIViewController {
     guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return nil }
     let ms = AvPlayerEngine.milliseconds(from: CMTimeRangeGetEnd(range))
     return ms > 0 ? ms : nil
+  }
+
+  // MARK: Terminal error surface
+
+  /// Puts the native error/Retry overlay on screen.
+  ///
+  /// **Deliberately minimal, and deliberately a mirror rather than a new
+  /// design:** `PlayerErrorOverlay` (`lib/player/player_overlay.dart`) is a
+  /// scrim, a message and Back + Retry, and this is the same three things. Every
+  /// richer idea (a reason code on screen, an engine picker, a countdown)
+  /// either leaks something — `AVError` userInfo embeds the credential-bearing
+  /// stream URL — or duplicates a decision the engine-selection rules already
+  /// own.
+  ///
+  /// Reached only where nothing else can act: a VOD hard failure (live
+  /// reconnects instead), a VOD reload that never came back, and an
+  /// `engineFailed` that has no channel to hand off through. It is never a
+  /// substitute for the mpv handoff, which is always preferred when the failure
+  /// is a container problem.
+  private func surfaceTerminalError(_ message: String) {
+    guard !finishing else { return }
+    uiState.batch { state in
+      state.errorMessage = message
+      // The chip promises a retry is under way, which this contradicts.
+      state.reconnecting = false
+      state.isPlaying = false
+      state.isBuffering = false
+      // The overlay renders outside the visibility gate, but the chrome carries
+      // the X and the title, so bring it up rather than leaving the viewer with
+      // a card floating over nothing.
+      state.setControlsVisible(true)
+    }
+    refreshNowPlaying()
+  }
+
+  /// Retry from the error surface.
+  ///
+  /// Goes through the same `resolveAgain` round trip a live reload does rather
+  /// than replaying `request.url`, for the reason that round trip exists at all:
+  /// a Stalker `create_link` token is single-use, so retrying the held locator
+  /// after a portal-side kill can never succeed. For VOD the Dart side leaves
+  /// `resolveAgain` unwired (only live channels pass it —
+  /// `channel_list_screen.dart`), so `_freshLiveStream` answers with the
+  /// original stream, which is exactly what a VOD retry wants; the round trip
+  /// costs one method call and needs no VOD-specific branch here.
+  ///
+  /// `startPlayback` re-arms the start backstop, so a retry that hangs surfaces
+  /// this same overlay again after ``PlaybackStartBackstop/timeoutMs`` instead of
+  /// replacing one silent hang with another.
+  private func retryAfterTerminalError() {
+    // Shares `liveReloadInFlight` with the reconnect watchdog rather than
+    // running its own resolve: two overlapping `resolveAgain` round trips would
+    // leave the first completion orphaned (the second overwrites
+    // `pendingResolveCompletion`) and the flag stuck true, deadlocking every
+    // later reload.
+    guard !finishing, uiState.value.errorMessage != nil, !liveReloadInFlight else { return }
+    liveReloadInFlight = true
+    uiState.batch { state in
+      state.errorMessage = nil
+      state.isBuffering = true
+      state.ended = false
+    }
+    resolveFreshLocator { [weak self] locator in
+      guard let self else { return }
+      self.liveReloadInFlight = false
+      guard !self.finishing else { return }
+      self.liveDropped = false
+      self.load(url: locator.url, headers: locator.headers)
+    }
   }
 
   // MARK: Tap ladder
@@ -1341,8 +1515,26 @@ final class IptvsPlayerViewController: UIViewController {
   /// that is already going away. And it must be `engineFailed`, never
   /// `nativeClosed`: the Dart route has to survive to host the mpv surface, and
   /// `_finishNativePlayback` would pop it.
+  ///
+  /// All three of docs/ios.md's detection shapes arrive here: a hard
+  /// `AVPlayerItem.status == .failed` and a ready-but-no-video-track item via
+  /// `AvPlayerEngine.onFatalError`, and **never-started-within-10s** via
+  /// `PlaybackStartBackstop` on the watchdog ticker. They are distinguishable
+  /// downstream only by `reason`, which is why that stays a short machine code.
   private func reportEngineFailed(reason: String) {
     guard !finishing else { return }
+    // **Handing off is only possible while there is somewhere to hand off to.**
+    // The emit below goes through the plugin's channel; with the plugin
+    // deallocated or the channel gone it would vanish silently — after this
+    // method had already dismissed the only surface the user had — leaving the
+    // Dart route on a black screen with nothing left to recover it. That is the
+    // exact dead end the whole fallback contract exists to rule out, so fail
+    // closed onto the local error surface instead: the controller stays
+    // presented (playback is already dead either way) and Back/Retry still work.
+    guard IptvsIosPlayerPlugin.current != nil, channel != nil else {
+      surfaceTerminalError(PlayerErrorMessages.cannotPlay)
+      return
+    }
     finishing = true
 
     let positionMs = request.isLive ? 0 : engine.positionMs
