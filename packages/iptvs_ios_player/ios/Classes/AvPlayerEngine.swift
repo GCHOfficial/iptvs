@@ -367,12 +367,12 @@ final class AvPlayerEngine {
   /// ``iosStreamInfo(format:edrHeadroom:)`` to turn into chrome fields.
   ///
   /// **Gated on ``hasStarted`` on purpose, and not only to avoid empty reads.**
-  /// The accessors below (`AVAssetTrack.formatDescriptions`, `AVAsset.variants`)
-  /// are synchronous views of properties AVFoundation loads asynchronously; on
-  /// an unloaded asset they can block the calling thread, and this runs on the
-  /// main queue from the progress tick. Once the first frame is up, the master
-  /// playlist and track formats are already parsed, so every read here is a
-  /// cache hit.
+  /// The accessors below (`AVAssetTrack.formatDescriptions`,
+  /// `AVURLAsset.variants`) are synchronous views of properties AVFoundation
+  /// loads asynchronously; on an unloaded asset they can block the calling
+  /// thread, and this runs on the main queue from the progress tick. Once the
+  /// first frame is up, the master playlist and track formats are already
+  /// parsed, so every read here is a cache hit.
   ///
   /// **Two sources, because iOS has two.** Format descriptions are
   /// authoritative and are what a progressive MP4/fMP4 exposes; for HLS,
@@ -399,13 +399,9 @@ final class AvPlayerEngine {
   private func readTrackFormats(_ item: AVPlayerItem, into format: inout IosStreamFormat) {
     for track in item.tracks {
       guard let assetTrack = track.assetTrack else { continue }
-      // `formatDescriptions` is an untyped `[Any]` bridge, so the cast is
-      // required rather than cosmetic — and `compactMap` rather than
-      // `first as?`, so a track whose first entry is something unexpected
-      // doesn't silently drop the whole track.
       guard
         let description = assetTrack.formatDescriptions
-          .compactMap({ $0 as? CMFormatDescription })
+          .compactMap({ AvPlayerEngine.formatDescription($0) })
           .first
       else { continue }
       let subType = AvPlayerEngine.fourCCString(CMFormatDescriptionGetMediaSubType(description))
@@ -447,6 +443,15 @@ final class AvPlayerEngine {
 
   /// The HLS route. Fills only what the track read left empty.
   ///
+  /// **`variants` lives on `AVURLAsset`, not on `AVAsset`** (`API_AVAILABLE(ios(15.0))`),
+  /// which is why this starts with a cast rather than reading `item.asset`
+  /// directly — the first build of this file got that wrong. No `#available`
+  /// guard: the pod's deployment target is iOS 15.0 (`iptvs_ios_player.podspec`,
+  /// `s.platform = :ios, '15.0'`), so the property is unconditionally available
+  /// and a redundant check would itself be diagnosed. Every item this engine
+  /// builds carries an `AVURLAsset` (`load` constructs one), so the cast failing
+  /// means someone changed `load`, not that a stream is unusual.
+  ///
   /// Picking *which* variant: prefer the one whose declared presentation size
   /// matches what the item is actually presenting, since ABR may have settled on
   /// any rung of the ladder; fall back to the largest, which is the rung whose
@@ -454,9 +459,20 @@ final class AvPlayerEngine {
   /// AVFoundation exposes no "currently playing variant" — but the dynamic range
   /// is a property of the *ladder* on every real provider, not of the rung, so
   /// the fallback costs nothing in practice.
+  ///
+  /// Deliberately reads only four members — `videoAttributes`,
+  /// `presentationSize`, `codecTypes`, `videoRange`. Two more that would have
+  /// been useful (`VideoAttributes.nominalFrameRate`,
+  /// `AudioAttributes.formatIDs`) are left alone because their exact iOS 15
+  /// spellings could not be verified without a compiler, and both produce merely
+  /// decorative facts: the frame rate has a live-measured fallback
+  /// (`currentVideoFrameRate`, snapped by `iosResolvedFrameRate`) and the audio
+  /// codec is one info-panel row. The HDR badge — the whole reason this second
+  /// source exists — depends on neither.
   private func readVariantAttributes(_ item: AVPlayerItem, into format: inout IosStreamFormat) {
     guard format.videoCodecFourCC == nil || format.transferFunction == nil else { return }
-    let variants = item.asset.variants
+    guard let asset = item.asset as? AVURLAsset else { return }
+    let variants = asset.variants
     guard !variants.isEmpty else { return }
     let presented = item.presentationSize
     let matched = variants.first { variant in
@@ -468,50 +484,55 @@ final class AvPlayerEngine {
       ?? variants.max { lhs, rhs in
         AvPlayerEngine.variantArea(lhs) < AvPlayerEngine.variantArea(rhs)
       }
-    guard let variant = chosen else { return }
+    guard let video = chosen?.videoAttributes else { return }
 
-    if let video = variant.videoAttributes {
-      if format.videoCodecFourCC == nil, let codec = video.codecTypes.first {
-        format.videoCodecFourCC = AvPlayerEngine.fourCCString(codec)
-      }
-      if format.transferFunction == nil {
-        switch video.videoRange {
-        case .pq:
-          format.transferFunction = "pq"
-        case .hlg:
-          format.transferFunction = "hlg"
-        case .sdr:
-          format.transferFunction = "sdr"
-        default:
-          break
-        }
-        // A PQ/HLG rung is BT.2020 by definition. An SDR one is deliberately
-        // left without primaries, so the label falls through to plain "SDR"
-        // instead of claiming a wide gamut the manifest never declared.
-        if format.colorPrimaries == nil, video.videoRange != .sdr,
-          format.transferFunction != nil
-        {
-          format.colorPrimaries = "bt.2020"
-        }
-      }
-      if format.declaredFrameRate <= 0, let rate = video.nominalFrameRate, rate > 0 {
-        format.declaredFrameRate = rate
-      }
+    if format.videoCodecFourCC == nil, let codec = video.codecTypes.first {
+      format.videoCodecFourCC = AvPlayerEngine.fourCCString(codec)
     }
+    guard format.transferFunction == nil else { return }
 
-    if format.audioCodecFourCC == nil, let audio = variant.audioAttributes,
-      let formatID = audio.formatIDs.first
-    {
-      format.audioCodecFourCC = AvPlayerEngine.fourCCString(formatID)
+    // Compared against an explicitly typed local rather than matched with
+    // leading-dot patterns in a `switch`: `AVVideoRange` is a string-backed
+    // struct (`NS_TYPED_ENUM`), not an enum, so `.sdr` needs a base the compiler
+    // can see — and "cannot infer contextual base in reference to member 'sdr'"
+    // was the third error in the first build of this file. An annotated local
+    // makes the base explicit whichever way the type is imported.
+    let range: AVVideoRange = video.videoRange
+    if range == .pq {
+      format.transferFunction = "pq"
+    } else if range == .hlg {
+      format.transferFunction = "hlg"
+    } else if range == .sdr {
+      format.transferFunction = "sdr"
     }
-    // Channel count is deliberately not read here: the per-rendition count is an
-    // iOS 17 API, and this project's floor is 15. `0` renders as no channel
-    // suffix rather than a wrong one (`playerAudioChannelsLabel`).
+    // A PQ/HLG rung is BT.2020 by definition. An SDR one is deliberately left
+    // without primaries, so the label falls through to plain "SDR" instead of
+    // claiming a wide gamut the manifest never declared.
+    if format.colorPrimaries == nil, format.transferFunction != nil, range != .sdr {
+      format.colorPrimaries = "bt.2020"
+    }
   }
 
   private static func variantArea(_ variant: AVAssetVariant) -> Double {
     guard let size = variant.videoAttributes?.presentationSize else { return 0 }
     return Double(size.width * size.height)
+  }
+
+  /// A `CMFormatDescription` out of an untyped `formatDescriptions` entry.
+  ///
+  /// `AVAssetTrack.formatDescriptions` is documented as `[Any]` — the ObjC
+  /// property is an untyped `NSArray *` — and **a conditional cast from `Any` to
+  /// a CoreFoundation type does not compile**: Swift cannot express a failable
+  /// downcast to a CF type and diagnoses `as?` as always-succeeding, which is
+  /// what broke the first build of this file. The honest form is to do by hand
+  /// exactly what `as?` could not: check the CF type id, then cast
+  /// unconditionally. `CFGetTypeID` is total over any object, so an entry that
+  /// is something else (or a boxed Swift value) returns nil rather than trapping
+  /// — which is the safety an `as!` on its own would have thrown away.
+  private static func formatDescription(_ entry: Any) -> CMFormatDescription? {
+    let object = entry as AnyObject
+    guard CFGetTypeID(object) == CMFormatDescriptionGetTypeID() else { return nil }
+    return (entry as! CMFormatDescription)  // swiftlint:disable:this force_cast
   }
 
   /// A `CMFormatDescription` string extension (colour tags), or nil.
