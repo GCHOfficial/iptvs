@@ -1516,11 +1516,21 @@ final class IptvsPlayerViewController: UIViewController {
   /// `nativeClosed`: the Dart route has to survive to host the mpv surface, and
   /// `_finishNativePlayback` would pop it.
   ///
-  /// All three of docs/ios.md's detection shapes arrive here: a hard
-  /// `AVPlayerItem.status == .failed` and a ready-but-no-video-track item via
-  /// `AvPlayerEngine.onFatalError`, and **never-started-within-10s** via
-  /// `PlaybackStartBackstop` on the watchdog ticker. They are distinguishable
-  /// downstream only by `reason`, which is why that stays a short machine code.
+  /// Two of docs/ios.md's three detection shapes arrive here: a hard
+  /// `AVPlayerItem.status == .failed` via `AvPlayerEngine.onFatalError`, and
+  /// **never-started-within-10s** via `PlaybackStartBackstop` on the watchdog
+  /// ticker. They are distinguishable downstream only by `reason`, which is why
+  /// that stays a short machine code.
+  ///
+  /// **Shape 2 (ready-but-no-video-track) is NOT implemented** — an earlier
+  /// version of this comment claimed it was. There is no such detector anywhere
+  /// in the plugin, and `PlaybackStartBackstop` does not cover it: an audio-only
+  /// item does reach `.playing`, so `hasEverStarted` latches and the backstop
+  /// disarms. The symptom is a black screen with audio, indefinitely. It is
+  /// deliberately unbuilt rather than overlooked — the obvious detector
+  /// ("playing but `presentationSize == .zero`") misfires on legitimately
+  /// audio-only content, which `selectIosEngine` rule 3 routes here on purpose
+  /// (`m4a`, `mp3`, `aac`). Tracked separately; it needs a decision, not code.
   private func reportEngineFailed(reason: String) {
     guard !finishing else { return }
     // **Handing off is only possible while there is somewhere to hand off to.**

@@ -9,9 +9,9 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/validation-baseline.md](docs/validation-baseline.md) — reproducible large-ingestion workloads, public schema history, performance evidence, and native-device validation matrix.
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
-- [docs/ios.md](docs/ios.md) — **in progress, nothing shipped yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player plan — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
+- [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
-- [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (in progress), the shared-engine preview handoff, auto-reconnect, PiP.
+- [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (implemented, on-device validation pending), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
 - [docs/updates.md](docs/updates.md) — the self-update pipeline: release changelog, per-platform install, update-dialog focus behavior.
 
@@ -381,10 +381,11 @@ Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when 
 decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR), Windows (native
 HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
 texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
-PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses), and iOS (**in progress** —
-a presented `UIViewController` owning an `AVPlayerLayer`, the `HdrPlayerActivity` analogue: **AVPlayer
-default** for real HDR/PiP/AirPlay, **libmpv via `media_kit` fallback**, always SDR on iOS, for
-containers AVFoundation refuses; see docs/ios.md and docs/player.md "iOS"). Linux: embedded
+PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses), and iOS (**implemented,
+on-device validation pending** — a presented `UIViewController` owning an `AVPlayerLayer`, the
+`HdrPlayerActivity` analogue: **AVPlayer default** for real HDR/PiP/AirPlay, **libmpv via
+`media_kit` fallback**, always SDR on iOS, for containers AVFoundation refuses; see docs/ios.md
+and docs/player.md "iOS"). Linux: embedded
 `media_kit_video`/libmpv (with the shared Flutter
 overlay) is the default fullscreen path, and a host-discovered (not bundled), version-gated
 (>= 0.40, 0.41 recommended) native mpv window with an IPTVS-specific GPU/OSD Lua overlay is used
@@ -407,8 +408,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   never pause** — a paused media_kit engine still holds its provider connection, and accounts are
   single-connection, so pausing across a Dart↔Swift handoff would double-connect exactly like an
   unpaused different-channel preview would.
-- On a TV remote the preview is **deliberate and locked**: only OK starts/switches it; D-pad
-  focus movement never does. The preview engine is stopped when the app backgrounds or exits.
+- On a TV remote the preview is **deliberate and locked**: only OK (or a pointer tap on the row)
+  starts/switches it; D-pad focus movement never does. The preview engine is stopped when the app
+  backgrounds or exits.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
   control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
   Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
@@ -416,11 +418,15 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. Four independent watchdogs (Kotlin for Android native;
-  Dart for Windows/embedded; Dart-over-IPC for Linux native mpv; Swift for iOS native, in progress),
-  sharing one timing policy (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy` and Swift
-  `ReconnectPolicy`). iOS's reload is planned to go through `PlayerScreen.resolveAgain` first —
-  Android's native watchdog currently does not, so it retries the same URL that just failed. A
-  **clean server-side EOF** maps
+  Dart for Windows/embedded; Dart-over-IPC for Linux native mpv; Swift for iOS native), sharing one
+  timing policy (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy` and Swift
+  `ReconnectPolicy`). **All four now re-resolve before reloading** (Stalker `play_token`s are
+  single-use, so retrying the same URL a portal already killed can never reconnect) — Android's
+  and iOS's reload each go through a single-flight re-resolve gate shared with their own "Go to
+  live", so a reconnect and a manual go-live can't both fire overlapping `create_link` calls.
+  iOS's live watchdog is additionally inert before the stream's first frame: a stream that never
+  starts hands off to the mpv fallback at 10s (`PlaybackStartBackstop`) rather than reconnecting on
+  the usual 8/16/24/30s cadence. A **clean server-side EOF** maps
   to media_kit `completed=true`/`buffering=false` — invisible to the buffering-gated stall poll —
   so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
   legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
@@ -438,9 +444,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
   channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
   `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays`/`windowsOverlayDibs` (the last is
-  the cached overlay back-buffer DIB), Swift (`iosAvPlayers`/`iosPlayerViews`/`iosPipControllers`/
-  `iosTimeObservers`/`iosAudioClients`, planned — `iosTimeObservers` matters because an un-removed
-  periodic time observer retains the `AVPlayer` forever) — all release-inert
+  the cached overlay back-buffer DIB), Swift (`iosAvPlayers`/`iosPlayerControllers`/
+  `iosPipControllers`/`iosTimeObservers`/`iosAudioClients` — `iosTimeObservers` matters because an
+  un-removed periodic time observer retains the `AVPlayer` forever) — all release-inert
   (`kDebugMode`/`BuildConfig.DEBUG`/`#ifndef NDEBUG`) and merged by `ResourceCounters.snapshot()`
   via a `debugCounters` method on the existing HDR channel, called on Android/Windows/iOS.
   Counters must return to zero after an
@@ -496,7 +502,8 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
   are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
 - Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `PlayerBackPolicyTest`,
-  `ReconnectPolicyTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`) for pure logic
+  `ReconnectPolicyTest`, `LiveResolveTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`)
+  for pure logic
   extracted from the native player. `integration_test/player_soak_test.dart` is owner-run on real
   hardware only (see docs/player.md) — plain `flutter test` doesn't collect it.
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on

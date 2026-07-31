@@ -1,28 +1,52 @@
 # iOS
 
-**Status: in progress, nothing shipped yet.** This document records the scope, the two
-distribution paths, and the player design (a single full-hybrid release — no staged
-`v1`/`v2` split; see "Shipping plan" under Player). **The Dart side is real and tested, the
-plugin's host-visibility reporting is real and tested, and the player surface itself is not
-written.** Every Dart contract this design commits to is implemented and covered by the suite:
+**Status: the player is implemented and CI-green; on-device validation is what's left.** This
+document records the scope, the two distribution paths, and the player design (a single
+full-hybrid release — no staged `v1`/`v2` split; see "Shipping plan" under Player).
+`IptvsPlayerViewController` **exists and works**: all nine implementation steps of the native
+player are merged, with 143 Swift `Core` tests and 678 Dart tests green, plus a CI probe
+(`.github/workflows/ios-build-probe.yml`) that builds an installable unsigned `.ipa` for a real
+device *and* a separate `flutter build ios --debug --simulator` build.
+
+**Be precise about what that does and doesn't prove.** Verified, mechanically, on every push:
+Swift and Dart compile; `swift test` exercises every pure-logic type in `Core` (engine selection,
+the fallback gate, the reconnect/start-backstop watchdogs, audio-session bookkeeping, badge/label
+formatting — anything with no UIKit/AVFoundation dependency) with a synthetic clock and no
+simulator; the device build produces a real installable artifact; the simulator build proves
+`media_kit_libs_ios_video` carries a simulator slice, so the **mpv fallback** engine can at least
+be exercised without hardware. Unverified — because nothing in CI can verify it, and this is
+exactly what the on-device test protocol below exists for: whether **AVPlayer** actually plays
+anything on a device (the Simulator cannot decode video at all), whether real HDR/EDR reaches the
+screen through `AVPlayerLayer`, PiP, background audio, the whole `iosManageAudioSession`
+non-interference claim, real provider behaviour (MAG headers, HLS ladders), and the
+`AudioSessionClients`/`decideIosFallbackAction` gates under conditions a synthetic clock can't
+reproduce. "Compiles and passes `swift test`" is a necessary floor, not a substitute for a phone.
+
+Every Dart contract this design commits to is implemented and covered by the suite:
 `selectIosEngine`/`IosEngineMemo` (`lib/player/ios_engine.dart`), the cross-engine fullscreen
 handoff (`decideFullscreenHandoff`'s `crossEngineFullscreen` flag, `channel_list_screen.dart`,
 pinned by `test/fullscreen_handoff_test.dart` and `test/ios_engine_selection_test.dart`), the
 `nativePlayback` (`engineFailed`/`hostVisibility`)/`resolveAgain` handling and the never-dead-ends
 fallback gate (`decideIosFallbackAction`, `IosFallbackAction`, pinned by
-`test/ios_fallback_gate_test.dart`) in `PlayerScreen` (`lib/player/player_screen.dart`), and
-`iosManageAudioSession: false` at both `PlayerConfiguration` sites. On the Swift side,
-`packages/iptvs_ios_player/`'s `IptvsIosPlayerPlugin` (`ios/Classes/`) already owns the real
-process-wide host-visibility reporting — `UIApplication` notification observers,
-`currentHostVisibility()`, `emitEngineFailed`, the `IptvsPipStateProviding` registration point —
-backed by the Foundation-only `Core` SwiftPM target's `HostVisibility`/`HostVisibilityTracker`/
-`PlaybackEventPayload` (plus `ReconnectPolicy`/`EngineSelection`/`PlayerBackPolicy`/
-`DynamicRangeLabel`), covered by `swift test`. What is **not** written is
-`IptvsPlayerViewController` itself — the presented AVPlayer surface described below, and the only
-thing the `open` method-channel call and the PiP provider registration are waiting on. Nothing
-plays through AVPlayer on iOS today; every Dart and plugin path described above is exercised only
-by tests and by the mpv-fallback code paths that already run through the ordinary embedded
-`media_kit` surface.
+`test/ios_fallback_gate_test.dart`) in `PlayerScreen` (`lib/player/player_screen.dart`),
+`IosAudioSessionClaim`'s balance contract, and `iosManageAudioSession: false` at both
+`PlayerConfiguration` sites. On the Swift side, `packages/iptvs_ios_player/`'s
+`IptvsPlayerViewController` (`ios/Classes/`) is the presented AVPlayer surface itself — chrome
+(`PlayerControlsView`, `InfoPanelView`, `ListMenuView`, `PlayerTheme`, `PlayerUiState`), the
+engine shim (`AvPlayerEngine`), PiP (`IosPipController`), and the audio session
+(`IosAudioSession`) — alongside `IptvsIosPlayerPlugin`'s process-wide host-visibility reporting
+(`UIApplication` notification observers, `currentHostVisibility()`, `emitEngineFailed`, the
+`IptvsPipStateProviding` registration point), all backed by the Foundation-only `Core` SwiftPM
+target's pure logic (`HostVisibility`/`HostVisibilityTracker`/`PlaybackEventPayload`,
+`LiveReconnectWatchdog`, `PlaybackStartBackstop`, `AudioSessionPolicy`, `PlaybackStateEvents`,
+`PlayerChromeState`, `PlayerOpenRequest`, `StreamInfoMapping`, `NowPlayingPolicy`,
+`PictureInPicturePolicy`, `ReconnectPolicy`, `EngineSelection`, `PlayerBackPolicy`,
+`DynamicRangeLabel`, `BadgeFormatting`), covered by `swift test`. **What is not done is a device
+in anyone's hand.** Nothing here has played a real provider's stream on real hardware yet — see
+"On-device test protocol" below for the ordered list of what that first session needs to answer,
+starting with the two questions that can invalidate the design outright (does EDR actually reach
+the screen through `AVPlayerLayer`; does a MAG portal's headers survive `AVURLAsset`) rather than
+the ones a synthetic clock already answered.
 
 iOS is a **phone/tablet target only**. tvOS is explicitly out of scope (Flutter
 has no official tvOS support), so Apple TV is not a counterpart to the Android TV
@@ -275,9 +299,32 @@ than a nicety — defaulting Xtream to `m3u8` on iOS is what actually makes AVPl
 the common path.
 
 Container sniffing can still be wrong — a `.m3u8` AVPlayer accepts and then chokes on. A
-**runtime fallback** is therefore mandatory, not optional: three Swift-detected failure shapes
-(hard failure, ready-but-no-video-track, never-started-within-10s) all emit one `engineFailed`
-event over the plugin's method channel.
+**runtime fallback** is therefore mandatory, not optional. **Two of the three detection shapes
+this design specifies are implemented; the third is not, and the gap is real:**
+
+1. **Hard failure** — `AVPlayerItem.status == .failed` before anything ever played
+   (`AvPlayerEngine.handleFailure`, gated on `!hasEverStarted`) or a
+   `failedToPlayToEndTimeNotification` with the same gate. **Implemented.**
+2. **Ready-but-no-video-track** — an item that reaches `.readyToPlay`/starts producing a timebase
+   but never actually has a video track (an audio-only response, a manifest AVPlayer parses but
+   can't render). **Not implemented.** There is no code anywhere in `AvPlayerEngine.swift` that
+   inspects whether a played item actually has a video track — `hasStarted`/`hasEverStarted`
+   latches purely from `AVPlayer.TimeControlStatus == .playing`
+   (`AvPlayerEngine.handleTimeControlStatus`), and AVPlayer reaches `.playing` perfectly happily
+   on audio-only content. **Consequence, stated plainly: an audio-only response to a video
+   request produces a black screen with working audio, forever.** `hasEverStarted` latches true,
+   which disarms `PlaybackStartBackstop` for that load (it only owns the *pre-start* window) and
+   hands the load to `LiveReconnectWatchdog`, which sees healthy, non-buffering, non-ended
+   playback and has nothing to reconnect. Nothing ever calls `engineFailed`; nothing ever hands
+   off to mpv. (One stale comment in `IptvsPlayerViewController.swift` — "a ready-but-no-video-track
+   item via `AvPlayerEngine.onFatalError`" — claims this shape is wired; it is not, and should not
+   be trusted as evidence it exists.) **Tracked separately, not fixed by this pass.**
+3. **Never-started-within-10s** (`PlaybackStartBackstop`, `reason: "no-first-start"`) — a load
+   that never reaches `.playing` inside 10s hands off to mpv, distinct from a reload of a stream
+   that *has* played before, which surfaces the terminal error/Retry overlay instead (see
+   "Native player" and docs/player.md "Native VOD terminal behavior"). **Implemented.**
+
+All three, where implemented, emit one `engineFailed` event over the plugin's method channel.
 
 **This is not Android's in-process engine swap.** `HdrPlayerActivity.fallbackToMpv()` swaps
 `PlaybackEngine` implementations *inside the same Activity*, because both ExoPlayer and mpv are
@@ -411,6 +458,32 @@ probe after removing it. Given the stalled cadence, assume this pin is long-live
 and note the same applies to Constraint 2 below, which is also unreleased and
 unfixed, so git-pinning may be the normal posture here rather than an exception.
 
+**The second half of Constraint 1, easy to miss because it's a consequence rather than the fix
+itself: pinning `iosManageAudioSession: false` means *nothing in the process activates
+`AVAudioSession` automatically anymore*.** mpv is explicitly told to keep its hands off, and
+AVPlayer doesn't self-activate a shared session the way the old assumption implicitly relied on —
+so Dart must **claim** one. `IosAudioSessionClaim` (`lib/player/player_screen.dart`) is a small
+reference-counted claim object, one per client, sent over the same `iptvs/native_hdr_player`
+channel as `acquireAudioSession`/`releaseAudioSession` (not a new channel, so no new
+`ChannelHandlerOwner` surface) to the Swift-side `AudioSessionClients` set
+(`AudioSessionPolicy.swift`) — only an empty→non-empty transition actually activates
+`AVAudioSession`, only non-empty→empty deactivates, so overlapping claims (an `engineFailed`
+handoff has the AVPlayer path tearing down while the mpv path spins up) never fight each other.
+Two Dart clients: `IosAudioSessionClient.embeddedPlayer` (`PlayerScreen`, the AVPlayer fallback
+engine and the only engine for containers AVPlayer refuses) and `.livePreview`
+(`LivePreviewController` — muted by default but still decoding and still holding a provider
+connection, and it must **release** on app pause while the fullscreen player keeps its own claim,
+the asymmetry `UIBackgroundModes = [audio]` makes load-bearing).
+
+**The balance contract has a deliberate failure bias.** `IosAudioSessionClaim._apply` flips its
+local `_held` flag *before* the `await`, so a throwing `acquire()` (no plugin registered, a
+superseded/torn-down channel owner) still marks the claim held — which means the matching
+`release()` is still sent on teardown. This is not a bug: releasing a `clientId` the Swift side
+never actually recorded is a documented no-op, but the reverse — a claim the code believes it
+holds skipping its `release()` call — would strand `AVAudioSession` active for the rest of the
+process, silently blocking every other app's audio from resuming. An extra no-op release is free;
+a skipped one is a permanent leak, so the code is biased toward the free mistake.
+
 **Constraint 2 — a live render-context teardown race.** media_kit issue #1361 (open,
 filed 2026-01-06, reproduced on media_kit 1.2.6 / media_kit_video 1.3.1, iOS 16.6.1+)
 is an `EXC_BAD_ACCESS` in `mpv_render_context_free` when the Flutter raster thread
@@ -432,15 +505,28 @@ GLES deprecation was found — Apple has deprecated, not removed, it. Watch, don
 
 ### The `streamExtension` lever
 
-[xtream_source.dart:30](../lib/sources/xtream_source.dart#L30) already carries
-`streamExtension` (`'ts'` or `'m3u8'`), feeding both the live URL
-([:181](../lib/sources/xtream_source.dart#L181)) and timeshift
-([:195](../lib/sources/xtream_source.dart#L195)). Most Xtream panels serve both.
-Preferring `m3u8` on iOS therefore routes a large share of live content onto
-AVPlayer with **no new plumbing** — a per-platform default, not a feature.
+[`resolveXtreamStreamExtension`](../lib/sources/xtream_source.dart#L45) picks `'ts'` or `'m3u8'`
+per source, feeding every live URL and timeshift URL `XtreamSource` builds. Most Xtream panels
+serve both, so preferring `m3u8` on iOS routes a large share of live content onto AVPlayer with
+**no new plumbing** — a per-platform default, not a feature.
 
-This does not help Stalker, whose `create_link` returns whatever the portal
-chooses, nor M3U playlists that name `.ts` directly.
+This does not help Stalker, whose `create_link` returns whatever the portal chooses, nor M3U
+playlists that name `.ts` directly.
+
+**The per-source escape hatch, and why it has to exist.** `SourceConfig.settings['streamExtension']`
+overrides the platform default — `null`/unset (Automatic), `'ts'`, or `'m3u8'` — and is reachable
+from `SourceSettingsScreen`'s `_StreamFormatTile`, an "OK to cycle" tri-state row (`Automatic →
+Always .ts → Always .m3u8`, `debugLabel: 'sourceSettings.streamFormat'`) that opening the settings
+screen never pins away from the default on its own (the value stays `null` until a user actually
+cycles it). This is not a nicety: **a panel that doesn't actually serve `m3u8` fails *dead*, not
+merely SDR.** The extension is a fixed per-source choice, not something negotiated per request, so
+the fallback re-resolve after an `engineFailed` reopens the exact **same** URL — `.m3u8` on a panel
+that answers 404 for it fails identically the second time, on mpv, which has no more luck with a
+404 than AVPlayer did. Unlike the routing-rule failures rule 4 exists for (an unrecognised
+extension, safely routed to the engine that plays everything), a *wrongly forced* `m3u8` is not
+something either engine can route around — the tri-state override is the only way to recover a
+channel on such a panel, by forcing `.ts` so both the initial open and any reload land on a URL
+that actually exists.
 
 ### Native player
 
@@ -492,15 +578,15 @@ the direct analogue of `HdrPlayerActivity`:
   `safeDrawingPadding()` groups) and the Windows GDI overlay's bar insets. Only video/scrim may
   run under the notch/Dynamic Island; every control (play/pause, scrubber, badges, favorite
   star) stays inside the safe area.
-- **Must register itself as the PiP state provider on `viewDidLoad`.** The plugin
-  (`IptvsIosPlayerPlugin.pipStateProvider`, weak) already exists and defaults to `nil` — set
-  `IptvsIosPlayerPlugin.current?.pipStateProvider = self` as one of the controller's first acts, or
-  every `hostVisibility`/`engineFailed` payload reports `pipActive` as *unknown* rather than the
-  real PiP state for the whole time PiP is genuinely running, silently weakening (never breaking —
+- **Registers itself as the PiP state provider as the first act of `viewDidLoad`** — before
+  building the view hierarchy or binding the engine — setting
+  `IptvsIosPlayerPlugin.current?.pipStateProvider = self`. Skipping or delaying this would leave
+  every `hostVisibility`/`engineFailed` payload reporting `pipActive` as *unknown* rather than the
+  real PiP state for however long PiP is genuinely running — silently weakening (never breaking —
   see "Contracts that already exist") the AVPlayer→mpv fallback's PiP veto. Also the source of the
-  **stop-PiP-before-emit** ordering: `emitEngineFailed` must be called only after the controller
-  has torn down its `AVPlayer`, stopped PiP, and is dismissing itself, so the host snapshot riding
-  on that payload already reflects the post-teardown state.
+  **stop-PiP-before-emit** ordering: `emitEngineFailed` is called only after the controller has
+  torn down its `AVPlayer`, stopped PiP, and is dismissing itself, so the host snapshot riding on
+  that payload already reflects the post-teardown state.
 
 ### Why not `AVPlayerViewController`
 
@@ -627,13 +713,12 @@ and already specified and tested, and the iOS controller must honour them:
   `false` is an authoritative "PiP is off" (*clears* the PiP veto) — so a build that reports a
   confident `false` from a layer that genuinely cannot evaluate PiP would silently reintroduce the
   exact stall this whole contract exists to close.
-- **`IptvsPlayerViewController` must register itself as the plugin's PiP state provider.**
-  `IptvsIosPlayerPlugin.pipStateProvider` (`IptvsPipStateProviding`, weak) defaults to `nil` —
-  which `currentHostVisibility()` reports as `pipActive: nil`, per the rule above — until the
-  controller sets `IptvsIosPlayerPlugin.current?.pipStateProvider = self` (documented target:
-  `viewDidLoad`). Weak by design: the provider clears itself automatically when the controller
-  deallocates, so a torn-down controller can't leave a stale PiP opinion behind for the *next*
-  playback attempt to inherit.
+- **`IptvsPlayerViewController` registers itself as the plugin's PiP state provider as the first
+  act of `viewDidLoad`** — before `buildViewHierarchy`/`bindEngine` — so the window between
+  presentation and registration where `currentHostVisibility()` would still report `pipActive:
+  nil` is as small as possible. Weak by design (`IptvsPipStateProviding`): the provider clears
+  itself automatically when the controller deallocates, so a torn-down controller can't leave a
+  stale PiP opinion behind for the *next* playback attempt to inherit.
 - **Stop PiP before emitting `engineFailed`, not after.** The documented contract on
   `IptvsIosPlayerPlugin.emitEngineFailed` is that the controller has already torn down its
   `AVPlayer`, **stopped PiP**, and dismissed itself before calling it — the current host snapshot
@@ -641,6 +726,79 @@ and already specified and tested, and the iOS controller must honour them:
   `decideIosFallbackAction` evaluation already sees the post-teardown facts (in particular
   `pipActive: false`, not a stale `true` from a PiP session that's actually already ending)
   instead of one more round trip to find out.
+- **`hasEverStarted` is engine-lifetime, not per-`AVPlayerItem`, and that distinction is load-bearing,
+  not stylistic.** A live reconnect reload builds a fresh `AVPlayerItem`, so a per-item flag would
+  read `false` again the instant the watchdog retries — every failed reconnect attempt on a
+  perfectly fine container would then look exactly like an unplayable one, and
+  `_handleIosEngineFailed`/`IosEngineMemo.markMpvOnly` would throw a **working HDR channel** to
+  mpv (permanently downgraded to SDR for the rest of the session) after any ordinary,
+  recoverable portal-side kill. This was a **real bug during implementation**, not a hypothetical
+  one — `AvPlayerEngine.handleFailure`'s doc comment records it explicitly. The engine-lifetime
+  flag (latched once by `AVPlayer.TimeControlStatus == .playing`, never cleared) is what makes "a
+  container AVPlayer genuinely cannot play" and "a network drop on a container that already
+  proved it plays fine" distinguishable at all.
+- **`PlaybackStartBackstop` and `LiveReconnectWatchdog` own disjoint windows, expressed as a fact
+  rather than a threshold race.** Both derive a stall from the same buffer-empty signal, so a
+  stream that never starts looks identical to a stream that stalled immediately after starting —
+  tuning the backstop's 10s against the reconnect watchdog's 8s stall threshold would not resolve
+  that, because whichever fires first would keep re-triggering on every subsequent tick as long as
+  the ambiguity exists. Instead the two watchdogs are mutually exclusive by construction: while
+  `hasEverStarted` is false the backstop owns the window outright and
+  `LiveReconnectWatchdog.poll` unconditionally returns "healthy" no matter how empty the buffer
+  looks; the instant it flips true the backstop disarms for that load and the reconnect watchdog
+  owns everything from then on, including a reload that never comes back. On any given tick at
+  most one of the two can act, decided by a boolean fact, never by comparing two numbers.
+- **The native terminal error/Retry overlay exists, is reached only where nothing else can act,
+  and fails closed when the plugin/channel is gone.** `IptvsPlayerViewController.surfaceTerminalError`
+  mirrors `PlayerErrorOverlay` (`lib/player/player_overlay.dart`) — scrim, message, Back + Retry —
+  for a VOD hard failure (live reconnects instead), a VOD reload that never comes back, and an
+  `engineFailed` that has nowhere left to hand off to. That last case is the fail-closed guard:
+  `reportEngineFailed` checks `IptvsIosPlayerPlugin.current != nil && channel != nil` **before**
+  tearing anything down, and if either is gone it calls `surfaceTerminalError` directly instead of
+  attempting an emit that would vanish silently — the alternative (tear down first, then discover
+  there's no channel to emit through) would leave the Dart route on a black screen with nothing
+  left to recover it, which is the exact dead end the whole fallback contract exists to rule out.
+
+### API facts learned the hard way
+
+Each of these cost a failed 4-minute build-and-deploy round trip (or three) to discover, and none
+of them is discoverable by reasoning about the API from its name — recorded here so a future
+session doesn't re-pay the same cost rediscovering them from scratch.
+
+- **`variants` is a property of `AVURLAsset`, not `AVAsset`.** `readVariantAttributes`
+  (`AvPlayerEngine.swift`) has to downcast `item.asset as? AVURLAsset` before it can reach
+  `.variants` at all — the HLS master-playlist rung metadata (codecs, resolution, `AVVideoRange`)
+  simply isn't exposed on the base `AVAsset` type.
+- **`AVAssetTrack.formatDescriptions` is `[Any]`, and Swift cannot express a conditional cast from
+  `Any` to a CoreFoundation type.** The ObjC property is an untyped `NSArray *`; `as?
+  CMFormatDescription` doesn't compile — the compiler diagnoses it as an always-succeeding cast and
+  refuses. The honest fix is to do by hand what `as?` couldn't: check `CFGetTypeID(object) ==
+  CMFormatDescriptionGetTypeID()` (total over any object, so a boxed Swift value or something else
+  entirely returns nil safely), then cast unconditionally (`AvPlayerEngine.formatDescription`).
+- **`AVVideoRange` is a string-backed struct (`NS_TYPED_ENUM`), not a Swift enum.** Leading-dot
+  pattern matching in a `switch` (`case .pq:`) fails with "cannot infer contextual base in
+  reference to member" — an explicitly-typed local (`let range: AVVideoRange = video.videoRange`)
+  makes the base explicit regardless of how the type gets imported, and plain `==` comparisons
+  work fine once it does.
+- **`AVPlayer.addPeriodicTimeObserver` fires against the *timebase*, and stops firing exactly when
+  playback stalls or fails** — the one moment a stall/failure watchdog most needs a tick. It is
+  fundamentally the wrong primitive for that job, however convenient its existing 500ms interval
+  looks; `IptvsPlayerViewController`'s watchdog runs on a plain `Timer` instead, specifically
+  because a watchdog that can only run while playback is healthy is not a watchdog.
+- **`AVPlayerItemTrack.assetTrack` is documented `nil` for HLS.** The per-track format-description
+  walk that gives progressive MP4/fMP4 its declared frame rate, codec FourCCs and colorimetry has
+  nothing to read on HLS — see "Known parity gaps" for what that costs (frame rate, audio codec)
+  and `AVURLAsset.variants` for the fallback route that still gets colorimetry.
+- **`.overFullScreen` is not "fullscreen" as far as status-bar appearance is concerned.**
+  `prefersStatusBarHidden` alone does nothing under `.overFullScreen` presentation —
+  `modalPresentationCapturesStatusBarAppearance = true` is additionally required, or the bar keeps
+  whatever the presenting Flutter view controller last asked for.
+- **`dismiss(animated:completion:)` silently skips its completion when there is nothing presented
+  to undo.** Every caller in `IptvsPlayerViewController` uses the completion to deliver the one
+  message Dart is waiting for (`nativeClosed` or `engineFailed`); a completion that never fires
+  would strand the Dart route with no way back. `dismissThen` checks `presentingViewController !=
+  nil` first and calls the completion directly when there's nothing to dismiss (the real case:
+  PiP dismisses this controller while keeping it alive), rather than trusting `dismiss` to do it.
 
 ### Known parity gaps
 
@@ -651,6 +809,39 @@ separately, and no `v1`/`v2` split left in this design.
 - **HDR10+ is permanently absent.** AVFoundation exposes no per-scene ST2094-40 metadata API
   (unlike the decoder-level reads the Android/Windows/Linux paths use), so there is no way to
   distinguish HDR10+ from plain HDR10 through AVPlayer. Plain HDR10/HLG/DV are unaffected.
+- **The HDR badge is display-gated, and can honestly read SDR for a genuinely HDR stream.**
+  `displayEdrHeadroom()` reads `UIScreen.potentialEDRHeadroom` — the *display's* capability, never
+  `currentEDRHeadroom` (which tracks brightness/ambient light and legitimately reads 1.0 on a
+  genuinely HDR panel, so it can't be used to answer "can this screen do HDR at all"). An HDR
+  stream on a non-EDR panel therefore honestly badges SDR rather than claiming a capability the
+  screen doesn't have. **iOS 15 has no EDR signal at all**: `potentialEDRHeadroom` needs iOS 16,
+  so on the 15.0 deployment floor this always reads `nil` (no opinion), and the badge falls back
+  to source-declared colorimetry alone.
+- **The badge is evaluated once, at latch, not continuously.** `resolveStreamInfoIfNeeded` sets
+  `streamInfoResolved = true` the first time it has anything to report and never re-runs for that
+  load — deliberately, because the underlying track/variant reads are expensive synchronous
+  AVFoundation calls best done once. Consequence: an **AirPlay route change mid-playback does not
+  re-evaluate the badge**, because the EDR headroom read is part of that same one-shot latch. A
+  channel that badged SDR on the phone's own screen keeps reading SDR after routing to an
+  HDR-capable AirPlay display, and vice versa, until the next reload.
+- **Aspect is Fit/Fill only** (`videoGravity` toggles between `.resizeAspect` and
+  `.resizeAspectFill`) — no Zoom/Stretch/4:3-force tier the Android Compose overlay's aspect
+  cycle offers.
+- **Sidecar subtitles have no home on the AVPlayer engine.** `request.subtitles` (external
+  sidecar tracks — the same ones the mpv fallback and every other platform accept) are received
+  and currently ignored: composing them onto an `AVURLAsset` needs an `AVMutableComposition`, and
+  **AVFoundation cannot build one around an HLS asset at all** — only around a progressive
+  file-based asset. HLS is the common AVPlayer path on iOS (Xtream defaults to `m3u8` there), so
+  this isn't a narrow edge case. AVPlayer's own in-manifest subtitle tracks (`.legible` media
+  selection options) are unaffected — only externally-supplied sidecar files are the gap.
+- **On HLS, the frame rate badge is measured-and-snapped, not container-declared, and the audio
+  codec row is absent.** `AVPlayerItemTrack.assetTrack` is documented `nil` for HLS, so
+  `readTrackFormats`'s per-track format-description walk — the source of declared frame rate,
+  video/audio codec FourCCs, and colorimetry on a progressive MP4/fMP4 — has nothing to read.
+  Frame rate falls back to `currentVideoFrameRate` measured across whatever tracks the item does
+  expose; the audio codec row has no equivalent HLS fallback and simply stays blank. Colorimetry
+  still resolves on HLS, through the separate `AVURLAsset.variants` route (see "API facts learned
+  the hard way" below) — only frame rate and audio codec are affected.
 - **The cross-engine handoff for AVPlayer-routed channels is implemented; the permanent gap is
   that it can never be seamless.** `decideFullscreenHandoff`
   (`lib/screens/channel_list_screen.dart`, pinned by `test/fullscreen_handoff_test.dart`) takes a
@@ -784,39 +975,60 @@ AVPlayer is the common path or the exception.
 
 ### On-device test protocol
 
-For the first session with real hardware. Ordered by how much each can invalidate:
+For the first session with real hardware. Ordered by how much each can invalidate — the three
+that come first are the ones nothing in CI can even gesture at, and each is load-bearing enough
+that a "no" reopens part of the design rather than just narrowing a gap:
 
-1. **AVAudioSession interaction**, on a media_kit build carrying
+1. **Does EDR actually engage through `AVPlayerLayer`?** The entire reason the AVPlayer engine
+   exists is real HDR, and nothing in `swift test` or the Simulator (which cannot decode video at
+   all) can confirm the picture that reaches the screen is actually EDR rather than tone-mapped —
+   only `potentialEDRHeadroom` reading correctly and the panel itself lighting up brighter/wider
+   proves it. If this fails, the AVPlayer-default design's core premise needs revisiting, not just
+   a badge fix.
+2. **Does `AVURLAssetHTTPHeaderFieldsKey` reach a MAG portal without a 403?** Stalker/MAG panels
+   are typically gated on a specific `User-Agent`/`Referer` pair, set via
+   `AVURLAsset(url:options:)`'s `AVURLAssetHTTPHeaderFieldsKey` (`AvPlayerEngine.swift`) — an
+   options dictionary, not a per-request header API, and unverified against a real portal. If
+   AVFoundation drops or mangles these headers on the actual HLS segment/key requests (not just
+   the manifest fetch), every Stalker channel silently 403s no matter how correct the routing
+   logic is.
+3. **Does `AVAssetVariant` actually populate for real provider HLS ladders?** The colorimetry/
+   codec fallback that makes HLS work at all (`AVURLAsset.variants`, since
+   `AVPlayerItemTrack.assetTrack` is nil there) has only been exercised against whatever test
+   manifests were reachable during implementation — a provider's live master playlist, with
+   however many renditions and however it tags them, is the real test of whether the variant
+   read finds anything useful to report.
+4. **AVAudioSession interaction**, on a media_kit build carrying
    `iosManageAudioSession: false` — confirm the mpv fallback does not stop, duck, or
    steal AVPlayer's now-playing session, background audio, or lock-screen controls.
-2. **Engine-handoff soak** — 100+ zap cycles across the AVPlayer↔mpv boundary in the
+5. **Engine-handoff soak** — 100+ zap cycles across the AVPlayer↔mpv boundary in the
    routing table, watching the console specifically for the #1361 `EXC_BAD_ACCESS`
    teardown signature. Mirrors what `integration_test/player_soak_test.dart` already
    does for Android/Windows.
-3. **Raw MPEG-TS live** from an actual Stalker/M3U provider (continuous `.ts`, not
+6. **Raw MPEG-TS live** from an actual Stalker/M3U provider (continuous `.ts`, not
    TS-in-HLS) through the mpv fallback, sustained ≥30 min, watching for the periodic
    stall pattern of media_kit issue #440.
-4. **AC-3/E-AC-3 sync and artefacts** on a real provider stream carrying that track.
-5. **MKV VOD** — inferred from the compiled matroska demuxer, never observed.
-6. **DV P5 / HDR** via AVPlayer (question 2 above).
-7. **`engineFailed` deferral behaviour around PiP — a behavioural observation, not a
-   trust gate.** Earlier revisions of this design deferred the mpv reopen purely on
-   `WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed`, so whether
-   entering PiP actually moves that value was a real unknown the whole safety property
-   rested on. It no longer does: `decideIosFallbackAction` also consults the two native
-   facts (`nativeAppActive`, `nativePipActive`) Swift reads directly off UIKit/AVKit, so
-   even if Flutter's lifecycle turns out to report `resumed` throughout a PiP session, the
-   native `pipActive` opinion vetoes on its own — and if *that* somehow failed to report
-   too, the 10s surface-then-keep-waiting backstop still bounds the damage to one tap.
-   Worth observing on real hardware anyway, to confirm which signal actually ends up doing
-   the vetoing in practice (useful for future debugging), but nothing here can leave
-   playback silently and permanently stuck.
-8. **Waking via the PiP restore button** — trigger `engineFailed` while in PiP, then tap
-   the PiP window's restore control (rather than switching apps) to bring
-   `IptvsPlayerViewController`'s host back to the foreground; confirm the pending fallback
-   reopens promptly rather than waiting for the 1 Hz poll or the 10s surface timeout.
-9. **The surfaced Retry overlay in iPadOS Split View** — trigger a deferral that outlasts
-   `kIosFallbackSurfaceAfter` while the app is the secondary Split View pane (reduced size,
-   partially occluded by the primary app); confirm the error/Retry overlay actually renders
-   within the app's reduced bounds and the Retry button is reachable and tappable there,
-   not just in full-screen single-app mode.
+7. **AC-3/E-AC-3 sync and artefacts** on a real provider stream carrying that track.
+8. **MKV VOD** — inferred from the compiled matroska demuxer, never observed.
+9. **DV P5 / HDR** via AVPlayer (question 2 above).
+10. **`engineFailed` deferral behaviour around PiP — a behavioural observation, not a
+    trust gate.** Earlier revisions of this design deferred the mpv reopen purely on
+    `WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed`, so whether
+    entering PiP actually moves that value was a real unknown the whole safety property
+    rested on. It no longer does: `decideIosFallbackAction` also consults the two native
+    facts (`nativeAppActive`, `nativePipActive`) Swift reads directly off UIKit/AVKit, so
+    even if Flutter's lifecycle turns out to report `resumed` throughout a PiP session, the
+    native `pipActive` opinion vetoes on its own — and if *that* somehow failed to report
+    too, the 10s surface-then-keep-waiting backstop still bounds the damage to one tap.
+    Worth observing on real hardware anyway, to confirm which signal actually ends up doing
+    the vetoing in practice (useful for future debugging), but nothing here can leave
+    playback silently and permanently stuck.
+11. **Waking via the PiP restore button** — trigger `engineFailed` while in PiP, then tap
+    the PiP window's restore control (rather than switching apps) to bring
+    `IptvsPlayerViewController`'s host back to the foreground; confirm the pending fallback
+    reopens promptly rather than waiting for the 1 Hz poll or the 10s surface timeout.
+12. **The surfaced Retry overlay in iPadOS Split View** — trigger a deferral that outlasts
+    `kIosFallbackSurfaceAfter` while the app is the secondary Split View pane (reduced size,
+    partially occluded by the primary app); confirm the error/Retry overlay actually renders
+    within the app's reduced bounds and the Retry button is reachable and tappable there,
+    not just in full-screen single-app mode.
