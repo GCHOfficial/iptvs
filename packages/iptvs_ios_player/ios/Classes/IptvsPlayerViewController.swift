@@ -51,12 +51,12 @@ import UIKit
 /// `PlayerConfiguration` sites means mpv no longer touches it either, so the
 /// **fallback engine depends on this class as well** (docs/ios.md Constraint 1).
 ///
-/// **Still to attach**, each marked with a `MARK: Step N attaches here` at the
-/// exact call site: the live reconnect watchdog and the `resolveAgain` round
-/// trip (8), and colorimetry/stream-info plus the audio/subtitle track lists
-/// (9). The chrome for both is written and inert — the "Reconnecting…" chip,
-/// the HDR/fps badges, the info panel and the two track menus render nothing
-/// until their step supplies the state.
+/// Steps 8 and 9 complete it: the live reconnect watchdog with its `resolveAgain`
+/// round trip into Dart, and the colorimetry/stream-info read plus the
+/// audio/subtitle media selection. Both follow the same rule as everything
+/// above them — the decision lives in `Core` (`LiveReconnectWatchdog`,
+/// `iosStreamInfo`), this class only applies it — so the parts that can be
+/// tested without a device are.
 final class IptvsPlayerViewController: UIViewController {
   private let request: PlayerOpenRequest
   private weak var channel: FlutterMethodChannel?
@@ -141,9 +141,68 @@ final class IptvsPlayerViewController: UIViewController {
   private var pendingResumeMs: Int64?
   private var lastEmittedProgressSecond: Int64 = -1
 
+  // MARK: Live reconnect watchdog (step 8)
+
+  /// The pure decision half, in `Core`. This class supplies the clock and the
+  /// engine facts and does what it is told.
+  private var watchdog: LiveReconnectWatchdog
+
+  /// The 500 ms watchdog tick, mirroring Android's progress-ticker cadence.
+  ///
+  /// **A `Timer`, deliberately not `AvPlayerEngine.onProgressTick`**, even though
+  /// that already runs at 500 ms and is where Android's equivalent lives.
+  /// `AVPlayer.addPeriodicTimeObserver` fires against the *timebase*: when
+  /// playback stalls or the item fails, the timebase stops and the callback
+  /// stops with it — precisely the condition the watchdog exists to notice. A
+  /// watchdog that can only run while playback is healthy is not a watchdog.
+  private var reconnectTicker: Timer?
+
+  /// True from a hard `.dropped` until the engine reports playing again.
+  ///
+  /// The engine's own `isBuffering` does **not** cover a drop (an `AVPlayerItem`
+  /// that failed mid-playback stops reporting buffer state entirely), and the
+  /// chrome's copy is overwritten from the engine on every progress tick, so
+  /// neither can carry this. Kotlin gets it for free because ExoPlayer sits in
+  /// `STATE_BUFFERING`/`STATE_IDLE` after an error.
+  private var liveDropped = false
+
+  /// Guards against a second reload starting while a `resolveAgain` round trip
+  /// is still in flight — otherwise the watchdog's 500 ms tick and a "Go to
+  /// live" press could each ask the portal for a locator at the same time, which
+  /// on a single-connection account is exactly the `create_link` storm the
+  /// backoff exists to prevent.
+  private var liveReloadInFlight = false
+
+  /// Monotonic token for the in-flight `resolveAgain`, so the reply and the
+  /// timeout race for one settlement and the loser is discarded — the same
+  /// idiom as `ChannelHandlerOwner`'s owner token and the repo's generation
+  /// guards.
+  private var resolveSequence = 0
+  private var resolveTimer: Timer?
+  private var pendingResolveCompletion: ((FreshLocator) -> Void)?
+
+  // MARK: Stream info (step 9)
+
+  /// Latched once the item has told us something real. Colorimetry, codecs and
+  /// the track lists are properties of the item, not of the moment, so they are
+  /// read until they answer and then left alone rather than re-derived twice a
+  /// second — the same "derive once, then freeze" shape Android's fps
+  /// measurement uses.
+  private var streamInfoResolved = false
+  private var streamInfoAttempts = 0
+
+  /// ~10s of ticks after the first frame. A stream that has not described itself
+  /// by then never will (audio-only, or a provider HLS ladder with no usable
+  /// attributes), and retrying forever would touch AVFoundation's loadable
+  /// properties on the main thread twice a second for the whole session.
+  private static let streamInfoMaxAttempts = 20
+
   init(request: PlayerOpenRequest, channel: FlutterMethodChannel?) {
     self.request = request
     self.channel = channel
+    // Provider-declared liveness, never inferred — a VOD watchdog is inert by
+    // construction rather than by a guard someone can forget.
+    watchdog = LiveReconnectWatchdog(isLive: request.isLive)
     uiState = PlayerUiState(PlayerChromeState(request: request))
     super.init(nibName: nil, bundle: nil)
     IosDebugCounters.increment(.playerControllers)
@@ -166,6 +225,11 @@ final class IptvsPlayerViewController: UIViewController {
   deinit {
     soakAutoCloseTimer?.invalidate()
     autoHideTimer?.invalidate()
+    // A repeating `Timer` is retained by the run loop, not by this object, so an
+    // un-invalidated one keeps firing (against a nil `weak self`) for the rest of
+    // the process. Every exit path already stops it; this is the backstop for a
+    // controller torn down some other way.
+    stopLiveWatchdog()
     engine.release()
     // Belt and braces. Every exit path already runs `releasePlaybackServices`,
     // but a controller that is deallocated some other way must not leave the
@@ -201,6 +265,13 @@ final class IptvsPlayerViewController: UIViewController {
       pendingResumeMs = request.resumeMs
     }
     engine.load(url: request.url, headers: request.headers, subtitles: request.subtitles)
+    // Started here rather than in `viewDidAppear`, and never stopped on
+    // disappearance: playback deliberately outlives visibility on this platform
+    // (Picture-in-Picture, and background audio, which PiP requires anyway), and
+    // a stream that drops while the app is in PiP must still reconnect. Android
+    // can tie its ticker to `onStart`/`onStop` because it pauses playback there;
+    // this controller does not.
+    startLiveWatchdogIfNeeded()
   }
 
   override func viewDidAppear(_ animated: Bool) {
@@ -462,17 +533,6 @@ final class IptvsPlayerViewController: UIViewController {
   }
 
   private func handleStateEvent(_ event: PlaybackStateEvent, message: String?) {
-    // MARK: Step 8 attaches here.
-    //
-    // The live reconnect watchdog belongs in this method plus a 500 ms ticker,
-    // mirroring `HdrPlayerActivity.pollLiveReconnect`/`reconnectLive` and
-    // driving `ReconnectPolicy` (already in Core and tested). iOS is
-    // Kotlin-shaped rather than Linux-shaped here because, exactly like the
-    // Android Activity, this controller owns playback with no live channel back
-    // to Dart for playback state. It additionally gets a `resolveAgain`
-    // round-trip Android lacks — Stalker `create_link` tokens are single-use, so
-    // reloading the URL this controller is holding can never succeed after a
-    // portal-side kill (docs/player.md "Live auto-reconnect").
     applyToChrome(event)
     // Every one of these moves the reported playback rate, which is what the
     // lock screen extrapolates its elapsed time from — a stall that isn't
@@ -486,6 +546,161 @@ final class IptvsPlayerViewController: UIViewController {
         message: message
       )
     )
+
+    // The live reconnect watchdog's edge-triggered half; the level-triggered
+    // half is `pollLiveReconnect` on the 500 ms ticker.
+    switch event {
+    case .started, .resumed:
+      liveDropped = false
+    case .dropped:
+      // A hard player error while playing. Forced, so it skips the 8s stall
+      // threshold — but `ReconnectPolicy.minGapMs` still rate-limits it, so a
+      // stream erroring in a tight loop cannot become a `create_link` storm.
+      // Direct port of Android wiring `onRecoverableError` to
+      // `reconnectLive(force = true)`.
+      liveDropped = true
+      if watchdog.forceReconnect(nowMs: IptvsPlayerViewController.nowMs()) == .reconnect {
+        startLiveReload(showsReconnecting: true)
+      }
+    case .ended:
+      // **A clean server-side EOF on live is a drop, not an end**
+      // (`shouldReconnectOnCompleted`) — live IPTV does not end, so a server
+      // closing the connection has dropped it. Nothing forced here: the poll's
+      // `ended` branch picks the faster `endedReconnectMs` threshold on its own,
+      // which keeps a single decision point for *when*. A VOD `.ended` reaches a
+      // watchdog constructed with `isLive: false` and is inert.
+      break
+    case .stalled:
+      break
+    }
+  }
+
+  // MARK: - Live reconnect watchdog
+
+  private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+  private func startLiveWatchdogIfNeeded() {
+    guard request.isLive, reconnectTicker == nil else { return }
+    // `.common` run-loop mode rather than `Timer.scheduledTimer`'s default:
+    // scrolling an open track menu puts the main run loop in tracking mode, and
+    // a watchdog that stops ticking while the user is scrolling is a watchdog
+    // with a hole in it.
+    let ticker = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+      self?.pollLiveReconnect()
+    }
+    RunLoop.main.add(ticker, forMode: .common)
+    reconnectTicker = ticker
+  }
+
+  private func stopLiveWatchdog() {
+    reconnectTicker?.invalidate()
+    reconnectTicker = nil
+    resolveTimer?.invalidate()
+    resolveTimer = nil
+    pendingResolveCompletion = nil
+    liveReloadInFlight = false
+  }
+
+  /// The level-triggered half, port of `HdrPlayerActivity.pollLiveReconnect`.
+  ///
+  /// Reads engine facts rather than chrome fields: `handleProgressTick`
+  /// overwrites `PlayerChromeState.isBuffering` from the engine twice a second,
+  /// so a chrome-derived watchdog would be reading its own echo.
+  private func pollLiveReconnect() {
+    guard !finishing else { return }
+    switch watchdog.poll(
+      isBuffering: engine.isBuffering || liveDropped,
+      ended: engine.hasEnded,
+      nowMs: IptvsPlayerViewController.nowMs()
+    ) {
+    case .healthy:
+      // Clearing the chip here rather than on `.started` is deliberate: the
+      // engine reports `.started` the instant the timebase moves, which on a
+      // half-recovered stream can precede the buffer actually holding.
+      if uiState.value.reconnecting { uiState.value.reconnecting = false }
+    case .wait:
+      break
+    case .reconnect:
+      startLiveReload(showsReconnecting: true)
+    }
+  }
+
+  /// Reloads the live stream **through a fresh locator**.
+  ///
+  /// This is the step Android's native watchdog does not have. Stalker
+  /// `create_link` URLs carry single-use `play_token`s, so after a portal-side
+  /// kill the URL this controller is holding is permanently dead and reloading
+  /// it can never succeed — `HdrPlayerActivity.reconnectLive` retries exactly
+  /// that URL, which is why a portal kill on Android needs the user to back out
+  /// and re-enter the channel (docs/player.md "Live auto-reconnect").
+  private func startLiveReload(showsReconnecting: Bool) {
+    guard request.isLive, !finishing, !liveReloadInFlight else { return }
+    liveReloadInFlight = true
+    if showsReconnecting { uiState.value.reconnecting = true }
+    resolveFreshLocator { [weak self] locator in
+      guard let self else { return }
+      self.liveReloadInFlight = false
+      guard !self.finishing else { return }
+      self.liveDropped = false
+      self.load(url: locator.url, headers: locator.headers)
+    }
+  }
+
+  /// Asks Dart for a freshly resolved live locator, **with a timeout**.
+  ///
+  /// The timeout is the whole reason this isn't a bare `invokeMethod`: the reply
+  /// comes from a Dart route that may have popped, or from a `resolveAgain`
+  /// callback that never completes, and a completion that never fires would
+  /// leave the reconnect stalled forever behind `liveReloadInFlight`. On expiry
+  /// the reload proceeds with the locator this controller already holds —
+  /// mirroring `_freshLiveStream` falling back to `widget.stream` when
+  /// `resolveAgain` is unwired or throws, so the *worst* case here is Android's
+  /// current behaviour rather than a dead player.
+  ///
+  /// Reply and timeout race for one settlement through `resolveSequence`; the
+  /// loser is discarded rather than applied to a reload that already happened.
+  private func resolveFreshLocator(_ completion: @escaping (FreshLocator) -> Void) {
+    guard let channel else {
+      completion(currentLocatorFallback())
+      return
+    }
+    resolveSequence &+= 1
+    let token = resolveSequence
+    pendingResolveCompletion = completion
+
+    resolveTimer?.invalidate()
+    let timer = Timer(
+      timeInterval: TimeInterval(LiveReconnectWatchdog.resolveTimeoutMs) / 1000,
+      repeats: false
+    ) { [weak self] _ in
+      self?.settleResolve(token: token, locator: nil)
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    resolveTimer = timer
+
+    // `ChannelHandlerOwner`'s wrapper propagates the Dart return value straight
+    // back here; a superseded owner answers nothing, which lands on the timeout.
+    channel.invokeMethod("resolveAgain", arguments: nil) { [weak self] reply in
+      self?.settleResolve(token: token, locator: FreshLocator(reply: reply))
+    }
+  }
+
+  private func settleResolve(token: Int, locator: FreshLocator?) {
+    guard token == resolveSequence else { return }
+    // Consume the token so the losing path becomes a no-op.
+    resolveSequence &+= 1
+    resolveTimer?.invalidate()
+    resolveTimer = nil
+    let completion = pendingResolveCompletion
+    pendingResolveCompletion = nil
+    completion?(locator ?? currentLocatorFallback())
+  }
+
+  /// The locator to reload when Dart can't supply a fresh one — the `open`
+  /// payload's, exactly as Dart falls back to `widget.stream` rather than to
+  /// anything it re-resolved since.
+  private func currentLocatorFallback() -> FreshLocator {
+    FreshLocator(url: request.url, headers: request.headers)
   }
 
   /// Folds an engine state transition into the chrome. One `batch` per event, so
@@ -526,20 +741,11 @@ final class IptvsPlayerViewController: UIViewController {
     // `presentationSize` is `.zero` until the first frame decodes, and
     // `resolutionBadge` is nil for a zero size, so the badge simply appears when
     // the picture does.
-    //
-    // MARK: Step 9 attaches here.
-    //
-    // `fps`, `dynamicRange`, `videoCodec`, `audioCodec`/`audioChannels` are the
-    // remaining `PlayerChromeState` stream-info fields, and everything that
-    // renders them — the HDR and fps badges, the whole info panel — is already
-    // written and simply shows nothing while they are empty. Feed them from the
-    // item's track format descriptions here (or from a `readyToPlay` one-shot,
-    // since they don't change mid-item), and build the label itself with
-    // `dynamicRangeLabel(gamma:primaries:matrix:)` from Core rather than
-    // assembling a string, so the iOS badge text agrees with the Android,
-    // Windows and Linux ones by construction. Note HDR10+ is permanently
-    // absent on this platform (docs/ios.md "Known parity gaps").
     let size = engine.presentationSize
+    // Colorimetry, codecs and the track lists, read until the item answers and
+    // then latched (see `streamInfoResolved`). Folded into the same `batch` as
+    // the tick below so a resolve costs one render, not two.
+    let streamInfo = resolveStreamInfoIfNeeded()
     uiState.batch { state in
       state.positionMs = positionMs
       state.durationMs = durationMs
@@ -547,6 +753,7 @@ final class IptvsPlayerViewController: UIViewController {
       state.isBuffering = buffering
       state.videoWidth = Int(size.width)
       state.videoHeight = Int(size.height)
+      if let streamInfo { streamInfo.apply(to: &state) }
     }
 
     let second = positionMs / 1_000
@@ -565,6 +772,85 @@ final class IptvsPlayerViewController: UIViewController {
         buffering: buffering
       )
     )
+  }
+
+  // MARK: - Stream info + media selection
+
+  /// One resolved read of everything the item can say about itself.
+  private struct StreamInfoUpdate {
+    let info: IosStreamInfo
+    let audioTracks: [PlayerTrackOption]
+    let selectedAudioId: String?
+    let subtitleTracks: [PlayerTrackOption]
+    let selectedSubtitleId: String?
+
+    func apply(to state: inout PlayerChromeState) {
+      state.fps = info.fps
+      state.dynamicRange = info.dynamicRange
+      state.videoCodec = info.videoCodec
+      state.audioCodec = info.audioCodec
+      state.audioChannels = info.audioChannels
+      state.audioTracks = audioTracks
+      state.selectedAudioId = selectedAudioId
+      state.subtitleTracks = subtitleTracks
+      state.selectedSubtitleId = selectedSubtitleId
+    }
+  }
+
+  /// Reads colorimetry/codecs/tracks until the item answers, then latches.
+  ///
+  /// Gated on `engine.hasStarted` before the attempt budget is even touched:
+  /// AVFoundation's synchronous property accessors are views of asynchronously
+  /// loaded state, and touching them before the asset is loaded can block the
+  /// main thread. After the first frame every read here is a cache hit.
+  ///
+  /// **Dart stays the label authority in spirit.** Nothing here assembles a
+  /// string: the raw tags go to `Core`'s ``iosStreamInfo(format:edrHeadroom:)``,
+  /// which routes through the very
+  /// ``dynamicRangeLabel(gamma:primaries:matrix:hdr10Plus:)`` port that
+  /// `DynamicRangeLabelTests` pins byte-identical to
+  /// `test/dynamic_range_test.dart`.
+  private func resolveStreamInfoIfNeeded() -> StreamInfoUpdate? {
+    guard !streamInfoResolved, engine.hasStarted else { return nil }
+    guard streamInfoAttempts < IptvsPlayerViewController.streamInfoMaxAttempts else { return nil }
+    streamInfoAttempts += 1
+
+    let format = engine.readStreamFormat()
+    let audioTracks = engine.mediaOptions(for: .audible)
+    let subtitleTracks = iosSubtitleMenuOptions(tracks: engine.mediaOptions(for: .legible))
+    // Nothing at all yet — try again next tick rather than latching a blank
+    // readout that would then never be corrected.
+    guard !format.isEmpty || !audioTracks.isEmpty || !subtitleTracks.isEmpty else { return nil }
+    streamInfoResolved = true
+
+    return StreamInfoUpdate(
+      info: iosStreamInfo(format: format, edrHeadroom: displayEdrHeadroom()),
+      audioTracks: audioTracks,
+      selectedAudioId: engine.selectedMediaOptionId(for: .audible),
+      subtitleTracks: subtitleTracks,
+      // AVFoundation's automatic selection is left in place rather than forced
+      // off: on iOS the "Closed Captions + SDH" accessibility setting is what
+      // drives it, and overriding a system accessibility preference to match the
+      // other platforms' subtitles-off default would be the wrong trade. Whatever
+      // it picked is simply reported, so the menu's tick is honest.
+      selectedSubtitleId: engine.selectedMediaOptionId(for: .legible) ?? playerSubtitleOffId
+    )
+  }
+
+  /// The display's EDR capability, or nil when the platform can't say.
+  ///
+  /// Feeds the honesty gate in ``iosDynamicRangeForDisplay(sourceLabel:edrHeadroom:)``
+  /// — see there for why iOS gates the badge on the display where Android and
+  /// Windows don't, and why `nil` must read as "no opinion" rather than "SDR".
+  /// `potentialEDRHeadroom` (the display's capability), never
+  /// `currentEDRHeadroom` (which varies with brightness and ambient light and
+  /// legitimately reads 1.0 on a genuinely HDR panel).
+  private func displayEdrHeadroom() -> Double? {
+    guard #available(iOS 16.0, *) else { return nil }
+    // Scene-scoped rather than `UIScreen.main`: on an iPad with an external
+    // display the player's own window is the one whose capability matters.
+    let screen = view.window?.windowScene?.screen ?? UIScreen.main
+    return Double(screen.potentialEDRHeadroom)
   }
 
   /// VOD resume, applied once the item can accept a seek. Android does the same
@@ -589,6 +875,13 @@ final class IptvsPlayerViewController: UIViewController {
   /// Live reload — the same call the reconnect watchdog and "Go to live" make.
   func load(url: String, headers: [String: String]) {
     lastEmittedProgressSecond = -1
+    // A reload builds a whole new `AVPlayerItem`, so the latched stream info and
+    // the media-selection indices (which are per-item by construction — see
+    // `iosMediaOptionId(index:)`) have to be re-derived. The *rendered* values
+    // are left in place until the new read lands: a live reconnect returns to the
+    // same channel, so clearing them would only make the badges flicker.
+    streamInfoResolved = false
+    streamInfoAttempts = 0
     engine.load(url: url, headers: headers, subtitles: request.subtitles)
     refreshNowPlaying()
   }
@@ -764,24 +1057,29 @@ final class IptvsPlayerViewController: UIViewController {
       }
       applyPlaybackSpeed()
     case .audio:
-      // MARK: Step 9 attaches here — `AVPlayerItem.select(_:in:)` against the
-      // `.audible` media-selection group. The menu, its rows and this callback
-      // are complete; nothing populates `audioTracks` yet, so
-      // `showAudioButton` keeps the button hidden and this case is unreachable
-      // today. The option ids must be whatever key that step uses to find the
-      // `AVMediaSelectionOption` again.
+      // `AVPlayerItem.select(_:in:)` against the `.audible` group. The id is an
+      // index into `group.options` (`iosMediaOptionId(index:)`), which is why the
+      // list and the selection are always read from the same item.
+      let selected = engine.selectMediaOption(id: id, for: .audible)
       uiState.batch { state in
-        state.selectedAudioId = id
+        // Optimistic, like the speed menu: `currentMediaSelection` does not
+        // update synchronously, so reading it back here would render the *old*
+        // tick. A refused selection leaves the tick where it was instead.
+        if selected { state.selectedAudioId = id }
         state.menu = .none
       }
     case .subtitles:
-      // MARK: Step 9 attaches here too — the `.legible` group, plus the
-      // `playerSubtitleOffId` sentinel mapping to `select(nil, in:)`. External
-      // sidecar tracks (`request.subtitles`) additionally need an
-      // `AVMutableComposition`, which is why `AvPlayerEngine.load` already
-      // takes them and ignores them.
+      // Same, against `.legible`. The `playerSubtitleOffId` sentinel falls
+      // through `iosMediaOptionIndex` as nil and becomes `select(nil, in:)`.
+      //
+      // External sidecar tracks (`request.subtitles`) are still not composed in:
+      // that needs an `AVMutableComposition` around the `AVURLAsset`, which
+      // AVFoundation cannot build for an HLS asset at all — so a sidecar `.srt`
+      // on an AVPlayer-routed stream has no home on this engine. Only the
+      // stream's own in-band/HLS subtitle renditions appear here.
+      let selected = engine.selectMediaOption(id: id, for: .legible)
       uiState.batch { state in
-        state.selectedSubtitleId = id
+        if selected { state.selectedSubtitleId = id }
         state.menu = .none
       }
     case .none:
@@ -793,19 +1091,21 @@ final class IptvsPlayerViewController: UIViewController {
   ///
   /// Prefers a seek to the end of the item's seekable window: it keeps the
   /// current connection and the current locator, where a reload would need a
-  /// fresh one. Falls back to reloading the URL this controller holds.
+  /// fresh one.
   ///
-  /// MARK: Step 8 attaches here — that fallback must become the `resolveAgain`
-  /// round trip into Dart *before* the reload. A Stalker `play_token` is
-  /// single-use, so re-opening the URL this controller is holding can never
-  /// succeed after a portal-side kill (docs/player.md "Live reloads
-  /// re-resolve"). The same call is what the reconnect watchdog will make.
+  /// When the stream exposes no window — which is most live IPTV — the only way
+  /// to the edge is a reload, and that reload goes through the **`resolveAgain`
+  /// round trip**, not through the URL this controller is holding: a Stalker
+  /// `play_token` is single-use, so re-opening it can never succeed after a
+  /// portal-side kill (docs/player.md "Live reloads re-resolve"). It is the same
+  /// call the reconnect watchdog makes, minus the "Reconnecting…" chip — this is
+  /// a deliberate user action, not a recovery.
   private func goToLive() {
     guard request.isLive else { return }
     if let edgeMs = liveEdgeMs() {
       engine.seek(toMs: edgeMs)
     } else {
-      load(url: request.url, headers: request.headers)
+      startLiveReload(showsReconnecting: false)
     }
     uiState.value.liveSynced = true
   }
@@ -940,6 +1240,7 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopLiveWatchdog()
     // PiP first, then the engine — a PiP window left running over a released
     // `AVPlayer` is a black floating rectangle the user cannot dismiss from the
     // app.
@@ -971,6 +1272,7 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopLiveWatchdog()
     stopPictureInPictureForTeardown()
     releasePlaybackServices()
     engine.release()
@@ -1056,6 +1358,10 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    // Stops the ticker *and* drops any in-flight `resolveAgain` completion: the
+    // Dart route survives an `engineFailed` (it has to host the mpv surface),
+    // so a late reply must not reach a controller that is already dismissing.
+    stopLiveWatchdog()
     // The audio session goes back to the pool here rather than being held for
     // the successor: Dart reopens on the embedded media_kit surface, which
     // claims it under its own client id (`AudioSessionClientId.embeddedPlayer`).

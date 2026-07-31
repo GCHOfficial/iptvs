@@ -35,10 +35,16 @@ final class PlayerLayerView: UIView {
 /// Deliberately *not* here, and staying that way: the audio session
 /// (`IosAudioSession`, which is process-wide and outlives any one engine), the
 /// PiP controller (`IosPipController`, which is built from the *layer*, not the
-/// player), colorimetry/HDR reads (step 9), and the live reconnect watchdog
-/// (step 8, which lives in the view controller alongside the `ReconnectPolicy`
-/// it drives, mirroring `HdrPlayerActivity.pollLiveReconnect` rather than the
-/// Dart watchdogs). This type stays a state reporter.
+/// player), and the live reconnect watchdog (which lives in the view controller
+/// alongside the `LiveReconnectWatchdog`/`ReconnectPolicy` it drives, mirroring
+/// `HdrPlayerActivity.pollLiveReconnect` rather than the Dart watchdogs).
+///
+/// Colorimetry, codec and media-selection reads **do** live here, because they
+/// are per-`AVPlayerItem` facts and this type owns the item. They stay thin on
+/// purpose: every read hands raw FourCCs and colour tags to `Core`
+/// (`IosStreamFormat` → ``iosStreamInfo(format:edrHeadroom:)``), which owns the
+/// whole interpretation table and is covered by `swift test`. This type still
+/// makes no judgements.
 final class AvPlayerEngine {
   /// Undocumented but universally used `AVURLAsset` option for per-request HTTP
   /// headers. It is load-bearing here rather than a nicety: Stalker/MAG portals
@@ -353,6 +359,268 @@ final class AvPlayerEngine {
     } else {
       onFatalError?(code)
     }
+  }
+
+  // MARK: - Stream format (colorimetry, codecs, frame rate)
+
+  /// Collects whatever colorimetry/codec facts the current item exposes, for
+  /// ``iosStreamInfo(format:edrHeadroom:)`` to turn into chrome fields.
+  ///
+  /// **Gated on ``hasStarted`` on purpose, and not only to avoid empty reads.**
+  /// The accessors below (`AVAssetTrack.formatDescriptions`, `AVAsset.variants`)
+  /// are synchronous views of properties AVFoundation loads asynchronously; on
+  /// an unloaded asset they can block the calling thread, and this runs on the
+  /// main queue from the progress tick. Once the first frame is up, the master
+  /// playlist and track formats are already parsed, so every read here is a
+  /// cache hit.
+  ///
+  /// **Two sources, because iOS has two.** Format descriptions are
+  /// authoritative and are what a progressive MP4/fMP4 exposes; for HLS,
+  /// `AVPlayerItemTrack.assetTrack` is documented as `nil`, so the variant
+  /// attributes are the only route. HLS is the *common* AVPlayer path on iOS
+  /// once Xtream defaults to `m3u8` (docs/ios.md "The `streamExtension` lever"),
+  /// so the variant fallback is load-bearing rather than defensive.
+  func readStreamFormat() -> IosStreamFormat {
+    guard !released, hasStarted, let item = player.currentItem else { return IosStreamFormat() }
+    var format = IosStreamFormat()
+    readTrackFormats(item, into: &format)
+    readVariantAttributes(item, into: &format)
+    if format.declaredFrameRate <= 0 {
+      // Read across *all* item tracks rather than picking the video one: with no
+      // `assetTrack` there is nothing to test the media type against, and
+      // `currentVideoFrameRate` is documented as 0 for a non-video track.
+      format.measuredFrameRate = item.tracks
+        .map { Double($0.currentVideoFrameRate) }
+        .max() ?? 0
+    }
+    return format
+  }
+
+  private func readTrackFormats(_ item: AVPlayerItem, into format: inout IosStreamFormat) {
+    for track in item.tracks {
+      guard let assetTrack = track.assetTrack else { continue }
+      // `formatDescriptions` is an untyped `[Any]` bridge, so the cast is
+      // required rather than cosmetic — and `compactMap` rather than
+      // `first as?`, so a track whose first entry is something unexpected
+      // doesn't silently drop the whole track.
+      guard
+        let description = assetTrack.formatDescriptions
+          .compactMap({ $0 as? CMFormatDescription })
+          .first
+      else { continue }
+      let subType = AvPlayerEngine.fourCCString(CMFormatDescriptionGetMediaSubType(description))
+      switch CMFormatDescriptionGetMediaType(description) {
+      case kCMMediaType_Video:
+        format.videoCodecFourCC = format.videoCodecFourCC ?? subType
+        format.transferFunction =
+          format.transferFunction
+          ?? AvPlayerEngine.stringExtension(
+            description,
+            kCMFormatDescriptionExtension_TransferFunction
+          )
+        format.colorPrimaries =
+          format.colorPrimaries
+          ?? AvPlayerEngine.stringExtension(
+            description,
+            kCMFormatDescriptionExtension_ColorPrimaries
+          )
+        format.yCbCrMatrix =
+          format.yCbCrMatrix
+          ?? AvPlayerEngine.stringExtension(
+            description,
+            kCMFormatDescriptionExtension_YCbCrMatrix
+          )
+        let nominal = Double(assetTrack.nominalFrameRate)
+        if nominal > 0, format.declaredFrameRate <= 0 { format.declaredFrameRate = nominal }
+      case kCMMediaType_Audio:
+        format.audioCodecFourCC = format.audioCodecFourCC ?? subType
+        if format.audioChannels <= 0,
+          let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)
+        {
+          format.audioChannels = Int(asbd.pointee.mChannelsPerFrame)
+        }
+      default:
+        break
+      }
+    }
+  }
+
+  /// The HLS route. Fills only what the track read left empty.
+  ///
+  /// Picking *which* variant: prefer the one whose declared presentation size
+  /// matches what the item is actually presenting, since ABR may have settled on
+  /// any rung of the ladder; fall back to the largest, which is the rung whose
+  /// colorimetry the provider advertises the stream by. Both are heuristics —
+  /// AVFoundation exposes no "currently playing variant" — but the dynamic range
+  /// is a property of the *ladder* on every real provider, not of the rung, so
+  /// the fallback costs nothing in practice.
+  private func readVariantAttributes(_ item: AVPlayerItem, into format: inout IosStreamFormat) {
+    guard format.videoCodecFourCC == nil || format.transferFunction == nil else { return }
+    let variants = item.asset.variants
+    guard !variants.isEmpty else { return }
+    let presented = item.presentationSize
+    let matched = variants.first { variant in
+      guard presented != .zero, let attributes = variant.videoAttributes else { return false }
+      return attributes.presentationSize == presented
+    }
+    let chosen =
+      matched
+      ?? variants.max { lhs, rhs in
+        AvPlayerEngine.variantArea(lhs) < AvPlayerEngine.variantArea(rhs)
+      }
+    guard let variant = chosen else { return }
+
+    if let video = variant.videoAttributes {
+      if format.videoCodecFourCC == nil, let codec = video.codecTypes.first {
+        format.videoCodecFourCC = AvPlayerEngine.fourCCString(codec)
+      }
+      if format.transferFunction == nil {
+        switch video.videoRange {
+        case .pq:
+          format.transferFunction = "pq"
+        case .hlg:
+          format.transferFunction = "hlg"
+        case .sdr:
+          format.transferFunction = "sdr"
+        default:
+          break
+        }
+        // A PQ/HLG rung is BT.2020 by definition. An SDR one is deliberately
+        // left without primaries, so the label falls through to plain "SDR"
+        // instead of claiming a wide gamut the manifest never declared.
+        if format.colorPrimaries == nil, video.videoRange != .sdr,
+          format.transferFunction != nil
+        {
+          format.colorPrimaries = "bt.2020"
+        }
+      }
+      if format.declaredFrameRate <= 0, let rate = video.nominalFrameRate, rate > 0 {
+        format.declaredFrameRate = rate
+      }
+    }
+
+    if format.audioCodecFourCC == nil, let audio = variant.audioAttributes,
+      let formatID = audio.formatIDs.first
+    {
+      format.audioCodecFourCC = AvPlayerEngine.fourCCString(formatID)
+    }
+    // Channel count is deliberately not read here: the per-rendition count is an
+    // iOS 17 API, and this project's floor is 15. `0` renders as no channel
+    // suffix rather than a wrong one (`playerAudioChannelsLabel`).
+  }
+
+  private static func variantArea(_ variant: AVAssetVariant) -> Double {
+    guard let size = variant.videoAttributes?.presentationSize else { return 0 }
+    return Double(size.width * size.height)
+  }
+
+  /// A `CMFormatDescription` string extension (colour tags), or nil.
+  private static func stringExtension(
+    _ description: CMFormatDescription,
+    _ key: CFString
+  ) -> String? {
+    guard let value = CMFormatDescriptionGetExtension(description, extensionKey: key) else {
+      return nil
+    }
+    return value as? String
+  }
+
+  /// A FourCC as text (`0x68766331` → `"hvc1"`), or nil for the zero code.
+  ///
+  /// ISO-Latin-1 rather than ASCII: the encoding must be total over four
+  /// arbitrary bytes, and an unrecognised codec tag returning `nil` from a
+  /// failed decode would look identical to "no codec", which is a different
+  /// fact.
+  static func fourCCString(_ code: FourCharCode) -> String? {
+    guard code != 0 else { return nil }
+    let bytes: [UInt8] = [
+      UInt8((code >> 24) & 0xFF),
+      UInt8((code >> 16) & 0xFF),
+      UInt8((code >> 8) & 0xFF),
+      UInt8(code & 0xFF),
+    ]
+    return String(bytes: bytes, encoding: .isoLatin1)
+  }
+
+  // MARK: - Media selection
+
+  /// The selectable options in `characteristic`'s group, already labelled.
+  ///
+  /// Two filters, each removing a control that would appear to do nothing:
+  /// options the device cannot actually play (audio), and forced-only subtitle
+  /// tracks, which follow the audio selection automatically and are not a user
+  /// choice. Ids stay indexed against the *unfiltered* `group.options`, so a
+  /// filtered row still maps back to the right option.
+  func mediaOptions(for characteristic: AVMediaCharacteristic) -> [PlayerTrackOption] {
+    guard let group = mediaSelectionGroup(characteristic) else { return [] }
+    let playable: Set<ObjectIdentifier>? =
+      characteristic == .audible
+      ? Set(
+        AVMediaSelectionGroup.playableMediaSelectionOptions(from: group.options)
+          .map { ObjectIdentifier($0) }
+      )
+      : nil
+
+    var options: [PlayerTrackOption] = []
+    for (index, option) in group.options.enumerated() {
+      if let playable, !playable.contains(ObjectIdentifier(option)) { continue }
+      if characteristic == .legible,
+        option.hasMediaCharacteristic(.containsOnlyForcedSubtitles)
+      {
+        continue
+      }
+      options.append(
+        PlayerTrackOption(
+          id: iosMediaOptionId(index: index),
+          label: iosMediaOptionLabel(
+            displayName: option.displayName,
+            languageTag: option.extendedLanguageTag,
+            index: index
+          )
+        )
+      )
+    }
+    return options
+  }
+
+  /// The id of whatever is currently selected in `characteristic`'s group, or
+  /// nil when nothing is (which the subtitle menu renders as "Off").
+  func selectedMediaOptionId(for characteristic: AVMediaCharacteristic) -> String? {
+    guard let item = player.currentItem, let group = mediaSelectionGroup(characteristic) else {
+      return nil
+    }
+    guard let selected = item.currentMediaSelection.selectedMediaOption(in: group) else {
+      return nil
+    }
+    guard let index = group.options.firstIndex(of: selected) else { return nil }
+    return iosMediaOptionId(index: index)
+  }
+
+  /// Selects an option by id; a nil id (or the `playerSubtitleOffId` sentinel)
+  /// deselects, where the group allows it.
+  @discardableResult
+  func selectMediaOption(id: String?, for characteristic: AVMediaCharacteristic) -> Bool {
+    guard let item = player.currentItem, let group = mediaSelectionGroup(characteristic) else {
+      return false
+    }
+    guard let index = iosMediaOptionIndex(id: id) else {
+      // A group that requires a selection keeps the one it has rather than
+      // silently ignoring the call — `allowsEmptySelection` is false for audio
+      // on essentially every stream, and true for subtitles on essentially all.
+      guard group.allowsEmptySelection else { return false }
+      item.select(nil, in: group)
+      return true
+    }
+    guard index >= 0, index < group.options.count else { return false }
+    item.select(group.options[index], in: group)
+    return true
+  }
+
+  private func mediaSelectionGroup(
+    _ characteristic: AVMediaCharacteristic
+  ) -> AVMediaSelectionGroup? {
+    guard !released, let item = player.currentItem else { return nil }
+    return item.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic)
   }
 
   // MARK: - Time conversion
