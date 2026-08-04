@@ -320,6 +320,19 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   RLS bugs, **not** vs an unlocked/XSS'd panel or a paired device holding the CK; `rotate_content_key`
   is the revocation remedy (against a compromised *device* — not against a compromised backend). `package:cryptography` 2.9.0 has no VM/native ECDH, so P-256 is pure-Dart
   in `cloud_crypto.dart` (RFC-5903-validated); vectors in `test/fixtures/crypto_vectors.json`.
+- **A device is named at pairing time, and RPC overloads here are arity-distinct with no
+  `DEFAULT`.** The device sends a platform-derived suggestion (`request_pairing(p_label)` →
+  `pairings.suggested_label`); the panel's Pair form sends an optional name
+  (`claim_pairing(p_code, p_label)`). Precedence is **panel > existing `devices.label` (same owner
+  only) > suggestion > `''`** — the scalar form of the never-blank rule, so a blank panel field
+  can't clobber a hand-chosen name, and a cross-account re-pair never inherits the old owner's
+  name. `suggested_label` is attacker-controlled (anonymous device → another account's device
+  list): bounded 256 (**must stay ≤ `devices_validate`'s limit**, or a device can deny its owner's
+  claim), control-chars rejected, frozen on UPDATE, `esc()`-rendered. **Never add a `DEFAULT`
+  beside a narrower overload** — PostgREST matches on the parameter-name set and answers
+  `PGRST203`, breaking 100% of pairings; the narrow forms stay forever as delegates because app
+  installs are arbitrarily old and a panel tab outlives a deploy. Device-side naming is
+  deliberately zero-typing (read-only hint, no focus target) — the primary device is a TV remote.
 - Every profile (local and cloud) owns a `ProfileSnapshot`; switching snapshots the outgoing
   state and restores the incoming one, keeping cloud-managed source ids scoped per profile so
   pulls never leak sources across profiles (`local_profile_store.dart`).

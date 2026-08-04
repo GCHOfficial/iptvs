@@ -18,7 +18,7 @@
 
 begin;
 
-select plan(8);
+select plan(9);
 
 set local role authenticated;
 
@@ -101,6 +101,15 @@ select throws_like(
 select lives_ok(
   format('select public.push_favorites(%L, %L)', '[]'::jsonb, :'profile_a'::uuid),
   'push_favorites still succeeds for the paired device''s own profile'
+);
+
+-- The 2-arg claim_pairing added by 20260804000000_pairing_suggested_label.sql
+-- must not have opened a second door past the identity guard: only a real
+-- signed-in account may claim, and this session is an anonymous device.
+select throws_like(
+  format('select public.claim_pairing(%L, %L)', 'ABCD2345', 'Attacker'),
+  'only a signed-in account can claim a device',
+  'the 2-arg claim_pairing still rejects an anonymous (device) session'
 );
 
 select * from finish();

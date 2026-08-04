@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/cloud_crypto.dart';
 import 'package:iptvs/data/cloud_sync.dart';
+import 'package:iptvs/data/device_label.dart';
 import 'package:iptvs/data/metadata_config.dart';
 import 'package:iptvs/data/secret_keys.dart';
 import 'package:iptvs/sources/source.dart';
@@ -800,6 +801,49 @@ void main() {
         ),
         isFalse,
       );
+    });
+  });
+
+  group('suggestedDeviceLabelFor', () {
+    test('distinguishes an Android TV from an Android handset', () {
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'android', isTelevision: true),
+        'Android TV',
+      );
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'android', isTelevision: false),
+        'Android',
+      );
+    });
+
+    test('names the desktop and mobile platforms', () {
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'windows', isTelevision: false),
+        'Windows PC',
+      );
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'linux', isTelevision: false),
+        'Linux',
+      );
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'macos', isTelevision: false),
+        'Mac',
+      );
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'ios', isTelevision: false),
+        'iPhone',
+      );
+    });
+
+    test('suggests nothing on an unknown platform', () {
+      // Empty is the "no suggestion" signal end to end: the device sends '',
+      // the server stores '', and the panel keeps rendering "Device" until the
+      // owner names it — exactly the pre-feature behaviour.
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: 'fuchsia', isTelevision: false),
+        '',
+      );
+      expect(suggestedDeviceLabelFor(operatingSystem: '', isTelevision: true), '');
     });
   });
 }

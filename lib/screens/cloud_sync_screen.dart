@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../data/app_database.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
+import '../data/device_label.dart';
 import '../data/source_store.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
@@ -52,10 +53,18 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   /// [CloudCryptoStatus.locked] — see [_refreshCrypto].
   bool _downgraded = false;
 
+  /// The name this device suggests for itself while pairing, shown read-only so
+  /// the user knows what will appear in the panel. Empty on an unknown platform
+  /// (or if detection fails), in which case the hint is omitted entirely.
+  String _suggestedLabel = '';
+
   @override
   void initState() {
     super.initState();
     _init();
+    detectSuggestedDeviceLabel().then((label) {
+      if (mounted) setState(() => _suggestedLabel = label);
+    });
   }
 
   @override
@@ -502,6 +511,20 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         style: TextStyle(color: AppColors.textLo, fontSize: 12),
       ),
     ),
+    // Read-only on purpose: naming happens in the panel, on a real keyboard.
+    // Adding a text field here would put a focus target — and a Back-ladder
+    // rung — on a screen reached by D-pad remote.
+    if (_suggestedLabel.isNotEmpty) ...[
+      const SizedBox(height: 12),
+      Center(
+        child: Text(
+          'This device will appear as "$_suggestedLabel". '
+          'You can give it another name in the panel.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+        ),
+      ),
+    ],
     const SizedBox(height: 16),
     Center(
       child: InkWell(

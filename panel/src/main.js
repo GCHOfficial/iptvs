@@ -25,6 +25,7 @@ import {
 
 const MAX_PROFILE_NAME_LENGTH = 256;
 const MAX_METADATA_FIELD_LENGTH = 1024;
+const MAX_DEVICE_LABEL_LENGTH = 256;
 
 const app = document.getElementById('app');
 // Profiles per account are capped server-side (a BEFORE INSERT trigger); mirror
@@ -980,8 +981,10 @@ async function renderDevices() {
       <p class="muted">Enter the code shown on the device's Cloud sync screen.</p>
       <div class="claim-row">
         <input name="code" placeholder="ABCD2345" autocomplete="off" />
+        <input name="label" placeholder="Name (optional)" maxlength="64" autocomplete="off" />
         <button class="primary">Pair</button>
       </div>
+      <p class="muted hint">Leave the name blank to use the name the device suggests.</p>
     </form>
     <h2>Paired devices</h2>
     ${cryptoCtx.enabled
@@ -995,8 +998,13 @@ async function renderDevices() {
 
   document.getElementById('claim').onsubmit = async (e) => {
     e.preventDefault();
-    const code = new FormData(e.target).get('code').trim().toUpperCase();
-    const { error } = await supabase.rpc('claim_pairing', { p_code: code });
+    const fd = new FormData(e.target);
+    const code = fd.get('code').trim().toUpperCase();
+    const label = (fd.get('label') ?? '').toString().trim().slice(0, MAX_DEVICE_LABEL_LENGTH);
+    let { error } = await supabase.rpc('claim_pairing', { p_code: code, p_label: label });
+    if (error && secrets.isMissingFunctionError(error)) {
+      ({ error } = await supabase.rpc('claim_pairing', { p_code: code }));
+    }
     if (error) { logError(error); return toast(friendlyError(error), true); }
     toast('Device paired');
     renderDevices();
