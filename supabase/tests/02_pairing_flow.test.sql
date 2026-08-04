@@ -4,7 +4,7 @@
 
 begin;
 
-select plan(9);
+select plan(10);
 
 -- ---------------------------------------------------------------------------
 -- Positive path: a device requests a code, a real account claims it. Device
@@ -34,6 +34,15 @@ select lives_ok(
 select ok(
   (select owner from public.devices where device_uid = :'device_id'::uuid) = :'owner_id'::uuid,
   'claim_pairing links the device to the claiming account'
+);
+-- Legacy compatibility (20260804000000_pairing_suggested_label.sql): the whole
+-- flow above used the 0-arg request_pairing() and 1-arg claim_pairing() that
+-- old installed app versions and pre-deploy panel tabs still call. It must
+-- remain byte-identical to its pre-migration behaviour — no suggestion, so no
+-- name.
+select ok(
+  (select label from public.devices where device_uid = :'device_id'::uuid) = '',
+  'the legacy 0-arg pairing path still yields an empty label'
 );
 
 select test.jwt(:'device_id'::uuid, true);

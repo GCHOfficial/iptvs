@@ -41,5 +41,7 @@ GitHub Actions deploys `dist/` to GitHub Pages on push to `main`
   `lib/sources/source_config.dart` per kind (Stalker / Xtream / M3U / Demo).
   Reorder with ↑/↓ — devices show sources in this order.
 - **Metadata** — the selected profile's TMDB/TVDB/MDBList keys + auto-enrich toggle.
-- **Devices** — pair by entering a device's code (`claim_pairing` RPC), rename, revoke;
+- **Devices** — pair by entering a device's code (`claim_pairing` RPC) with an
+  optional name (leave it blank and the device's own suggestion — "Android TV",
+  "Windows PC" — is used), rename, revoke;
   each device shows which profile it's syncing. Devices choose their profile on-device.

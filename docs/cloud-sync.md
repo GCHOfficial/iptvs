@@ -156,6 +156,20 @@ trigger is picked up automatically.
 - `get_device_ck(p_profile_id)` → `{ck_version, wrapped_ck}|null` — the CK wrapped **to this
   device**. `null` means this device isn't provisioned yet (locked).
 
+- `request_pairing(p_label)` — the device's suggested name for itself (see "The device's name,
+  decided at pairing time"). `claim_pairing(p_code, p_label)` is the panel-side counterpart.
+
+**Standing constraint for every RPC in this schema: overloads must be arity-distinct with NO
+`DEFAULT` on any parameter.** PostgREST picks the candidate whose *parameter-name set* matches the
+request body's keys, and fails with `PGRST203` if two match. So
+`claim_pairing(p_code)` + `claim_pairing(p_code, p_label DEFAULT null)` would make a `{p_code}`
+body ambiguous and break **every** pairing — a total outage, not a degraded field. `push_metadata`
+((jsonb), (jsonb,uuid), (jsonb,uuid,jsonb)) is the working precedent. A `DEFAULT` is only correct
+if the narrower form is dropped in the same migration, which is itself unsafe here: the narrow
+forms are **kept forever as thin delegates** because `request_pairing()` is called by installed app
+versions that can be arbitrarily old, and `claim_pairing(p_code)` by a panel SPA tab that can
+outlive a deploy.
+
 `get_profile_crypto` / `provision_device_ck` / `enable` / `disable` / `rotate_content_key` are
 **panel-only** and never called from Dart. Every one of these RPCs may throw "function does not
 exist" against a pre-migration backend; the client treats that as **"no cloud secrets available"**
@@ -382,7 +396,13 @@ deliberately per-device, not per-owner, since two devices on one account are ind
 human-driven callers — one self-resetting row per subject in the policy-less `push_rate`
 table, reaped on account deletion). `claim_pairing` is rate-limited too (10/min) — it was the only
 push/claim-class RPC without a throttle, and a successful claim grants read access to that device's
-owner's data. Reads/pulls are deliberately unthrottled
+owner's data. `pairings.suggested_label` is bounded at **256 and rejected outright if it contains
+control characters** (`..._pairing_suggested_label.sql`). That ceiling **must stay ≤
+`devices_validate`'s `max_label`** (also 256): a suggestion that passed at pairing INSERT but failed
+`devices_validate` inside `claim_pairing` would let a device store a value that makes its owner's
+claim fail outright — a denial of pairing. `claim_pairing` bounds the panel's label **before** it
+looks the code up, deliberately, so the error cannot depend on whether the code exists; validating
+after the lookup would turn an oversized label into an oracle for code validity. Reads/pulls are deliberately unthrottled
 (PostgREST has no per-user limit and an Edge proxy isn't justified) — accepted risk, mitigated
 by RLS scoping and the payload caps. Client-side, the panel's `friendlyError` and the app's
 `friendlyCloudError` both show `iptvs: `-prefixed messages as-is, map permission/RLS errors to a
@@ -413,6 +433,39 @@ pulls. Once paired, the screen shows a **profile picker** (list the account's pr
 `set_device_profile` + re-pull) and offers **Pull now** / **Push to panel** (push confirms first,
 since it overwrites that profile).
 
+### The device's name, decided at pairing time
+
+A freshly paired device used to be nameless (`devices.label = ''`, rendered "Device") until the
+owner used Rename. Both ends now contribute a name, and the server merges them
+(`20260804000000_pairing_suggested_label.sql`):
+
+- The **device** sends a platform-derived suggestion — "Android TV", "Android", "Windows PC",
+  "Linux", "Mac", "iPhone" — via `request_pairing(p_label)`, stored on the pairing row as
+  `pairings.suggested_label`. It is **zero-typing on purpose**: the primary device is a TV with a
+  D-pad remote, so the pairing screen shows the suggestion as read-only text and adds **no text
+  field, no focus target, and no Back-ladder rung**. Android TV vs handset comes from
+  `UiModeManager` over the outbound-only `iptvs/device` channel — outbound only, so it is *not* a
+  `ChannelHandlerOwner` case.
+- The **panel** offers an optional Name box beside the code, passed as `claim_pairing(p_code,
+  p_label)`.
+
+**Precedence — panel-supplied > existing `devices.label` (same owner only) > device suggestion >
+`''`.** This is the scalar analogue of `merge_preserving_nonempty`: an absent value never blanks a
+stored one, and only an explicit panel action changes a stored non-empty name. A re-pair with the
+panel field left blank must not clobber a hand-chosen "Living room TV" with "Android TV".
+
+The "same owner only" qualifier is deliberate: a device re-paired to a **different** account starts
+from its own suggestion and never carries the previous owner's chosen name into the new owner's
+device list. That closes a small pre-existing cross-account information flow.
+
+`suggested_label` is **attacker-controlled text from an anonymous session that lands in another
+account's device list**, so it is bounded (256, matching `devices_validate` — see the coupling note
+under "Validation limits"), rejected outright if it contains control characters, frozen on UPDATE
+alongside the rest of the pairing row, and rendered through the panel's `esc()` into a text node.
+It carries **zero authority** — nothing branches on it. Accepted residuals: the suggestion is
+unauthenticated by nature (any anon-key holder can claim to be "Living room TV"), and bidi /
+zero-width Unicode is not caught by the control-character check.
+
 ## Flutter side
 
 [`cloud_config.dart`](../lib/data/cloud_config.dart) (build-time `--dart-define`
@@ -432,10 +485,17 @@ in the keychain, not plaintext prefs. Init is in `main.dart`, behind `isConfigur
 [`cloud_crypto.dart`](../lib/data/cloud_crypto.dart) is the pure crypto surface (envelopes, AAD,
 the pure-Dart P-256). The device P-256 key pair persists in the keychain
 (`cloud_device_priv_key`/`cloud_device_pub_key`) via the same `FlutterSecureStorage` as the rest.
+[`device_label.dart`](../lib/data/device_label.dart) derives the pairing-time name suggestion:
+`suggestedDeviceLabelFor` is the pure platform→name mapping, `detectSuggestedDeviceLabel` is the
+impure detector (`Platform.operatingSystem` plus the outbound-only `iptvs/device` channel on
+Android). It **never throws** — any failure degrades to an empty suggestion, which reproduces the
+pre-feature behaviour exactly. `requestPairingCode({label})` sends it, falling back to the 0-arg
+`request_pairing()` on `isMissingFunctionError` only, so a real rate-limit or auth rejection still
+surfaces.
 The pure mappers/helpers (`cloudRowToConfig`, the id helpers, `splitFields`/`mergeFields`/
 `fillGapsFromLocal`, `buildSecretElement`/`decodeSecretEntry`, `isMissingFunctionError`,
-`MetadataConfig.fromCloudParts`, `sourceCredentialsMissing`) are unit-tested in
-`test/cloud_sync_test.dart`; the crypto vectors + fail-closed cases in `test/cloud_crypto_test.dart`.
+`MetadataConfig.fromCloudParts`, `sourceCredentialsMissing`, `suggestedDeviceLabelFor`) are
+unit-tested in `test/cloud_sync_test.dart`; the crypto vectors + fail-closed cases in `test/cloud_crypto_test.dart`.
 
 ## Web panel
 

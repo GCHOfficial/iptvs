@@ -9,6 +9,7 @@ import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'cloud_crypto.dart';
+import 'device_label.dart';
 import 'metadata_config.dart';
 import 'net.dart';
 import 'secret_keys.dart';
@@ -484,8 +485,40 @@ class CloudSync {
   }
 
   /// Ask the backend for a fresh, short-lived code to display for pairing.
-  Future<PairingCode> requestPairingCode() async {
+  ///
+  /// Sends a platform-derived [label] suggestion ("Android TV", "Windows PC")
+  /// so the device already has a name in the panel the moment it is claimed,
+  /// instead of showing as "Device" until renamed. A name typed into the panel
+  /// still wins; see [detectSuggestedDeviceLabel].
+  Future<PairingCode> requestPairingCode({String? label}) async {
     await ensureAnonSession();
+    final suggestion = (label ?? await detectSuggestedDeviceLabel()).trim();
+    // The server truncates at 256; cap far shorter, since anything longer is a
+    // bug rather than a name.
+    final capped = suggestion.length > 64
+        ? suggestion.substring(0, 64)
+        : suggestion;
+    final List res;
+    try {
+      res = await _client.rpc('request_pairing', params: {'p_label': capped})
+          as List;
+    } on PostgrestException catch (e) {
+      // Only a backend that predates the suggestion migration may fall back —
+      // a real rate-limit or auth rejection must surface, not silently retry.
+      if (!isMissingFunctionError(e)) rethrow;
+      return _requestPairingCodeLegacy();
+    }
+    final row = Map<String, dynamic>.from(res.first as Map);
+    return PairingCode(
+      row['code'] as String,
+      DateTime.parse(row['expires_at'] as String),
+    );
+  }
+
+  /// The pre-suggestion `request_pairing()` call, for a backend that has not
+  /// run the suggestion migration yet. Pairing still works; the device just
+  /// arrives unnamed, exactly as before.
+  Future<PairingCode> _requestPairingCodeLegacy() async {
     final res = await _client.rpc('request_pairing') as List;
     final row = Map<String, dynamic>.from(res.first as Map);
     return PairingCode(

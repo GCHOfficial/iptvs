@@ -128,4 +128,10 @@ pgTAP suite in `supabase/tests/` — prefer extending that over re-checking by h
 - [ ] `anon`/`authenticated` hold **no** privileges on `source_secrets`,
       `metadata_secrets`, `profile_crypto`, `device_ck`, `push_rate`, and no
       TRUNCATE on the five client-facing tables.
+- [ ] `pairings.suggested_label` — the one column an **anonymous** session can write
+      that is displayed in **another account's** panel — is bounded (256, matching
+      `devices_validate`), rejects control characters, and is frozen on UPDATE.
+- [ ] A cross-account re-pair does not carry the previous owner's `devices.label`
+      into the new owner's device list, and a same-owner re-pair with a blank panel
+      name does not overwrite the name already stored.
 - [ ] Every `SECURITY DEFINER` function pins `search_path = ''`.

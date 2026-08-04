@@ -6,7 +6,7 @@
 
 begin;
 
-select plan(4);
+select plan(5);
 
 set local role authenticated;
 select test.login_device() as device_id \gset
@@ -16,6 +16,12 @@ select public.claim_pairing(:'pairing1_code');
 
 -- F4 negative: even the owning account cannot repoint device_uid.
 select test.jwt(:'owner_a'::uuid, false);
+
+-- Name the device as account A, so the cross-account assertion at the end of
+-- this file is about a real stored name rather than two empty strings.
+update public.devices set label = 'Account A bedroom TV'
+  where device_uid = :'device_id'::uuid;
+
 select throws_like(
   format(
     'update public.devices set device_uid = %L where device_uid = %L',
@@ -43,6 +49,14 @@ select ok(
 select ok(
   (select device_uid from public.devices where owner = :'owner_b'::uuid) = :'device_id'::uuid,
   'the device_uid itself is unchanged by re-pairing'
+);
+
+-- 20260804000000_pairing_suggested_label.sql: a re-pair moves the device to a
+-- new account, so account A's chosen name must not follow it into account B's
+-- device list. This code carried no suggestion, so B starts from empty.
+select ok(
+  (select label from public.devices where device_uid = :'device_id'::uuid) = '',
+  'a cross-account re-pair does not carry the previous owner''s device name'
 );
 
 select * from finish();

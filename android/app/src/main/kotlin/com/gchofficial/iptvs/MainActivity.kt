@@ -24,7 +24,15 @@ class MainActivity : FlutterActivity() {
     private lateinit var nativeHdrChannel: MethodChannel
     private lateinit var previewChannel: MethodChannel
     private lateinit var updatesChannel: MethodChannel
+    private lateinit var deviceChannel: MethodChannel
     private var pendingInstallPermissionResult: MethodChannel.Result? = null
+
+    /** Same check HdrPlayerActivity uses to pick its TV-sized player chrome. */
+    private fun isTelevision(): Boolean {
+        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager
+        return uiModeManager?.currentModeType ==
+            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -248,6 +256,21 @@ class MainActivity : FlutterActivity() {
                 // (see DebugCounters); empty map in a release build.
                 "debugCounters" -> result.success(DebugCounters.snapshot())
 
+                else -> result.notImplemented()
+            }
+        }
+
+        // Device form factor, read once while pairing so the device can suggest
+        // its own name ("Android TV" vs "Android") to the web panel. Outbound
+        // only — Dart never registers a handler here, so this is not a
+        // ChannelHandlerOwner case.
+        deviceChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "iptvs/device",
+        )
+        deviceChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isTelevision" -> result.success(isTelevision())
                 else -> result.notImplemented()
             }
         }
