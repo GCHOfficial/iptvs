@@ -72,8 +72,9 @@ enum PlayerDimens {
   static let trackHeight: CGFloat = 4
   static let scrubberHeight: CGFloat = 28
   static let thumbSize: CGFloat = 14
-  static let topScrimHeight: CGFloat = 180
-  static let bottomScrimHeight: CGFloat = 220
+  /// How far a scrim's gradient extends past the bar it backs, so the fade
+  /// finishes clear of the chrome instead of ending on it.
+  static let scrimFade: CGFloat = 24
 
   /// Below this width the top bar's badges and the bottom bar's right cluster
   /// each wrap onto their own row. Same 560 breakpoint the Compose overlay

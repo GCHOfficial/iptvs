@@ -254,7 +254,7 @@ docs/ios.md "Why not `AVPlayerViewController`").
   chrome (EPG, badges, go-to-live, favorite, track menus). **Android deliberately stays on the
   stock controls**: there the embedded surface really is a launch-failure fallback, and it has to
   survive an Android TV D-pad, which this overlay's Material sliders/`PopupMenuButton`s are not
-  built for. The `touch` flag (default false, so Linux/Windows are unchanged) carries four
+  built for. The `touch` flag (default false, so Linux/Windows are unchanged) carries seven
   gated differences, each chosen to agree with the native `IptvsPlayerViewController` the same
   device reaches on AVPlayer-routed channels:
   - **Tap is the Back ladder**, the Dart twin of Swift's `playerTapAction`: peel info → hide
@@ -271,11 +271,51 @@ docs/ios.md "Why not `AVPlayerViewController`").
     native controller has no fullscreen button either. Dropping the double-tap recognizer also
     makes the show/hide tap resolve on the next frame instead of after `kDoubleTapTimeout`.
   - **≥44pt hit targets** in both axes, replacing chip sizes that are deliberately shorter than
-    they are wide for a cursor.
-  - **Two-row compact reflow** below 720px, mirroring the native overlay's `applyCompactLayout`
-    reparenting: badges move under the title, the button cluster under the transport. Measured, not
-    precautionary — a 390pt portrait phone overflows by 227px (live, full badge set) and 360px
-    (VOD) on one row.
+    they are wide for a cursor. 44 is a floor, not a target: the roomy metrics below sit at 48pt
+    and the dense ones sit exactly on 44, never lower.
+  - **Two-row reflow at `kTouchReflowWidth` (560), not `kCompactControlsWidth` (720)** — badges move
+    under the title, the button cluster under the transport, mirroring the native overlay's
+    `applyCompactLayout` reparenting. This used to trigger off `kCompactControlsWidth`, the
+    *pointer* feature-collapse threshold (see "Windows" below) — a real bug, not just a shared
+    constant: a 667×375 landscape phone (iPhone SE/8 class) stayed one row on native
+    (`PlayerDimens.compactWidth` is also 560) and went two-row here, and stacking rows is exactly
+    the wrong answer on the shortest surface the app targets. `kTouchReflowWidth` now owns that
+    trigger alone; `kCompactControlsWidth` keeps its 720 and its original pointer-only job. Above
+    the reflow width the touch transport is wrapped in an `Expanded` rather than split off with a
+    `Spacer`, so free space lands after the transport and the cluster stays hard right.
+  - **Dense vertical metrics below `kShortOverlayHeight` (500pt tall)** — a phone in landscape is
+    320–440pt tall, and the roomy desktop-sized paddings this overlay otherwise uses left almost no
+    picture: measured before the fix, **49pt of visible video on live and 23pt on VOD**, out of a
+    375pt-tall screen. Below the threshold, padding and badge gaps shrink and buttons drop from
+    48pt to 44pt (the HIG floor above, never lower); the control set doesn't change and the VOD
+    seek bar — the one real drag target — keeps its size. The fix restores a genuine video band on
+    the shortest surface the app targets; the exact restored height is a test-suite assertion
+    (`test/player_overlay_touch_test.dart`), not a number worth hand-carrying here.
+  - **The info panel is banded between the two bars, not pinned at a hard-coded offset.** The
+    pointer path still opens the card 76px below the top bar — a literal guess that only holds
+    because the pointer overlay never reflows. Under touch the card is banded between the real
+    top and bottom bars (mirroring the native `infoPanel.top == topBar.bottom + 12` /
+    `bottom <= bottomBar.top - 12` constraints) and scrolls if it doesn't fit, instead of opening
+    inside the top bar or running through the bottom one — the two failure modes the 76px literal
+    produced the moment the badges reflowed onto their own row. Deliberate divergence from native,
+    recorded so it isn't "fixed" later: UIKit resolves the same squeeze by lowering constraint
+    priority, because it has no scroll fallback; scrolling is the better answer on a 375pt-tall
+    screen.
+  - **Dynamic Type is clamped to `kTouchMaxTextScale` (1.3).** The native controller sizes every
+    label with a fixed `UIFont.systemFont(ofSize:)` — no `UIFontMetrics`, no `preferredFont` — so
+    it ignores Dynamic Type outright; an unclamped Flutter overlay diverged from the controller the
+    same user reaches on AVPlayer-routed channels for the same content. It was also a layout bug:
+    at 2× the two bars alone exceed a 375–393pt-tall landscape phone, and the touch chrome
+    *column* overflows where the old independently-`Positioned` bars silently overlapped instead.
+    1.3 keeps some of the accessibility benefit rather than copying native's total refusal to
+    scale — it is the largest bound at which the worst real surface (667×375, VOD, full control
+    set) still fits. Pointer platforms are deliberately unclamped.
+  All of the above (reflow, density, button sizing) resolves once per build into a public
+  `EmbeddedOverlayMetrics` value class rather than being read off ad hoc —
+  `EmbeddedOverlayMetrics.of(anySize, touch: false)` returns one fixed token set at every size,
+  which is what keeps the pointer path (Linux/Windows) size-invariant **by construction**: a
+  touch-only metric leaking into the pointer path is a failing pure test, not something a reviewer
+  has to catch by eye.
   Aspect cycling stays at the full four mpv modes here (Fit/Fill/16:9/4:3) rather than being cut to
   the native controller's two: that limit is an `AVPlayerLayer`/`videoGravity` constraint
   (docs/ios.md "Known parity gaps"), not a design choice, and mpv genuinely does all four.
@@ -284,6 +324,13 @@ docs/ios.md "Why not `AVPlayerViewController`").
   `_barInsets` (`MediaQuery.paddingOf`) is what keeps the chrome clear of it and of the home
   indicator. Pinned by `test/player_overlay_touch_test.dart` (the pointer behavior stays in
   `test/player_overlay_test.dart`, which is untouched).
+- **Top/bottom scrims self-size against the bar each backs**, the native-Swift counterpart of the
+  reflow above: `topScrim.bottom == topBar.bottom + scrimFade` / `bottomScrim.top == bottomBar.top
+  - scrimFade` (`scrimFade = 24`), rather than the old fixed `topScrimHeight = 180` /
+  `bottomScrimHeight = 220` pair, which summed to more than a 375–440pt landscape phone's height —
+  the two gradients met in the middle and dimmed the whole picture instead of leaving a clear band
+  between them. A scrim now follows the bar it backs, including the live bottom bar's taller EPG
+  strip pushing its scrim's inner edge down with it.
 - **Parity gaps** (docs/ios.md "Known parity gaps"): no HDR10+, ever (AVFoundation exposes no
   per-scene ST2094-40 metadata, unlike the Android/Windows/Linux decoder-level reads); and no
   *seamless* preview→fullscreen handoff for AVPlayer-routed channels — the handoff itself is
@@ -356,8 +403,16 @@ sees the exposed video area. (2) The **top-bar badges are width-capped and wrap*
 the resolution/HDR/FPS/source/clock badge set can't overflow the row on a narrow/windowed surface.
 The **live-progress title is likewise width-capped and non-flex** (0.4 of the bar) so the `Expanded`
 progress bar keeps the rest of the width instead of splitting the row ~50/50, and the **bottom
-control row drops its two widest optional pieces below ~720px** (`compact`): the volume slider
-collapses to the mute button, and "Go to live" collapses to its icon.
+control row drops its two widest optional pieces below ~720px** (`compact`, `kCompactControlsWidth`
+in `player_overlay.dart`): the volume slider collapses to the mute button, and "Go to live"
+collapses to its icon. That 720px stays a **feature-collapse** threshold — it decides which optional
+pieces a row can still carry, on every platform including iOS, and it is still measured against the
+bar's *inner* constraints rather than the surface. What it no longer decides is *layout*: the touch
+path's own two-row reflow
+(see "iOS" above for the mpv/`EmbeddedPlayerControls` touch path) now answers to a separate,
+narrower constant (`kTouchReflowWidth`, 560) — the two used to be the same number, which is exactly
+the bug the iOS fix above corrects, so don't assume one constant governs both layouts when reading
+either overlay's code.
 
 `PaintNativeControlBar` **caches its ARGB back-buffer** (`OverlayBackBuffer`: DIB + memory DC,
 file-scope alongside the other single-overlay globals), recreating it only on a client-size change

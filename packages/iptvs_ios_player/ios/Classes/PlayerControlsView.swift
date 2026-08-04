@@ -192,15 +192,27 @@ final class PlayerControlsView: UIView {
 
     NSLayoutConstraint.activate([
       // Full-bleed scrim: to the physical edges, deliberately not the safe area.
+      // The scrim's *inner* edge tracks the bar it backs (bottomAnchor for the
+      // top scrim, topAnchor for the bottom scrim, padded by `scrimFade`)
+      // instead of a fixed height, so it self-sizes to whichever bar is taller
+      // (the live bottom bar's EPG strip vs. the VOD scrubber) and can never
+      // meet the opposite scrim on a short landscape phone — a fixed
+      // 180pt + 220pt pair used to overlap outright there.
       topScrim.topAnchor.constraint(equalTo: topAnchor),
       topScrim.leadingAnchor.constraint(equalTo: leadingAnchor),
       topScrim.trailingAnchor.constraint(equalTo: trailingAnchor),
-      topScrim.heightAnchor.constraint(equalToConstant: PlayerDimens.topScrimHeight),
+      topScrim.bottomAnchor.constraint(
+        equalTo: topBar.bottomAnchor,
+        constant: PlayerDimens.scrimFade
+      ),
 
       bottomScrim.bottomAnchor.constraint(equalTo: bottomAnchor),
       bottomScrim.leadingAnchor.constraint(equalTo: leadingAnchor),
       bottomScrim.trailingAnchor.constraint(equalTo: trailingAnchor),
-      bottomScrim.heightAnchor.constraint(equalToConstant: PlayerDimens.bottomScrimHeight),
+      bottomScrim.topAnchor.constraint(
+        equalTo: bottomBar.topAnchor,
+        constant: -PlayerDimens.scrimFade
+      ),
 
       // Controls: never under the notch, never under the home indicator.
       safeContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),

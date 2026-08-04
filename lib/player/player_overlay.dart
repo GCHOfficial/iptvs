@@ -355,13 +355,33 @@ class EmbeddedPlayerControls extends StatefulWidget {
   ///     `Video`, above the one [PlayerScreen] owns. The native controller has
   ///     no fullscreen button either. Dropping the double-tap recognizer also
   ///     makes rung 1 resolve immediately instead of after `kDoubleTapTimeout`.
-  ///  3. **≥44pt hit targets** (Apple HIG) instead of the 44×40 / 34×32 chips
-  ///     sized for a cursor.
-  ///  4. **Two-row compact layout**, the same reparenting the native overlay's
-  ///     `applyCompactLayout` does: below [kCompactControlsWidth] the badges get
+  ///  3. **≥44pt hit targets** (Apple HIG) in *both* axes, instead of the 44×40
+  ///     / 34×32 chips sized for a cursor. 44 is a floor, not a target: the
+  ///     roomy metrics sit at 48 and the dense ones (item 5) sit exactly on 44,
+  ///     never below.
+  ///  4. **Two-row reflow**, the same reparenting the native overlay's
+  ///     `applyCompactLayout` does: below [kTouchReflowWidth] the badges get
   ///     their own row under the title and the button cluster its own row under
   ///     the transport. A phone in portrait cannot fit either on one line, and
-  ///     the alternative is a `RenderFlex` overflow.
+  ///     the alternative is a `RenderFlex` overflow. The trigger is
+  ///     [kTouchReflowWidth] (560, the native breakpoint) and **not**
+  ///     [kCompactControlsWidth] (720, the pointer feature-collapse threshold)
+  ///     — sharing the pointer number reflowed a landscape phone the native
+  ///     overlay keeps on one row. Above the reflow width the touch transport
+  ///     is wrapped in an `Expanded` rather than separated by a `Spacer`, so
+  ///     the free space lands after the transport and the cluster stays hard
+  ///     right.
+  ///  5. **Dense vertical metrics below [kShortOverlayHeight]** — a phone in
+  ///     landscape is 320–440pt tall, and the desktop-sized paddings left it
+  ///     with 49pt of visible video. Padding and icon sizes shrink; the control
+  ///     set does not change and the VOD seek slider (the one real drag target)
+  ///     keeps its height. See [EmbeddedOverlayMetrics].
+  ///  6. **The info panel is banded between the two bars** rather than placed
+  ///     at a hard-coded offset, and scrolls when the card cannot fit. See
+  ///     [_infoPanel].
+  ///  7. **Dynamic Type is clamped** to [kTouchMaxTextScale] — the native
+  ///     controller ignores it outright, and unclamped it overflows the chrome
+  ///     column on a landscape phone.
   ///
   /// Auto-hide timing is deliberately *not* varied: this overlay's flat 4s sits
   /// between the native controller's 3.5s (VOD) and 4.5s (live), and a shared
@@ -372,10 +392,207 @@ class EmbeddedPlayerControls extends StatefulWidget {
   State<EmbeddedPlayerControls> createState() => EmbeddedPlayerControlsState();
 }
 
-/// Width below which the control row can no longer carry its optional pieces.
-/// Shared by the pointer collapse (volume slider → mute, "Go to live" → icon)
-/// and, under [EmbeddedPlayerControls.touch], the two-row reflow.
+/// Width below which the control row can no longer carry its optional pieces:
+/// the volume slider collapses to the mute button and "Go to live" drops its
+/// text label. Applies on **both** paths, and is measured against the bar's
+/// *inner* constraints (inside its padding), which is where it has always been
+/// evaluated — deriving it from the surface size instead would shift the
+/// effective collapse point by the bar's 32–40pt of padding.
+///
+/// This is a *feature-collapse* threshold, not a reflow one. The touch reflow
+/// has its own, narrower [kTouchReflowWidth].
 const double kCompactControlsWidth = 720;
+
+/// Width below which the touch layout reflows onto two rows: the badges get
+/// their own row under the title, and the button cluster its own row under the
+/// transport.
+///
+/// Deliberately equal to the native iOS overlay's `PlayerDimens.compactWidth`
+/// (`PlayerControlsView.applyCompactLayout`), because the two overlays are
+/// reached by different *streams* on the same device — AVPlayer vs mpv — and a
+/// user who meets both in one session must not see them reflow at different
+/// widths. This used to reuse [kCompactControlsWidth]'s 720, which reflowed a
+/// 667×375 phone in landscape (iPhone SE/8 class) that the native overlay keeps
+/// on one row: stacking rows is exactly the wrong answer on the *shortest*
+/// surface the app targets, and it left 49pt of visible video.
+const double kTouchReflowWidth = 560;
+
+/// Upper bound on text scaling inside the touch overlay chrome.
+///
+/// The native `IptvsPlayerViewController` sizes every label with a fixed
+/// `UIFont.systemFont(ofSize:)` — no `UIFontMetrics`, no `preferredFont` — so it
+/// ignores Dynamic Type outright. A user meets both overlays on one device
+/// (AVPlayer vs mpv on the same channel), so the Flutter one growing to 2× while
+/// the native one stays put is itself a parity break, on top of being a layout
+/// one: at 2× the two bars alone exceed a 375–393pt-tall landscape phone and the
+/// chrome column overflows.
+///
+/// 1.3 rather than 1.0 deliberately keeps *some* of the accessibility benefit —
+/// it is the largest bound at which the worst real surface (667×375, VOD, full
+/// control set) still fits — instead of matching native's total refusal to
+/// scale. The chrome is icons and short badges; the readable content here is the
+/// video.
+///
+/// Pointer platforms are untouched: they have no Dynamic Type equivalent driving
+/// this, and their windows are never short enough for it to bind.
+const double kTouchMaxTextScale = 1.3;
+
+/// Height below which the touch layout switches to its dense vertical metrics.
+///
+/// Separates "phone in landscape" (320–440pt tall across the whole iPhone
+/// range) from everything else: the shortest iPhone *portrait* height is 568
+/// and iPad landscape is 768/834, so an iPad in landscape correctly keeps the
+/// roomy metrics. Density is purely vertical — it never changes which controls
+/// exist, and never takes a hit target below Apple's 44pt floor.
+const double kShortOverlayHeight = 500;
+
+/// The vertical metrics the overlay chrome is laid out with, resolved once per
+/// build from the surface size and [EmbeddedPlayerControls.touch].
+///
+/// Exists so the *pointer* path is size-invariant **by construction** rather
+/// than by inspection: `EmbeddedOverlayMetrics.of(anySize, touch: false)`
+/// returns one fixed token set at every size, so a regression that leaks a
+/// touch-only metric onto Linux/Windows is a failing pure test rather than
+/// something a reviewer has to catch by eye. It also mirrors the native
+/// overlay's model — a `PlayerDimens` token table plus one `isCompact`
+/// decision — so the two layouts can be compared by reading two tables.
+@immutable
+class EmbeddedOverlayMetrics {
+  const EmbeddedOverlayMetrics._({
+    required this.reflow,
+    required this.dense,
+    required this.topPadTop,
+    required this.topPadBottom,
+    required this.badgeGap,
+    required this.bottomPadTop,
+    required this.bottomPadBottom,
+    required this.buttonWidth,
+    required this.buttonHeight,
+    required this.buttonCompactWidth,
+    required this.buttonCompactHeight,
+    required this.buttonIcon,
+    required this.buttonCompactIcon,
+    required this.infoPanelWidth,
+    required this.infoPanelPad,
+    required this.infoRowPad,
+  });
+
+  /// Resolves the metrics for a surface. [touch] is the only thing that can
+  /// make the result size-dependent: with it false, every size maps to the same
+  /// instance-equal token set (the pointer path's shipped values).
+  factory EmbeddedOverlayMetrics.of(Size surface, {required bool touch}) {
+    if (!touch) return _pointer;
+    final dense = surface.height < kShortOverlayHeight;
+    return EmbeddedOverlayMetrics._(
+      reflow: surface.width < kTouchReflowWidth,
+      dense: dense,
+      topPadTop: dense ? 6 : 12,
+      topPadBottom: dense ? 10 : 28,
+      badgeGap: dense ? 4 : 8,
+      bottomPadTop: dense ? 14 : 36,
+      bottomPadBottom: dense ? 8 : 14,
+      // A finger needs Apple's 44pt minimum in *both* axes. 44 is the floor,
+      // not a target: the roomy mode sits above it and dense sits exactly on
+      // it, so no touch control is ever smaller than a fingertip.
+      buttonWidth: dense ? 44 : 48,
+      buttonHeight: dense ? 44 : 48,
+      buttonCompactWidth: 44,
+      buttonCompactHeight: 44,
+      buttonIcon: dense ? 20 : 22,
+      buttonCompactIcon: dense ? 18 : 20,
+      // Matches the native `PlayerDimens.infoPanelWidth`.
+      infoPanelWidth: 260,
+      infoPanelPad: dense ? 14 : 18,
+      infoRowPad: dense ? 2 : 4,
+    );
+  }
+
+  /// The pointer path's metrics: the values Linux and Windows have shipped,
+  /// returned for every surface size.
+  static const _pointer = EmbeddedOverlayMetrics._(
+    reflow: false,
+    dense: false,
+    topPadTop: 12,
+    topPadBottom: 28,
+    badgeGap: 8,
+    bottomPadTop: 36,
+    bottomPadBottom: 14,
+    // Deliberately shorter than they are wide — fine for a cursor, and not for
+    // a thumb, which is what [EmbeddedOverlayMetrics.of] overrides under touch.
+    buttonWidth: 44,
+    buttonHeight: 40,
+    buttonCompactWidth: 34,
+    buttonCompactHeight: 32,
+    buttonIcon: 20,
+    buttonCompactIcon: 18,
+    infoPanelWidth: 320,
+    infoPanelPad: 18,
+    infoRowPad: 4,
+  );
+
+  /// Two-row reflow (badges under the title, cluster under the transport).
+  /// Always false on the pointer path.
+  final bool reflow;
+
+  /// Dense vertical metrics for a short (landscape-phone) surface. Always false
+  /// on the pointer path.
+  final bool dense;
+
+  final double topPadTop;
+  final double topPadBottom;
+  final double badgeGap;
+  final double bottomPadTop;
+  final double bottomPadBottom;
+  final double buttonWidth;
+  final double buttonHeight;
+  final double buttonCompactWidth;
+  final double buttonCompactHeight;
+  final double buttonIcon;
+  final double buttonCompactIcon;
+  final double infoPanelWidth;
+  final double infoPanelPad;
+  final double infoRowPad;
+
+  @override
+  bool operator ==(Object other) =>
+      other is EmbeddedOverlayMetrics &&
+      other.reflow == reflow &&
+      other.dense == dense &&
+      other.topPadTop == topPadTop &&
+      other.topPadBottom == topPadBottom &&
+      other.badgeGap == badgeGap &&
+      other.bottomPadTop == bottomPadTop &&
+      other.bottomPadBottom == bottomPadBottom &&
+      other.buttonWidth == buttonWidth &&
+      other.buttonHeight == buttonHeight &&
+      other.buttonCompactWidth == buttonCompactWidth &&
+      other.buttonCompactHeight == buttonCompactHeight &&
+      other.buttonIcon == buttonIcon &&
+      other.buttonCompactIcon == buttonCompactIcon &&
+      other.infoPanelWidth == infoPanelWidth &&
+      other.infoPanelPad == infoPanelPad &&
+      other.infoRowPad == infoRowPad;
+
+  @override
+  int get hashCode => Object.hash(
+    reflow,
+    dense,
+    topPadTop,
+    topPadBottom,
+    badgeGap,
+    bottomPadTop,
+    bottomPadBottom,
+    buttonWidth,
+    buttonHeight,
+    buttonCompactWidth,
+    buttonCompactHeight,
+    buttonIcon,
+    buttonCompactIcon,
+    infoPanelWidth,
+    infoPanelPad,
+    infoRowPad,
+  );
+}
 
 class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Timer? _hideTimer;
@@ -386,6 +603,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   StreamSubscription<VideoParams>? _paramsSub;
   bool _visible = true;
   bool _showInfo = false;
+
+  /// Resolved at the top of every [build] and read by the layout helpers below,
+  /// rather than threaded through eight signatures. Size-invariant (and equal
+  /// to the shipped pointer values) whenever `widget.touch` is false.
+  EmbeddedOverlayMetrics _m = EmbeddedOverlayMetrics._pointer;
 
   @override
   void initState() {
@@ -474,6 +696,23 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   @override
   Widget build(BuildContext context) {
+    _m = EmbeddedOverlayMetrics.of(
+      MediaQuery.sizeOf(context),
+      touch: widget.touch,
+    );
+    final overlay = _buildOverlay(context);
+    // Bound Dynamic Type inside the chrome — see [kTouchMaxTextScale]. Applied
+    // here (above the whole subtree) rather than per-label so nothing can be
+    // added later that escapes it. No-op on the pointer path.
+    return widget.touch
+        ? MediaQuery.withClampedTextScaling(
+            maxScaleFactor: kTouchMaxTextScale,
+            child: overlay,
+          )
+        : overlay;
+  }
+
+  Widget _buildOverlay(BuildContext context) {
     return MouseRegion(
       cursor: _visible ? SystemMouseCursors.basic : SystemMouseCursors.none,
       onHover: (_) => _show(),
@@ -500,12 +739,72 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               onDoubleTap: widget.touch ? null : widget.onToggleFullscreen,
             ),
           ),
-          if (_visible) ...[_topBar(), _bottomBar(context)],
-          if (_showInfo) _infoPanel(),
+          // The pointer path keeps its two independently-`Positioned` bars and
+          // the fixed-offset info panel — the tree Linux and Windows ship.
+          // Touch replaces all three with one full-height column, so the panel
+          // is banded between the bars by construction (see [_touchChrome]).
+          if (!widget.touch) ...[
+            if (_visible) ...[_topBar(), _bottomBar(context)],
+            if (_showInfo) _infoPanel(),
+          ] else
+            _touchChrome(context),
         ],
       ),
     );
   }
+
+  /// The touch chrome: top bar, a flexible band, bottom bar — top to bottom in
+  /// one column.
+  ///
+  /// The band exists to hold the info panel. Placing the panel at a hard-coded
+  /// `top:` offset meant duplicating the top bar's height as a literal, which
+  /// was wrong by ~74pt the moment the badges reflowed onto their own row (it
+  /// opened *inside* the bar), and it had no lower bound at all, so on a
+  /// landscape phone the card ran straight through the bottom bar. Banding it
+  /// between the two bars mirrors the native overlay's
+  /// `infoPanel.top == topBar.bottom + 12` / `bottom <= bottomBar.top - 12` and
+  /// cannot drift when either bar changes height.
+  ///
+  /// Where this deliberately diverges from native: the card scrolls instead of
+  /// being allowed to overlap. UIKit resolves the same squeeze by lowering the
+  /// constraint priority, because it has no scroll fallback there; on a 375pt
+  /// landscape phone the full card genuinely cannot fit, and scrolling is the
+  /// better answer.
+  ///
+  /// The band must **not** absorb taps: `Column`, `Align` and an empty
+  /// `SizedBox` all decline to hit-test their empty area, so a press between
+  /// the bars still reaches the background gesture layer and drives the Back
+  /// ladder (docs/tv-navigation.md). Do not wrap it in anything opaque.
+  Widget _touchChrome(BuildContext context) => Positioned.fill(
+    child: Column(
+      // Tight width for the children, matching what `Positioned(left: 0,
+      // right: 0)` gave the bars — the default (`center`) would let each bar
+      // shrink to its intrinsic width and strand its gradient mid-screen.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_visible) _topBarBody(),
+        Expanded(
+          child: _showInfo
+              ? Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    0,
+                    12,
+                    20 + _barInsets.right,
+                    12,
+                  ),
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    // Keeps the card's natural height while it fits, scrolls
+                    // once it doesn't.
+                    child: SingleChildScrollView(child: _infoPanelCard()),
+                  ),
+                )
+              : const SizedBox.expand(),
+        ),
+        if (_visible) _bottomBarBody(context),
+      ],
+    ),
+  );
 
   /// System-bar/cutout insets for the overlay chrome.
   ///
@@ -538,17 +837,20 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   // Both bars keep their gradient full-bleed (it has to reach the screen edge to
   // stay readable over video) and inset only their content — the same split the
   // native Compose overlay uses.
-  Widget _topBar() => Positioned(
-    left: 0,
-    right: 0,
-    top: 0,
-    child: _absorbChromeTaps(
+  //
+  // The pointer path anchors each bar with its own `Positioned`; the touch path
+  // stacks the same two bodies in a column (see [_touchChrome]). Only the
+  // wrapper differs — the bodies below are shared verbatim.
+  Widget _topBar() =>
+      Positioned(left: 0, right: 0, top: 0, child: _topBarBody());
+
+  Widget _topBarBody() => _absorbChromeTaps(
       Container(
         padding: EdgeInsets.fromLTRB(
           16 + _barInsets.left,
-          12 + _barInsets.top,
+          _m.topPadTop + _barInsets.top,
           16 + _barInsets.right,
-          28,
+          _m.topPadBottom,
         ),
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -559,12 +861,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
         ),
         child: LayoutBuilder(
           builder: (context, constraints) {
-            // On a touch phone the badges can't share the row with the title:
-            // capped at 0.55 of a ~390pt bar they leave the title ~30pt. Give
-            // them their own row instead — the same reparenting the native iOS
-            // overlay's `applyCompactLayout` does with its `compactBadgeRow`.
-            final stackBadges =
-                widget.touch && constraints.maxWidth < kCompactControlsWidth;
+            // On a narrow touch surface the badges can't share the row with the
+            // title: capped at 0.55 of a ~390pt bar they leave the title ~30pt.
+            // Give them their own row instead — the same reparenting the native
+            // iOS overlay's `applyCompactLayout` does with its
+            // `compactBadgeRow`, and at the same width, so the two agree. The
+            // two halves of that reflow move together: see [_m].reflow.
+            final stackBadges = _m.reflow;
             final titleRow = Row(
               children: [
                 _button(
@@ -645,15 +948,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 titleRow,
-                const SizedBox(height: 8),
+                SizedBox(height: _m.badgeGap),
                 Wrap(spacing: 6, runSpacing: 6, children: _badges()),
               ],
             );
           },
         ),
       ),
-    ),
-  );
+    );
 
   List<Widget> _badges() {
     final params = widget.controls.state.videoParams;
@@ -674,11 +976,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     return [for (final item in items) _badge(item)];
   }
 
-  Widget _bottomBar(BuildContext context) => Positioned(
-    left: 0,
-    right: 0,
-    bottom: 0,
-    child: _absorbChromeTaps(
+  Widget _bottomBar(BuildContext context) =>
+      Positioned(left: 0, right: 0, bottom: 0, child: _bottomBarBody(context));
+
+  Widget _bottomBarBody(BuildContext context) => _absorbChromeTaps(
       Container(
         // The gradient fills this (bottom-anchored) container. It ramps to a
         // solid dark value by ~45% down — where the two-row live bar (progress +
@@ -687,9 +988,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
         // scrim. The top inset sets how high the transparent fade starts.
         padding: EdgeInsets.fromLTRB(
           20 + _barInsets.left,
-          36,
+          _m.bottomPadTop,
           20 + _barInsets.right,
-          14 + _barInsets.bottom,
+          _m.bottomPadBottom + _barInsets.bottom,
         ),
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -715,8 +1016,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 // the right-hand cluster on one line (they overflow at ~390pt as
                 // soon as a stream carries a second audio track). Split them onto
                 // two rows, exactly as the native iOS overlay's
-                // `applyCompactLayout` reparents its cluster into `secondaryRow`.
-                final twoRow = widget.touch && compact;
+                // `applyCompactLayout` reparents its cluster into `secondaryRow`
+                // — and at the same width, which `compact` (720) was not.
+                final twoRow = _m.reflow;
                 final transport = <Widget>[
                   _button(
                     widget.controls.state.playing
@@ -747,11 +1049,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                   ],
                   _volumeControls(context, showSlider: !compact),
                   if (!widget.isLive)
-                    // Flexible only in the two-row layout: on one row it would
-                    // share the free space with the `Spacer` and shift the
-                    // cluster left. Here it just lets a long VOD timestamp
-                    // ellipsize instead of overflowing a phone-width row.
-                    twoRow
+                    // Flexible on touch only: it lets a long VOD timestamp
+                    // ellipsize instead of overflowing a phone-width row. On
+                    // the pointer path it would share the free space with the
+                    // `Spacer` and shift the cluster left, so that path keeps
+                    // the rigid label (its rows are never width-starved).
+                    widget.touch
                         ? Flexible(child: _positionRebuild(_timeLabel))
                         : _positionRebuild(_timeLabel),
                 ];
@@ -792,9 +1095,24 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     ),
                 ];
                 if (!twoRow) {
-                  return Row(
-                    children: [...transport, const Spacer(), ...cluster],
-                  );
+                  // Moving the touch reflow down to 560 puts 560–720 on one
+                  // row under touch, where a `Spacer` is no longer safe: it
+                  // shares the free space with the (now `Flexible`) time label
+                  // and, on a VOD stream at ~667pt, the transport + cluster
+                  // overflow outright. An `Expanded` transport gives the free
+                  // space to the left group only, which keeps the cluster hard
+                  // right — the same reason the `Spacer` is right on a wide
+                  // pointer window, and why that branch is untouched.
+                  return widget.touch
+                      ? Row(
+                          children: [
+                            Expanded(child: Row(children: transport)),
+                            ...cluster,
+                          ],
+                        )
+                      : Row(
+                          children: [...transport, const Spacer(), ...cluster],
+                        );
                 }
                 return Column(
                   mainAxisSize: MainAxisSize.min,
@@ -812,8 +1130,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           ],
         ),
       ),
-    ),
-  );
+    );
 
   /// Scopes per-position-tick rebuilds to the only widgets that actually read
   /// the position (the VOD seek bar and time label). The rest of the overlay
@@ -994,11 +1311,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     ],
   );
 
-  Widget _infoPanel() {
+  /// The label/value pairs the info card renders, read off the live player
+  /// state. Split out of [_infoPanel] so both the pointer wrapper and the touch
+  /// band build the same card from the same source.
+  List<(String, String)> _infoRows() {
     final params = widget.controls.state.videoParams;
     final video = _realVideoTrack();
     final audio = _realAudioTrack();
-    final rows = <(String, String)>[
+    return <(String, String)>[
       ('Resolution', '${params.w ?? video.w ?? 0}×${params.h ?? video.h ?? 0}'),
       (
         'Dynamic range',
@@ -1017,19 +1337,38 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       if (video.fps != null)
         ('Frame rate', '${video.fps!.toStringAsFixed(3)} FPS'),
     ];
+  }
+
+  /// The pointer path's info panel: the card at a fixed offset below the top
+  /// bar. Unused under [EmbeddedPlayerControls.touch] — see [_touchChrome].
+  Widget _infoPanel() {
     return Positioned(
       // Tracks the (inset) top bar so the panel stays below it, not under the
-      // status bar — see [_barInsets].
+      // status bar — see [_barInsets]. This 76 is a *literal* for the top
+      // bar's height, which only holds because the pointer bar never reflows;
+      // the touch path bands the card between the real bars instead, since
+      // there the number went stale the moment the badges stacked. See
+      // [_touchChrome].
       top: 76 + _barInsets.top,
       right: 20 + _barInsets.right,
-      // 320 is wider than the usable width of a small phone in portrait once
-      // both insets and the right offset are taken out, so clamp rather than
-      // let it run off the left edge. No-op on any desktop-sized surface.
+      child: _infoPanelCard(),
+    );
+  }
+
+  /// The stream-information card itself, shared by the pointer path's
+  /// fixed-offset [Positioned] and the touch path's band.
+  Widget _infoPanelCard() {
+    final content = _infoRows();
+    return SizedBox(
+      // The full width is wider than the usable width of a small phone in
+      // portrait once both insets and the right offset are taken out, so clamp
+      // rather than let the card run off the left edge. No-op on any
+      // desktop-sized surface.
       width: math.min(
-        320.0,
+        _m.infoPanelWidth,
         MediaQuery.sizeOf(context).width -
             _barInsets.horizontal -
-            40, // the 20pt right offset above, mirrored as a left margin
+            40, // the 20pt right offset, mirrored as a left margin
       ),
       // Absorb taps so a press on the panel itself doesn't fall through to the
       // background tap-outside handler and immediately re-close it.
@@ -1040,7 +1379,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           color: AppColors.panel.withValues(alpha: 0.96),
           borderRadius: BorderRadius.circular(AppRadius.tile),
           child: Padding(
-            padding: const EdgeInsets.all(18),
+            padding: EdgeInsets.all(_m.infoPanelPad),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1054,9 +1393,9 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                for (final row in rows)
+                for (final row in content)
                   Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    padding: EdgeInsets.symmetric(vertical: _m.infoRowPad),
                     child: Row(
                       children: [
                         SizedBox(
@@ -1113,15 +1452,17 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
             _show();
             onPressed();
           },
-          // A finger needs Apple's 44pt minimum in *both* axes; the pointer
-          // sizes below are deliberately shorter than they are wide, which is
-          // fine for a cursor and not for a thumb.
+          // A finger needs Apple's 44pt minimum in *both* axes, which is the
+          // floor every touch value in [EmbeddedOverlayMetrics] respects — the
+          // dense short-surface mode sits exactly on it. The pointer sizes are
+          // deliberately shorter than they are wide, which is fine for a cursor
+          // and not for a thumb.
           child: SizedBox(
-            width: widget.touch ? (compact ? 44 : 48) : (compact ? 34 : 44),
-            height: widget.touch ? (compact ? 44 : 48) : (compact ? 32 : 40),
+            width: compact ? _m.buttonCompactWidth : _m.buttonWidth,
+            height: compact ? _m.buttonCompactHeight : _m.buttonHeight,
             child: Icon(
               icon,
-              size: widget.touch ? (compact ? 20 : 22) : (compact ? 18 : 20),
+              size: compact ? _m.buttonCompactIcon : _m.buttonIcon,
               color: color ?? (active ? Colors.white : AppColors.textHi),
             ),
           ),

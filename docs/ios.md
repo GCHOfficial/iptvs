@@ -287,6 +287,30 @@ by adding `.trim()` to the Swift mirror (the only direction that's safe; Dart's 
 source of truth) means re-verifying that mirror's test suite for no gain. Recorded here so it
 reads as a known, accepted asymmetry rather than a bug waiting to be found.
 
+**Breakpoint alignment is an invariant, not a coincidence — the mirror image of the asymmetry
+above.** `EmbeddedPlayerControls`'s touch reflow (`lib/player/player_overlay.dart`,
+`kTouchReflowWidth = 560`) and the native `PlayerControlsView`'s compact reparenting
+(`PlayerDimens.compactWidth = 560`) are the same width on purpose, not by luck: a user reaches both
+overlays on one device, through different *streams* on the same channel — AVPlayer routes to the
+native controller, mpv (the common case for Stalker/MAG, since `create_link` locators are
+extension-less and hit rule 4 above) routes to the Flutter one with `touch: true` — so if the two
+constants ever disagreed, the picture would visibly reflow at a different screen width depending on
+which stream happened to route there. Unlike the trim() asymmetry, this one has no "unreachable in
+practice" excuse: both overlays are reached routinely by ordinary D-pad-free navigation. Keep the
+two constants equal on any future edit to either side — there is no test that spans both languages
+to catch a drift, only this note and the comment at each constant (`kTouchReflowWidth`'s doc comment
+in `player_overlay.dart`, `PlayerDimens.compactWidth` in Swift).
+
+**Neither overlay honours Dynamic Type, and that is deliberate on both sides.** `PlayerFonts`
+(Swift) is a table of fixed `UIFont.systemFont(ofSize:)` values — no `UIFontMetrics`, no
+`preferredFont` — so the native controller's chrome never grows with the user's text size. The
+Flutter overlay used to, which was both a parity break (the same user, the same channel, a
+visibly different overlay depending on which engine the stream routed to) and a layout bug: at 2×
+the two bars alone exceed a 375–393pt-tall landscape phone. It now clamps to `kTouchMaxTextScale`
+(1.3) — not 1.0, so some of the accessibility benefit survives, but bounded at the largest value
+the worst real surface still fits. If the Swift side ever adopts `UIFontMetrics`, this clamp is the
+thing to revisit, and the bars would need to stop being fixed-height first.
+
 **Rule 4 is the load-bearing one**, and it is where the coverage asymmetry argument
 now lives. A wrong guess toward mpv costs *quality* (SDR). A wrong guess toward
 AVPlayer costs a *visible failure and a reopen beat* on every zap of the app's most
@@ -1126,3 +1150,26 @@ that a "no" reopens part of the design rather than just narrowing a gap:
       out to be served as *media* playlists rather than masters, `variants` is empty, the evidence
       stays `unknown` and this case is a documented miss — worth recording either way, since it
       decides whether the HLS half of the detector has any reach at all.
+14. **Rotate a phone to landscape and confirm the picture is undimmed between the two chrome
+    bands.** `PlayerControlsView`'s top/bottom scrims size themselves against the bar each backs
+    (`topBar`/`bottomBar` bottom/top anchor, padded by `PlayerDimens.scrimFade`) rather than a
+    fixed height, specifically so they can't meet in the middle on a short landscape phone (375–
+    440pt tall) the way a fixed 180pt + 220pt pair used to. Nothing in `swift test` lays out a
+    real view hierarchy, so only a device (or the Simulator, which does at least run Auto
+    Layout) can confirm the two scrims stop short of each other and the live bottom bar's taller
+    EPG strip pushes its scrim's inner edge down with it.
+15. **On the same landscape rotation, repeat the check against the *mpv* engine's chrome, not just
+    the native scrims above.** Item 14 is `PlayerControlsView`, reached on AVPlayer-routed content;
+    whenever `selectIosEngine` instead routes to mpv (the common case for Stalker/MAG, since
+    `create_link` locators are extension-less and hit rule 4), the on-screen chrome is the shared
+    Flutter overlay (`EmbeddedPlayerControls`, `touch: true`) — a different renderer with its own
+    layout bug that produced the same symptom, so it needs its own device confirmation even though
+    the underlying problem (a short landscape phone) is the one item 14 already covers. Confirm two
+    things: first, that the bars go dense (`kShortOverlayHeight`) and leave a real band of visible
+    video, rather than the ~49pt (live) / ~23pt (VOD) a fixed desktop-sized layout left before the
+    fix, on a 375pt-tall screen. Second, open the info panel from the control cluster and confirm
+    the card opens below the top bar and scrolls if it doesn't fit, instead of opening inside the
+    top bar or running into the bottom one — the two failure modes the old hard-coded `top: 76`
+    offset produced the instant the badges reflowed onto their own row. Also worth eyeballing here:
+    that the reflow itself triggers at the same rotation point item 14's native chrome does (both
+    are keyed to 560pt-wide), since nothing in CI can compare the two layouts side by side.
