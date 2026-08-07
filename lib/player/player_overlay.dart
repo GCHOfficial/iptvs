@@ -80,8 +80,20 @@ class PlayerVideoSurface extends StatefulWidget {
   final Future<void> Function() onGoLive;
   final Future<void> Function() onCycleAspect;
 
+  /// Overrides [PlayerVideoSurfaceState.togglePlayerFullscreen] for the
+  /// on-screen button and the pointer double-tap.
+  ///
+  /// `media_kit_video`'s `toggleFullscreen` drives its own window handling,
+  /// which does nothing under this app's custom Windows runner — so the button
+  /// was dead on the whole Windows SDR preview→fullscreen path while still
+  /// advertising itself. [PlayerScreen] supplies a handler that goes through
+  /// the runner's own `setFullscreen` channel there, and leaves this null
+  /// wherever the embedded toggle is the right one.
+  final VoidCallback? onRequestFullscreen;
+
   const PlayerVideoSurface({
     super.key,
+    this.onRequestFullscreen,
     required this.player,
     required this.controller,
     required this.title,
@@ -113,6 +125,11 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   final GlobalKey<EmbeddedPlayerControlsState> _controlsKey = GlobalKey();
 
   void togglePlayerFullscreen() {
+    final override = widget.onRequestFullscreen;
+    if (override != null) {
+      override();
+      return;
+    }
     final state = _videoState;
     if (state != null && state.mounted) {
       unawaited(toggleFullscreen(state.context));

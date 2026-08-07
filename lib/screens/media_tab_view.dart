@@ -45,9 +45,16 @@ class MediaGridMetrics {
   /// [_MediaGridTile]'s own inner padding, each side.
   static const double tilePadding = 10;
 
-  /// Resting border width [FocusableCard] draws on each side (a focused card
-  /// draws 2, which the `Expanded` poster absorbs).
-  static const double tileBorder = 1;
+  /// Border width [FocusableCard] draws on each side, reserved at the
+  /// **focused** width of 2 rather than the resting 1.
+  ///
+  /// It used to be 1, on the reasoning that "a focused card draws 2, which the
+  /// `Expanded` poster absorbs" — true while the poster was flexible, and false
+  /// the moment it became a fixed [posterAspectRatio]. Nothing stretches any
+  /// more, so the focused tile overflowed by ~1.6 px. Reserving the larger
+  /// width costs the resting tile one pixel of poster and keeps every state
+  /// inside the cell.
+  static const double tileBorder = 2;
 
   /// Gap between a tile's poster and its text block.
   static const double posterTextGap = 8;
@@ -246,17 +253,26 @@ class MediaTabView extends StatelessWidget {
   ) {
     onRemoveContinueWatching(entry);
     final restore = onRestoreContinueWatching;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text('Removed “${entry.item.title}” from Continue watching'),
-          duration: const Duration(seconds: 6),
-          action: restore == null
-              ? null
-              : SnackBarAction(label: 'Undo', onPressed: () => restore(entry)),
-        ),
-      );
+    const visible = Duration(seconds: 6);
+    final messenger = ScaffoldMessenger.of(context)..hideCurrentSnackBar();
+    final shown = messenger.showSnackBar(
+      SnackBar(
+        content: Text('Removed “${entry.item.title}” from Continue watching'),
+        duration: visible,
+        action: restore == null
+            ? null
+            : SnackBarAction(label: 'Undo', onPressed: () => restore(entry)),
+      ),
+    );
+    // **Close it ourselves rather than trusting `duration`.**
+    // `ScaffoldMessengerState` only arms the auto-dismiss timer inside its
+    // own `build`, and only while `ModalRoute.of(context)!.isCurrent` — so a
+    // snackbar shown just before a route push (tap Remove, then open a
+    // channel) can miss its one chance to schedule and then never leave. It
+    // was seen sitting over fullscreen live TV for minutes, still offering to
+    // undo something no longer on screen. `close()` is idempotent: if the
+    // framework's timer did fire, this is a no-op on an already-gone bar.
+    Timer(visible + const Duration(milliseconds: 250), shown.close);
   }
 
   @override
@@ -535,16 +551,28 @@ class _ContinueWatchingTile extends StatelessWidget {
 
   /// Natural height of one rail tile: the thumbnail, the two text runs, and
   /// the Remove row below the card, at the current text scale. The rail's
-  /// `ListView` hands its children a *tight* cross-axis extent, so this has to
-  /// cover the tallest content the tile can produce or the tile overflows.
+  /// `ListView` hands its children a *tight* cross-axis extent, so this is what
+  /// the tile has to live inside.
   ///
-  /// The 1.35 factors stand in for the unset `TextStyle.height` of the
-  /// subtitle/Remove runs; erring high leaves slack under the tile, erring low
-  /// overflows it.
+  /// **It is a hint, not a guarantee** — [build] lays the tile out unconstrained
+  /// inside a `ClipRect`, so being wrong here costs at most a sub-pixel trim off
+  /// the bottom of the Remove row's (transparent) tap padding. It used to be
+  /// load-bearing, and it was wrong: this rail was the source of the persistent
+  /// `BOTTOM OVERFLOWED BY 1.6 PIXELS` on a windowed desktop layout, not the
+  /// poster grid it sits above.
+  ///
+  /// Two corrections came out of measuring the real font (see
+  /// `test/layout_overflow_test.dart`, which loads Inter rather than the
+  /// widget-test font): the engine **rounds each laid-out line up to a whole
+  /// logical pixel**, so a predicted run has to be ceiled; and Inter's real
+  /// line-height ratio for a run with no explicit `TextStyle.height` is ~1.41,
+  /// not the 1.35 assumed here. The border term is the **focused** width
+  /// ([FocusableCard] draws 2 px a side when focused, 1 at rest) because unlike
+  /// the poster grid nothing in this tile is flexible enough to absorb it.
   static double height(BuildContext context) {
     final scaler = MediaQuery.textScalerOf(context);
-    final title = scaler.scale(_titleFontSize) * _titleHeight;
-    final subtitle = scaler.scale(_subtitleFontSize) * 1.35;
+    final title = (scaler.scale(_titleFontSize) * _titleHeight).ceilToDouble();
+    final subtitle = (scaler.scale(_subtitleFontSize) * 1.45).ceilToDouble();
     return _thumbHeight +
         6 + // thumbnail → title
         title +
@@ -552,7 +580,7 @@ class _ContinueWatchingTile extends StatelessWidget {
         subtitle +
         10 + // breathing room above the card's bottom border
         kFocusableCardVerticalPadding * 2 +
-        2 + // card border
+        2 * 2 + // focused card border, both sides
         4 + // card → Remove row
         _RemoveButton.height(context);
   }
@@ -573,135 +601,160 @@ class _ContinueWatchingTile extends StatelessWidget {
     final subtitle = _continueWatchingSubtitle(entry);
     return SizedBox(
       width: _width,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          FocusableCard(
-            onTap: onTap,
-            debugLabel: 'media.continue.${item.id}',
-            child: SizedBox(
-              width: _width,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: SizedBox(
-                      width: _width,
-                      height: _thumbHeight,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          _Thumb(
-                            item: item,
-                            width: _width,
-                            height: _thumbHeight,
-                          ),
-                          // Resume affordance — makes it obvious at a glance
-                          // that these tiles play mid-way through, not from
-                          // the start.
-                          Center(
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.45),
-                                shape: BoxShape.circle,
+      // **Laid out unconstrained, then clipped.** The rail's `ListView` hands
+      // this tile a *tight* height derived from [height] — a prediction built
+      // from font metrics, which is exactly the kind of thing that is quietly
+      // 1–2 px short on a real font. Giving the `Column` an unbounded main axis
+      // makes the tile structurally incapable of reporting an overflow, and the
+      // `ClipRect` turns any residual into a trim off the bottom of the Remove
+      // row's transparent tap padding rather than a striped bar under every
+      // card in the rail. `topLeft` keeps the thumbnail pinned to the top, which
+      // is where the alignment matters.
+      child: ClipRect(
+        child: OverflowBox(
+          alignment: Alignment.topLeft,
+          minHeight: 0,
+          maxHeight: double.infinity,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              FocusableCard(
+                onTap: onTap,
+                debugLabel: 'media.continue.${item.id}',
+                child: SizedBox(
+                  width: _width,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: SizedBox(
+                          width: _width,
+                          height: _thumbHeight,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              _Thumb(
+                                item: item,
+                                width: _width,
+                                height: _thumbHeight,
                               ),
-                              child: const Icon(
-                                Icons.play_arrow_rounded,
-                                color: Colors.white,
-                                size: 22,
-                              ),
-                            ),
-                          ),
-                          // Progress bar overlaid on the thumbnail (with a
-                          // scrim behind it for contrast on bright artwork)
-                          // rather than a separate row, so the freed-up
-                          // space goes to the title.
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              padding: const EdgeInsets.fromLTRB(6, 14, 6, 6),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.black.withValues(alpha: 0.0),
-                                    Colors.black.withValues(alpha: 0.7),
-                                  ],
-                                ),
-                              ),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(3),
-                                child: LinearProgressIndicator(
-                                  value: entry.position.progress,
-                                  minHeight: 4,
-                                  backgroundColor: Colors.white.withValues(
-                                    alpha: 0.3,
+                              // Resume affordance — makes it obvious at a glance
+                              // that these tiles play mid-way through, not from
+                              // the start.
+                              Center(
+                                child: Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.45),
+                                    shape: BoxShape.circle,
                                   ),
-                                  color: AppColors.accent,
+                                  child: const Icon(
+                                    Icons.play_arrow_rounded,
+                                    color: Colors.white,
+                                    size: 22,
+                                  ),
                                 ),
                               ),
-                            ),
+                              // Progress bar overlaid on the thumbnail (with a
+                              // scrim behind it for contrast on bright artwork)
+                              // rather than a separate row, so the freed-up
+                              // space goes to the title.
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                child: Container(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    6,
+                                    14,
+                                    6,
+                                    6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: [
+                                        Colors.black.withValues(alpha: 0.0),
+                                        Colors.black.withValues(alpha: 0.7),
+                                      ],
+                                    ),
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(3),
+                                    child: LinearProgressIndicator(
+                                      value: entry.position.progress,
+                                      minHeight: 4,
+                                      backgroundColor: Colors.white.withValues(
+                                        alpha: 0.3,
+                                      ),
+                                      color: AppColors.accent,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                    child: Text(
-                      item.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.textHi,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        height: 1.2,
-                      ),
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 6),
-                      child: Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textLo,
-                          fontSize: 11,
                         ),
                       ),
-                    ),
-                  ],
-                  // Breathing room between the text and the card's bottom
-                  // border — the card itself adds no internal padding.
-                  const SizedBox(height: 10),
-                ],
+                      const SizedBox(height: 6),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        child: Text(
+                          item.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textHi,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            height: 1.2,
+                          ),
+                        ),
+                      ),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 2),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                      ],
+                      // Breathing room between the text and the card's bottom
+                      // border — the card itself adds no internal padding.
+                      const SizedBox(height: 10),
+                    ],
+                  ),
+                ),
               ),
-            ),
+              // A genuine sibling *below* the card, not overlaid on top of it.
+              // An overlaid corner badge is unreachable by D-pad: Flutter's
+              // directional focus search matches against candidates' screen
+              // rects, and a badge nested inside the card's own rect never reads
+              // as "up/down/left/right" of it — confirmed by testing an
+              // overlaid version, where arrow keys skipped straight over it to
+              // the next card. A non-overlapping rect below it works exactly
+              // like moving between adjacent cards in the row.
+              Padding(
+                padding: const EdgeInsets.only(top: 4, left: 2),
+                child: _RemoveButton(
+                  onPressed: onRemove,
+                  itemTitle: item.title,
+                ),
+              ),
+            ],
           ),
-          // A genuine sibling *below* the card, not overlaid on top of it.
-          // An overlaid corner badge is unreachable by D-pad: Flutter's
-          // directional focus search matches against candidates' screen
-          // rects, and a badge nested inside the card's own rect never reads
-          // as "up/down/left/right" of it — confirmed by testing an
-          // overlaid version, where arrow keys skipped straight over it to
-          // the next card. A non-overlapping rect below it works exactly
-          // like moving between adjacent cards in the row.
-          Padding(
-            padding: const EdgeInsets.only(top: 4, left: 2),
-            child: _RemoveButton(onPressed: onRemove, itemTitle: item.title),
-          ),
-        ],
+        ),
       ),
     );
   }

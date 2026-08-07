@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <utility>
@@ -547,6 +548,84 @@ void ZeroDibRect(uint32_t *pixels, int dib_width, int dib_height,
   const size_t span = static_cast<size_t>(right - left) * sizeof(uint32_t);
   for (int y = top; y < bottom; ++y) {
     ZeroMemory(pixels + static_cast<size_t>(y) * dib_width + left, span);
+  }
+}
+
+// One stop of a vertical black-scrim ramp: [position] runs 0 (top edge of the
+// rect) to 1 (bottom edge), [alpha] is 0-255.
+struct ScrimStop {
+  double position;
+  int alpha;
+};
+
+// Fills [rect] with a vertical black scrim whose alpha follows a piecewise
+// linear ramp through [stops], writing premultiplied ARGB straight into the
+// top-down DIB.
+//
+// This replaced a flat 20%-black fill so the native bars fade into the video
+// the way the shared Flutter overlay's `LinearGradient`s do
+// (`player_overlay.dart`). A Windows user moves between the two surfaces
+// routinely — native for HDR, embedded for the SDR preview->fullscreen handoff
+// — so a hard-edged bar on one and a fade on the other read as two different
+// players. The ramps here mirror that overlay's: top bar 0xB3 at the window
+// edge fading to nothing, bottom bar nothing at the video edge deepening
+// through 0x99 (45%) to 0xCC at the window edge.
+//
+// Premultiplication is free because the scrim is pure black: every colour
+// channel is 0 whatever the alpha, so a pixel is just `alpha << 24`, which is
+// exactly what `UpdateLayeredWindow`'s AC_SRC_ALPHA blend wants.
+//
+// **The alpha floor of 1 is load-bearing.** GDI leaves the alpha byte at 0 on
+// everything it draws, and NormalizeNativeControlBitmapAlpha relies on exactly
+// that to tell drawn pixels (forced opaque) from the pre-filled backdrop (left
+// alone). A scanline that reached a true 0 would be indistinguishable from
+// drawn content and come back **opaque black** — a solid bar where the fade
+// should be. 1/255 of black is not visible.
+//
+// The ramp is measured against the unclipped [rect] so clamping to the DIB
+// bounds shifts nothing.
+void FillVerticalScrim(uint32_t *pixels, int dib_width, int dib_height,
+                       const RECT &rect, const ScrimStop *stops,
+                       size_t stop_count) {
+  if (pixels == nullptr || stops == nullptr || stop_count == 0) {
+    return;
+  }
+  const int left = std::max(0, static_cast<int>(rect.left));
+  const int top = std::max(0, static_cast<int>(rect.top));
+  const int right = std::min(dib_width, static_cast<int>(rect.right));
+  const int bottom = std::min(dib_height, static_cast<int>(rect.bottom));
+  if (right <= left || bottom <= top) {
+    return;
+  }
+  const double last_row =
+      std::max(1.0, static_cast<double>(rect.bottom - rect.top) - 1.0);
+  for (int y = top; y < bottom; ++y) {
+    const double t = std::clamp(
+        (static_cast<double>(y) - static_cast<double>(rect.top)) / last_row,
+        0.0, 1.0);
+    double alpha = static_cast<double>(stops[0].alpha);
+    for (size_t i = 1; i < stop_count; ++i) {
+      const ScrimStop &prev = stops[i - 1];
+      const ScrimStop &next = stops[i];
+      if (t <= next.position || i == stop_count - 1) {
+        const double span = next.position - prev.position;
+        const double local =
+            span <= 0.0 ? 1.0
+                        : std::clamp((t - prev.position) / span, 0.0, 1.0);
+        alpha = static_cast<double>(prev.alpha) +
+                (static_cast<double>(next.alpha) -
+                 static_cast<double>(prev.alpha)) *
+                    local;
+        break;
+      }
+    }
+    const uint32_t a = static_cast<uint32_t>(
+        std::clamp(static_cast<int>(alpha + 0.5), 1, 255));
+    const uint32_t pixel = a << 24;
+    uint32_t *row = pixels + static_cast<size_t>(y) * dib_width;
+    for (int x = left; x < right; ++x) {
+      row[x] = pixel;
+    }
   }
 }
 
@@ -1375,19 +1454,19 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     ZeroDibRect(pixels, width, height, r);
   }
 
-  const uint32_t bg_pixel = 0x33000000; // 20% opaque black
-  for (int y = top.top; y < top.bottom; ++y) {
-    uint32_t *row = pixels + y * width;
-    for (int x = 0; x < width; ++x) {
-      row[x] = bg_pixel;
-    }
-  }
-  for (int y = bottom.top; y < bottom.bottom; ++y) {
-    uint32_t *row = pixels + y * width;
-    for (int x = 0; x < width; ++x) {
-      row[x] = bg_pixel;
-    }
-  }
+  // Bar backdrops: a gradient that fades toward the middle of the view rather
+  // than a flat fill, matching the shared Flutter overlay's bars (see
+  // FillVerticalScrim). Both ramps live entirely inside the existing bar rects,
+  // so the window region (UpdateNativeControlsRegion) needs no extra room — the
+  // fade reaches ~0 exactly where the region already stops clipping, which is
+  // what removes the old hard 20%-to-nothing step at the bar edge.
+  static constexpr ScrimStop kTopScrim[] = {{0.0, 0xB3}, {1.0, 0x00}};
+  static constexpr ScrimStop kBottomScrim[] = {
+      {0.0, 0x00}, {0.45, 0x99}, {1.0, 0xCC}};
+  FillVerticalScrim(pixels, width, height, top, kTopScrim,
+                    std::size(kTopScrim));
+  FillVerticalScrim(pixels, width, height, bottom, kBottomScrim,
+                    std::size(kBottomScrim));
 
   SetBkMode(paint_hdc, TRANSPARENT);
 
@@ -1586,7 +1665,13 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
 
   const RECT top_bar = TopControlsRect(rect);
   const RECT bottom_bar = BottomControlsRect(rect);
-  // Normalize top/bottom bar alpha to match the 20% backdrop used in Dart.
+  // Force everything GDI drew into the bars fully opaque (GDI leaves the alpha
+  // byte at 0), while leaving the gradient backdrop FillVerticalScrim laid down
+  // untouched — that is exactly what the `alpha == 0` test distinguishes, and
+  // why the scrim's alpha never reaches 0. The RGB(3,4,7)/0x33 pair is a legacy
+  // sentinel for a flat backdrop colour nothing paints any more; it is kept
+  // only because a drawn pixel that happened to land on it should stay a
+  // backdrop pixel rather than turn opaque.
   NormalizeNativeControlBitmapAlpha(pixels, width, height, top_bar,
                                      RGB(3, 4, 7), 0x33);
   NormalizeNativeControlBitmapAlpha(pixels, width, height, bottom_bar,

@@ -518,6 +518,11 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 
 ## Testing notes
 
+- `test/layout_overflow_test.dart` is the one test that **loads real font assets** (Inter, from
+  `android/app/src/main/res/font/`). `flutter_test`'s default font lays every line out at exactly
+  `1.0 × fontSize`, so any bug that depends on real line metrics — the whole class of fixed-extent
+  row/tile overflows — is invisible to every other test in the suite. Sweep window sizes *and*
+  text scales there, and assert `tester.takeException()` is null.
 - Mostly pure-logic / persistence unit tests; use `DemoSource` or a small fake `Source` rather
   than hitting the network. Real widget tests exist for `TvTextField`, focus/Back-ladder
   behavior, the EPG grid, and the update dialog — keep them green when touching those areas.

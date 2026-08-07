@@ -1706,133 +1706,148 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: _handleRootBack,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.repo.source.name),
-          leading:
-              (widget.onChangeProfile != null ||
-                  widget.onProfileSettings != null)
-              ? ProfileAvatarButton(
-                  profileName: widget.profileName,
-                  colorIndex: widget.profileColorIndex,
-                  onChangeProfile: widget.onChangeProfile,
-                  onProfileSettings: widget.onProfileSettings,
-                )
-              : null,
-          // Group the actions so D-pad traversal treats them as one cluster (reached
-          // by going up to the bar), rather than the toolbar's "right" jumping
-          // straight to the rightmost icon.
-          actions: [
-            FocusTraversalGroup(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_tab == ContentKind.live &&
-                      _previousPlayedLiveChannelId != null)
+    // **A messenger scoped to this screen**, not `MaterialApp`'s.
+    //
+    // The app-level messenger lives *above* the Navigator, so anything it is
+    // showing survives a route push and keeps painting over whatever comes
+    // next — the Continue-watching "Undo" snackbar was observed sitting on top
+    // of fullscreen live TV on an unrelated channel, offering to undo
+    // something the user could no longer see. Owning a messenger here puts
+    // these snackbars *below* the route that pushes `PlayerScreen`, so opening
+    // the player covers them instead of carrying them along, and returning
+    // still finds one that hasn't timed out.
+    return ScaffoldMessenger(
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: _handleRootBack,
+        child: Scaffold(
+          appBar: AppBar(
+            title: Text(widget.repo.source.name),
+            leading:
+                (widget.onChangeProfile != null ||
+                    widget.onProfileSettings != null)
+                ? ProfileAvatarButton(
+                    profileName: widget.profileName,
+                    colorIndex: widget.profileColorIndex,
+                    onChangeProfile: widget.onChangeProfile,
+                    onProfileSettings: widget.onProfileSettings,
+                  )
+                : null,
+            // Group the actions so D-pad traversal treats them as one cluster (reached
+            // by going up to the bar), rather than the toolbar's "right" jumping
+            // straight to the rightmost icon.
+            actions: [
+              FocusTraversalGroup(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_tab == ContentKind.live &&
+                        _previousPlayedLiveChannelId != null)
+                      IconButton(
+                        tooltip: 'Last channel',
+                        icon: const Icon(Icons.swap_horiz_rounded),
+                        onPressed: _zapToPreviousChannel,
+                      ),
+                    if (widget.onManageSources != null)
+                      IconButton(
+                        tooltip: 'Sources',
+                        icon: const Icon(Icons.dns_outlined),
+                        onPressed: () {
+                          unawaited(_preview.stop());
+                          widget.onManageSources?.call();
+                        },
+                      ),
                     IconButton(
-                      tooltip: 'Last channel',
-                      icon: const Icon(Icons.swap_horiz_rounded),
-                      onPressed: _zapToPreviousChannel,
-                    ),
-                  if (widget.onManageSources != null)
-                    IconButton(
-                      tooltip: 'Sources',
-                      icon: const Icon(Icons.dns_outlined),
-                      onPressed: () {
-                        unawaited(_preview.stop());
-                        widget.onManageSources?.call();
+                      tooltip: 'Diagnostics',
+                      icon: const Icon(Icons.bug_report_outlined),
+                      onPressed: () async {
+                        await _preview.stop();
+                        if (!context.mounted) return;
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => DiagnosticsScreen(
+                              database: widget.repo.db,
+                              sourceId: widget.repo.source.id,
+                              onReingest: () => _loadLive(forceRefresh: true),
+                            ),
+                          ),
+                        );
                       },
                     ),
-                  IconButton(
-                    tooltip: 'Diagnostics',
-                    icon: const Icon(Icons.bug_report_outlined),
-                    onPressed: () async {
-                      await _preview.stop();
-                      if (!context.mounted) return;
-                      await Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => DiagnosticsScreen(
-                            database: widget.repo.db,
-                            sourceId: widget.repo.source.id,
-                            onReingest: () => _loadLive(forceRefresh: true),
+                    IconButton(
+                      tooltip: 'Help & about',
+                      icon: const Icon(Icons.help_outline),
+                      onPressed: () async {
+                        await _preview.stop();
+                        if (!context.mounted) return;
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const LegalScreen(),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
+                    ListenableBuilder(
+                      listenable: _dataListenable,
+                      builder: (context, _) => IconButton(
+                        tooltip: 'Refresh from source',
+                        icon: const Icon(Icons.refresh),
+                        onPressed:
+                            _live.loading ||
+                                (_tab != ContentKind.live &&
+                                    _media(_tab).loading)
+                            ? null
+                            : () => _tab == ContentKind.live
+                                  ? _loadLive(forceRefresh: true)
+                                  : _loadMediaTab(_tab, forceRefresh: true),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                ),
+              ),
+            ],
+            bottom: _resolving
+                ? const PreferredSize(
+                    preferredSize: Size.fromHeight(2),
+                    child: LinearProgressIndicator(minHeight: 2),
+                  )
+                : null,
+          ),
+          // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
+          // arrowing sideways into the AppBar's action cluster.
+          //
+          // Edge-to-edge (targetSdk 35+): SafeArea shrinks the body's constraints,
+          // so the live list's Expanded viewport ends above/beside the system bar.
+          // That is what keeps LiveFocusCoordinator._reveal correct — it scrolls a
+          // selected row to `viewportDimension`, so the viewport itself must
+          // exclude the inset or the selected row lands underneath the bar.
+          // Insets are zero on Android TV, so this is a no-op there.
+          body: SafeArea(
+            top: false,
+            child: FocusTraversalGroup(
+              child: Column(
+                children: [
+                  ChannelContentTabs(
+                    value: _tab,
+                    onChanged: _selectTab,
+                    focusNodes: _tabFocusNodes,
                   ),
-                  IconButton(
-                    tooltip: 'Help & about',
-                    icon: const Icon(Icons.help_outline),
-                    onPressed: () async {
-                      await _preview.stop();
-                      if (!context.mounted) return;
-                      await Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const LegalScreen()),
-                      );
-                    },
-                  ),
+                  // Toolbar + status line read the data controllers (loading /
+                  // enrich / category state) but not the preview, so preview ticks
+                  // never rebuild them.
                   ListenableBuilder(
                     listenable: _dataListenable,
-                    builder: (context, _) => IconButton(
-                      tooltip: 'Refresh from source',
-                      icon: const Icon(Icons.refresh),
-                      onPressed:
-                          _live.loading ||
-                              (_tab != ContentKind.live && _media(_tab).loading)
-                          ? null
-                          : () => _tab == ContentKind.live
-                                ? _loadLive(forceRefresh: true)
-                                : _loadMediaTab(_tab, forceRefresh: true),
+                    builder: (context, _) => _buildToolbarAndStatus(context),
+                  ),
+                  Expanded(
+                    child: ListenableBuilder(
+                      listenable: _bodyListenable,
+                      builder: (context, _) => _buildBody(context),
                     ),
                   ),
-                  const SizedBox(width: 4),
                 ],
               ),
-            ),
-          ],
-          bottom: _resolving
-              ? const PreferredSize(
-                  preferredSize: Size.fromHeight(2),
-                  child: LinearProgressIndicator(minHeight: 2),
-                )
-              : null,
-        ),
-        // Keep D-pad traversal within the body (tabs → toolbar → list) instead of
-        // arrowing sideways into the AppBar's action cluster.
-        //
-        // Edge-to-edge (targetSdk 35+): SafeArea shrinks the body's constraints,
-        // so the live list's Expanded viewport ends above/beside the system bar.
-        // That is what keeps LiveFocusCoordinator._reveal correct — it scrolls a
-        // selected row to `viewportDimension`, so the viewport itself must
-        // exclude the inset or the selected row lands underneath the bar.
-        // Insets are zero on Android TV, so this is a no-op there.
-        body: SafeArea(
-          top: false,
-          child: FocusTraversalGroup(
-            child: Column(
-              children: [
-                ChannelContentTabs(
-                  value: _tab,
-                  onChanged: _selectTab,
-                  focusNodes: _tabFocusNodes,
-                ),
-                // Toolbar + status line read the data controllers (loading /
-                // enrich / category state) but not the preview, so preview ticks
-                // never rebuild them.
-                ListenableBuilder(
-                  listenable: _dataListenable,
-                  builder: (context, _) => _buildToolbarAndStatus(context),
-                ),
-                Expanded(
-                  child: ListenableBuilder(
-                    listenable: _bodyListenable,
-                    builder: (context, _) => _buildBody(context),
-                  ),
-                ),
-              ],
             ),
           ),
         ),

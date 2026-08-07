@@ -1178,6 +1178,66 @@ class _PlayerScreenState extends State<PlayerScreen>
     await _setNativeFullscreen(!_isNativeFullscreen);
   }
 
+  /// Fullscreen for whichever surface is actually on screen.
+  ///
+  /// On **Windows this is a window operation, not a player one** — the runner's
+  /// `setFullscreen` channel resizes the OS window, and `_setNativeFullscreen`
+  /// gates only on `Platform.isWindows`, so it works just as well behind the
+  /// embedded surface as behind the native one. The SDR path was previously
+  /// sent to `media_kit_video`'s `toggleFullscreen`, which drives its own
+  /// window handling and does nothing under this app's custom runner: the
+  /// on-screen button (and `F`) were dead on the whole Windows SDR
+  /// preview→fullscreen path while advertising themselves as working.
+  ///
+  /// On **Linux** `media_kit_video`'s toggle is not merely inert, it is wrong:
+  /// `enterFullscreen` *pushes another route* holding a bare `Video` with
+  /// media_kit's own stock controls. `PlayerScreen` is already a fullscreen
+  /// route, so that would swap this app's entire overlay — EPG, badges,
+  /// favourite star, go-to-live, the track menus, the Back ladder — for
+  /// media_kit's default chrome, on top of the player the user is already in.
+  /// Only the *window* half of what it does is wanted, which is exactly what
+  /// `defaultEnterNativeFullscreen`/`defaultExitNativeFullscreen` are.
+  ///
+  /// Tracked in [_embeddedWindowFullscreen] because those two helpers are
+  /// one-way calls with no state of their own.
+  Future<void> _toggleFullscreenForCurrentSurface() async {
+    // The native surface owns the GDI control overlay, so it alone may go
+    // through `_toggleNativeFullscreen`.
+    if (_usesWindowsNativeSurface) {
+      await _toggleNativeFullscreen();
+      return;
+    }
+    if (Platform.isWindows || Platform.isLinux) {
+      // **Not `_setNativeFullscreen`.** That is not a pure window call: it
+      // ends with `_syncNativeControlState()` + `_showNativeControls()`, which
+      // on the *embedded* path spawns the native GDI control overlay — a
+      // layered Win32 window whose teardown only the native surface manages.
+      // It then outlived the player route and sat over the channel list
+      // eating input. `Utils.EnterNativeFullscreen` is the window half on its
+      // own, with no controls and no route push.
+      await _setEmbeddedWindowFullscreen(!_embeddedWindowFullscreen);
+      return;
+    }
+    _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
+  }
+
+  Future<void> _setEmbeddedWindowFullscreen(bool fullscreen) async {
+    if (_embeddedWindowFullscreen == fullscreen) return;
+    try {
+      await (fullscreen
+          ? defaultEnterNativeFullscreen()
+          : defaultExitNativeFullscreen());
+      _embeddedWindowFullscreen = fullscreen;
+      if (mounted) setState(() {});
+    } catch (error) {
+      _logPlayback('window fullscreen failed: $error');
+    }
+  }
+
+  /// Whether [_toggleFullscreenForCurrentSurface] has put the *window* into
+  /// fullscreen on the Linux embedded path.
+  bool _embeddedWindowFullscreen = false;
+
   // Windows always-on-top mini-player: a compact frameless topmost window,
   // draggable by its video area. Toggled with the M key; the native side owns
   // the geometry and restores the previous placement on exit.
@@ -2599,6 +2659,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       title: widget.title,
       sourceName: widget.sourceName,
       aspectLabel: _aspectModes[_aspectModeIndex].label,
+      // Windows fullscreen is a window operation the runner owns; media_kit's
+      // own toggle is inert here. See [_toggleFullscreenForCurrentSurface].
+      onRequestFullscreen: (Platform.isWindows || Platform.isLinux)
+          ? () => unawaited(_toggleFullscreenForCurrentSurface())
+          : null,
       epgNow: widget.epgNow,
       epgNext: widget.epgNext,
       isLive: _isLive,
@@ -2927,6 +2992,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _exitAndPop() async {
+    // Hand the window back before leaving. `defaultEnterNativeFullscreen` has
+    // no owner but this route, so skipping it would strand the whole app
+    // fullscreen after the player closed.
+    await _setEmbeddedWindowFullscreen(false);
     // Await the final position write before popping — see the doc comment on
     // _persistPlaybackPosition for why this can't be fire-and-forget here.
     await _persistPlaybackPosition();
@@ -3016,11 +3085,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             // where it early-returned on `!_usesWindowsNativeSurface` and did
             // nothing at all, while the on-screen button sat there tooltipped
             // "Fullscreen (F)" and worked.
-            if (_usesWindowsNativeSurface) {
-              _toggleNativeFullscreen();
-            } else {
-              _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
-            }
+            unawaited(_toggleFullscreenForCurrentSurface());
           },
           // `M`: mini-player on the Windows native surface (the native side
           // owns the window geometry, so it can only act there), mute
