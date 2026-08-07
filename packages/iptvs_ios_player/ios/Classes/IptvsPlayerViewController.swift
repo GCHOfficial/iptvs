@@ -80,6 +80,21 @@ final class IptvsPlayerViewController: UIViewController {
   private var autoHideTimer: Timer?
   private var autoHideKey: AutoHideKey?
 
+  /// Redraws the chrome so the top bar's clock badge stays honest.
+  ///
+  /// Needed because every other render trigger is a *playback* event: the
+  /// progress tick fires off the timebase, so a **paused** player renders
+  /// nothing at all — and a paused player is exactly the case where the chrome
+  /// is pinned up indefinitely (`PlayerAutoHide.shouldSchedule` refuses to
+  /// schedule while paused), so a frozen clock would sit on screen for as long
+  /// as the viewer left it there.
+  ///
+  /// 10s to match the Android overlay's clock `LaunchedEffect`, which ticks at
+  /// the same rate for the same reason: an `HH:mm` badge only ever needs
+  /// minute-granularity, so anything faster is churn.
+  private var clockTicker: Timer?
+  private static let clockTickInterval: TimeInterval = 10
+
   private struct AutoHideKey: Equatable {
     let controlsVisible: Bool
     let pinned: Bool
@@ -256,6 +271,7 @@ final class IptvsPlayerViewController: UIViewController {
   deinit {
     soakAutoCloseTimer?.invalidate()
     autoHideTimer?.invalidate()
+    clockTicker?.invalidate()
     // A repeating `Timer` is retained by the run loop, not by this object, so an
     // un-invalidated one keeps firing (against a nil `weak self`) for the rest of
     // the process. Every exit path already stops it; this is the backstop for a
@@ -371,6 +387,33 @@ final class IptvsPlayerViewController: UIViewController {
     // Paint the seeded state before the first frame, so the bar is populated
     // (title, LIVE pill, favorite star) rather than appearing a tick later.
     render(uiState.value)
+    startClockTicker()
+  }
+
+  /// See ``clockTicker``. `.common` run-loop mode for the same reason the
+  /// watchdog ticker uses it: a menu being scrolled must not stop the clock.
+  private func startClockTicker() {
+    guard clockTicker == nil, !finishing else { return }
+    let ticker = Timer(
+      timeInterval: IptvsPlayerViewController.clockTickInterval,
+      repeats: true
+    ) { [weak self] _ in
+      // Nothing to repaint when the chrome is down, and nothing on screen at all
+      // while this controller is dismissed for Picture-in-Picture.
+      guard let self, self.uiState.value.controlsVisible else { return }
+      guard !self.dismissedForPictureInPicture else { return }
+      // A pure repaint — no state mutation, so this cannot re-arm the auto-hide
+      // clock (`syncAutoHide` keys on the (visible, pinned, playing) triple,
+      // which none of this touches).
+      self.render(self.uiState.value)
+    }
+    RunLoop.main.add(ticker, forMode: .common)
+    clockTicker = ticker
+  }
+
+  private func stopClockTicker() {
+    clockTicker?.invalidate()
+    clockTicker = nil
   }
 
   // MARK: - Audio session, Now Playing, remote transport
@@ -1177,6 +1220,17 @@ final class IptvsPlayerViewController: UIViewController {
       uiState.batch { $0.toggleInfo() }
     case .selectMenuOption(let id):
       selectMenuOption(id)
+    case .routePickerWillPresent:
+      // Pins the chrome for the sheet's lifetime — see
+      // `PlayerChromeState.routePickerPresenting`. The `pokeControls()` above
+      // already re-armed the timer; this state change immediately re-evaluates
+      // `syncAutoHide` with `pinned == true`, which cancels it.
+      uiState.batch { $0.routePickerPresenting = true }
+    case .routePickerDidDismiss:
+      // Unpinning is what re-arms the clock, via the same `syncAutoHide` edge —
+      // so the chrome gets a full auto-hide interval after the sheet closes
+      // rather than vanishing immediately.
+      uiState.batch { $0.routePickerPresenting = false }
     }
   }
 
@@ -1501,6 +1555,7 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopClockTicker()
     stopLiveWatchdog()
     // PiP first, then the engine — a PiP window left running over a released
     // `AVPlayer` is a black floating rectangle the user cannot dismiss from the
@@ -1533,6 +1588,7 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopClockTicker()
     stopLiveWatchdog()
     stopPictureInPictureForTeardown()
     releasePlaybackServices()
@@ -1652,6 +1708,7 @@ final class IptvsPlayerViewController: UIViewController {
     soakAutoCloseTimer = nil
     autoHideTimer?.invalidate()
     autoHideTimer = nil
+    stopClockTicker()
     // Stops the ticker *and* drops any in-flight `resolveAgain` completion: the
     // Dart route survives an `engineFailed` (it has to host the mpv surface),
     // so a late reply must not reach a controller that is already dismissing.

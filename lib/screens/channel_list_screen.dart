@@ -304,6 +304,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onToggleFavorite: (channel) =>
           unawaited(_toggleFavorite(ContentKind.live, channel.id)),
       onFocusTabs: _focusTabs,
+      // The coordinator has no `BuildContext`, so it can't reach `appMotion`
+      // itself — this callback is how the list reveal honours "remove
+      // animations". Lazily evaluated (same shape as `isWide`/`isMounted`), so
+      // reading `MediaQuery` here is safe despite running in `initState`.
+      reduceMotion: () => mounted && MediaQuery.disableAnimationsOf(context),
     );
     _bodyListenable = Listenable.merge([_dataListenable, _preview]);
     WidgetsBinding.instance.addObserver(this);
@@ -1352,7 +1357,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       context: context,
       showDragHandle: true,
       backgroundColor: AppColors.panel,
-      constraints: const BoxConstraints(maxWidth: 720),
+      // Without `isScrollControlled` a modal sheet is capped at 9/16 of the
+      // screen height — 202 px on a 360-tall landscape phone, where the poster
+      // alone is 180. The inner `SingleChildScrollView` still sizes to its
+      // content, so a short movie sheet stays short; this only lifts the
+      // ceiling for sheets that have something to show.
+      isScrollControlled: true,
+      useSafeArea: true,
+      constraints: BoxConstraints(
+        maxWidth: 720,
+        maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+      ),
       builder: (context) => MediaDetailsSheet(
         repo: widget.repo,
         item: item,
@@ -1485,9 +1500,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   bool _isWide() =>
       mounted && MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
 
+  /// The live tab's geometry, read from the **window** `MediaQuery`.
+  ///
+  /// This is the authority for the two lists' `itemExtent`s *and* for the
+  /// coordinator's `index * extent` scroll maths (via [_liveChannelRowExtent] /
+  /// [_liveCategoryRowExtent]). `LiveTabView.build` constructs the same metrics
+  /// again to size the row *contents*; both must pass identical arguments —
+  /// same window size, same `compactWideLayout`, same text scale — or the
+  /// selection model scrolls by a height the rows aren't drawn at. A
+  /// debug-only assert in `LiveTabView.build` compares the two.
   LiveLayoutMetrics get _liveLayoutMetrics => LiveLayoutMetrics.forSize(
     mounted ? MediaQuery.sizeOf(context) : const Size(1280, 720),
     compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+    textScale: mounted ? MediaQuery.textScalerOf(context).scale(1) : 1.0,
   );
 
   double _liveChannelRowExtent() =>
@@ -1928,6 +1953,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             onResume: _playMedia,
             onRemoveContinueWatching: (entry) =>
                 _media(_tab).removeFromContinueWatching(entry),
+            onRestoreContinueWatching: (entry) =>
+                _media(_tab).restoreContinueWatching(entry),
           );
   }
 

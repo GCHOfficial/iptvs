@@ -62,6 +62,13 @@ class PlayerVideoSurface extends StatefulWidget {
   final bool favorite;
   final bool liveSynced;
 
+  /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
+  /// "4:3"). Rendered as the aspect control's text, exactly as all four native
+  /// overlays do — Dart owns the mode sequence (`PlayerScreen._aspectModes`),
+  /// so this overlay showing a bare icon left it the only surface that hid the
+  /// state it is itself the source of truth for.
+  final String aspectLabel;
+
   /// Maps colorimetry to the badge/info label. Injected by [PlayerScreen]
   /// (its `_dynamicRangeLabel`, which folds in the async HDR10+ probe) so the
   /// label logic stays single-sourced in `dynamicRangeLabelFrom` — this file
@@ -85,6 +92,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
     required this.onToggleFavorite,
@@ -117,6 +125,29 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   /// nothing left to peel. No-op (false) on the non-desktop default-controls
   /// path where the overlay isn't mounted.
   bool handleBackPeel() => _controlsKey.currentState?.handleBackPeel() ?? false;
+
+  /// Brings the chrome back on **any** input, called by every one of
+  /// [PlayerScreen]'s keyboard bindings.
+  ///
+  /// Without this a keyboard-only user could strand the overlay hidden: the
+  /// chrome auto-hides after 4 s, Space then pauses, and `_scheduleHide` bails
+  /// on `!playing` — so nothing was left that could set `_visible` back to
+  /// true except a mouse hover or a tap. Arrow-key seeking was invisible for
+  /// the same reason. Every other overlay in the app (Android, Windows GDI,
+  /// the Linux Lua OSD) already reveals on any key; this brings the embedded
+  /// path in line. No-op where the overlay isn't mounted.
+  void revealChrome() => _controlsKey.currentState?.revealChrome();
+
+  // Keyboard counterparts of the overlay's own buttons. These exist so the
+  // embedded surface answers the same keys as the Linux native mpv/Lua OSD:
+  // `m`/`i`/`s`/volume were bound there and nowhere here, so on Linux the same
+  // physical key did different things depending on whether the stream happened
+  // to be HDR-on-Wayland (native) or anything else (embedded).
+  void toggleMute() => _controlsKey.currentState?.toggleMute();
+  void adjustVolume(double delta) =>
+      _controlsKey.currentState?.adjustVolume(delta);
+  void toggleInfo() => _controlsKey.currentState?.toggleInfo();
+  void toggleOverlayFavorite() => _controlsKey.currentState?.toggleFavorite();
 
   @override
   Widget build(BuildContext context) {
@@ -157,6 +188,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             canFavorite: widget.canFavorite,
             favorite: widget.favorite,
             liveSynced: widget.liveSynced,
+            aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
             onToggleFavorite: widget.onToggleFavorite,
@@ -297,6 +329,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
     required this.onToggleFavorite,
@@ -316,6 +349,9 @@ class EmbeddedPlayerControls extends StatefulWidget {
   final bool canFavorite;
   final bool favorite;
   final bool liveSynced;
+
+  /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
+  final String aspectLabel;
   final String Function(VideoParams params) dynamicRangeLabel;
   final VoidCallback onBack;
   final VoidCallback onToggleFavorite;
@@ -604,6 +640,17 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   bool _visible = true;
   bool _showInfo = false;
 
+  /// True while a track/subtitle/speed `PopupMenuButton` route is open.
+  ///
+  /// Cancelling the timer in `_show(keep: true)` is not enough on its own:
+  /// `_playingSub` re-arms one on the next `playing` edge, which a live stream
+  /// produces routinely. Without this flag the bars would be pulled out from
+  /// under an open menu — and because the bars are removed from the tree when
+  /// `_visible` goes false, `PopupMenuButton`'s `showMenu(...).then` guards on
+  /// `mounted` and drops the result: the user's track selection would be
+  /// silently discarded. See [_scheduleHide].
+  bool _menuOpen = false;
+
   /// Resolved at the top of every [build] and read by the layout helpers below,
   /// rather than threaded through eight signatures. Size-invariant (and equal
   /// to the shipped pointer values) whenever `widget.touch` is false.
@@ -632,12 +679,70 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   void _show({bool keep = false}) {
     if (!_visible && mounted) setState(() => _visible = true);
-    if (!keep) _scheduleHide();
+    // `keep` must *cancel*, not merely skip re-arming. `_scheduleHide` owns the
+    // only other `_hideTimer.cancel()`, so skipping it left an already-armed
+    // timer running — open a menu one second after the chrome appeared and the
+    // bars still vanished three seconds later, taking the open menu's own
+    // button out of the tree with them. `PopupMenuButton` guards its result
+    // callback on `mounted`, so that dropped the selection *and* left
+    // `_menuOpen` pinned true, after which the overlay never auto-hid again.
+    if (keep) {
+      _hideTimer?.cancel();
+      return;
+    }
+    _scheduleHide();
+  }
+
+  /// Public counterpart of [_show] for [PlayerVideoSurfaceState.revealChrome] —
+  /// see its doc for why any keyboard input has to reach here.
+  void revealChrome() => _show();
+
+  /// Mute/unmute — the keyboard counterpart of the volume button.
+  void toggleMute() {
+    final volume = widget.controls.state.volume;
+    unawaited(widget.controls.setVolume(volume > 0 ? 0 : 100));
+    _show();
+  }
+
+  /// Nudge the volume by [delta] (media_kit's scale is 0–100).
+  void adjustVolume(double delta) {
+    final volume = (widget.controls.state.volume + delta).clamp(0.0, 100.0);
+    unawaited(widget.controls.setVolume(volume));
+    _show();
+  }
+
+  /// Open/close the info panel.
+  void toggleInfo() {
+    setState(() => _showInfo = !_showInfo);
+    _show();
+  }
+
+  /// Toggle the favorite star, when this stream can be favorited at all.
+  void toggleFavorite() {
+    if (!widget.canFavorite) return;
+    widget.onToggleFavorite();
+    _show();
+  }
+
+  void _onMenuOpened() {
+    _menuOpen = true;
+    _show(keep: true);
+  }
+
+  void _onMenuClosed() {
+    _menuOpen = false;
+    _scheduleHide();
   }
 
   void _scheduleHide() {
     _hideTimer?.cancel();
-    if (!widget.controls.state.playing || _showInfo) return;
+    // `_menuOpen` matters because `_playingSub` calls this on *every* `playing`
+    // transition, including the buffering→playing edge a live stream produces
+    // routinely — so an open track/subtitle/speed menu would otherwise have
+    // the bars yanked out from under it 4 s later. Android pins via
+    // `state.pinned`, iOS via `AutoHidePolicy.shouldSchedule(pinned:)` and the
+    // Lua OSD via `not open_menu`; this overlay was the only one that didn't.
+    if (!widget.controls.state.playing || _showInfo || _menuOpen) return;
     _hideTimer = Timer(const Duration(seconds: 4), () {
       if (mounted) setState(() => _visible = false);
     });
@@ -845,117 +950,117 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       Positioned(left: 0, right: 0, top: 0, child: _topBarBody());
 
   Widget _topBarBody() => _absorbChromeTaps(
-      Container(
-        padding: EdgeInsets.fromLTRB(
-          16 + _barInsets.left,
-          _m.topPadTop + _barInsets.top,
-          16 + _barInsets.right,
-          _m.topPadBottom,
+    Container(
+      padding: EdgeInsets.fromLTRB(
+        16 + _barInsets.left,
+        _m.topPadTop + _barInsets.top,
+        16 + _barInsets.right,
+        _m.topPadBottom,
+      ),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xB3000000), Color(0x00000000)],
         ),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xB3000000), Color(0x00000000)],
-          ),
-        ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            // On a narrow touch surface the badges can't share the row with the
-            // title: capped at 0.55 of a ~390pt bar they leave the title ~30pt.
-            // Give them their own row instead — the same reparenting the native
-            // iOS overlay's `applyCompactLayout` does with its
-            // `compactBadgeRow`, and at the same width, so the two agree. The
-            // two halves of that reflow move together: see [_m].reflow.
-            final stackBadges = _m.reflow;
-            final titleRow = Row(
-              children: [
-                _button(
-                  // The explicit exit control takes the host platform's glyph:
-                  // an X on iOS, matching the native controller's `xmark`
-                  // (docs/tv-navigation.md). Same role either way — it skips
-                  // the ladder and exits outright.
-                  widget.touch ? Icons.close : Icons.arrow_back,
-                  widget.touch ? 'Exit' : 'Back',
-                  widget.onBack,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // On a narrow touch surface the badges can't share the row with the
+          // title: capped at 0.55 of a ~390pt bar they leave the title ~30pt.
+          // Give them their own row instead — the same reparenting the native
+          // iOS overlay's `applyCompactLayout` does with its
+          // `compactBadgeRow`, and at the same width, so the two agree. The
+          // two halves of that reflow move together: see [_m].reflow.
+          final stackBadges = _m.reflow;
+          final titleRow = Row(
+            children: [
+              _button(
+                // The explicit exit control takes the host platform's glyph:
+                // an X on iOS, matching the native controller's `xmark`
+                // (docs/tv-navigation.md). Same role either way — it skips
+                // the ladder and exits outright.
+                widget.touch ? Icons.close : Icons.arrow_back,
+                widget.touch ? 'Exit' : 'Back',
+                widget.onBack,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (widget.epgNow case final now?)
                       Text(
-                        widget.title,
+                        PlayerVideoSurfaceState._programmeLine(
+                          now,
+                          widget.epgNext,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
+                          color: AppColors.textLo,
+                          fontSize: 12,
                         ),
                       ),
-                      if (widget.epgNow case final now?)
-                        Text(
-                          PlayerVideoSurfaceState._programmeLine(
-                            now,
-                            widget.epgNext,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 12,
-                          ),
-                        ),
-                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Badges are capped to a fraction of the bar and wrap onto a
+              // second line when the window is narrow, so a full EPG + long
+              // resolution/HDR/FPS/source/clock set can never overflow the
+              // row.
+              if (!stackBadges)
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth * 0.55,
+                  ),
+                  child: Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: _badges(),
                   ),
                 ),
-                const SizedBox(width: 8),
-                // Badges are capped to a fraction of the bar and wrap onto a
-                // second line when the window is narrow, so a full EPG + long
-                // resolution/HDR/FPS/source/clock set can never overflow the
-                // row.
-                if (!stackBadges)
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxWidth: constraints.maxWidth * 0.55,
-                    ),
-                    child: Wrap(
-                      alignment: WrapAlignment.end,
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: _badges(),
-                    ),
-                  ),
-                if (widget.canFavorite) ...[
-                  const SizedBox(width: 10),
-                  _button(
-                    widget.favorite
-                        ? Icons.star_rounded
-                        : Icons.star_outline_rounded,
-                    widget.favorite ? 'Remove favorite' : 'Add favorite',
-                    widget.onToggleFavorite,
-                    color: widget.favorite ? AppColors.accent : Colors.white,
-                    compact: true,
-                  ),
-                ],
+              if (widget.canFavorite) ...[
+                const SizedBox(width: 10),
+                _button(
+                  widget.favorite
+                      ? Icons.star_rounded
+                      : Icons.star_outline_rounded,
+                  widget.favorite ? 'Remove favorite' : 'Add favorite',
+                  widget.onToggleFavorite,
+                  color: widget.favorite ? AppColors.accent : Colors.white,
+                  compact: true,
+                ),
               ],
-            );
-            if (!stackBadges) return titleRow;
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                titleRow,
-                SizedBox(height: _m.badgeGap),
-                Wrap(spacing: 6, runSpacing: 6, children: _badges()),
-              ],
-            );
-          },
-        ),
+            ],
+          );
+          if (!stackBadges) return titleRow;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              titleRow,
+              SizedBox(height: _m.badgeGap),
+              Wrap(spacing: 6, runSpacing: 6, children: _badges()),
+            ],
+          );
+        },
       ),
-    );
+    ),
+  );
 
   List<Widget> _badges() {
     final params = widget.controls.state.videoParams;
@@ -980,157 +1085,207 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       Positioned(left: 0, right: 0, bottom: 0, child: _bottomBarBody(context));
 
   Widget _bottomBarBody(BuildContext context) => _absorbChromeTaps(
-      Container(
-        // The gradient fills this (bottom-anchored) container. It ramps to a
-        // solid dark value by ~45% down — where the two-row live bar (progress +
-        // controls) begins — instead of fading linearly to dark only at the very
-        // bottom, so both rows sit on a real backdrop rather than near-transparent
-        // scrim. The top inset sets how high the transparent fade starts.
-        padding: EdgeInsets.fromLTRB(
-          20 + _barInsets.left,
-          _m.bottomPadTop,
-          20 + _barInsets.right,
-          _m.bottomPadBottom + _barInsets.bottom,
-        ),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
-            stops: [0.0, 0.45, 1.0],
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
-            const SizedBox(height: 4),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                // Below this width the fixed controls + volume slider stop
-                // fitting alongside the left/right split, so collapse the two
-                // widest optional pieces: the volume slider (mute stays) and the
-                // "Go to live" text label (its icon stays).
-                final compact = constraints.maxWidth < kCompactControlsWidth;
-                // Even collapsed, a phone in portrait can't fit the transport and
-                // the right-hand cluster on one line (they overflow at ~390pt as
-                // soon as a stream carries a second audio track). Split them onto
-                // two rows, exactly as the native iOS overlay's
-                // `applyCompactLayout` reparents its cluster into `secondaryRow`
-                // — and at the same width, which `compact` (720) was not.
-                final twoRow = _m.reflow;
-                final transport = <Widget>[
-                  _button(
-                    widget.controls.state.playing
-                        ? Icons.pause
-                        : Icons.play_arrow,
-                    widget.controls.state.playing ? 'Pause' : 'Play',
-                    () => unawaited(widget.onPlayPause()),
-                  ),
-                  if (!widget.isLive) ...[
-                    _button(Icons.replay_10, 'Back 10 seconds', () {
-                      final next =
-                          widget.controls.state.position -
-                          const Duration(seconds: 10);
-                      unawaited(
-                        widget.controls.seek(
-                          next < Duration.zero ? Duration.zero : next,
-                        ),
-                      );
-                    }),
-                    _button(Icons.forward_10, 'Forward 10 seconds', () {
-                      unawaited(
-                        widget.controls.seek(
-                          widget.controls.state.position +
-                              const Duration(seconds: 10),
-                        ),
-                      );
-                    }),
-                  ],
-                  _volumeControls(context, showSlider: !compact),
-                  if (!widget.isLive)
-                    // Flexible on touch only: it lets a long VOD timestamp
-                    // ellipsize instead of overflowing a phone-width row. On
-                    // the pointer path it would share the free space with the
-                    // `Spacer` and shift the cluster left, so that path keeps
-                    // the rigid label (its rows are never width-starved).
-                    widget.touch
-                        ? Flexible(child: _positionRebuild(_timeLabel))
-                        : _positionRebuild(_timeLabel),
-                ];
-                final cluster = <Widget>[
-                  if (widget.isLive && !widget.liveSynced)
-                    compact
-                        ? _button(
-                            Icons.skip_next,
-                            'Go to live',
-                            () => unawaited(widget.onGoLive()),
-                          )
-                        : TextButton.icon(
-                            onPressed: () => unawaited(widget.onGoLive()),
-                            icon: const Icon(Icons.skip_next),
-                            label: const Text('Go to live'),
-                          ),
-                  if (_audioTracks().length > 1) _audioMenu(),
-                  _subtitleMenu(),
-                  if (!widget.isLive) _speedMenu(),
-                  _button(
-                    Icons.aspect_ratio,
-                    'Cycle aspect ratio',
-                    () => unawaited(widget.onCycleAspect()),
-                  ),
-                  _button(Icons.info_outline, 'Stream information', () {
-                    setState(() => _showInfo = !_showInfo);
-                    _show(keep: _showInfo);
-                  }),
-                  // The iOS route is already fullscreen and media_kit's
-                  // `toggleFullscreen` would push a second `Video` route above
-                  // the one PlayerScreen owns — the native controller has no
-                  // fullscreen button either.
-                  if (!widget.touch)
-                    _button(
-                      Icons.fullscreen,
-                      'Fullscreen (F)',
-                      widget.onToggleFullscreen,
-                    ),
-                ];
-                if (!twoRow) {
-                  // Moving the touch reflow down to 560 puts 560–720 on one
-                  // row under touch, where a `Spacer` is no longer safe: it
-                  // shares the free space with the (now `Flexible`) time label
-                  // and, on a VOD stream at ~667pt, the transport + cluster
-                  // overflow outright. An `Expanded` transport gives the free
-                  // space to the left group only, which keeps the cluster hard
-                  // right — the same reason the `Spacer` is right on a wide
-                  // pointer window, and why that branch is untouched.
-                  return widget.touch
-                      ? Row(
-                          children: [
-                            Expanded(child: Row(children: transport)),
-                            ...cluster,
-                          ],
-                        )
-                      : Row(
-                          children: [...transport, const Spacer(), ...cluster],
-                        );
-                }
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(children: transport),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: cluster,
-                    ),
-                  ],
-                );
-              },
-            ),
-          ],
+    Container(
+      // The gradient fills this (bottom-anchored) container. It ramps to a
+      // solid dark value by ~45% down — where the two-row live bar (progress +
+      // controls) begins — instead of fading linearly to dark only at the very
+      // bottom, so both rows sit on a real backdrop rather than near-transparent
+      // scrim. The top inset sets how high the transparent fade starts.
+      padding: EdgeInsets.fromLTRB(
+        20 + _barInsets.left,
+        _m.bottomPadTop,
+        20 + _barInsets.right,
+        _m.bottomPadBottom + _barInsets.bottom,
+      ),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0x00000000), Color(0x99000000), Color(0xCC000000)],
+          stops: [0.0, 0.45, 1.0],
         ),
       ),
-    );
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
+          const SizedBox(height: 4),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              // Below this width the fixed controls + volume slider stop
+              // fitting alongside the left/right split, so collapse the two
+              // widest optional pieces: the volume slider (mute stays) and the
+              // "Go to live" text label (its icon stays).
+              final compact = constraints.maxWidth < kCompactControlsWidth;
+              // A pointer row that has already dropped its optional pieces
+              // is also no longer guaranteed to *fit*: a VOD row at a 500pt
+              // window measures ~523pt of controls against ~460pt of inner
+              // width and overflowed outright, because the pointer path
+              // never reflows and the time label was rigid. Below the same
+              // feature-collapse threshold the pointer path therefore takes
+              // the third branch below (see [_bottomBarBody]'s row
+              // selection) and lets the label shrink. Above it, nothing
+              // changes — the `Spacer` layout stays byte-for-byte.
+              final narrowPointer = !widget.touch && compact;
+              // Even collapsed, a phone in portrait can't fit the transport and
+              // the right-hand cluster on one line (they overflow at ~390pt as
+              // soon as a stream carries a second audio track). Split them onto
+              // two rows, exactly as the native iOS overlay's
+              // `applyCompactLayout` reparents its cluster into `secondaryRow`
+              // — and at the same width, which `compact` (720) was not.
+              final twoRow = _m.reflow;
+              final transport = <Widget>[
+                _button(
+                  widget.controls.state.playing
+                      ? Icons.pause
+                      : Icons.play_arrow,
+                  widget.controls.state.playing ? 'Pause' : 'Play',
+                  () => unawaited(widget.onPlayPause()),
+                ),
+                if (!widget.isLive) ...[
+                  _button(Icons.replay_10, 'Back 10 seconds', () {
+                    final next =
+                        widget.controls.state.position -
+                        const Duration(seconds: 10);
+                    unawaited(
+                      widget.controls.seek(
+                        next < Duration.zero ? Duration.zero : next,
+                      ),
+                    );
+                  }),
+                  _button(Icons.forward_10, 'Forward 10 seconds', () {
+                    unawaited(
+                      widget.controls.seek(
+                        widget.controls.state.position +
+                            const Duration(seconds: 10),
+                      ),
+                    );
+                  }),
+                ],
+                _volumeControls(context, showSlider: !compact),
+                if (!widget.isLive)
+                  // Flexible wherever the row can be width-starved: always
+                  // under touch, and on the pointer path only once it is
+                  // narrow enough to take the `Expanded`-transport branch.
+                  // It must **not** be flexible in the wide pointer branch —
+                  // there it would share the free space with the `Spacer` and
+                  // drag the cluster left, which is exactly why that branch
+                  // keeps the rigid label.
+                  widget.touch || narrowPointer
+                      ? Flexible(child: _positionRebuild(_timeLabel))
+                      : _positionRebuild(_timeLabel),
+              ];
+              final cluster = <Widget>[
+                if (widget.isLive && !widget.liveSynced)
+                  compact
+                      ? _button(
+                          Icons.skip_next,
+                          'Go to live',
+                          () => unawaited(widget.onGoLive()),
+                        )
+                      : TextButton.icon(
+                          onPressed: () => unawaited(widget.onGoLive()),
+                          icon: const Icon(Icons.skip_next),
+                          label: const Text('Go to live'),
+                        ),
+                if (_audioTracks().length > 1) _audioMenu(),
+                // Only when the stream actually carries a subtitle track:
+                // media_kit always reports the synthetic `auto`/`no` pair, so
+                // an unconditional button opened a menu offering nothing but
+                // "Auto"/"Off" on the majority of live IPTV channels. Same
+                // predicate as Android's `showSubtitleButton`, iOS's
+                // `PlayerChromeState.showSubtitleButton` and the Windows
+                // overlay's `!subtitle_tracks.empty()`.
+                if (_subtitleTracks().isNotEmpty) _subtitleMenu(),
+                if (!widget.isLive) _speedMenu(),
+                // The *current* mode as the button's text, matching all four
+                // native overlays (Android `TextControlButton`, iOS
+                // `PlayerTextButton`, the Windows `DrawTextButton`, the Lua
+                // `text_button`). Dart owns the mode sequence, so an icon
+                // here made the only surface that knows the answer the only
+                // one not showing it — with four modes the user cycled blind.
+                _textButton(
+                  widget.aspectLabel,
+                  'Cycle aspect ratio',
+                  () => unawaited(widget.onCycleAspect()),
+                  semanticsLabel: 'Aspect ratio, ${widget.aspectLabel}',
+                ),
+                _button(Icons.info_outline, 'Stream information', () {
+                  setState(() => _showInfo = !_showInfo);
+                  _show(keep: _showInfo);
+                }),
+                // The iOS route is already fullscreen and media_kit's
+                // `toggleFullscreen` would push a second `Video` route above
+                // the one PlayerScreen owns — the native controller has no
+                // fullscreen button either.
+                if (!widget.touch)
+                  _button(
+                    Icons.fullscreen,
+                    'Fullscreen (F)',
+                    widget.onToggleFullscreen,
+                  ),
+              ];
+              if (!twoRow) {
+                // Three deliberately separate one-row branches. They are not
+                // collapsed because the `Expanded`-vs-`Spacer` choice is
+                // load-bearing in opposite directions at the two ends of the
+                // width range.
+                //
+                // 1. Touch, at/above the reflow width. Moving the touch
+                //    reflow down to 560 puts 560–720 on one row, where a
+                //    `Spacer` is no longer safe: it shares the free space
+                //    with the (now `Flexible`) time label and, on a VOD
+                //    stream at ~667pt, the transport + cluster overflow
+                //    outright. An `Expanded` transport gives the free space
+                //    to the left group only, keeping the cluster hard right.
+                if (widget.touch) {
+                  return Row(
+                    children: [
+                      Expanded(child: Row(children: transport)),
+                      ...cluster,
+                    ],
+                  );
+                }
+                // 2. A *narrow* pointer window (a small or resized Linux/
+                //    Windows window). Same shape as branch 1 and for the same
+                //    reason: the pointer path never reflows, so below the
+                //    feature-collapse width the only thing left that can
+                //    absorb a squeeze is the `Flexible` time label — and it
+                //    can only do that inside a bounded group. With the wide
+                //    branch's `Spacer` a 500pt VOD row overflowed by ~60pt.
+                if (narrowPointer) {
+                  return Row(
+                    children: [
+                      Expanded(child: Row(children: transport)),
+                      ...cluster,
+                    ],
+                  );
+                }
+                // 3. A wide pointer window — the shipped Linux/Windows
+                //    layout, unchanged. Here the row always fits, the label
+                //    is rigid, and the `Spacer` is the right way to split the
+                //    two groups.
+                return Row(
+                  children: [...transport, const Spacer(), ...cluster],
+                );
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(children: transport),
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: cluster,
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    ),
+  );
 
   /// Scopes per-position-tick rebuilds to the only widgets that actually read
   /// the position (the VOD seek bar and time label). The rest of the overlay
@@ -1184,6 +1339,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 child: Slider(
                   max: 100,
                   value: volume,
+                  semanticFormatterCallback: (value) => '${value.round()}%',
                   onChanged: (value) {
                     _show(keep: true);
                     unawaited(widget.controls.setVolume(value));
@@ -1206,6 +1362,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     return Slider(
       value: position.inMilliseconds.clamp(0, maximum.toInt()).toDouble(),
       max: maximum,
+      // Without this a screen reader announces the raw millisecond count
+      // ("4425000") on every scrub step. Both natives announce a time.
+      semanticFormatterCallback: (value) =>
+          _duration(Duration(milliseconds: value.round())),
       onChanged: duration <= Duration.zero
           ? null
           : (value) => unawaited(
@@ -1216,10 +1376,18 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   Widget _liveProgress() {
     final now = widget.epgNow;
-    final total = now?.stop.difference(now.start).inSeconds ?? 0;
-    final elapsed = now == null
-        ? 0
-        : DateTime.now().difference(now.start).inSeconds;
+    // No guide for this channel → no programme to show progress through. The
+    // strip is *omitted*, not rendered empty: a `LinearProgressIndicator` stuck
+    // at 0.0 reads as "still loading" forever, and all three native overlays
+    // drop the strip entirely in this case rather than showing a dead bar.
+    if (now == null) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: _LiveBadge(synced: widget.liveSynced),
+      );
+    }
+    final total = now.stop.difference(now.start).inSeconds;
+    final elapsed = DateTime.now().difference(now.start).inSeconds;
     final progress = total <= 0 ? 0.0 : (elapsed / total).clamp(0.0, 1.0);
     return LayoutBuilder(
       builder: (context, constraints) => Row(
@@ -1227,22 +1395,20 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           _LiveBadge(synced: widget.liveSynced),
           const SizedBox(width: 12),
           Expanded(child: LinearProgressIndicator(value: progress)),
-          if (now != null) ...[
-            const SizedBox(width: 12),
-            // The title is width-capped and non-flex so the progress bar keeps
-            // all the remaining width. A `Flexible` title shared the row ~50/50
-            // with the `Expanded` bar, leaving the bar ending mid-screen with
-            // dead space to its right.
-            ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.4),
-              child: Text(
-                now.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white),
-              ),
+          const SizedBox(width: 12),
+          // The title is width-capped and non-flex so the progress bar keeps
+          // all the remaining width. A `Flexible` title shared the row ~50/50
+          // with the `Expanded` bar, leaving the bar ending mid-screen with
+          // dead space to its right.
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.4),
+            child: Text(
+              now.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white),
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -1258,15 +1424,25 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     style: const TextStyle(color: Colors.white70),
   );
 
+  // The menu buttons carry their accessible name on the `Icon` rather than on
+  // the `PopupMenuButton`: its `tooltip` becomes `semanticsTooltip`, which is a
+  // *hint*, not a name, so the control announced as an unnamed button. An
+  // `Icon.semanticLabel` merges into the enclosing button node instead — the
+  // standard way to name an icon-only Material button, and it leaves the
+  // button's own tap semantics (which open the menu) intact.
   Widget _audioMenu() => PopupMenuButton<String>(
     tooltip: 'Audio track',
-    icon: const Icon(Icons.audiotrack, color: Colors.white),
-    onOpened: () => _show(keep: true),
-    onCanceled: _scheduleHide,
+    icon: const Icon(
+      Icons.audiotrack,
+      color: Colors.white,
+      semanticLabel: 'Audio track',
+    ),
+    onOpened: _onMenuOpened,
+    onCanceled: _onMenuClosed,
     onSelected: (id) {
       final track = _audioTracks().firstWhere((track) => track.id == id);
       unawaited(widget.controls.setAudioTrack(track));
-      _scheduleHide();
+      _onMenuClosed();
     },
     itemBuilder: (_) => [
       for (final track in _audioTracks())
@@ -1275,16 +1451,23 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   );
 
   Widget _subtitleMenu() {
+    // The full list (including the synthetic Auto/Off entries) — turning
+    // subtitles off is a real choice. Whether the *button* exists at all is
+    // decided by [_subtitleTracks], which counts only real tracks.
     final tracks = widget.controls.state.tracks.subtitle;
     return PopupMenuButton<String>(
       tooltip: 'Subtitles',
-      icon: const Icon(Icons.subtitles, color: Colors.white),
-      onOpened: () => _show(keep: true),
-      onCanceled: _scheduleHide,
+      icon: const Icon(
+        Icons.subtitles,
+        color: Colors.white,
+        semanticLabel: 'Subtitles',
+      ),
+      onOpened: _onMenuOpened,
+      onCanceled: _onMenuClosed,
       onSelected: (id) {
         final track = tracks.firstWhere((track) => track.id == id);
         unawaited(widget.controls.setSubtitleTrack(track));
-        _scheduleHide();
+        _onMenuClosed();
       },
       itemBuilder: (_) => [
         for (final track in tracks)
@@ -1295,12 +1478,16 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   Widget _speedMenu() => PopupMenuButton<double>(
     tooltip: 'Playback speed',
-    icon: const Icon(Icons.speed, color: Colors.white),
-    onOpened: () => _show(keep: true),
-    onCanceled: _scheduleHide,
+    icon: const Icon(
+      Icons.speed,
+      color: Colors.white,
+      semanticLabel: 'Playback speed',
+    ),
+    onOpened: _onMenuOpened,
+    onCanceled: _onMenuClosed,
     onSelected: (rate) {
       unawaited(widget.controls.setRate(rate));
-      _scheduleHide();
+      _onMenuClosed();
     },
     itemBuilder: (_) => [
       for (final rate in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
@@ -1314,28 +1501,31 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// The label/value pairs the info card renders, read off the live player
   /// state. Split out of [_infoPanel] so both the pointer wrapper and the touch
   /// band build the same card from the same source.
+  /// Only rows the player can actually answer. A row whose value is unknown is
+  /// **omitted**, not rendered as a placeholder: all three native info panels
+  /// drop blank rows, and "Resolution 0×0" / "Video Unknown" read as broken
+  /// playback rather than as missing metadata — which they routinely are during
+  /// the first moments of a load, before the first frame decodes.
   List<(String, String)> _infoRows() {
     final params = widget.controls.state.videoParams;
     final video = _realVideoTrack();
     final audio = _realAudioTrack();
+    final width = params.w ?? video.w;
+    final height = params.h ?? video.h;
+    final range = widget.dynamicRangeLabel(params);
+    final videoCodec = _codecOrNull(video.codec);
+    final audioLine = [
+      _codecOrNull(audio.codec),
+      audio.channels,
+    ].whereType<String>().where((e) => e.isNotEmpty).join(' · ');
     return <(String, String)>[
-      ('Resolution', '${params.w ?? video.w ?? 0}×${params.h ?? video.h ?? 0}'),
-      (
-        'Dynamic range',
-        widget.dynamicRangeLabel(params).isEmpty
-            ? 'Unknown'
-            : widget.dynamicRangeLabel(params),
-      ),
-      ('Video', _codec(video.codec)),
-      (
-        'Audio',
-        [
-          _codec(audio.codec),
-          audio.channels ?? '',
-        ].where((e) => e.isNotEmpty).join(' · '),
-      ),
-      if (video.fps != null)
-        ('Frame rate', '${video.fps!.toStringAsFixed(3)} FPS'),
+      if (width != null && height != null && width > 0 && height > 0)
+        ('Resolution', '$width×$height'),
+      if (range.isNotEmpty) ('Dynamic range', range),
+      if (videoCodec != null) ('Video', videoCodec),
+      if (audioLine.isNotEmpty) ('Audio', audioLine),
+      if (video.fps case final fps? when fps > 0)
+        ('Frame rate', '${fps.toStringAsFixed(3)} FPS'),
     ];
   }
 
@@ -1434,42 +1624,119 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     Color? color,
     bool active = false,
     bool compact = false,
-  }) => Padding(
-    padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 3),
-    child: Tooltip(
-      message: tooltip,
-      child: Material(
-        color: active
-            ? Color.alphaBlend(
-                AppColors.accent.withValues(alpha: 0.30),
-                AppColors.panel,
-              )
-            : AppColors.panel.withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(compact ? 10 : 12),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () {
-            _show();
-            onPressed();
-          },
-          // A finger needs Apple's 44pt minimum in *both* axes, which is the
-          // floor every touch value in [EmbeddedOverlayMetrics] respects — the
-          // dense short-surface mode sits exactly on it. The pointer sizes are
-          // deliberately shorter than they are wide, which is fine for a cursor
-          // and not for a thumb.
-          child: SizedBox(
-            width: compact ? _m.buttonCompactWidth : _m.buttonWidth,
-            height: compact ? _m.buttonCompactHeight : _m.buttonHeight,
-            child: Icon(
-              icon,
-              size: compact ? _m.buttonCompactIcon : _m.buttonIcon,
-              color: color ?? (active ? Colors.white : AppColors.textHi),
+    String? semanticsLabel,
+  }) => _chrome(
+    tooltip: tooltip,
+    semanticsLabel: semanticsLabel,
+    onPressed: onPressed,
+    compact: compact,
+    active: active,
+    // A finger needs Apple's 44pt minimum in *both* axes, which is the floor
+    // every touch value in [EmbeddedOverlayMetrics] respects — the dense
+    // short-surface mode sits exactly on it. The pointer sizes are deliberately
+    // shorter than they are wide, which is fine for a cursor and not for a
+    // thumb.
+    child: SizedBox(
+      width: compact ? _m.buttonCompactWidth : _m.buttonWidth,
+      height: compact ? _m.buttonCompactHeight : _m.buttonHeight,
+      child: Icon(
+        icon,
+        size: compact ? _m.buttonCompactIcon : _m.buttonIcon,
+        color: color ?? (active ? Colors.white : AppColors.textHi),
+      ),
+    ),
+  );
+
+  /// The text-labelled sibling of [_button] — the aspect-mode control, whose
+  /// *label is its state*, matching all four native overlays. Keeps the same
+  /// chip styling and the same ≥44pt floor (as a *minimum*, so a wider label
+  /// like "16:9" grows the chip instead of clipping).
+  Widget _textButton(
+    String label,
+    String tooltip,
+    VoidCallback onPressed, {
+    String? semanticsLabel,
+  }) => _chrome(
+    tooltip: tooltip,
+    semanticsLabel: semanticsLabel,
+    onPressed: onPressed,
+    child: ConstrainedBox(
+      constraints: BoxConstraints(
+        minWidth: _m.buttonWidth,
+        minHeight: _m.buttonHeight,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Center(
+          widthFactor: 1,
+          heightFactor: 1,
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: AppColors.textHi,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
       ),
     ),
   );
+
+  /// Shared chip chrome for [_button]/[_textButton]: the rounded translucent
+  /// fill matching the native Windows GDI / Android Compose overlays (rather
+  /// than a bare Material `IconButton`), plus the accessible name.
+  ///
+  /// **The name has to be a `label`, not the `Tooltip`.** Flutter maps a
+  /// tooltip to `semanticsTooltip`, which is a *hint* — every control here
+  /// therefore announced as an unnamed button with a trailing description,
+  /// while both native overlays set real names. This matters most on iOS's mpv
+  /// path, which for a Stalker/MAG portal is the primary player.
+  ///
+  /// `excludeSemantics` + an explicit `onTap` is deliberate: it collapses the
+  /// Tooltip's and the `InkWell`'s own annotations into this single node, so
+  /// the label can't be announced twice or land beside a second, unnamed
+  /// button node. Semantics exclusion doesn't affect hit testing, so the
+  /// pointer/touch path is unchanged.
+  Widget _chrome({
+    required String tooltip,
+    required String? semanticsLabel,
+    required VoidCallback onPressed,
+    required Widget child,
+    bool compact = false,
+    bool active = false,
+  }) {
+    void handle() {
+      _show();
+      onPressed();
+    }
+
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 3),
+      child: Semantics(
+        label: semanticsLabel ?? tooltip,
+        button: true,
+        onTap: handle,
+        excludeSemantics: true,
+        child: Tooltip(
+          message: tooltip,
+          child: Material(
+            color: active
+                ? Color.alphaBlend(
+                    AppColors.accent.withValues(alpha: 0.30),
+                    AppColors.panel,
+                  )
+                : AppColors.panel.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(compact ? 10 : 12),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(onTap: handle, child: child),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _badge(String text) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1488,6 +1755,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   );
 
   List<AudioTrack> _audioTracks() => widget.controls.state.tracks.audio
+      .where((track) => track.id != 'auto' && track.id != 'no')
+      .toList(growable: false);
+
+  /// Real subtitle tracks — the synthetic `auto`/`no` pair media_kit always
+  /// reports is excluded, so "the stream has subtitles" means what it says.
+  /// Empty on most live IPTV channels, which is why the button is gated on it.
+  List<SubtitleTrack> _subtitleTracks() => widget.controls.state.tracks.subtitle
       .where((track) => track.id != 'auto' && track.id != 'no')
       .toList(growable: false);
 
@@ -1516,6 +1790,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
 
   static String _codec(String? codec) =>
       codec == null || codec.isEmpty ? 'Unknown' : codec.toUpperCase();
+
+  /// [_codec] without the "Unknown" placeholder — the info panel omits a row it
+  /// can't answer rather than filling it in.
+  static String? _codecOrNull(String? codec) =>
+      codec == null || codec.isEmpty ? null : codec.toUpperCase();
   static String _hm(DateTime time) =>
       '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   static String _duration(Duration value) {
@@ -1533,30 +1812,37 @@ class PlayerReconnectChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.panel.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(AppRadius.tile),
-      ),
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: AppColors.accent,
+    // `liveRegion` so a screen reader announces the reconnect when it appears:
+    // this widget is the only signal that playback dropped and is being
+    // re-established, and it is otherwise silent — it never takes focus and
+    // nothing else on the route changes.
+    return Semantics(
+      liveRegion: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.panel.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(AppRadius.tile),
+        ),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.accent,
+                ),
               ),
-            ),
-            SizedBox(width: 10),
-            Text(
-              'Reconnecting…',
-              style: TextStyle(color: AppColors.textHi, fontSize: 14),
-            ),
-          ],
+              SizedBox(width: 10),
+              Text(
+                'Reconnecting…',
+                style: TextStyle(color: AppColors.textHi, fontSize: 14),
+              ),
+            ],
+          ),
         ),
       ),
     );

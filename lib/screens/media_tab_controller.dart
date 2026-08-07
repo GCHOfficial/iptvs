@@ -143,6 +143,25 @@ class MediaTabController extends ChangeNotifier {
     );
   }
 
+  /// Puts back an entry [removeFromContinueWatching] just dropped, for the
+  /// Undo action on its snackbar.
+  ///
+  /// Removal is otherwise unconfirmed and irreversible — a ~19 px control (now
+  /// a 44 px target) sitting directly under a tile whose tap starts playback —
+  /// so the mis-tap needs a way back. Restoring the row locally as well as the
+  /// DB position keeps the rail identical to what the user was looking at,
+  /// rather than making them wait for the next [loadContinueWatching].
+  Future<void> restoreContinueWatching(ContinueWatchingEntry entry) async {
+    await repo.db.savePlaybackPosition(
+      repo.source.id,
+      entry.position.kind,
+      entry.item.id,
+      position: entry.position.position,
+      duration: entry.position.duration,
+    );
+    await loadContinueWatching();
+  }
+
   Future<void> load({bool forceRefresh = false}) async {
     final gen = ++_loadGeneration;
     // A newer load supersedes any still-running one — cancel its token so it

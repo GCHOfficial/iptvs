@@ -668,6 +668,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _windowsEscalating = false;
   bool get _usesWindowsNativeSurface => _windowsNativeActive;
   bool get _usesLinuxNativeSurface => Platform.isLinux;
+
+  /// True where [PlayerVideoSurface] builds the app's own
+  /// [EmbeddedPlayerControls] — mirrors the platform test in its `build`.
+  ///
+  /// Gates the overlay-specific key bindings (mute/info/favorite/volume). It
+  /// matters most for what it **excludes**: Android's embedded path is
+  /// media_kit's stock Material controls, whose buttons are focus targets that
+  /// a TV D-pad walks with Up/Down — binding those arrows here would swallow
+  /// the traversal and strand the user on that fallback surface.
+  bool get _usesSharedEmbeddedOverlay =>
+      Platform.isLinux || Platform.isWindows || Platform.isIOS;
   LinuxNativeSession? _linuxNativeSession;
   StreamSubscription<String>? _linuxNativeControlSub;
   StreamSubscription<LinuxNativePlaybackSignal>? _linuxNativePlaybackSub;
@@ -1883,8 +1894,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  /// Any user input (key or pointer) brings the chrome back.
+  ///
+  /// This used to only handle the Windows *native* surface, so on every
+  /// embedded surface — Linux (the default there), the Windows SDR handoff,
+  /// and iOS's mpv path — the whole `CallbackShortcuts` set was a no-op for
+  /// visibility. A keyboard-only user could hide the chrome, press Space, and
+  /// be left with a paused frame and no way back without a pointer, because
+  /// `_scheduleHide` refuses to re-arm while paused. See
+  /// [PlayerVideoSurfaceState.revealChrome].
   void _handlePlaybackInput() {
-    if (_usesWindowsNativeSurface) _showNativeControls();
+    if (_usesWindowsNativeSurface) {
+      _showNativeControls();
+      return;
+    }
+    _embeddedSurfaceKey.currentState?.revealChrome();
   }
 
   Future<void> _handleNativeControlCommand(String command) async {
@@ -2298,6 +2322,14 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _cycleNativeAspect() async {
     _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
+    // The embedded overlay reads its `aspectLabel` from this index through
+    // `PlayerScreen.build`, and `_syncNativeControlState()` below is a no-op
+    // off the native surfaces — so without an explicit rebuild the new text
+    // chip kept rendering the *previous* mode while the picture changed under
+    // it. A control that lies about its own state is worse than the bare icon
+    // it replaced. (The Linux-native branch is unaffected; it pushes the label
+    // over IPC.)
+    if (mounted) setState(() {});
     final mode = _aspectModes[_aspectModeIndex];
     final platform = _player.platform;
     if (platform is NativePlayer) {
@@ -2566,6 +2598,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       controller: _controller,
       title: widget.title,
       sourceName: widget.sourceName,
+      aspectLabel: _aspectModes[_aspectModeIndex].label,
       epgNow: widget.epgNow,
       epgNext: widget.epgNext,
       isLive: _isLive,
@@ -2976,15 +3009,49 @@ class _PlayerScreenState extends State<PlayerScreen>
           },
           const SingleActivator(LogicalKeyboardKey.keyF): () {
             _handlePlaybackInput();
-            if (Platform.isLinux) {
-              _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
-            } else {
+            // Gate on the *surface*, not the platform. This used to read
+            // `Platform.isLinux`, which sent the Windows **SDR-embedded** path
+            // — the common Windows live path, reached through the same-channel
+            // preview→fullscreen handoff — into `_toggleNativeFullscreen()`,
+            // where it early-returned on `!_usesWindowsNativeSurface` and did
+            // nothing at all, while the on-screen button sat there tooltipped
+            // "Fullscreen (F)" and worked.
+            if (_usesWindowsNativeSurface) {
               _toggleNativeFullscreen();
+            } else {
+              _embeddedSurfaceKey.currentState?.togglePlayerFullscreen();
             }
           },
+          // `M`: mini-player on the Windows native surface (the native side
+          // owns the window geometry, so it can only act there), mute
+          // everywhere else — which is what the Linux Lua OSD has always bound
+          // it to, and the usual media-player convention. The two surfaces are
+          // mutually exclusive, so there is no real collision.
           const SingleActivator(LogicalKeyboardKey.keyM): () {
             _handlePlaybackInput();
-            _toggleNativeMiniPlayer();
+            if (_usesWindowsNativeSurface) {
+              _toggleNativeMiniPlayer();
+              return;
+            }
+            _embeddedSurfaceKey.currentState?.toggleMute();
+          },
+          if (_usesSharedEmbeddedOverlay) ...{
+            const SingleActivator(LogicalKeyboardKey.keyI): () {
+              _handlePlaybackInput();
+              _embeddedSurfaceKey.currentState?.toggleInfo();
+            },
+            const SingleActivator(LogicalKeyboardKey.keyS): () {
+              _handlePlaybackInput();
+              _embeddedSurfaceKey.currentState?.toggleOverlayFavorite();
+            },
+            const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+              _handlePlaybackInput();
+              _embeddedSurfaceKey.currentState?.adjustVolume(5);
+            },
+            const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+              _handlePlaybackInput();
+              _embeddedSurfaceKey.currentState?.adjustVolume(-5);
+            },
           },
         },
         child: Listener(

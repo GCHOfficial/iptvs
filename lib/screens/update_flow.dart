@@ -293,7 +293,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
         pos.minScrollExtent,
         pos.maxScrollExtent,
       ),
-      duration: const Duration(milliseconds: 120),
+      duration: appMotion(context, const Duration(milliseconds: 120)),
       curve: Curves.easeOut,
     );
     return KeyEventResult.handled;
@@ -337,7 +337,10 @@ class _UpdateDialogState extends State<_UpdateDialog> {
                       onKeyEvent: _notesKey,
                       onFocusChange: (_) => setState(() {}),
                       child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 120),
+                        duration: appMotion(
+                          context,
+                          const Duration(milliseconds: 120),
+                        ),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
                           vertical: 8,

@@ -8,19 +8,88 @@ class AppColors {
   static const line = Color(0xFF353B49); // hairlines / borders
   static const textHi = Color(0xFFF2F4F8);
   static const textLo = Color(0xFF9AA3B2);
-  static const accent = Color(0xFF7B6CF6); // brand / progress
+  static const accent = Color(0xFF7B6CF6); // brand / progress / focus rings
   static const live = Color(0xFFFF4D6D); // "on air" signal
+
+  /// [accent] darkened just enough that **white 14 px bold** — Material's
+  /// default `labelLarge`, which every `FilledButton`/FAB here inherits —
+  /// clears WCAG AA 4.5:1 against it (measured 4.64:1; plain [accent] is
+  /// 3.95:1, and bold 14 px is below the 18.66 px large-text threshold that
+  /// would have allowed 3:1).
+  ///
+  /// Deliberately *not* a replacement for [accent]: rings, progress and focus
+  /// states sit on the dark [ink]/[panel] ground where the lighter hue reads
+  /// better (4.85:1 vs 4.13:1), so the brand hue stays there. Use this one
+  /// only where white text sits **on top of** the accent.
+  static const accentFill = Color(0xFF6F5FEC);
+
+  /// Semantic state colours. These exist because every screen that needed one
+  /// previously hand-rolled it — the same red was written out at six call
+  /// sites (plus a seventh as `Colors.redAccent`), and the amber and green
+  /// once each. Reach for these instead of a literal.
+  static const danger = Color(0xFFE5484D); // destructive / expired / error
+  static const warning = Color(0xFFE5A23D); // needs attention
+  static const success = Color(0xFF22C55E); // healthy / synced
 }
+
+/// Wraps [duration] so an animation collapses to nothing when the platform
+/// reports the "remove animations" accessibility preference.
+///
+/// Flutter honours this flag for its own route transitions but **not** for
+/// `AnimatedContainer`/`AnimatedOpacity` and friends, which is most of what
+/// this app animates — so every explicit duration should go through here.
+Duration appMotion(BuildContext context, Duration duration) =>
+    MediaQuery.disableAnimationsOf(context) ? Duration.zero : duration;
 
 class AppRadius {
   static const tile = 8.0;
   static const control = 8.0;
 }
 
-/// Width (logical px) at or above which the browsing UI uses the wide layout
-/// (category side-pane + live preview panel). Shared by the channel list
-/// screen and the live tab view so the breakpoint can't drift between them.
+// ---------------------------------------------------------------------------
+// Layout breakpoints.
+//
+// **Measure every one of these against `MediaQuery.sizeOf(context)` — the
+// window — not against a `LayoutBuilder`'s `constraints.maxWidth`.** A body's
+// own width is shrunk by `SafeArea` (the landscape nav-bar / cutout inset on
+// Android), by sheet padding, and by any `maxWidth` cap above it, so the same
+// number means different things at different points in the tree. The live tab
+// documents at length what happened when one branch read constraints while
+// every other branch read the window; see docs/tv-navigation.md.
+// ---------------------------------------------------------------------------
+
+/// Width at or above which the browsing UI uses the wide layout (category
+/// side-pane + live preview panel). Shared by the channel list screen and the
+/// live tab view so the breakpoint can't drift between them.
 const double kWideLayoutMinWidth = 950;
+
+/// Width below which the channel-list toolbar stacks into two rows instead of
+/// one. Purely a reflow — no focus target appears or disappears across it, so
+/// unlike [kWideLayoutMinWidth] it carries no D-pad hazard.
+const double kToolbarStackMaxWidth = 620;
+
+/// Minimum window size for the movies/series **grid**; below either dimension
+/// the media tab renders list rows instead. Height matters as much as width —
+/// a 900x400 landscape phone has room for a list but not for a poster grid.
+const double kMediaGridMinWidth = 600;
+const double kMediaGridMinHeight = 500;
+
+/// Target width of one poster tile. The media grid picks its column count by
+/// dividing the available width by this, so tiles stay in a narrow size band
+/// from a 600 px window to a 4K TV instead of stepping between two extremes.
+const double kMediaPosterTargetWidth = 200;
+
+/// Window width at or above which the media details sheet lays its header out
+/// in two columns (poster beside metadata) rather than stacked.
+const double kMediaSheetTwoColumnMinWidth = 560;
+
+/// Width below which the sources list collapses its per-row action buttons.
+const double kSourcesNarrowMaxWidth = 560;
+
+/// Cap for running text and form fields on settings-style screens. Unbounded
+/// forms stretch credential fields and paragraph copy edge-to-edge on a
+/// maximised desktop window; this keeps a readable measure.
+const double kSettingsMaxContentWidth = 640;
 
 class AppTheme {
   /// Text-button styling, exposed separately from [dark]. The
@@ -122,7 +191,9 @@ class AppTheme {
       filledButtonTheme: FilledButtonThemeData(
         style:
             FilledButton.styleFrom(
-              backgroundColor: AppColors.accent,
+              // accentFill, not accent: white 14 px bold needs 4.5:1 and the
+              // brand hue only reaches 3.95:1. See AppColors.accentFill.
+              backgroundColor: AppColors.accentFill,
               foregroundColor: Colors.white,
               minimumSize: const Size(44, 42),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -223,7 +294,7 @@ class AppTheme {
         ),
       ),
       floatingActionButtonTheme: const FloatingActionButtonThemeData(
-        backgroundColor: AppColors.accent,
+        backgroundColor: AppColors.accentFill,
         foregroundColor: Colors.white,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.all(Radius.circular(AppRadius.control)),
