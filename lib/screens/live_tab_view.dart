@@ -68,19 +68,40 @@ const double kShortViewportMaxHeight = 560;
 /// growing, and the row's own `maxLines`/ellipsis absorb the rest.
 const double kMaxLiveTextScale = 1.4;
 
-// Line heights of a channel row's fixed-size lines at text scale 1. The row is
-// a fixed `itemExtent`, so [LiveLayoutMetrics] has to predict what its content
-// costs; these deliberately use a conservative 1.3 line-height factor for the
-// styles that set no explicit `height` (the bundled Inter is ~1.21, and the
-// widget-test font is smaller still), because under-estimating paints a row
-// across its neighbour while over-estimating only drops the "Next" line early.
-const double _kNowLineHeight = 12.5 * 1.3;
-const double _kMetaLineHeight = 11.5 * 1.3;
-const double _kRowLineGap = 4.0;
+// Line heights of a channel row's fixed-size lines at text scale 1.
+//
+// **These are a hint, not a guarantee.** The row cannot overflow whatever they
+// say — `_ChannelTile` lays its text column out unconstrained inside a
+// `ClipRect`, so a wrong number here costs at most a sub-pixel clip. All they
+// decide is *when the "Next" line is dropped* ([LiveLayoutMetrics.denseChannelRow]).
+//
+// They used to use a 1.3 factor on the theory that the bundled Inter is ~1.21.
+// Measured against the real font (a widget test that loads `Inter` and reads
+// the laid-out `RenderParagraph` heights back — `test/layout_overflow_test.dart`),
+// a 12.5 px run lays out at 18 px and an 11.5 px one at 16 px: Inter's real
+// ratio is ~1.41, *and* the engine rounds each line's ascent and descent to
+// whole logical pixels on top of that. 1.3 was therefore short by ~1.5 px a
+// line, which is how a four-line row that the metrics called "fits" overflowed
+// its extent. 1.45 covers both effects at the sizes this row uses.
+const double _kNowLineHeight = 12.5 * 1.45;
+const double _kMetaLineHeight = 11.5 * 1.45;
 
-/// The row's own vertical chrome inside the extent: the 3 px gap above/below
-/// plus the tile's inner padding.
-double _rowChrome(bool compact) => 6 + (compact ? 12 : 16);
+/// Gap between two of a channel row's text lines. Three of them separate the
+/// four lines, so this is also the row's cheapest source of vertical slack —
+/// 4 → 3 bought back the 3 px the corrected line-height factors above cost,
+/// keeping the "Next" line on windows that used to keep it.
+const double _kRowLineGap = 3.0;
+
+/// The row's own vertical chrome inside the extent: the 3 px gap above/below,
+/// the tile's inner padding, and its border.
+///
+/// The border term is a flat 2 (1 px a side) and **does not vary with the
+/// cursor**: the accent focus ring is painted as a `foregroundDecoration`, which
+/// costs no layout, precisely so the selected row's content box is the same size
+/// as every other row's. It previously reserved the focused 2-px-a-side width
+/// instead, which is a fair description of what the old ring cost but left every
+/// *unselected* row 2 px of dead space.
+double _rowChrome(bool compact) => 6 + (compact ? 12 : 16) + 2;
 
 /// The channel row height for a list that does ([hasEpg]) or doesn't carry EPG.
 double channelRowExtentFor(bool hasEpg) =>
@@ -207,6 +228,20 @@ class LiveLayoutMetrics {
       rowTitleSize: (16 * scale).clamp(13, 16),
     );
   }
+
+  /// Side of the channel logo / number badge.
+  ///
+  /// Derived from the row it sits in rather than fixed at 36/40, so it grows
+  /// with the taller EPG row — and with density and text scaling — instead of
+  /// being dwarfed by it. The floor keeps the *plain* row's badge at roughly
+  /// its previous size (that row's content box is only ~48 px, so a
+  /// proportional value there would shrink it), and the ceiling stops the
+  /// badge from ever being what makes a row overflow.
+  double logoSize(bool hasEpg) =>
+      ((channelRowExtent(hasEpg) - _rowChrome(compact)) * 0.62).clamp(
+        36.0,
+        60.0,
+      );
 
   double channelRowExtent(bool hasEpg) =>
       hasEpg ? channelRowExtentWithEpg : channelRowExtentPlain;
@@ -1746,9 +1781,23 @@ class _ChannelTileState extends State<_ChannelTile> {
                 borderRadius: BorderRadius.circular(AppRadius.tile),
                 border: Border.all(
                   color: active ? AppColors.accent : AppColors.line,
-                  width: active ? 2 : 1,
                 ),
               ),
+              // **The cursor ring is painted, not laid out.** `Container`
+              // reserves `decoration.border`'s width as padding but never
+              // `foregroundDecoration`'s, so drawing the 2 px accent ring here
+              // puts it in exactly the same place a `decoration` border would
+              // (both `DecoratedBox`es wrap the same rect) while leaving the
+              // selected row's content box identical to every other row's.
+              // With the ring in `decoration` the cursor row had 2 px less
+              // height and width than its neighbours — which is why a row that
+              // fitted everywhere else overflowed the moment it was selected.
+              foregroundDecoration: active
+                  ? BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.tile),
+                      border: Border.all(color: AppColors.accent, width: 2),
+                    )
+                  : null,
               child: Padding(
                 padding: EdgeInsets.symmetric(
                   horizontal: metrics.compact ? 10 : 12,
@@ -1757,93 +1806,126 @@ class _ChannelTileState extends State<_ChannelTile> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    _Logo(channel: channel, size: metrics.compact ? 36 : 40),
+                    _Logo(
+                      channel: channel,
+                      size: metrics.logoSize(widget.now != null),
+                    ),
                     SizedBox(width: metrics.compact ? 10 : 12),
+                    // **The text column is laid out unconstrained and clipped.**
+                    // The row height is authoritative — the live list is a
+                    // selection model that scrolls by `index * itemExtent` — so
+                    // the content has to fit the box *by construction*, not by
+                    // estimate. Handing the `Column` an unbounded main axis is
+                    // what makes that true: it can never be over-allocated, so
+                    // it can never report an overflow, and `ClipRect` turns any
+                    // residual (a font whose real line height runs past
+                    // [_kNowLineHeight] and friends, an accessibility text scale
+                    // past [kMaxLiveTextScale]) into an invisible sub-pixel trim
+                    // instead of a striped bar across the row a user is looking
+                    // at. `OverflowBox` sizes itself to the parent, so the
+                    // `centerLeft` alignment reproduces the `Row`'s own
+                    // `CrossAxisAlignment.center` exactly while it fits — and
+                    // splits any trim between the title's leading and the last
+                    // line's descenders when it doesn't. Same pattern as
+                    // `_MediaGridTile`'s fixed-height text block.
                     Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            channel.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            // Density-scaled, unlike the theme's fixed 16 px
-                            // titleMedium it used to take verbatim: the extent
-                            // around this line shrinks on compact/short
-                            // layouts, and a fixed title was the biggest single
-                            // consumer of the headroom that left.
-                            style: Theme.of(context).textTheme.titleMedium
-                                ?.copyWith(fontSize: metrics.rowTitleSize),
-                          ),
-                          if (current != null) ...[
-                            const SizedBox(height: 4),
-                            // Current show on its own emphasized line — leads with the
-                            // title so a long channel name never hides it.
-                            Text(
-                              nowProgrammeLabel(current),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppColors.accent,
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
+                      child: ClipRect(
+                        child: OverflowBox(
+                          alignment: Alignment.centerLeft,
+                          minHeight: 0,
+                          maxHeight: double.infinity,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                channel.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                // Density-scaled, unlike the theme's fixed 16 px
+                                // titleMedium it used to take verbatim: the
+                                // extent around this line shrinks on
+                                // compact/short layouts, and a fixed title was
+                                // the biggest single consumer of the headroom
+                                // that left.
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontSize: metrics.rowTitleSize),
                               ),
-                            ),
-                            const SizedBox(height: 4),
-                            // Time range + progress share a row so the bar reads as
-                            // "where we are between these times".
-                            Row(
-                              children: [
+                              if (current != null) ...[
+                                const SizedBox(height: _kRowLineGap),
+                                // Current show on its own emphasized line —
+                                // leads with the title so a long channel name
+                                // never hides it.
                                 Text(
-                                  programmeTimeRange(current),
-                                  style: const TextStyle(
-                                    color: AppColors.textLo,
-                                    fontSize: 11.5,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(3),
-                                    child: LinearProgressIndicator(
-                                      // Not `progress`: a null value means
-                                      // *indeterminate*, so a programme with a
-                                      // bad duration would animate this row
-                                      // forever and keep the frame pipeline
-                                      // awake. The preview panel already guards
-                                      // this by not drawing the bar at all.
-                                      value: progress ?? 0,
-                                      minHeight: 3,
-                                      backgroundColor: AppColors.line,
-                                      valueColor:
-                                          const AlwaysStoppedAnimation<Color>(
-                                            AppColors.accent,
-                                          ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            // The 88 px Android-TV row keeps the current show,
-                            // range and progress visible, but moves "Next" to
-                            // the preview panel/semantics instead of overflowing
-                            // the fixed selection-model extent.
-                            if (upcoming != null && !dense)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(
-                                  nextProgrammeLabel(upcoming),
+                                  nowProgrammeLabel(current),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                    color: AppColors.textLo,
-                                    fontSize: 11.5,
+                                    color: AppColors.accent,
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                              ),
-                          ],
-                        ],
+                                const SizedBox(height: _kRowLineGap),
+                                // Time range + progress share a row so the bar
+                                // reads as "where we are between these times".
+                                Row(
+                                  children: [
+                                    Text(
+                                      programmeTimeRange(current),
+                                      style: const TextStyle(
+                                        color: AppColors.textLo,
+                                        fontSize: 11.5,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(3),
+                                        child: LinearProgressIndicator(
+                                          // Not `progress`: a null value means
+                                          // *indeterminate*, so a programme with
+                                          // a bad duration would animate this
+                                          // row forever and keep the frame
+                                          // pipeline awake. The preview panel
+                                          // already guards this by not drawing
+                                          // the bar at all.
+                                          value: progress ?? 0,
+                                          minHeight: 3,
+                                          backgroundColor: AppColors.line,
+                                          valueColor:
+                                              const AlwaysStoppedAnimation<
+                                                Color
+                                              >(AppColors.accent),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                // The 88 px Android-TV row keeps the current
+                                // show, range and progress visible, but moves
+                                // "Next" to the preview panel/semantics rather
+                                // than clipping it against the fixed
+                                // selection-model extent.
+                                if (upcoming != null && !dense)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: _kRowLineGap,
+                                    ),
+                                    child: Text(
+                                      nextProgrammeLabel(upcoming),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: AppColors.textLo,
+                                        fontSize: 11.5,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),

@@ -274,6 +274,8 @@ jobs:
       - name: Generate AI changelog
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # For the `gh release list` lookup that picks the changelog base.
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
         run: |
           : > body.md
@@ -283,7 +285,22 @@ jobs:
           fi
           ref="$RELEASE_TAG"
           git rev-parse -q --verify "$ref" >/dev/null || ref=HEAD
-          prev=$(git describe --tags --abbrev=0 "$ref^" 2>/dev/null || true)
+          # **Diff against the last *published release*, not merely the last
+          # tag.** A release build that fails leaves a tag behind with no
+          # release attached to it — v0.1.44 did exactly that — and
+          # `git describe` would then pick that dead tag as the base. v0.1.45's
+          # notes consequently covered one commit instead of the seven it
+          # shipped, and the model below, handed almost nothing, filled the gap
+          # by inventing user-facing claims that were not true.
+          prev=$(gh release list --limit 50 --json tagName,isDraft \
+                   --jq '[.[] | select(.isDraft | not) | .tagName] | .[]' \
+                   2>/dev/null | grep -vx "$ref" | head -1 || true)
+          # No published release to compare against (first release, or a fork):
+          # fall back to the previous tag.
+          if [ -z "$prev" ] || ! git rev-parse -q --verify "$prev^{commit}" >/dev/null 2>&1; then
+            prev=$(git describe --tags --abbrev=0 "$ref^" 2>/dev/null || true)
+          fi
+          echo "Changelog base: ${prev:-<none>} .. $ref"
           if [ -n "$prev" ]; then
             commits=$(git log --no-merges --pretty='- %s' "$prev".."$ref")
           else
@@ -293,7 +310,7 @@ jobs:
             echo "No commits found; skipping AI changelog."
             exit 0
           fi
-          prompt="You write release changelogs for iptvs, a cross-platform IPTV player app (Windows, Android phone + TV). Summarize the following commit subjects into a short user-facing changelog in GitHub markdown: 3-8 bullet points under a '## Highlights' heading, plain language a user understands, grouped by theme. Never write filler like 'bug fixes and improvements'; describe what actually changed and why a user cares. Use only this markdown: '##' headings, '-' bullets (at most one nesting level), and **bold** emphasis — no tables, no code blocks, no links, no images. No commit hashes, no PR numbers, no preamble before or after the markdown. Commits:
+          prompt="You write release changelogs for iptvs, a cross-platform IPTV player app (Windows, Android phone + TV). Summarize the following commit subjects into a short user-facing changelog in GitHub markdown: 3-8 bullet points under a '## Highlights' heading, plain language a user understands, grouped by theme. Never write filler like 'bug fixes and improvements'; describe what actually changed and why a user cares. If the commits are only build, CI or toolchain changes with no effect a user could notice, say exactly that in a single bullet — do not invent user-facing benefits, and never imply the release fixed crashes, install failures or security problems unless a commit says so. Use only this markdown: '##' headings, '-' bullets (at most one nesting level), and **bold** emphasis — no tables, no code blocks, no links, no images. No commit hashes, no PR numbers, no preamble before or after the markdown. Commits:
           $commits"
           jq -n --arg p "$prompt" \
             '{contents: [{parts: [{text: $p}]}], generationConfig: {temperature: 0.3}}' > request.json

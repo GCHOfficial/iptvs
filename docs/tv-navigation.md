@@ -128,12 +128,23 @@ retains the normal scale. Category rows retain a 40 px D-pad target.
 
 `MediaQuery` text scaling **feeds the extents** (clamped at `kMaxLiveTextScale`) rather than being
 ignored. It has to: the tall EPG row had ~1.10× headroom and the compact 88 px row ~3% at default
-scale, while Android's first font step is already 1.15 and iOS reaches 1.35 — and the row `Column`
-has no clip, so an overflow painted across the neighbouring row. The scaler must be read at
+scale, while Android's first font step is already 1.15 and iOS reaches 1.35. The scaler must be
+read at
 **both** `LiveLayoutMetrics.forSize` call sites (`live_tab_view.dart` and
 `ChannelListScreen._liveChannelRowExtent`/`_liveCategoryRowExtent`), because the selection model
 scrolls by `index * extent` — if the view lays out one extent while the coordinator scrolls by
-another, every D-pad move drifts. `LiveTabView.build` asserts the two agree; the assert is what
+another, every D-pad move drifts. **Predicting text height is a hint, never the guarantee.** `_epgRowContentHeight` only decides
+*when the "Next" line is dropped*; the row's text `Column` sits in `ClipRect` → `OverflowBox`, so
+an unbounded main axis makes a `RenderFlex` overflow structurally impossible whatever the estimate
+says. That split exists because the estimate was wrong three times running: the bundled Inter lays
+out at **~1.41**, not the ~1.21 an earlier comment claimed, *and* the engine rounds each line's
+ascent and descent to whole logical pixels on top of that — ~4.3 px per four-line row, which no
+amount of chrome tuning was going to close. `test/layout_overflow_test.dart` pins it with the real
+font loaded, because `flutter_test`'s default font makes every line exactly `1.0 × fontSize` and
+hides the whole class of bug. The channel logo is sized from the row it sits in
+(`LiveLayoutMetrics.logoSize`) for the same reason — bounded so it can never be what overflows.
+
+`LiveTabView.build` asserts the two agree; the assert is what
 caught `live_tab_layout_test.dart` hard-coding the base constants while the view scaled them.
 Relatedly, the "drop the *Next* line" test is a **content-height** comparison, not
 `extent < kChannelRowExtentWithEpg` — the latter fired on any scaling at all, so a 700 px-tall
@@ -215,6 +226,10 @@ with no dialog to route focus through and no hold-timing gesture to discover.
   the ladder's first-row rung runs (rung 0 in the Back ladder below).
 - **Drawing**: the row body carries the accent border only while the `body` column holds the
   cursor; on the `favorite` column the star cell draws its own accent ring + panel lift instead.
+  That border is a **`foregroundDecoration`, not a `decoration`** — `Container` reserves
+  `decoration.border` as padding but never the foreground one, so drawing the ring the obvious way
+  gave the cursor row 4 px less content space than every other row and overflowed it *only when
+  focused*. Both wrap the same rect, so the ring looks identical and now costs no layout.
   The selected row's `panelHi` fill stays either way, so the row remains visible. The star cell
   fits inside the row extents, which are no longer fixed: they scale with density *and* with the platform text scale, and the star target scales with the text scale alongside them.
 - **Touch**: tapping the star toggles directly (selecting the row first, so cursor and pointer

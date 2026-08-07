@@ -384,7 +384,13 @@ colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct
 `preferWindowsEmbedded`, so they open native immediately. Control state is mirrored
 to native via `setControlState` (Dart→C++) / `nativeControl` (C++→Dart commands); the GDI overlay
 (`windows/runner/flutter_window.cpp`) draws the **same control set, badges, live EPG strip,
-go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay. Windows
+go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay, and
+its bars **fade into the video** rather than sitting as flat fills — a per-scanline alpha ramp
+written straight into the layered window's DIB, mirroring the shared Flutter overlay's
+gradients (top `0xB3`→`0x00`, bottom `0x00`→`0x99`→`0xCC`). The ramp floors alpha at 1 rather
+than reaching a true 0, because `NormalizeNativeControlBitmapAlpha` treats `alpha == 0` as
+"GDI didn't draw here" and forces it **opaque** — a ramp to zero comes back as a solid black
+bar. Windows
 draws that indicator *inside* the auto-hiding overlay rather than outside the visibility gate the
 way Android and iOS do, so `ControlsPinnedByOverlay()` counts `reconnecting` alongside an open
 menu/info panel — otherwise the hide timer took the badge away mid-stall and the platform's

@@ -478,9 +478,17 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
       now.hour,
       now.minute < 30 ? 0 : 30,
     );
+    // ±24 h of half-hour slots rather than ±4 (±2 h). The guide is generated
+    // once per sync and never regenerates on read, so the narrow window
+    // silently expired about two hours into a session: every row lost its
+    // now/next, the tall EPG rows collapsed to the plain variety, and the
+    // preview panel read "No programme information" — indistinguishable from
+    // genuinely broken EPG, on the source whose whole job is making the guide
+    // testable without a provider. A day either side outlasts any plausible
+    // session and still costs only ~96 programmes per channel.
     return [
       for (final channel in channels)
-        for (var offset = -4; offset <= 4; offset++)
+        for (var offset = -48; offset <= 48; offset++)
           Programme(
             channelId: channel.id,
             start: slot.add(Duration(minutes: offset * 30)),
