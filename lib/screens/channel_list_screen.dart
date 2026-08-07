@@ -230,6 +230,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   Timer? _searchTimer;
   // One controller for whichever list/grid is mounted (only one exists per tab),
   // so a tab/category change can jump it back to the top.
+  /// This screen owns its own [ScaffoldMessenger] (see [build]) so its
+  /// snackbars can't outlive the route and paint over the pushed player.
+  ///
+  /// That messenger is created *inside* `build`, so it sits **below** this
+  /// State's own context — `ScaffoldMessenger.of(context)` from here resolves
+  /// to `MaterialApp`'s outer messenger instead, which no longer has a
+  /// registered `Scaffold` and trips `assert(_scaffolds.isNotEmpty)` the
+  /// moment anything tries to show a snackbar (the double-Back exit prompt was
+  /// the first to hit it). Every snackbar this State shows goes through the
+  /// key.
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  ScaffoldMessengerState get _messenger => _messengerKey.currentState!;
+
   final ScrollController _scrollController = ScrollController();
   // The live category sidebar's controller, so the focus coordinator can
   // jump-scroll an off-screen category into build range before focusing it
@@ -796,7 +811,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         _restoreListFocusAfterPlayback();
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          _messenger.showSnackBar(
             SnackBar(content: Text('Could not play: ${redactText('$e')}')),
           );
         }
@@ -837,7 +852,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }) async {
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     var playbackStream = stream;
     // Set only while the Wayland+HDR stop-and-resolve-fresh path below has
     // torn the preview down but not yet completed the fullscreen push — if
@@ -1094,7 +1109,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // finally below only fires (i.e. `_resolving` is still true) when
     // resolve() itself threw before ever reaching it.
     setState(() => _resolving = true);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     try {
       final stream = await widget.repo.resolve(channel);
       if (!mounted) return;
@@ -1190,7 +1205,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// past programmes and play the chosen one via [_playCatchup].
   Future<void> _showCatchupSheet(Channel channel) async {
     if (_resolving) return;
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     final programmes = await widget.repo.archiveProgrammes(channel);
     if (!mounted) return;
     if (programmes.isEmpty) {
@@ -1227,7 +1242,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (_resolving) return;
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     try {
       await _preview.pause();
       DiagnosticsLog.instance.add(
@@ -1265,7 +1280,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   Future<void> _openMedia(MediaItem item) async {
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     try {
       DiagnosticsLog.instance.add(
         'library',
@@ -1293,7 +1308,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (_resolving) return;
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = _messenger;
     try {
       DiagnosticsLog.instance.add(
         'library',
@@ -1685,7 +1700,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         now.difference(_exitArmedAt!) <= _exitConfirmWindow;
     if (!armed) {
       _exitArmedAt = now;
-      ScaffoldMessenger.of(context)
+      _messenger
         ..clearSnackBars()
         ..showSnackBar(
           const SnackBar(
@@ -1717,6 +1732,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // the player covers them instead of carrying them along, and returning
     // still finds one that hasn't timed out.
     return ScaffoldMessenger(
+      key: _messengerKey,
       child: PopScope(
         canPop: false,
         onPopInvokedWithResult: _handleRootBack,
