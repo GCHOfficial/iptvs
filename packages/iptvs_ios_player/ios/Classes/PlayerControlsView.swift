@@ -767,9 +767,12 @@ final class PlayerRoutePickerView: UIView, PlayerTapAbsorbing {
     // `AVRoutePickerView.delegate` is a weak reference, so the owning
     // `PlayerControlsView` passing itself here is not a cycle.
     picker.delegate = delegate
-    // `.plain` because the chip behind it is ours: `.system` would draw AVKit's
-    // own background under our own and read as a double-height button.
-    picker.routePickerButtonStyle = .plain
+    // No `routePickerButtonStyle` here: it is **macOS-only** (`@available(macOS
+    // 10.15, *)`, unavailable in iOS), and setting it is a hard compile error
+    // rather than a no-op. On iOS the picker draws a bare glyph with no
+    // background of its own, which is exactly what this chip wants — the style
+    // knob only exists on macOS because AppKit's variant can draw its own
+    // bezel. Appearance here is `tintColor`/`activeTintColor` and nothing else.
     picker.tintColor = PlayerColors.textHi
     // Accent while a route is actually in use — the same colour a pressed
     // `PlayerIconButton` takes, spent here on "AirPlay is on" instead.
