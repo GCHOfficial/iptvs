@@ -518,6 +518,13 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
 
 ## Testing notes
 
+- **`flutter test` locally is not the same suite CI runs, and the difference is
+  silently reported as "skipped".** `channel_list_focus_test.dart` builds a real preview player, so
+  **22 of its 23 tests skip on any machine without libmpv** — which is every Windows dev box. The
+  whole Back-ladder and live-focus model therefore runs *only* on CI's Linux runner. A local
+  `flutter test` will happily print "All tests passed!" with a hard `assert` failure sitting in
+  that suite. Read the `~N` skipped count, not just the pass count, and treat focus/Back-ladder
+  changes as unverified until CI says otherwise.
 - `test/layout_overflow_test.dart` is the one test that **loads real font assets** (Inter, from
   `android/app/src/main/res/font/`). `flutter_test`'s default font lays every line out at exactly
   `1.0 × fontSize`, so any bug that depends on real line metrics — the whole class of fixed-extent
