@@ -64,6 +64,34 @@ bool shouldReconnectOnCompleted({
   required bool nativeSessionActive,
 }) => completed && isLive && !nativeSessionActive;
 
+/// Whether the VOD resume seek should be applied to the media_kit `_player`
+/// once its duration is known.
+///
+/// [nativeSessionActive] carries exactly the meaning it has in
+/// [shouldReconnectOnCompleted] — a *separate* engine owns playback and this
+/// `_player` is idle — and the same **Windows exception applies**, which is why
+/// this predicate exists at all rather than reusing `_nativePlaybackLaunched`
+/// directly. That flag starts **true** on Windows for every non-preview open
+/// (`_usesWindowsNativeSurface`), yet the Windows native HWND surface is still
+/// this same `_player` presenting through a `vo` swap. Gating the resume seek on
+/// it therefore suppressed the seek for *every* Windows VOD — positions were
+/// saved correctly (`_persistPlaybackPosition` gates on Android/iOS only) but
+/// never restored, so "Continue watching" always restarted from zero.
+///
+/// The engines that genuinely own their own playback receive the resume point
+/// up front instead, and must not be seeked here: Android/iOS native players
+/// via the `resumeMs` open payload, and the Linux native mpv process via
+/// `--start=`.
+bool shouldApplyEmbeddedResume({
+  required Duration? pendingResume,
+  required Duration duration,
+  required bool nativeSessionActive,
+}) =>
+    pendingResume != null &&
+    !nativeSessionActive &&
+    duration > Duration.zero &&
+    pendingResume < duration;
+
 /// How long an iOS AVPlayer→mpv fallback may sit deferred *invisibly* before
 /// the route stops waiting in silence and puts a Retry affordance on screen.
 ///
@@ -669,6 +697,22 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool get _usesWindowsNativeSurface => _windowsNativeActive;
   bool get _usesLinuxNativeSurface => Platform.isLinux;
 
+  /// True when a *separate* engine owns playback and the media_kit [_player]
+  /// sits idle: the Linux native mpv process, the Android native HDR Activity,
+  /// the iOS presented AVPlayer controller. Events from `_player` then describe
+  /// a stopped engine rather than the stream, and playback state (position,
+  /// resume point) must come from — or be handed to — that engine instead.
+  ///
+  /// **Windows is deliberately excluded even while `_nativePlaybackLaunched` is
+  /// true.** Its native HWND surface is this same `_player` presenting through a
+  /// `vo` swap, so `_player` is the authority there. Testing
+  /// `_nativePlaybackLaunched` directly is the recurring bug — it starts `true`
+  /// on Windows for every non-preview open — so prefer this getter for any
+  /// "does this player own playback?" question.
+  bool get _separateEngineOwnsPlayback =>
+      _linuxNativeSession != null ||
+      ((Platform.isAndroid || Platform.isIOS) && _nativePlaybackLaunched);
+
   /// True where [PlayerVideoSurface] builds the app's own
   /// [EmbeddedPlayerControls] — mirrors the platform test in its `build`.
   ///
@@ -766,10 +810,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (!shouldReconnectOnCompleted(
           completed: completed,
           isLive: _isLive,
-          nativeSessionActive:
-              _linuxNativeSession != null ||
-              ((Platform.isAndroid || Platform.isIOS) &&
-                  _nativePlaybackLaunched),
+          nativeSessionActive: _separateEngineOwnsPlayback,
         )) {
           return;
         }
@@ -798,17 +839,31 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }
     // Embedded resume: seek once the duration is known (a cold seek right
-    // after open can land before the demuxer is ready).
+    // after open can land before the demuxer is ready). This covers the
+    // **Windows native HWND surface** too — it is this same `_player` — which
+    // is why the guard is [_separateEngineOwnsPlayback] and not
+    // `_nativePlaybackLaunched` (see [shouldApplyEmbeddedResume]).
     _subs.add(
       _player.stream.duration.listen((duration) {
         final resume = _pendingEmbeddedResume;
-        if (resume == null || _nativePlaybackLaunched) return;
-        if (duration <= Duration.zero) return;
-        _pendingEmbeddedResume = null;
-        if (resume < duration) {
-          _logPlayback('resume seek to ${resume.inSeconds}s');
-          unawaited(_player.seek(resume));
+        if (resume == null) return;
+        final separateEngine = _separateEngineOwnsPlayback;
+        if (!shouldApplyEmbeddedResume(
+          pendingResume: resume,
+          duration: duration,
+          nativeSessionActive: separateEngine,
+        )) {
+          // Settle the resume only once this engine has really decided: a
+          // zero duration means "not known yet", and a separate engine means
+          // this `_player` may still take over as the embedded fallback.
+          if (duration > Duration.zero && !separateEngine) {
+            _pendingEmbeddedResume = null;
+          }
+          return;
         }
+        _pendingEmbeddedResume = null;
+        _logPlayback('resume seek to ${resume.inSeconds}s');
+        unawaited(_player.seek(resume));
       }),
     );
     _subs.add(
