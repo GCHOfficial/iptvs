@@ -62,6 +62,7 @@ void main() {
               controls: stub,
               title: 'Channel One',
               sourceName: sourceName,
+              aspectLabel: 'Fill',
               epgNow: epgNow,
               epgNext: epgNext,
               isLive: isLive,
@@ -320,6 +321,73 @@ void main() {
       await tester.tapAt(tester.getCenter(find.byType(EmbeddedPlayerControls)));
       await tester.pump(const Duration(milliseconds: 350));
       expect(find.text('Stream information'), findsNothing);
+    });
+  });
+
+  group('auto-hide pinning', () {
+    // Regression: the 4 s hide timer used to survive an open menu. `_show(keep:
+    // true)` skipped *re-arming* it but never cancelled the one already
+    // running, so opening a track menu a second after the chrome appeared let
+    // the bars disappear three seconds later — taking the open menu's own
+    // button out of the tree. `PopupMenuButton` guards its result callback on
+    // `mounted`, so that silently discarded the user's selection *and* left the
+    // pin flag stuck true, after which the overlay never auto-hid again for the
+    // rest of the route.
+    testWidgets('an open track menu keeps the chrome up past the hide delay', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        state: const PlayerState(
+          playing: true,
+          tracks: Tracks(
+            audio: [AudioTrack('1', null, 'eng'), AudioTrack('2', null, 'fra')],
+          ),
+        ),
+      );
+
+      // Let the initial reveal arm its timer, then open the menu partway
+      // through — the ordering that used to lose the race.
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byIcon(Icons.audiotrack));
+      await tester.pump();
+      expect(find.byType(PopupMenuItem<String>), findsWidgets);
+
+      // Well past the 4 s hide delay measured from the original reveal.
+      await tester.pump(const Duration(seconds: 6));
+
+      expect(
+        find.byIcon(Icons.audiotrack),
+        findsOneWidget,
+        reason: 'the bars must not be torn out from under an open menu',
+      );
+      expect(find.byType(PopupMenuItem<String>), findsWidgets);
+    });
+
+    testWidgets('and hides again once the menu closes', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        state: const PlayerState(
+          playing: true,
+          tracks: Tracks(
+            audio: [AudioTrack('1', null, 'eng'), AudioTrack('2', null, 'fra')],
+          ),
+        ),
+      );
+
+      await tester.tap(find.byIcon(Icons.audiotrack));
+      await tester.pump();
+      await tester.tap(find.byType(PopupMenuItem<String>).first);
+      await tester.pump(const Duration(milliseconds: 400));
+
+      await tester.pump(const Duration(seconds: 6));
+      expect(
+        find.byIcon(Icons.audiotrack),
+        findsNothing,
+        reason: 'a stuck pin would keep the chrome up forever',
+      );
     });
   });
 }

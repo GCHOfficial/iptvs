@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/services.dart' show KeyRepeatEvent;
 
 import '../data/app_database.dart';
 import '../data/distribution_channel.dart';
@@ -177,10 +178,15 @@ class _SourcesScreenState extends State<SourcesScreen> {
         content: Text('Remove "${c.label}"?'),
         actions: [
           TextButton(
+            // Autofocus the *non*-destructive action: on a D-pad an
+            // unfocused dialog swallows the first OK press entirely, so the
+            // user has to blind-hunt with arrows before anything responds.
+            autofocus: true,
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -706,7 +712,7 @@ class _ExpiryBadge extends StatelessWidget {
     return _chip(
       expired ? Icons.warning_amber_rounded : Icons.event_available,
       label,
-      expired ? Colors.redAccent : AppColors.textLo,
+      expired ? AppColors.danger : AppColors.textLo,
     );
   }
 
@@ -734,7 +740,7 @@ class _NeedsAttentionBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const color = Color(0xFFE5A23D);
+    const color = AppColors.warning;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -791,6 +797,92 @@ class _FieldSpec {
   });
 }
 
+/// Field keys that carry a URL and get a light format check (parseable +
+/// http/https scheme + non-empty host) on top of the plain presence check —
+/// so a malformed portal/host/playlist URL is caught here rather than at
+/// playback time.
+const _urlFieldKeys = {'portal', 'host', 'playlistUrl'};
+
+bool _looksLikeValidUrl(String value) {
+  // **Normalise exactly the way the sources do before judging.** Both
+  // `XtreamSource._base` and `StalkerSource._base()` prepend `http://` when the
+  // user omitted a scheme, so `panel.example.com:8080` and `1.2.3.4:8080` are
+  // supported input, not mistakes. Validating the raw string rejected both:
+  // `Uri.tryParse` reads `panel.example.com` as the *scheme* (dots are legal
+  // there) and gives `1.2.3.4:8080` an empty host. That turned every
+  // scheme-less source into one the owner could no longer save an edit to —
+  // change the password, press Save, and the Host field they never touched
+  // errors out while the source itself still plays fine.
+  final normalised = value.startsWith('http://') || value.startsWith('https://')
+      ? value
+      : 'http://$value';
+  final uri = Uri.tryParse(normalised);
+  if (uri == null) return false;
+  return (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty;
+}
+
+/// Same visual chrome as `channel_list_chrome.dart`'s `_DropdownFrame`
+/// (accent-ring-on-focus, `KeyRepeatEvent` swallowed so D-pad auto-repeat
+/// can't misbehave against the popup menu) reimplemented here rather than
+/// imported, since `channel_list_chrome.dart` is owned by a concurrent
+/// change. A future refactor should extract one shared widget.
+class _SourceKindFieldFrame extends StatefulWidget {
+  final Widget Function(FocusNode focusNode) builder;
+
+  const _SourceKindFieldFrame({required this.builder});
+
+  @override
+  State<_SourceKindFieldFrame> createState() => _SourceKindFieldFrameState();
+}
+
+class _SourceKindFieldFrameState extends State<_SourceKindFieldFrame> {
+  final FocusNode _node = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(_sync);
+  }
+
+  void _sync() {
+    if (mounted && _focused != _node.hasFocus) {
+      setState(() => _focused = _node.hasFocus);
+    }
+  }
+
+  @override
+  void dispose() {
+    _node.removeListener(_sync);
+    _node.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: _focused ? AppColors.panelHi : AppColors.panel,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        border: Border.all(
+          color: _focused ? AppColors.accent : AppColors.line,
+          width: _focused ? 2 : 1,
+        ),
+      ),
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: (_, event) => event is KeyRepeatEvent
+            ? KeyEventResult.handled
+            : KeyEventResult.ignored,
+        child: DropdownButtonHideUnderline(child: widget.builder(_node)),
+      ),
+    );
+  }
+}
+
 /// Add or edit a single source.
 class EditSourceScreen extends StatefulWidget {
   final SourceStore store;
@@ -805,6 +897,17 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
   late SourceKind _kind;
   late final TextEditingController _label;
   final Map<String, TextEditingController> _fields = {};
+
+  /// Field key → inline error message, cleared as soon as the user edits that
+  /// field again. Rendered directly under the offending [TvTextField] rather
+  /// than in a bottom SnackBar, so the problem is visible next to the field.
+  Map<String, String> _fieldErrors = const {};
+
+  /// True while `_save` is awaiting the M3U→Xtream conversion probe (a live
+  /// `player_api.php` request) or the store write, so the button can disable
+  /// itself and show a spinner instead of looking frozen — a second tap while
+  /// busy would fire a second concurrent probe.
+  bool _saving = false;
 
   @override
   void initState() {
@@ -842,7 +945,11 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       case SourceKind.xtream:
         return const [
           _FieldSpec('host', 'Host', hint: 'http://host:port'),
-          _FieldSpec('username', 'Username', obscure: true),
+          // Username isn't shoulder-surfing-sensitive the way a password is,
+          // and masking it makes a typo impossible to spot without a physical
+          // keyboard — the exact problem TvTextField's show/hide toggle exists
+          // to solve for fields that must stay masked. Leave it visible.
+          _FieldSpec('username', 'Username'),
           _FieldSpec('password', 'Password', obscure: true),
         ];
       case SourceKind.m3u:
@@ -860,32 +967,60 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     }
   }
 
-  Future<void> _save() async {
-    final specs = _specs(_kind);
+  /// Presence + light URL-format validation, reported per-field (see
+  /// [_fieldErrors]) rather than as a single bottom SnackBar for the first
+  /// failure. Returns the errors found; empty means the form is valid.
+  Map<String, String> _validate(List<_FieldSpec> specs) {
+    final errors = <String, String>{};
     for (final s in specs) {
-      if (s.required && _controller(s.key).text.trim().isEmpty) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('${s.label} is required')));
-        return;
+      final value = _controller(s.key).text.trim();
+      if (s.required && value.isEmpty) {
+        errors[s.key] = '${s.label} is required';
+        continue;
+      }
+      if (value.isNotEmpty &&
+          _urlFieldKeys.contains(s.key) &&
+          !_looksLikeValidUrl(value)) {
+        errors[s.key] = 'Enter a valid URL starting with http:// or https://';
       }
     }
-    final fields = <String, String>{
-      for (final s in specs) s.key: _controller(s.key).text.trim(),
-    };
-    final label = _label.text.trim().isEmpty ? _kind.name : _label.text.trim();
-    var config = SourceConfig(
-      id: widget.existing?.id ?? newSourceId(),
-      kind: _kind,
-      label: label,
-      fields: fields,
-    );
-    if (_kind == SourceKind.m3u) {
-      final converted = await _maybeConvertM3uToXtream(config);
-      if (converted != null) config = converted;
+    return errors;
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final specs = _specs(_kind);
+    final errors = _validate(specs);
+    if (errors.isNotEmpty) {
+      setState(() => _fieldErrors = errors);
+      return;
     }
-    await widget.store.save(config);
-    if (mounted) Navigator.of(context).pop(true);
+    setState(() {
+      _fieldErrors = const {};
+      _saving = true;
+    });
+    try {
+      final fields = <String, String>{
+        for (final s in specs) s.key: _controller(s.key).text.trim(),
+      };
+      final label = _label.text.trim().isEmpty
+          ? _kind.name
+          : _label.text.trim();
+      var config = SourceConfig(
+        id: widget.existing?.id ?? newSourceId(),
+        kind: _kind,
+        label: label,
+        fields: fields,
+      );
+      if (_kind == SourceKind.m3u) {
+        final converted = await _maybeConvertM3uToXtream(config);
+        if (converted != null) config = converted;
+      }
+      await widget.store.save(config);
+      if (mounted) Navigator.of(context).pop(true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   /// If the M3U playlist URL is really an Xtream panel (`get.php`) whose
@@ -927,64 +1062,104 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // New source: the Type selector picks the field set below it, so it
+    // should be the first stop — otherwise a TV user has to go Up from Label,
+    // cycle Type, then come back down past Label again. Editing an existing
+    // source keeps no autofocus, matching the previous behaviour.
+    final isNew = widget.existing == null;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.existing == null ? 'Add source' : 'Edit source'),
-      ),
+      appBar: AppBar(title: Text(isNew ? 'Add source' : 'Edit source')),
       // Edge-to-edge (targetSdk 35+): keep the form — and especially the Save
       // button at its end — clear of the system bar.
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            DropdownButtonFormField<SourceKind>(
-              initialValue: _kind,
-              decoration: const InputDecoration(labelText: 'Type'),
-              dropdownColor: AppColors.panelHi,
-              items: SourceKind.values
-                  .map(
-                    (k) => DropdownMenuItem(
-                      value: k,
-                      child: Row(
-                        children: [
-                          Icon(_kindIcon(k), size: 18, color: AppColors.textLo),
-                          const SizedBox(width: 10),
-                          Text(k.name.toUpperCase()),
-                        ],
-                      ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: kSettingsMaxContentWidth,
+            ),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                _SourceKindFieldFrame(
+                  builder: (focusNode) => DropdownButtonFormField<SourceKind>(
+                    focusNode: focusNode,
+                    autofocus: isNew,
+                    initialValue: _kind,
+                    isDense: true,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Type',
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      filled: false,
+                      isCollapsed: true,
                     ),
-                  )
-                  .toList(),
-              onChanged: (k) => setState(() => _kind = k ?? _kind),
+                    dropdownColor: AppColors.panelHi,
+                    borderRadius: BorderRadius.circular(AppRadius.control),
+                    items: SourceKind.values
+                        .map(
+                          (k) => DropdownMenuItem(
+                            value: k,
+                            child: Row(
+                              children: [
+                                Icon(
+                                  _kindIcon(k),
+                                  size: 18,
+                                  color: AppColors.textLo,
+                                ),
+                                const SizedBox(width: 10),
+                                Text(k.name.toUpperCase()),
+                              ],
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (k) => setState(() => _kind = k ?? _kind),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TvTextField(
+                  controller: _label,
+                  label: 'Label (optional)',
+                  hintText: 'e.g. Living room IPTV',
+                  textInputAction: TextInputAction.next,
+                ),
+                for (final s in _specs(_kind)) ...[
+                  const SizedBox(height: 16),
+                  TvTextField(
+                    controller: _controller(s.key),
+                    label: s.label,
+                    hintText: s.hint ?? '',
+                    obscureText: s.obscure,
+                    textInputAction: TextInputAction.next,
+                    errorText: _fieldErrors[s.key],
+                    onChanged: _fieldErrors.containsKey(s.key)
+                        ? (_) => setState(
+                            () =>
+                                _fieldErrors = {..._fieldErrors}..remove(s.key),
+                          )
+                        : null,
+                  ),
+                ],
+                const SizedBox(height: 28),
+                SizedBox(
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : _save,
+                    icon: _saving
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(_saving ? 'Saving' : 'Save source'),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 16),
-            TvTextField(
-              controller: _label,
-              label: 'Label (optional)',
-              hintText: 'e.g. Living room IPTV',
-              autofocus: widget.existing == null,
-              textInputAction: TextInputAction.next,
-            ),
-            for (final s in _specs(_kind)) ...[
-              const SizedBox(height: 16),
-              TvTextField(
-                controller: _controller(s.key),
-                label: s.label,
-                hintText: s.hint ?? '',
-                obscureText: s.obscure,
-                textInputAction: TextInputAction.next,
-              ),
-            ],
-            const SizedBox(height: 28),
-            SizedBox(
-              height: 48,
-              child: FilledButton(
-                onPressed: _save,
-                child: const Text('Save source'),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -1074,10 +1249,15 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
         ),
         actions: [
           TextButton(
+            // Autofocus the *non*-destructive action: on a D-pad an
+            // unfocused dialog swallows the first OK press entirely, so the
+            // user has to blind-hunt with arrows before anything responds.
+            autofocus: true,
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Clear'),
           ),
@@ -1103,10 +1283,15 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
         ),
         actions: [
           TextButton(
+            // Autofocus the *non*-destructive action: on a D-pad an
+            // unfocused dialog swallows the first OK press entirely, so the
+            // user has to blind-hunt with arrows before anything responds.
+            autofocus: true,
             onPressed: () => Navigator.pop(context, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Reset'),
           ),
@@ -1131,105 +1316,116 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
         top: false,
         child: _loading
             ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  Text(
-                    'Metadata provider',
-                    style: Theme.of(context).textTheme.titleMedium,
+            : Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    maxWidth: kSettingsMaxContentWidth,
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Pick the preferred poster/details provider. The other configured visual provider is used as fallback; MDBList adds ratings when possible.',
-                    style: TextStyle(color: AppColors.textLo),
-                  ),
-                  const SizedBox(height: 16),
-                  SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(value: 'tmdb', label: Text('TMDB')),
-                      ButtonSegment(value: 'tvdb', label: Text('TVDB')),
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      Text(
+                        'Metadata provider',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Pick the preferred poster/details provider. The other configured visual provider is used as fallback; MDBList adds ratings when possible.',
+                        style: TextStyle(color: AppColors.textLo),
+                      ),
+                      const SizedBox(height: 16),
+                      SegmentedButton<String>(
+                        segments: const [
+                          ButtonSegment(value: 'tmdb', label: Text('TMDB')),
+                          ButtonSegment(value: 'tvdb', label: Text('TVDB')),
+                        ],
+                        selected: {_provider},
+                        onSelectionChanged: (value) =>
+                            setState(() => _provider = value.first),
+                      ),
+                      const SizedBox(height: 16),
+                      TvTextField(
+                        controller: _tmdb,
+                        label: 'TMDB API credential',
+                        hintText: 'Paste a v3 API key or v4 Read Access Token',
+                        obscureText: true,
+                        autofocus: true,
+                        textInputAction: TextInputAction.next,
+                      ),
+                      const SizedBox(height: 12),
+                      TvTextField(
+                        controller: _tvdb,
+                        label: 'TVDB API key',
+                        hintText:
+                            'Used as preferred or fallback visual provider',
+                        obscureText: true,
+                        textInputAction: TextInputAction.next,
+                      ),
+                      const SizedBox(height: 12),
+                      TvTextField(
+                        controller: _tvdbPin,
+                        label: 'TVDB PIN',
+                        hintText: 'Optional user-supported key PIN',
+                        obscureText: true,
+                        textInputAction: TextInputAction.next,
+                      ),
+                      const SizedBox(height: 12),
+                      TvTextField(
+                        controller: _mdblist,
+                        label: 'MDBList API key',
+                        hintText: 'Optional ratings enrichment',
+                        obscureText: true,
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => _save(),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Changes apply after returning to the library.',
+                        style: TextStyle(color: AppColors.textLo, fontSize: 12),
+                      ),
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        value: _autoEnrich,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Auto-enrich loaded lists'),
+                        subtitle: const Text(
+                          'Fetch metadata in the background after movies or series load.',
+                          style: TextStyle(color: AppColors.textLo),
+                        ),
+                        onChanged: (value) =>
+                            setState(() => _autoEnrich = value),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _clearMetadataCache,
+                        icon: const Icon(Icons.delete_sweep_outlined),
+                        label: const Text('Clear metadata cache'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _resetMetadataAndDisplay,
+                        icon: const Icon(Icons.restore_outlined),
+                        label: const Text('Reset enriched display'),
+                      ),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        height: 48,
+                        child: FilledButton.icon(
+                          onPressed: _saving ? null : _save,
+                          icon: _saving
+                              ? const SizedBox.square(
+                                  dimension: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.save_outlined),
+                          label: Text(_saving ? 'Saving' : 'Save'),
+                        ),
+                      ),
                     ],
-                    selected: {_provider},
-                    onSelectionChanged: (value) =>
-                        setState(() => _provider = value.first),
                   ),
-                  const SizedBox(height: 16),
-                  TvTextField(
-                    controller: _tmdb,
-                    label: 'TMDB API credential',
-                    hintText: 'Paste a v3 API key or v4 Read Access Token',
-                    obscureText: true,
-                    autofocus: true,
-                    textInputAction: TextInputAction.next,
-                  ),
-                  const SizedBox(height: 12),
-                  TvTextField(
-                    controller: _tvdb,
-                    label: 'TVDB API key',
-                    hintText: 'Used as preferred or fallback visual provider',
-                    obscureText: true,
-                    textInputAction: TextInputAction.next,
-                  ),
-                  const SizedBox(height: 12),
-                  TvTextField(
-                    controller: _tvdbPin,
-                    label: 'TVDB PIN',
-                    hintText: 'Optional user-supported key PIN',
-                    obscureText: true,
-                    textInputAction: TextInputAction.next,
-                  ),
-                  const SizedBox(height: 12),
-                  TvTextField(
-                    controller: _mdblist,
-                    label: 'MDBList API key',
-                    hintText: 'Optional ratings enrichment',
-                    obscureText: true,
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) => _save(),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Changes apply after returning to the library.',
-                    style: TextStyle(color: AppColors.textLo, fontSize: 12),
-                  ),
-                  const SizedBox(height: 16),
-                  SwitchListTile(
-                    value: _autoEnrich,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Auto-enrich loaded lists'),
-                    subtitle: const Text(
-                      'Fetch metadata in the background after movies or series load.',
-                      style: TextStyle(color: AppColors.textLo),
-                    ),
-                    onChanged: (value) => setState(() => _autoEnrich = value),
-                  ),
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed: _clearMetadataCache,
-                    icon: const Icon(Icons.delete_sweep_outlined),
-                    label: const Text('Clear metadata cache'),
-                  ),
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed: _resetMetadataAndDisplay,
-                    icon: const Icon(Icons.restore_outlined),
-                    label: const Text('Reset enriched display'),
-                  ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    height: 48,
-                    child: FilledButton.icon(
-                      onPressed: _saving ? null : _save,
-                      icon: _saving
-                          ? const SizedBox.square(
-                              dimension: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.save_outlined),
-                      label: Text(_saving ? 'Saving' : 'Save'),
-                    ),
-                  ),
-                ],
+                ),
               ),
       ),
     );

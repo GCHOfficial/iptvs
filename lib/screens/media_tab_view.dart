@@ -1,7 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 
@@ -12,6 +12,7 @@ import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
+import '../widgets/routed_focus_node.dart';
 import '../data/app_database.dart' show PlaybackPosition;
 import 'media_tab_controller.dart' show ContinueWatchingEntry;
 
@@ -26,13 +27,35 @@ String _positionLabel(Duration position) {
       : '$minutes:${two(seconds)}';
 }
 
-/// Grid density for poster catalogues. Android's TV render targets commonly
-/// expose a desktop-sized logical viewport, so the old fixed 4/6-column rule
-/// produced enormous cards and only one or two visible rows. Compact mode uses
-/// a bounded target card width instead, while desktop keeps its established
-/// breakpoints.
+/// Grid density for poster catalogues.
+///
+/// One continuous ladder for every platform: the column count is the viewport
+/// width divided by [kMediaPosterTargetWidth], so a tile stays in a ~176–230 px
+/// band from a 600 px window to a 4K TV. It replaced a two-branch rule
+/// (`width >= 1280 ? 6 : 4`, forked on `defaultTargetPlatform == android`) with
+/// no height input and no upper bound, under which a 1279 px window drew 303 px
+/// tiles, a 3840 px one drew ~628 px posters with 1.2 rows on screen, and an
+/// Android tablet showed 7 columns where an iPad of the same width showed 6 for
+/// no user-visible reason. The ladder reproduces the Android TV column counts
+/// the platform fork was introduced for (960 → 5, 1920 → 10) and the desktop
+/// 1280 → 6 exactly, so the fork bought nothing but the divergence; only its
+/// tighter gutters survive, keyed off viewport size rather than the platform.
 @immutable
 class MediaGridMetrics {
+  /// [_MediaGridTile]'s own inner padding, each side.
+  static const double tilePadding = 10;
+
+  /// Resting border width [FocusableCard] draws on each side (a focused card
+  /// draws 2, which the `Expanded` poster absorbs).
+  static const double tileBorder = 1;
+
+  /// Gap between a tile's poster and its text block.
+  static const double posterTextGap = 8;
+
+  /// Posters are 2:3 — the shape TMDB and every provider panel ships, so a
+  /// tile at this ratio crops nothing.
+  static const double posterAspectRatio = 2 / 3;
+
   final int columns;
   final double spacing;
   final EdgeInsets padding;
@@ -43,20 +66,94 @@ class MediaGridMetrics {
     required this.padding,
   });
 
-  factory MediaGridMetrics.forWidth(double width, {bool compact = false}) {
-    if (!compact) {
-      return MediaGridMetrics._(
-        columns: width >= 1280 ? 6 : 4,
-        spacing: 12,
-        padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
-      );
-    }
+  /// [viewport] is the **window** ([MediaQuery.sizeOf]), never a
+  /// `LayoutBuilder`'s post-`SafeArea` constraints — see theme.dart's
+  /// breakpoint note and docs/tv-navigation.md.
+  factory MediaGridMetrics.forSize(Size viewport) {
+    final columns = (viewport.width / kMediaPosterTargetWidth).round().clamp(
+      3,
+      16,
+    );
+    // A dense viewport (TV render targets at 960x540, phones, small windows)
+    // gets tighter gutters so the extra pixels go to the artwork. This is the
+    // only thing left of the old `compact` platform fork.
+    final dense = viewport.shortestSide < 1000;
     return MediaGridMetrics._(
-      columns: (width / 180).floor().clamp(5, 10),
-      spacing: 8,
-      padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+      columns: columns,
+      spacing: dense ? 8 : 12,
+      padding: dense
+          ? const EdgeInsets.fromLTRB(10, 4, 10, 12)
+          : const EdgeInsets.fromLTRB(16, 6, 16, 20),
     );
   }
+
+  double get crossAxisSpacing => spacing;
+
+  /// [FocusableCard] pads itself vertically, so a naive
+  /// `mainAxisSpacing == spacing` produced a `spacing + 8` vertical gutter
+  /// against a `spacing` horizontal one — visibly lopsided. Subtract it back
+  /// out so both gutters measure [spacing].
+  double get mainAxisSpacing =>
+      math.max(0.0, spacing - kFocusableCardVerticalPadding * 2);
+
+  /// Width of one tile when the grid is laid out in [availableWidth] — the
+  /// same arithmetic `SliverGridDelegateWithFixedCrossAxisCount` does, needed
+  /// here because [childAspectRatio] depends on the absolute tile width.
+  double tileWidth(double availableWidth) =>
+      (availableWidth - padding.horizontal - crossAxisSpacing * (columns - 1)) /
+      columns;
+
+  /// Cell aspect that leaves the poster exactly [posterAspectRatio] once
+  /// [textBudget] logical pixels are reserved for the title/year/hint block.
+  ///
+  /// The tile used to be `Expanded(poster)` over a text block that varied by
+  /// up to ~58 px (1 vs 2 title lines, optional year, optional source hints),
+  /// so `Expanded` handed every poster a different remainder and the box
+  /// aspect ranged 0.70–0.92. With `memCacheWidth`-only decoding restoring real
+  /// `BoxFit.cover` cropping, that showed up as neighbouring tiles cropping the
+  /// *same* poster differently. Reserving the budget (rather than letting it
+  /// float) also keeps a large accessibility text scale from eating the poster:
+  /// the tile grows taller instead.
+  double childAspectRatio({
+    required double tileWidth,
+    required double textBudget,
+  }) {
+    final posterWidth = tileWidth - (tilePadding + tileBorder) * 2;
+    if (posterWidth <= 0) return 0.64;
+    final tileHeight =
+        posterWidth / posterAspectRatio +
+        posterTextGap +
+        textBudget +
+        (tilePadding + tileBorder) * 2 +
+        kFocusableCardVerticalPadding * 2;
+    return (tileWidth / tileHeight).clamp(0.2, 2.0);
+  }
+}
+
+/// Vertical space a grid tile reserves under its poster: two title lines, a
+/// year line, and one row of source-hint chips, at the current text scale.
+///
+/// Deliberately reserves the *maximum* a tile can render rather than measuring
+/// each item: the reservation has to be identical for every cell (the grid has
+/// one `childAspectRatio`), and probing `sourceHintLabels` across the visible
+/// list to find out whether any tile needs the chip row would re-run its regex
+/// pass on every build. Text scaling is intentionally not overridden anywhere
+/// in this app, so the budget is derived from `MediaQuery.textScalerOf`.
+double mediaTileTextBudget(BuildContext context) {
+  final scaler = MediaQuery.textScalerOf(context);
+  final titleStyle = Theme.of(context).textTheme.titleSmall;
+  // 1.35 stands in for an unset `TextStyle.height` (the font's own metrics);
+  // erring high only leaves slack at the bottom of the fixed text box, while
+  // erring low would clip.
+  final titleLine =
+      scaler.scale(titleStyle?.fontSize ?? 14) * (titleStyle?.height ?? 1.35);
+  final yearLine = scaler.scale(12) * 1.35;
+  final hintRow =
+      scaler.scale(10) * 1.35 +
+      4 + // chip vertical padding
+      2 + // chip border
+      5; // gap above the chip row
+  return titleLine * 2 + yearLine + hintRow;
 }
 
 /// The movies/series browsing body: the grid/list of [MediaItem]s with paging,
@@ -108,6 +205,13 @@ class MediaTabView extends StatelessWidget {
   final ValueChanged<MediaItem> onResume;
   final ValueChanged<ContinueWatchingEntry> onRemoveContinueWatching;
 
+  /// Puts back an entry [onRemoveContinueWatching] just dropped — the Undo
+  /// action of the confirmation snackbar. **Optional on purpose:** when it is
+  /// null the snackbar still reports the removal, just without an Undo, so the
+  /// view stays usable before the callback is wired up by the owning screen
+  /// (`MediaTabController.restoreContinueWatching`).
+  final ValueChanged<ContinueWatchingEntry>? onRestoreContinueWatching;
+
   const MediaTabView({
     super.key,
     required this.kind,
@@ -128,7 +232,32 @@ class MediaTabView extends StatelessWidget {
     this.continueWatching = const [],
     required this.onResume,
     required this.onRemoveContinueWatching,
+    this.onRestoreContinueWatching,
   });
+
+  /// Removes an entry and offers an Undo. The removal itself is destructive
+  /// (it deletes the saved resume position), the control sits directly under a
+  /// tile whose tap starts playback, and the entry object is already in hand —
+  /// so re-writing the position costs nothing and the confirmation is worth
+  /// the snackbar.
+  void _removeContinueWatching(
+    BuildContext context,
+    ContinueWatchingEntry entry,
+  ) {
+    onRemoveContinueWatching(entry);
+    final restore = onRestoreContinueWatching;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Removed “${entry.item.title}” from Continue watching'),
+          duration: const Duration(seconds: 6),
+          action: restore == null
+              ? null
+              : SnackBarAction(label: 'Undo', onPressed: () => restore(entry)),
+        ),
+      );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -145,7 +274,7 @@ class MediaTabView extends StatelessWidget {
             child: _ContinueWatchingRail(
               entries: continueWatching,
               onResume: onResume,
-              onRemove: onRemoveContinueWatching,
+              onRemove: (entry) => _removeContinueWatching(context, entry),
             ),
           )
         : null;
@@ -163,9 +292,19 @@ class MediaTabView extends StatelessWidget {
 
     final showLoadMore =
         !showingSearch && (loadingMore || snapshot?.hasMore == true);
+    // Two-dimensional, and measured against the **window** rather than this
+    // body's own (SafeArea-shrunk) constraints — see theme.dart's breakpoint
+    // note. Height matters as much as width: with a width-only rule an iPad in
+    // portrait got the grid and in landscape the list, flipping layout on every
+    // rotation; a 900x400 landscape phone has room for list rows but not for a
+    // poster grid.
+    final windowSize = MediaQuery.sizeOf(context);
+    final useGrid =
+        windowSize.width >= kMediaGridMinWidth &&
+        windowSize.height >= kMediaGridMinHeight;
+    final textBudget = mediaTileTextBudget(context);
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 860;
         final hasLastVisible =
             lastPlayedId != null &&
             visible.any((media) => media.id == lastPlayedId);
@@ -174,7 +313,7 @@ class MediaTabView extends StatelessWidget {
             : (i == 0 ? firstFocusNode : null);
         bool autofocusFor(int i) =>
             hasLastVisible ? visible[i].id == lastPlayedId : i == 0;
-        if (!wide) {
+        if (!useGrid) {
           return CustomScrollView(
             controller: scrollController,
             scrollCacheExtent: const ScrollCacheExtent.pixels(800),
@@ -207,10 +346,12 @@ class MediaTabView extends StatelessWidget {
             ],
           );
         }
-        final grid = MediaGridMetrics.forWidth(
-          constraints.maxWidth,
-          compact: defaultTargetPlatform == TargetPlatform.android,
-        );
+        final grid = MediaGridMetrics.forSize(windowSize);
+        // Deliberately still a fixed-cross-axis-count lattice: Flutter's
+        // directional traversal walks a regular grid predictably, and
+        // `SliverGridDelegateWithMaxCrossAxisExtent` can't express the
+        // per-width `childAspectRatio` the fixed poster/text split needs.
+        final tileWidth = grid.tileWidth(constraints.maxWidth);
         return CustomScrollView(
           controller: scrollController,
           scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
@@ -221,9 +362,12 @@ class MediaTabView extends StatelessWidget {
               sliver: SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: grid.columns,
-                  crossAxisSpacing: grid.spacing,
-                  mainAxisSpacing: grid.spacing,
-                  childAspectRatio: 0.64,
+                  crossAxisSpacing: grid.crossAxisSpacing,
+                  mainAxisSpacing: grid.mainAxisSpacing,
+                  childAspectRatio: grid.childAspectRatio(
+                    tileWidth: tileWidth,
+                    textBudget: textBudget,
+                  ),
                 ),
                 delegate: SliverChildBuilderDelegate((context, i) {
                   if (i == visible.length) {
@@ -240,6 +384,7 @@ class MediaTabView extends StatelessWidget {
                     total: visible.length,
                     autofocus: autofocusFor(i),
                     focusNode: focusNodeFor(i),
+                    textBudget: textBudget,
                     onTap: () => onOpenMedia(visible[i]),
                   );
                 }, childCount: visible.length + (showLoadMore ? 1 : 0)),
@@ -354,7 +499,11 @@ class _ContinueWatchingRail extends StatelessWidget {
             // against the screen, so it can never itself overflow a short
             // viewport (phone landscape). It scrolls away with the rest of
             // the tab content.
-            height: 224,
+            //
+            // Derived from the text scale rather than hard-coded: the three
+            // text runs grow ~13 px at Android's "Large" (1.3x) and more at the
+            // accessibility sizes above it, which a fixed 224 could not absorb.
+            height: _ContinueWatchingTile.height(context),
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -379,6 +528,34 @@ class _ContinueWatchingTile extends StatelessWidget {
   // box (the old design) zoomed in hard and made compression noise obvious.
   static const double _width = 224.0;
   static const double _thumbHeight = 126.0;
+
+  static const double _titleFontSize = 13.0;
+  static const double _titleHeight = 1.2;
+  static const double _subtitleFontSize = 11.0;
+
+  /// Natural height of one rail tile: the thumbnail, the two text runs, and
+  /// the Remove row below the card, at the current text scale. The rail's
+  /// `ListView` hands its children a *tight* cross-axis extent, so this has to
+  /// cover the tallest content the tile can produce or the tile overflows.
+  ///
+  /// The 1.35 factors stand in for the unset `TextStyle.height` of the
+  /// subtitle/Remove runs; erring high leaves slack under the tile, erring low
+  /// overflows it.
+  static double height(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final title = scaler.scale(_titleFontSize) * _titleHeight;
+    final subtitle = scaler.scale(_subtitleFontSize) * 1.35;
+    return _thumbHeight +
+        6 + // thumbnail → title
+        title +
+        2 + // title → subtitle
+        subtitle +
+        10 + // breathing room above the card's bottom border
+        kFocusableCardVerticalPadding * 2 +
+        2 + // card border
+        4 + // card → Remove row
+        _RemoveButton.height(context);
+  }
 
   final ContinueWatchingEntry entry;
   final VoidCallback onTap;
@@ -522,7 +699,7 @@ class _ContinueWatchingTile extends StatelessWidget {
           // like moving between adjacent cards in the row.
           Padding(
             padding: const EdgeInsets.only(top: 4, left: 2),
-            child: _RemoveButton(onPressed: onRemove),
+            child: _RemoveButton(onPressed: onRemove, itemTitle: item.title),
           ),
         ],
       ),
@@ -536,7 +713,32 @@ class _ContinueWatchingTile extends StatelessWidget {
 class _RemoveButton extends StatefulWidget {
   final VoidCallback onPressed;
 
-  const _RemoveButton({required this.onPressed});
+  /// Title of the entry this removes, so the control announces what it acts
+  /// on instead of a bare "Remove".
+  final String itemTitle;
+
+  /// Font size of the "Remove" label, shared with [height].
+  static const double _labelFontSize = 11;
+
+  /// Minimum tap target. The visible chip is deliberately much smaller — it
+  /// sits under a poster thumb — but this is a destructive control directly
+  /// below a tile whose tap starts playback, so the *hit* area is padded out.
+  static const double _minTapTarget = 44;
+
+  /// Height one of these occupies, for [_ContinueWatchingTile.height]'s rail
+  /// sizing. Normally the flat [_minTapTarget], but the chip's own content is
+  /// measured too so an extreme accessibility text scale grows the rail
+  /// instead of overflowing it.
+  static double height(BuildContext context) {
+    final label = MediaQuery.textScalerOf(context).scale(_labelFontSize) * 1.35;
+    final chip =
+        label +
+        3 * 2 + // vertical padding
+        2; // focus border
+    return math.max(_minTapTarget, chip);
+  }
+
+  const _RemoveButton({required this.onPressed, required this.itemTitle});
 
   @override
   State<_RemoveButton> createState() => _RemoveButtonState();
@@ -545,49 +747,77 @@ class _RemoveButton extends StatefulWidget {
 class _RemoveButtonState extends State<_RemoveButton> {
   bool _focused = false;
 
+  // A plain `FocusableActionDetector` node carries no route key, so the root
+  // Back ladder read `''` here and fell through to the exit prompt.
+  late final FocusNode _focusNode = RoutedFocusNode('media.continue.remove');
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return FocusableActionDetector(
-      mouseCursor: SystemMouseCursors.click,
-      onShowFocusHighlight: (v) {
-        if (mounted) setState(() => _focused = v);
-      },
-      actions: {
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            widget.onPressed();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        onTap: widget.onPressed,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-          decoration: BoxDecoration(
-            color: _focused ? AppColors.panelHi : Colors.transparent,
-            borderRadius: BorderRadius.circular(6),
-            border: _focused ? Border.all(color: AppColors.accent) : null,
+    return Semantics(
+      button: true,
+      label: 'Remove ${widget.itemTitle} from Continue watching',
+      child: FocusableActionDetector(
+        focusNode: _focusNode,
+        mouseCursor: SystemMouseCursors.click,
+        onShowFocusHighlight: (v) {
+          if (mounted) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              widget.onPressed();
+              return null;
+            },
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.close_rounded,
-                size: 13,
-                color: _focused ? AppColors.accent : AppColors.textLo,
-              ),
-              const SizedBox(width: 4),
-              Text(
-                'Remove',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: _focused ? AppColors.accent : AppColors.textLo,
+        },
+        child: GestureDetector(
+          onTap: widget.onPressed,
+          // The visual chip stays small (it sits under a poster thumb), but
+          // the *hit* area is padded out to the 44px minimum — this is a
+          // destructive control immediately below a tile whose tap starts
+          // playback, so a mis-tap here is expensive. `behavior: opaque`
+          // makes the transparent padding hit-testable. This adds no focus
+          // stop: the SizedBox is inside the existing detector.
+          behavior: HitTestBehavior.opaque,
+          child: SizedBox(
+            height: _RemoveButton._minTapTarget,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: AnimatedContainer(
+                duration: appMotion(context, const Duration(milliseconds: 120)),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: _focused ? AppColors.panelHi : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
+                  border: _focused ? Border.all(color: AppColors.accent) : null,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.close_rounded,
+                      size: 13,
+                      color: _focused ? AppColors.accent : AppColors.textLo,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Remove',
+                      style: TextStyle(
+                        fontSize: _RemoveButton._labelFontSize,
+                        fontWeight: FontWeight.w600,
+                        color: _focused ? AppColors.accent : AppColors.textLo,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -638,8 +868,11 @@ class _Thumb extends StatelessWidget {
         width: width,
         height: height,
         fit: BoxFit.cover,
+        // Width only — see [imageCacheSize]. Passing both dimensions decodes
+        // the bitmap pre-distorted to this box's 16:9, which matters most
+        // here: when a title has no backdrop this falls back to the *poster*,
+        // and squashing 2:3 into 16:9 makes the entry unrecognisable.
         memCacheWidth: imageCacheSize(context, width),
-        memCacheHeight: imageCacheSize(context, height),
         errorWidget: (_, _, _) => fallback,
         placeholder: (_, _) => fallback,
       ),
@@ -761,6 +994,14 @@ class _MediaGridTile extends StatelessWidget {
   final int total;
   final bool autofocus;
   final FocusNode? focusNode;
+
+  /// Fixed height reserved for the text under the poster
+  /// ([mediaTileTextBudget]) — the same value the grid's `childAspectRatio`
+  /// was computed from, so the `Expanded` poster above it lands on
+  /// [MediaGridMetrics.posterAspectRatio] in *every* cell instead of varying
+  /// with how much text each item happens to carry.
+  final double textBudget;
+
   final VoidCallback onTap;
 
   const _MediaGridTile({
@@ -770,6 +1011,7 @@ class _MediaGridTile extends StatelessWidget {
     required this.total,
     required this.autofocus,
     this.focusNode,
+    required this.textBudget,
     required this.onTap,
   });
 
@@ -787,7 +1029,7 @@ class _MediaGridTile extends StatelessWidget {
       ].join(', '),
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(MediaGridMetrics.tilePadding),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -837,25 +1079,50 @@ class _MediaGridTile extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              item.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            if (item.year != null)
-              Text(
-                item.year!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            const SizedBox(height: MediaGridMetrics.posterTextGap),
+            // Fixed-height text block. `OverflowBox` + `ClipRect` rather than a
+            // bare `SizedBox`: the budget is an estimate built from font
+            // metrics, and a font whose real line height runs a hair taller
+            // than the estimate must clip quietly instead of throwing a
+            // RenderFlex overflow across every tile in the catalogue.
+            SizedBox(
+              width: double.infinity,
+              height: textBudget,
+              child: ClipRect(
+                child: OverflowBox(
+                  alignment: Alignment.topLeft,
+                  minHeight: 0,
+                  maxHeight: double.infinity,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      if (item.year != null)
+                        Text(
+                          item.year!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
+                        ),
+                      if (sourceHintLabels(item) case final hints
+                          when hints.isNotEmpty) ...[
+                        const SizedBox(height: 5),
+                        _SourceHints(hints: hints, compact: true),
+                      ],
+                    ],
+                  ),
+                ),
               ),
-            if (sourceHintLabels(item) case final hints
-                when hints.isNotEmpty) ...[
-              const SizedBox(height: 5),
-              _SourceHints(hints: hints, compact: true),
-            ],
+            ),
           ],
         ),
       ),
@@ -942,7 +1209,7 @@ class _RatingBadge extends StatelessWidget {
   }
 }
 
-class _MediaLoadMoreTile extends StatelessWidget {
+class _MediaLoadMoreTile extends StatefulWidget {
   final MediaLibrarySnapshot? snapshot;
   final bool loading;
   final VoidCallback onPressed;
@@ -954,14 +1221,33 @@ class _MediaLoadMoreTile extends StatelessWidget {
   });
 
   @override
+  State<_MediaLoadMoreTile> createState() => _MediaLoadMoreTileState();
+}
+
+class _MediaLoadMoreTileState extends State<_MediaLoadMoreTile> {
+  // Stateful purely to own this node: a plain `FilledButton` focus node
+  // carries no route key, so the root Back ladder read `''` from it and fell
+  // through to the exit prompt instead of climbing to the tabs.
+  late final FocusNode _focusNode = RoutedFocusNode('media.loadMore');
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final snapshot = widget.snapshot;
+    final loading = widget.loading;
     final canLoad = snapshot?.hasMore == true;
-    final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
+    final nextPage = snapshot == null ? null : snapshot.loadedPages + 1;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Center(
         child: FilledButton.icon(
-          onPressed: canLoad && !loading ? onPressed : null,
+          focusNode: _focusNode,
+          onPressed: canLoad && !loading ? widget.onPressed : null,
           icon: loading
               ? const SizedBox.square(
                   dimension: 18,
@@ -1000,6 +1286,11 @@ class _MediaLoadMoreCard extends StatelessWidget {
     final nextPage = snapshot == null ? null : snapshot!.loadedPages + 1;
     return FocusableCard(
       autofocus: false,
+      // Without an explicit label this minted the route key `FocusableCard`,
+      // which is non-empty and not `media.`-prefixed — so the root Back ladder
+      // matched neither its `media.` rung nor its empty-label recovery, and
+      // Back from the end of the grid dropped straight to the exit prompt.
+      debugLabel: 'media.loadMore',
       onTap: canLoad && !loading ? onPressed : () {},
       child: Center(
         child: Column(
@@ -1079,8 +1370,13 @@ class _Poster extends StatelessWidget {
             width: renderedWidth,
             height: renderedHeight,
             fit: BoxFit.cover,
+            // Width only — see [imageCacheSize]. Decoding to both dimensions
+            // selects `ResizeImagePolicy.exact`, which is `BoxFit.fill` at
+            // decode time and leaves the `BoxFit.cover` below nothing to crop.
+            // The tile's box aspect is fixed now (see
+            // [MediaGridMetrics.childAspectRatio]), so the stretch would be
+            // uniform rather than per-tile — still wrong, just less obviously.
             memCacheWidth: imageCacheSize(context, renderedWidth),
-            memCacheHeight: imageCacheSize(context, renderedHeight),
             errorWidget: (_, _, _) => fallback,
             placeholder: (_, _) => fallback,
           ),
@@ -1520,99 +1816,110 @@ class _SeriesBrowser extends StatelessWidget {
                         style: const TextStyle(color: AppColors.textLo),
                       ),
                 children: [
-                  FutureBuilder<List<MediaItem>>(
-                    future: episodesFor(seasons[i]),
-                    builder: (context, episodeSnapshot) {
-                      if (episodeSnapshot.connectionState !=
-                          ConnectionState.done) {
-                        return const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: LinearProgressIndicator(minHeight: 2),
-                        );
-                      }
-                      if (episodeSnapshot.hasError) {
-                        return Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            'Could not load episodes: ${episodeSnapshot.error}',
-                            style: const TextStyle(color: AppColors.textLo),
-                          ),
-                        );
-                      }
-                      final episodes =
-                          episodeSnapshot.data ?? const <MediaItem>[];
-                      if (episodes.isEmpty) {
-                        return const Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            'No episodes found',
-                            style: TextStyle(color: AppColors.textLo),
-                          ),
-                        );
-                      }
-                      return Column(
-                        children: [
-                          // FocusableCard (not ListTile) — the series browser
-                          // was the only browsing surface without the app's
-                          // accent D-pad focus ring; season headers stay
-                          // ExpansionTile (see the doc comment above on why
-                          // that one isn't wrapped).
-                          for (final episode in episodes)
-                            FocusableCard(
-                              debugLabel: 'media.episode.${episode.id}',
-                              semanticsLabel: _episodeSemanticsLabel(episode),
-                              onTap: () => onPlayEpisode(episode),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 4,
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.play_arrow_rounded,
-                                      color: AppColors.accent,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            episode.episodeNumber == null
-                                                ? episode.title
-                                                : '${episode.episodeNumber}. ${episode.title}',
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: Theme.of(
-                                              context,
-                                            ).textTheme.bodyLarge,
-                                          ),
-                                          if (episode.description !=
-                                              null) ...[
-                                            const SizedBox(height: 2),
-                                            Text(
-                                              episode.description!,
-                                              maxLines: 2,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                color: AppColors.textLo,
-                                                fontSize: 12,
-                                              ),
-                                            ),
-                                          ],
-                                        ],
+                  // The future is created inside a `Builder` so it only fires
+                  // when this season's subtree is actually mounted. A closed
+                  // `ExpansionTile` drops its children (there is no
+                  // `maintainState` here), but the `children:` *list* is still
+                  // constructed on every build of the browser — so calling
+                  // `episodesFor` directly at this point fired one provider
+                  // catalog request per season the instant the sheet opened,
+                  // which on a long-running series meant a dozen-plus
+                  // concurrent requests nobody asked for.
+                  Builder(
+                    builder: (context) => FutureBuilder<List<MediaItem>>(
+                      future: episodesFor(seasons[i]),
+                      builder: (context, episodeSnapshot) {
+                        if (episodeSnapshot.connectionState !=
+                            ConnectionState.done) {
+                          return const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: LinearProgressIndicator(minHeight: 2),
+                          );
+                        }
+                        if (episodeSnapshot.hasError) {
+                          return Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Could not load episodes: ${episodeSnapshot.error}',
+                              style: const TextStyle(color: AppColors.textLo),
+                            ),
+                          );
+                        }
+                        final episodes =
+                            episodeSnapshot.data ?? const <MediaItem>[];
+                        if (episodes.isEmpty) {
+                          return const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'No episodes found',
+                              style: TextStyle(color: AppColors.textLo),
+                            ),
+                          );
+                        }
+                        return Column(
+                          children: [
+                            // FocusableCard (not ListTile) — the series browser
+                            // was the only browsing surface without the app's
+                            // accent D-pad focus ring; season headers stay
+                            // ExpansionTile (see the doc comment above on why
+                            // that one isn't wrapped).
+                            for (final episode in episodes)
+                              FocusableCard(
+                                debugLabel: 'media.episode.${episode.id}',
+                                semanticsLabel: _episodeSemanticsLabel(episode),
+                                onTap: () => onPlayEpisode(episode),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 4,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.play_arrow_rounded,
+                                        color: AppColors.accent,
                                       ),
-                                    ),
-                                  ],
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              episode.episodeNumber == null
+                                                  ? episode.title
+                                                  : '${episode.episodeNumber}. ${episode.title}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(
+                                                context,
+                                              ).textTheme.bodyLarge,
+                                            ),
+                                            if (episode.description !=
+                                                null) ...[
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                episode.description!,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  color: AppColors.textLo,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
-                      );
-                    },
+                          ],
+                        );
+                      },
+                    ),
                   ),
                 ],
               ),

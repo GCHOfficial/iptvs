@@ -219,7 +219,13 @@ fun PlayerScreen(
                         state = state,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(top = 84.dp, end = PlayerDimens.EdgePadding),
+                            // The 84dp clears the top bar; on TV that bar grows by
+                            // the overscan inset, so the panel has to follow it
+                            // down or it opens *inside* the bar.
+                            .padding(
+                                top = 84.dp + PlayerDimens.edgeExtraVertical(state.isTv),
+                                end = PlayerDimens.edgePadding(state.isTv),
+                            ),
                     )
                 }
             }
@@ -269,13 +275,23 @@ private fun TopBar(
 ) {
     // Same breakpoint as the bottom bar: below ~560dp (phone portrait) the badge
     // cluster would squeeze the title to nothing, so it wraps onto its own row.
+    // On a TV the edge inset widens and the *outer* (top) vertical inset grows:
+    // `safeDrawingPadding()` reports zero insets there, so nothing else keeps the
+    // chrome off the physical panel edge. See `PlayerDimens.TvEdgePadding`.
+    val edge = PlayerDimens.edgePadding(state.isTv)
+    val outerVertical = PlayerDimens.edgeExtraVertical(state.isTv)
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val compact = maxWidth < 560.dp
         if (compact) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 12.dp),
+                    .padding(
+                        start = edge,
+                        end = edge,
+                        top = 12.dp + outerVertical,
+                        bottom = 12.dp,
+                    ),
             ) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -311,7 +327,12 @@ private fun TopBar(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = PlayerDimens.EdgePadding, vertical = 16.dp),
+                    .padding(
+                        start = edge,
+                        end = edge,
+                        top = 16.dp + outerVertical,
+                        bottom = 16.dp,
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconControlButton(
@@ -365,7 +386,14 @@ private fun BottomBar(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = PlayerDimens.EdgePadding, vertical = 18.dp),
+            // TV overscan: wider sides, and the extra goes on the *bottom* only —
+            // that's the physical edge here. See `PlayerDimens.TvEdgePadding`.
+            .padding(
+                start = PlayerDimens.edgePadding(state.isTv),
+                end = PlayerDimens.edgePadding(state.isTv),
+                top = 18.dp,
+                bottom = 18.dp + PlayerDimens.edgeExtraVertical(state.isTv),
+            ),
     ) {
         if (!state.isLive) {
             Scrubber(state, callbacks, onInteract)

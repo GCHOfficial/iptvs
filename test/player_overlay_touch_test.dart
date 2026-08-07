@@ -70,6 +70,7 @@ void main() {
               touch: touch,
               title: 'Channel One',
               sourceName: sourceName,
+              aspectLabel: 'Fill',
               epgNow: epgNow,
               epgNext: epgNext,
               isLive: isLive,
@@ -306,6 +307,12 @@ void main() {
           tracks: Tracks(
             video: [VideoTrack('1', null, null, codec: 'hevc', fps: 50)],
             audio: [AudioTrack('1', null, 'eng'), AudioTrack('2', null, 'fra')],
+            // A real subtitle track, because the subtitle button is now gated
+            // on one existing (most live IPTV channels carry none, and the
+            // button used to open a menu holding only the synthetic
+            // Auto/Off). This test measures the *widest* cluster, so it has
+            // to be the case where every optional control is present.
+            subtitle: [SubtitleTrack('3', null, 'eng')],
           ),
         ),
         dynamicRangeLabel: (_) => 'HDR10 · PQ',
@@ -314,7 +321,9 @@ void main() {
 
       expect(find.byIcon(Icons.audiotrack), findsOneWidget);
       expect(find.byIcon(Icons.subtitles), findsOneWidget);
-      expect(find.byIcon(Icons.aspect_ratio), findsOneWidget);
+      // The aspect control renders its current mode as a text chip now (all
+      // four native overlays do), so there is no icon to find.
+      expect(find.text('Fill'), findsOneWidget);
       expect(find.byIcon(Icons.skip_next), findsOneWidget);
       // Badges keep their own row under the title rather than squeezing it.
       expect(find.text('1920×1080'), findsOneWidget);

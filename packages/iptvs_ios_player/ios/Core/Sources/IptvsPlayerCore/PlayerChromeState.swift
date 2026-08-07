@@ -214,8 +214,13 @@ public enum PlayerErrorMessages {
 ///
 /// Deliberately absent versus Kotlin:
 ///
-/// - `isTv` and the clock badge (Android TV only; tvOS is out of scope —
-///   docs/ios.md).
+/// - `isTv` (Android TV only; tvOS is out of scope — docs/ios.md). The **clock
+///   badge is not** absent, despite being TV-gated on Android: this controller
+///   hides the status bar (`prefersStatusBarHidden`), and the same phone reaches
+///   the Flutter overlay on mpv-routed channels — which shows an `HH:mm` badge
+///   unconditionally — so gating it here would mean the *same device* showing a
+///   clock on a Stalker channel and not on an HLS one. It is rendered straight
+///   from the `nowMs` the view is already handed, so it needs no state field.
 /// - `volume` (the volume *slider* is dropped on iOS: the hardware buttons and
 ///   the AirPlay route picker cover it — docs/ios.md "Plugin-package layout").
 ///   `muted` stays, since a mute toggle has no hardware equivalent.
@@ -325,6 +330,21 @@ public struct PlayerChromeState: Equatable, Sendable {
   public var controlsVisible: Bool = true
   public var supportsPip: Bool = false
 
+  /// True while `AVRoutePickerView`'s system route sheet is on screen.
+  ///
+  /// Its only job is to pin the chrome: the sheet is presented by AVKit, not by
+  /// this overlay, so none of the interaction that keeps it up passes through
+  /// `pokeControls`. Without this the auto-hide timer runs to completion behind
+  /// the sheet and the viewer dismisses it onto a bare picture — the same
+  /// "a pinned overlay never auto-hides" rule the open-menu case already has
+  /// (docs/player.md). Set from `AVRoutePickerViewDelegate`'s will-begin/did-end
+  /// pair.
+  ///
+  /// Deliberately **not** cleared by ``setControlsVisible(_:)`` the way `menu`
+  /// and `infoOpen` are: those are this overlay's own chrome, while this one
+  /// mirrors a system presentation whose lifetime only AVKit knows.
+  public var routePickerPresenting: Bool = false
+
   public init() {}
 
   /// Seeds the presentation half from the `open` payload. Everything else keeps
@@ -343,8 +363,9 @@ public struct PlayerChromeState: Equatable, Sendable {
   // MARK: - Derived visibility
 
   /// Controls must stay pinned (no auto-hide) while a menu or the info panel is
-  /// open. Port of Kotlin `PlayerUiState.pinned`.
-  public var pinned: Bool { menu != .none || infoOpen }
+  /// open. Port of Kotlin `PlayerUiState.pinned`, plus one iOS-only rung:
+  /// the AirPlay route sheet, which Android has no counterpart for.
+  public var pinned: Bool { menu != .none || infoOpen || routePickerPresenting }
 
   /// Audio button only when there's a real choice to make.
   public var showAudioButton: Bool { audioTracks.count > 1 }

@@ -100,6 +100,20 @@ same way. So only video extends under the cutout, and a transient swipe-revealed
 covers a control. When changing the overlay layout, keep new chrome inside one of those two inset
 groups rather than aligning it against the raw window edge.
 
+**On a TV that is not enough**, because `safeDrawingPadding()` reports zero insets on essentially
+every Android TV while the panel may still crop. `PlayerDimens.TvEdgePadding` (40 dp) and
+`TvEdgeExtraVertical` (+14 dp on the outer edge only) carry that job, selected through
+`edgePadding(isTv)`/`edgeExtraVertical(isTv)` so phone and tablet geometry is byte-identical. The
+numbers are derived, not chosen: a 1080p TV is a 960×540 dp layout, so the 5% guideline safe area
+is 48/27 dp while the legacy worst-case crop is ~2.5% per side — **24 dp**, exactly where
+`EdgePadding` already sat, i.e. the chrome was resting precisely on the crop line with no margin
+at all. 40 dp is that 24 dp of crop coverage plus 16 dp of genuinely visible margin. The vertical
+extra lands on the outer edge only so the bars don't grow taller on a 540 dp-tall layout. Two
+bar-clearance offsets must track it — the info panel's `top` and `ListMenu`'s `bottom` — or on TV
+the panel opens inside the taller top bar and the menu hides under the taller bottom bar. Still
+**needs on-device confirmation**, ideally on one set with overscan deliberately enabled and one
+modern set (to check it doesn't merely look wasteful).
+
 **Live favorite star** (`PlayerUiState.canFavorite`/`isFavorite`, shown only for live channels):
 the Dart host owns the favorites store, so it seeds the initial state via an Intent extra
 (`EXTRA_CAN_FAVORITE`/`EXTRA_IS_FAVORITE`) and reads the final state back on exit
@@ -157,8 +171,13 @@ requirement).
 ## iOS
 
 **Status: implemented; on-device validation pending — see docs/ios.md for the full design,
-decision record, and on-device test protocol.** iOS gets a native surface too, the same shape as
-Android and Windows:
+decision record, and on-device test protocol.** Its overlay tracks Android's control set with two
+deliberate differences: it carries an **`AVRoutePickerView`** (the only control in the app with no
+Android counterpart — AirPlay is an AVFoundation capability no other platform here has), and its
+"a pinned overlay never auto-hides" rule has an iOS-only third rung, the route sheet, because
+AVKit presents that itself and nothing inside it reaches `pokeControls`. Its clock badge is
+deliberately not TV-gated the way Android's is. Details and the on-device checklist are in
+docs/ios.md. iOS gets a native surface too, the same shape as Android and Windows:
 `IptvsPlayerViewController` (`packages/iptvs_ios_player/`) is a **presented** `UIViewController`
 owning an `AVPlayerLayer` — `.overFullScreen`, not `.fullScreen` (the latter delivers a Flutter
 `AppLifecycleState` transition to the preview-stop observer, the update flow, and the
@@ -365,10 +384,17 @@ colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct
 `preferWindowsEmbedded`, so they open native immediately. Control state is mirrored
 to native via `setControlState` (Dart→C++) / `nativeControl` (C++→Dart commands); the GDI overlay
 (`windows/runner/flutter_window.cpp`) draws the **same control set, badges, live EPG strip,
-go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay. The
-favorite star (live channels with a favorites store) sits rightmost in the top bar; Dart owns the
-store, so the click sends a `favorite` command and Dart pushes the new `canFavorite`/`isFavorite`
-back via `setControlState` (mouse-clickable, not yet in the keyboard-focus ring). The controls
+go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay. Windows
+draws that indicator *inside* the auto-hiding overlay rather than outside the visibility gate the
+way Android and iOS do, so `ControlsPinnedByOverlay()` counts `reconnecting` alongside an open
+menu/info panel — otherwise the hide timer took the badge away mid-stall and the platform's
+primary live path showed a frozen picture with no explanation. (The Linux Lua OSD both draws it
+ungated *and* pins; pinning alone is the smaller change and covers the auto-hide case, which is
+the one that actually bites.) The favorite star (live channels with a favorites store) sits
+rightmost in the top bar; Dart owns the store, so the click sends a `favorite` command and Dart
+pushes the new `canFavorite`/`isFavorite` back via `setControlState`. It is in the keyboard-focus
+ring — pushed right after `kBack` to match the top bar's visual order, gated on `can_favorite`.
+The controls
 overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
 when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
@@ -384,7 +410,48 @@ This matters on Android, not just desktop: the embedded path is the fallback whe
 `HdrPlayerActivity` can't launch, and it renders in the ordinary Flutter window, which is **not**
 immersive (nothing calls `SystemChrome.setEnabledSystemUIMode`), so under edge-to-edge the system
 bars really do sit over the video. Insets are zero in widget tests by default, which is why the
-regression is pinned explicitly rather than left to be noticed visually. **Back/Escape peel + tap-outside parity:** the
+regression is pinned explicitly rather than left to be noticed visually.
+
+**Any input reveals the chrome, and a pinned overlay never auto-hides.** These are the two rules
+six of the seven control surfaces already followed by accident; they are now contracts on the
+shared overlay. `_handlePlaybackInput()` routes *every* `CallbackShortcuts` binding and the
+pointer `Listener` to `PlayerVideoSurfaceState.revealChrome()` (which forwards to the controls
+state exactly the way `handleBackPeel` does). It used to handle only the Windows *native* surface,
+so on Linux, the Windows SDR handoff and iOS's mpv path the whole shortcut set was a no-op for
+visibility: chrome auto-hid after 4 s, Space paused, `_scheduleHide` refuses to re-arm while
+paused, and nothing but a mouse hover or tap could bring it back — a keyboard-only user was
+stranded on a frozen frame. Escape's ordering is deliberately untouched, so it still *peels*
+rather than merely revealing. Correspondingly `_scheduleHide()` early-returns on `_menuOpen` as
+well as `_showInfo`: `_playingSub` calls it on every `playing` transition, including the
+buffering→playing edge a live stream produces routinely, so an open track/subtitle/speed menu
+otherwise had the bars pulled out from under it 4 s later (Android pins via `state.pinned`, iOS
+via `AutoHidePolicy.shouldSchedule(pinned:)`, Lua via `not open_menu`).
+
+**Key scope is decided by the surface, never the platform.** `F` toggles fullscreen through the
+embedded surface unless `_usesWindowsNativeSurface`; it used to branch on `Platform.isLinux`,
+which sent the Windows SDR-embedded path — the *common* Windows live path, reached via the
+same-channel preview→fullscreen handoff — into `_toggleNativeFullscreen()`, where it early-returned
+and did nothing while the on-screen button advertised "Fullscreen (F)". `M` is the mini-player on
+the Windows native surface (the native side owns the window geometry, so it can only act there)
+and **mute** everywhere else, matching the Lua OSD and the usual media-player convention; the two
+surfaces are mutually exclusive, so there is no real collision. `i` (info), `s` (favorite) and
+Up/Down (volume) exist for Linux parity — the Lua OSD bound them and the embedded path did not, so
+the same physical key did different things depending on whether the stream happened to be
+HDR-on-Wayland. All four are gated behind `_usesSharedEmbeddedOverlay`, which matters for what it
+**excludes**: Android's embedded path is media_kit's stock Material controls, whose buttons are
+focus targets a TV D-pad walks with Up/Down, and binding those arrows would swallow the traversal
+and strand the user on the fallback surface.
+
+**Controls that can't act are not shown.** The subtitle button appears only when a track other
+than the synthetic Auto/Off exists (Android, iOS and Windows all gate this; most live IPTV
+channels carry no subtitle track, so it was a permanently useless button on the busiest surface),
+and a live channel with no `epgNow` renders just the LIVE badge rather than a
+`LinearProgressIndicator` frozen at 0 that reads as "stuck loading". The aspect control renders
+its **current mode label** as a text chip rather than a bare icon — all four native overlays do,
+and `docs/player.md` already called Dart the single source of truth for that label sequence, so
+the surface owning the truth was the only one not showing it.
+
+**Back/Escape peel + tap-outside parity:** the
 info panel is a non-modal `Positioned`, so it needs an explicit single-press peel to match the
 native overlays' menu→info→hide→exit ladder — `EmbeddedPlayerControlsState.handleBackPeel()` closes
 an open info panel first (consuming the press), and `PlayerScreen`'s Escape binding calls it

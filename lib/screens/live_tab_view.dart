@@ -45,8 +45,42 @@ const double kChannelRowExtentWithEpg = 112;
 /// Channel row height when there's no EPG to show (logo + name only).
 const double kChannelRowExtentPlain = 72;
 
-/// Category sidebar row height.
-const double kCategoryRowExtent = 44;
+/// Category sidebar row height. 48, not the visually sufficient 44, because the
+/// row draws a 2 px gap above and below itself inside the extent — 48 − 4 is
+/// exactly the 44 px minimum pointer target the row's hit area must keep.
+const double kCategoryRowExtent = 48;
+
+/// Vertical gap drawn *inside* [kCategoryRowExtent] (and its scaled variants),
+/// so the extent the selection model scrolls by and the row's hit area differ
+/// by exactly `2 * this`.
+const double kCategoryRowGap = 2;
+
+/// Viewport height below which a layout compresses its row/preview geometry.
+/// Applies to the wide (TV/desktop) layout *and* to a short **narrow** one — an
+/// 800x360 landscape phone is not a "phone portrait", and at full density it
+/// showed two channel rows. Phone portrait stays at scale 1 (see
+/// docs/tv-navigation.md).
+const double kShortViewportMaxHeight = 560;
+
+/// Upper bound on the accessibility text scale the live layout tracks. Beyond
+/// this the fixed-extent lists would eat the whole viewport; the text itself
+/// still scales past it (Flutter owns that), the *row heights* just stop
+/// growing, and the row's own `maxLines`/ellipsis absorb the rest.
+const double kMaxLiveTextScale = 1.4;
+
+// Line heights of a channel row's fixed-size lines at text scale 1. The row is
+// a fixed `itemExtent`, so [LiveLayoutMetrics] has to predict what its content
+// costs; these deliberately use a conservative 1.3 line-height factor for the
+// styles that set no explicit `height` (the bundled Inter is ~1.21, and the
+// widget-test font is smaller still), because under-estimating paints a row
+// across its neighbour while over-estimating only drops the "Next" line early.
+const double _kNowLineHeight = 12.5 * 1.3;
+const double _kMetaLineHeight = 11.5 * 1.3;
+const double _kRowLineGap = 4.0;
+
+/// The row's own vertical chrome inside the extent: the 3 px gap above/below
+/// plus the tile's inner padding.
+double _rowChrome(bool compact) => 6 + (compact ? 12 : 16);
 
 /// The channel row height for a list that does ([hasEpg]) or doesn't carry EPG.
 double channelRowExtentFor(bool hasEpg) =>
@@ -70,6 +104,11 @@ bool debugDisableNetworkChannelLogos = false;
 @immutable
 class LiveLayoutMetrics {
   final double scale;
+
+  /// The accessibility text scale the extents were built for, clamped to
+  /// `[1, kMaxLiveTextScale]`. Stored so a row can size anything else it draws
+  /// against the *same* number the extent used.
+  final double textScale;
   final double previewHeight;
   final double previewWidth;
   final double categoryPaneWidth;
@@ -82,8 +121,27 @@ class LiveLayoutMetrics {
   final double titleSize;
   final double infoSize;
 
+  /// Font size for a channel row's name. Density-scaled like everything else —
+  /// it used to be the theme's fixed 16 px `titleMedium` while the extent
+  /// around it shrank, which is where the compact row lost most of its
+  /// headroom. Text *scaling* is not applied here: Flutter already scales the
+  /// glyphs, and the extent grows by [textScale] to make room.
+  final double rowTitleSize;
+
+  /// True only for the **ten-foot** density (the Android-TV compact wide
+  /// layout), as opposed to [compact], which is just "something shrank".
+  ///
+  /// The two used to be the same thing, and then short-viewport scaling made
+  /// `compact` true for an 800x360 landscape phone and a 1280x600 desktop
+  /// window as well — both of which are pointer/touch postures. Anything
+  /// deciding *input-modality* affordances (rather than density) has to ask
+  /// this instead; see [favoriteTargetSize].
+  final bool tenFootUi;
+
   const LiveLayoutMetrics._({
     required this.scale,
+    required this.textScale,
+    required this.tenFootUi,
     required this.previewHeight,
     required this.previewWidth,
     required this.categoryPaneWidth,
@@ -95,34 +153,58 @@ class LiveLayoutMetrics {
     required this.panelPadding,
     required this.titleSize,
     required this.infoSize,
+    required this.rowTitleSize,
   });
 
+  /// Geometry for a live body of [size].
+  ///
+  /// [textScale] is the platform's accessibility text scale
+  /// (`MediaQuery.textScalerOf(context).scale(1)`). **Every construction site
+  /// must pass the same value**: the channel list's `itemExtent` and the
+  /// coordinator's `index * extent` scroll maths are two reads of this same
+  /// pure function, and the selection model breaks the moment they disagree.
+  /// Row extents (and the paddings around them) are multiplied by it *after*
+  /// the density clamps, so a larger system font grows the rows instead of
+  /// overflowing them — Android's first step is already 1.15 and iOS reaches
+  /// 1.35, against a compact row that had ~3% headroom.
   factory LiveLayoutMetrics.forSize(
     Size size, {
     bool compactWideLayout = false,
+    double textScale = 1.0,
   }) {
     final isWide = size.width >= kWideLayoutMinWidth;
+    final short = size.height < kShortViewportMaxHeight;
+    // Height compression is not a wide-layout privilege: an 800x360 landscape
+    // phone is short for exactly the same reason a 1280x600 desktop window is,
+    // and at full density it fitted two channel rows. Phone *portrait* (tall
+    // and narrow) still gets the unscaled geometry.
     final scale = isWide
         ? compactWideLayout
               ? 0.625
               : (size.height / 720).clamp(0.75, 1.0)
+        : short
+        ? (size.height / 720).clamp(0.75, 1.0)
         : 1.0;
+    final text = textScale.clamp(1.0, kMaxLiveTextScale);
     return LiveLayoutMetrics._(
       scale: scale,
-      previewHeight: (190 * scale).clamp(120, 190),
+      textScale: text,
+      tenFootUi: isWide && compactWideLayout,
+      previewHeight: (190 * scale).clamp(120, 190) * text,
       previewWidth: (250 * scale).clamp(170, 250),
       categoryPaneWidth: (240 * scale).clamp(180, 240),
-      channelRowExtentPlain: (kChannelRowExtentPlain * scale).clamp(56, 72),
-      channelRowExtentWithEpg: (kChannelRowExtentWithEpg * scale).clamp(
-        88,
-        112,
-      ),
-      categoryRowExtent: (kCategoryRowExtent * scale).clamp(40, 44),
+      channelRowExtentPlain:
+          (kChannelRowExtentPlain * scale).clamp(56, 72) * text,
+      channelRowExtentWithEpg:
+          (kChannelRowExtentWithEpg * scale).clamp(88, 112) * text,
+      categoryRowExtent:
+          (kCategoryRowExtent * scale).clamp(40, kCategoryRowExtent) * text,
       outerPadding: (12 * scale).clamp(8, 12),
       paneGap: (12 * scale).clamp(8, 12),
-      panelPadding: (14 * scale).clamp(10, 14),
+      panelPadding: (14 * scale).clamp(10, 14) * text,
       titleSize: (24 * scale).clamp(20, 24),
       infoSize: (16 * scale).clamp(13, 16),
+      rowTitleSize: (16 * scale).clamp(13, 16),
     );
   }
 
@@ -130,6 +212,39 @@ class LiveLayoutMetrics {
       hasEpg ? channelRowExtentWithEpg : channelRowExtentPlain;
 
   bool get compact => scale < 0.95;
+
+  /// Stacked height the *four*-line EPG row (name / now / time+progress /
+  /// next) needs at this density and text scale.
+  double get _epgRowContentHeight =>
+      _rowChrome(compact) +
+      (rowTitleSize * 1.5 +
+              _kNowLineHeight +
+              _kMetaLineHeight * 2 +
+              _kRowLineGap * 3) *
+          textScale;
+
+  /// Whether the channel row must drop its "Next" line to fit its extent.
+  ///
+  /// This is a **content-height** test, not `extent < kChannelRowExtentWithEpg`.
+  /// That older test fired on *any* reduction, so a 700 px-tall desktop window
+  /// — with ~19 px of room to spare — silently lost the line; and it would now
+  /// fire backwards under text scaling, where the extent grows past the
+  /// baseline while the text grows faster.
+  bool get denseChannelRow => channelRowExtentWithEpg < _epgRowContentHeight;
+
+  /// Side of the favorite star's hit area. 44 (the platform minimum pointer
+  /// target) wherever a pointer is plausible; the compact row is 56 px tall and
+  /// remote-only, so it keeps the tighter 32 that fits it.
+  /// Hit area for the row's favourite star.
+  ///
+  /// Gated on [tenFootUi], **not** [compact]: 44 is the touch minimum and the
+  /// star sits beside a row whose tap starts fullscreen playback on a phone,
+  /// so a miss is expensive. Only the ten-foot layout drops to 32 — there the
+  /// input is a remote, where hit area is meaningless, and 44 doesn't fit the
+  /// 56 px row anyway. Reading `compact` here silently gave the 32 px target
+  /// to landscape phones once short-viewport scaling landed, which is the one
+  /// posture that most needed the big one.
+  double get favoriteTargetSize => (tenFootUi ? 32.0 : 44.0) * textScale;
 }
 
 /// The live-TV browsing body: the channel list (with the category side-pane and
@@ -357,9 +472,19 @@ class LiveTabView extends StatelessWidget {
         ),
       );
     }
+    // **Not an early return.** On a wide layout the only UI that can change
+    // the category is the sidebar — `ChannelListScreen` nulls the toolbar
+    // dropdown whenever live && wide — so returning a bare `Center` here
+    // unmounted the sidebar along with the list and left *no* way back: every
+    // caller of `_selectCategory` was gone, and `focusCategories()` then
+    // requested focus on a node with no context, which is a silent no-op.
+    // Picking a provider category that happens to have zero channels (common
+    // on portals) became unrecoverable short of restarting the app. The empty
+    // message is a *body* that replaces the list, not the whole tab.
+    Widget? emptyBody;
     if (visible.isEmpty) {
       final filtered = searchActive || selectedCategoryId != null;
-      return Center(
+      emptyBody = Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Text(
@@ -377,9 +502,27 @@ class LiveTabView extends StatelessWidget {
     // Computed once here rather than per row in [_ChannelTile.build]: it is the
     // same value for every row (it only reads the window size), and resolving it
     // per row also made every row a MediaQuery dependent.
+    //
+    // **The same inputs as `ChannelListScreen._liveLayoutMetrics`.** That one
+    // feeds [channelRowExtent]/[categoryRowExtent] (this list's `itemExtent`)
+    // *and* the coordinator's `index * extent` scroll maths; this one sizes the
+    // row's contents. Both read the window `MediaQuery` — nothing in `lib/`
+    // installs a modified `MediaQuery` between the screen and here — so the two
+    // calls are the same pure function of the same values. The assert below
+    // fails loudly (debug-only) the first time that stops being true.
     final metrics = LiveLayoutMetrics.forSize(
       size,
       compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+      textScale: MediaQuery.textScalerOf(context).scale(1),
+    );
+    assert(
+      channelRowExtent == metrics.channelRowExtent(now.isNotEmpty) &&
+          categoryRowExtent == metrics.categoryRowExtent,
+      'live row extents disagree: itemExtent/coordinator got '
+      '$channelRowExtent/$categoryRowExtent, the row layout computed '
+      '${metrics.channelRowExtent(now.isNotEmpty)}/${metrics.categoryRowExtent}. '
+      'The selection model scrolls by index * extent, so these must be one '
+      'value — see LiveLayoutMetrics.forSize.',
     );
     // **One width authority for the whole live tab.** Everything else that
     // branches on "wide" reads the *window* width through `MediaQuery`:
@@ -399,7 +542,9 @@ class LiveTabView extends StatelessWidget {
     // A body narrower than the window now simply renders the two-pane layout a
     // little tighter, which is what the rest of the screen already assumes.
     if (size.width < kWideLayoutMinWidth) {
-      return _buildChannelList(context, metrics, wide: false);
+      // Narrow keeps the old behaviour: the toolbar dropdown is still mounted
+      // here, so the category remains changeable with the list gone.
+      return emptyBody ?? _buildChannelList(context, metrics, wide: false);
     }
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -442,12 +587,19 @@ class LiveTabView extends StatelessWidget {
                 ),
                 SizedBox(height: metrics.paneGap),
                 Expanded(
-                  child: _buildChannelList(
-                    context,
-                    metrics,
-                    wide: true,
-                    padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
-                  ),
+                  // The sidebar above stays mounted either way; only this
+                  // slot swaps to the message. Deliberately *not*
+                  // `_buildChannelList` over an empty list — that node
+                  // handles no keys, so arrows would escape to geometry
+                  // traversal instead of staying in the live body.
+                  child:
+                      emptyBody ??
+                      _buildChannelList(
+                        context,
+                        metrics,
+                        wide: true,
+                        padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
+                      ),
                 ),
               ],
             ),
@@ -458,8 +610,9 @@ class LiveTabView extends StatelessWidget {
   }
 
   Widget _buildPreviewPanel(BuildContext context, LiveLayoutMetrics metrics) {
-    // Non-null whenever [visible] is non-empty, which the caller already
-    // established; stay defensive rather than assert during a rebuild.
+    // Null is a live path, not just defensiveness: the wide layout now keeps
+    // the sidebar (and this panel) mounted while the channel list is empty, so
+    // an empty category reaches here with nothing to resolve.
     final preview = resolvePreviewChannel();
     if (preview == null) return SizedBox(height: metrics.previewHeight);
     return _LivePreviewPanel(
@@ -571,7 +724,22 @@ class _LiveCategoryPane extends StatelessWidget {
   }
 }
 
-class _CategoryRow extends StatelessWidget {
+/// Pointer-hover fill for the two live lists.
+///
+/// Hover used to be `InkWell(hoverColor: AppColors.panelHi)` inside a
+/// *transparent* `Material`, with the row's own `AnimatedContainer` painting an
+/// opaque fill over the exact same bounds — the ink splash was drawn and then
+/// completely occluded, so hover was invisible on both lists. It is now driven
+/// by the container's colour instead, and deliberately sits *between* the
+/// resting panel and the selection cursor's `panelHi`: a hovered row must not
+/// impersonate the D-pad cursor, which is the only thing OK acts on.
+final Color _kRowHoverFill = Color.lerp(
+  AppColors.panel,
+  AppColors.panelHi,
+  0.5,
+)!;
+
+class _CategoryRow extends StatefulWidget {
   final String label;
 
   /// This category is the active filter.
@@ -597,27 +765,46 @@ class _CategoryRow extends StatelessWidget {
   });
 
   @override
+  State<_CategoryRow> createState() => _CategoryRowState();
+}
+
+class _CategoryRowState extends State<_CategoryRow> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
-    final focused = cursor && listFocused;
+    final label = widget.label;
+    final active = widget.active;
+    final cursor = widget.cursor;
+    final onTap = widget.onTap;
+    final focused = cursor && widget.listFocused;
     return Semantics(
-      label: '$label, $position of $total',
+      label: '$label, ${widget.position} of ${widget.total}',
       button: true,
       selected: active,
       onTap: onTap,
       excludeSemantics: true,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        // Only [kCategoryRowGap] per side (was 3): the extent is 48, so the
+        // row's own hit area stays at the 44 px pointer-target minimum.
+        padding: const EdgeInsets.symmetric(vertical: kCategoryRowGap),
         child: Material(
           type: MaterialType.transparency,
           child: InkWell(
             canRequestFocus: false,
             borderRadius: BorderRadius.circular(AppRadius.tile),
-            hoverColor: AppColors.panelHi,
+            onHover: (hovered) {
+              if (hovered != _hovered) setState(() => _hovered = hovered);
+            },
             onTap: onTap,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              duration: appMotion(context, const Duration(milliseconds: 120)),
               decoration: BoxDecoration(
-                color: cursor ? AppColors.panelHi : AppColors.panel,
+                color: cursor
+                    ? AppColors.panelHi
+                    : _hovered
+                    ? _kRowHoverFill
+                    : AppColors.panel,
                 borderRadius: BorderRadius.circular(AppRadius.tile),
                 border: Border.all(
                   color: focused ? AppColors.accent : AppColors.line,
@@ -712,9 +899,12 @@ class _LivePreviewPanel extends StatelessWidget {
   /// a ~170 px thumbnail and ellipsizes past roughly 22 characters.
   String? get _hint {
     if (previewActive && previewError == null) {
+      // Both inputs, on both postures: a second activation goes fullscreen
+      // whether it arrives as OK or as a pointer, and the desktop wording used
+      // to name only the key even though `_pointerVerb` was right there.
       return deliberate
           ? 'OK or $_pointerVerb again for fullscreen'
-          : 'Press OK/Select to play fullscreen';
+          : 'OK/Select or $_pointerVerb again for fullscreen';
     }
     if (deliberate) return 'OK or $_pointerVerb to preview';
     return null;
@@ -724,6 +914,7 @@ class _LivePreviewPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final current = now;
     final upcoming = next;
+    final compact = metrics.compact;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -742,263 +933,256 @@ class _LivePreviewPanel extends StatelessWidget {
         ),
         border: Border.all(color: AppColors.line),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final compact = metrics.compact;
-          return Padding(
-            padding: EdgeInsets.all(metrics.panelPadding),
-            child: Row(
-              children: [
-                Container(
-                  width: metrics.previewWidth,
-                  decoration: BoxDecoration(
-                    color: AppColors.panel,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.line),
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        if (previewActive &&
-                            !previewLoading &&
-                            previewError == null)
-                          Focus(
-                            canRequestFocus: false,
-                            skipTraversal: true,
-                            descendantsAreFocusable: false,
-                            child: IgnorePointer(child: previewVideo),
-                          )
-                        else if (!debugDisableNetworkChannelLogos &&
-                            channel.logo != null &&
-                            channel.logo!.isNotEmpty)
-                          LayoutBuilder(
-                            builder: (context, constraints) =>
-                                CachedNetworkImage(
-                                  imageUrl: channel.logo!,
-                                  fit: BoxFit.cover,
-                                  memCacheWidth: imageCacheSize(
-                                    context,
-                                    constraints.maxWidth.isFinite
-                                        ? constraints.maxWidth
-                                        : 480,
-                                  ),
-                                  errorWidget: (_, _, _) => const Icon(
-                                    Icons.live_tv_rounded,
-                                    color: AppColors.textLo,
-                                    size: 42,
-                                  ),
-                                ),
-                          )
-                        else
-                          const Icon(
+      // Deliberately no `LayoutBuilder` here: it read no constraint at all, so
+      // all it bought was an extra builder on a panel that already knows its
+      // own size from [metrics].
+      child: Padding(
+        padding: EdgeInsets.all(metrics.panelPadding),
+        child: Row(
+          children: [
+            Container(
+              width: metrics.previewWidth,
+              decoration: BoxDecoration(
+                color: AppColors.panel,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.line),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (previewActive &&
+                        !previewLoading &&
+                        previewError == null)
+                      Focus(
+                        canRequestFocus: false,
+                        skipTraversal: true,
+                        descendantsAreFocusable: false,
+                        child: IgnorePointer(child: previewVideo),
+                      )
+                    else if (!debugDisableNetworkChannelLogos &&
+                        channel.logo != null &&
+                        channel.logo!.isNotEmpty)
+                      LayoutBuilder(
+                        builder: (context, constraints) => CachedNetworkImage(
+                          imageUrl: channel.logo!,
+                          fit: BoxFit.cover,
+                          memCacheWidth: imageCacheSize(
+                            context,
+                            constraints.maxWidth.isFinite
+                                ? constraints.maxWidth
+                                : 480,
+                          ),
+                          errorWidget: (_, _, _) => const Icon(
                             Icons.live_tv_rounded,
                             color: AppColors.textLo,
                             size: 42,
                           ),
-                        if (previewLoading)
-                          Container(
-                            color: Colors.black.withValues(alpha: 0.45),
-                            alignment: Alignment.center,
-                            child: const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          ),
-                        if (previewError != null)
-                          Container(
-                            color: Colors.black.withValues(alpha: 0.62),
-                            alignment: Alignment.center,
-                            padding: const EdgeInsets.all(10),
-                            child: const Text(
-                              'Preview unavailable',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: AppColors.textLo,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        if (previewActive && !previewLoading)
-                          Align(
-                            alignment: Alignment.bottomLeft,
-                            child: Container(
-                              margin: const EdgeInsets.all(8),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.55),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text(
-                                'Preview',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                        // The below-panel text hint (`_hint`) is gated behind
-                        // `!compact`, but Android TV wide layouts are always
-                        // compact (0.625 scale) — the device that most needs
-                        // the "press OK" nudge. Mirror the "Preview" badge
-                        // above with a corner chip on the thumbnail itself,
-                        // which costs zero layout height, so compact layouts
-                        // still get the hint. Non-compact layouts keep the
-                        // text hint unchanged and don't get this chip too.
-                        if (compact &&
-                            !previewActive &&
-                            !previewLoading &&
-                            previewError == null &&
-                            _hint != null)
-                          Align(
-                            alignment: Alignment.bottomRight,
-                            child: Container(
-                              margin: const EdgeInsets.all(8),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.55),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                _hint!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                SizedBox(width: metrics.paneGap),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              channel.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: AppColors.textHi,
-                                fontSize: metrics.titleSize,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                          ),
-                          if (onCatchup != null)
-                            _CatchupButton(
-                              onPressed: onCatchup!,
-                              focusNode: catchupFocusNode,
-                              onKeyEvent: (node, event) =>
-                                  onControlKey(true, event),
-                            ),
-                          FavoriteButton(
-                            favorite: favorite,
-                            onPressed: onToggleFavorite,
-                            focusNode: favoriteFocusNode,
-                            onKeyEvent: (node, event) =>
-                                onControlKey(false, event),
-                          ),
-                        ],
+                        ),
+                      )
+                    else
+                      const Icon(
+                        Icons.live_tv_rounded,
+                        color: AppColors.textLo,
+                        size: 42,
                       ),
-                      SizedBox(height: compact ? 2 : 8),
-                      if (current != null)
-                        Text(
-                          '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
+                    if (previewLoading)
+                      Container(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        alignment: Alignment.center,
+                        child: const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    if (previewError != null)
+                      Container(
+                        color: Colors.black.withValues(alpha: 0.62),
+                        alignment: Alignment.center,
+                        padding: const EdgeInsets.all(10),
+                        child: const Text(
+                          'Preview unavailable',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (previewActive && !previewLoading)
+                      Align(
+                        alignment: Alignment.bottomLeft,
+                        child: Container(
+                          margin: const EdgeInsets.all(8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            'Preview',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    // The below-panel text hint (`_hint`) is gated behind
+                    // `!compact`, but Android TV wide layouts are always
+                    // compact (0.625 scale) — the device that most needs
+                    // the "press OK" nudge. Mirror the "Preview" badge
+                    // above with a corner chip on the thumbnail itself,
+                    // which costs zero layout height, so compact layouts
+                    // still get the hint. Non-compact layouts keep the
+                    // text hint unchanged and don't get this chip too.
+                    if (compact &&
+                        !previewActive &&
+                        !previewLoading &&
+                        previewError == null &&
+                        _hint != null)
+                      Align(
+                        alignment: Alignment.bottomRight,
+                        child: Container(
+                          margin: const EdgeInsets.all(8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            _hint!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            SizedBox(width: metrics.paneGap),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          channel.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: AppColors.textHi,
-                            fontSize: metrics.infoSize,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        )
-                      else
-                        const Text(
-                          'No programme information',
-                          style: TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 14,
+                            fontSize: metrics.titleSize,
+                            fontWeight: FontWeight.w800,
                           ),
                         ),
-                      if (progress != null) ...[
-                        const SizedBox(height: 6),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: progress,
-                            minHeight: 4,
-                            backgroundColor: AppColors.line,
-                            valueColor: const AlwaysStoppedAnimation<Color>(
-                              AppColors.accent,
-                            ),
-                          ),
+                      ),
+                      if (onCatchup != null)
+                        _CatchupButton(
+                          onPressed: onCatchup!,
+                          focusNode: catchupFocusNode,
+                          onKeyEvent: (node, event) =>
+                              onControlKey(true, event),
                         ),
-                      ],
-                      if (!compact &&
-                          current?.description != null &&
-                          current!.description!.isNotEmpty) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          current.description!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                      const Spacer(),
-                      if (!compact && !previewLoading && _hint != null) ...[
-                        Text(
-                          _hint!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 11,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                      ],
-                      if (upcoming != null)
-                        Text(
-                          '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 13,
-                          ),
-                        ),
+                      FavoriteButton(
+                        favorite: favorite,
+                        onPressed: onToggleFavorite,
+                        focusNode: favoriteFocusNode,
+                        onKeyEvent: (node, event) => onControlKey(false, event),
+                      ),
                     ],
                   ),
-                ),
-              ],
+                  SizedBox(height: compact ? 2 : 8),
+                  if (current != null)
+                    Text(
+                      '${nowProgrammeLabel(current)} · ${programmeTimeRange(current)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: AppColors.textHi,
+                        fontSize: metrics.infoSize,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    )
+                  else
+                    const Text(
+                      'No programme information',
+                      style: TextStyle(color: AppColors.textLo, fontSize: 14),
+                    ),
+                  if (progress != null) ...[
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 4,
+                        backgroundColor: AppColors.line,
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          AppColors.accent,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (!compact &&
+                      current?.description != null &&
+                      current!.description!.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      current.description!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  if (!compact && !previewLoading && _hint != null) ...[
+                    Text(
+                      _hint!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  if (upcoming != null)
+                    Text(
+                      '${nextProgrammeLabel(upcoming)} · ${programmeTimeRange(upcoming)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textLo,
+                        fontSize: 13,
+                      ),
+                    ),
+                ],
+              ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
@@ -1417,7 +1601,7 @@ class _PhonePreviewSheetState extends State<PhonePreviewSheet> {
 /// A channel row. **Not focusable** — the list's single focus node owns the
 /// D-pad and this row simply draws the cursor when it's the selected index (see
 /// [LiveFocusCoordinator]). It stays tappable/long-pressable for touch + mouse.
-class _ChannelTile extends StatelessWidget {
+class _ChannelTile extends StatefulWidget {
   final Channel channel;
   final Programme? now;
   final Programme? next;
@@ -1480,16 +1664,32 @@ class _ChannelTile extends StatelessWidget {
   );
 
   @override
+  State<_ChannelTile> createState() => _ChannelTileState();
+}
+
+class _ChannelTileState extends State<_ChannelTile> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
-    final current = now;
-    final upcoming = next;
-    // Drop the "Next" line whenever the row extent is scaled below its full
-    // height — the inner text/spacing is fixed-size, so a shrunk extent can't
-    // fit all four lines and would overflow (worst in windowed mode, where
-    // `scale` = height/720 < 1.0). The full "Next" line only fits at the
-    // unscaled 112 px extent (fullscreen); below that it moves to the preview
-    // panel/semantics, as the fixed selection-model extent requires.
-    final dense = metrics.channelRowExtentWithEpg < kChannelRowExtentWithEpg;
+    final channel = widget.channel;
+    final metrics = widget.metrics;
+    final cursor = widget.cursor;
+    final favorite = widget.favorite;
+    final favoriteCursor = widget.favoriteCursor;
+    final listFocused = widget.listFocused;
+    final enabled = widget.enabled;
+    final onTap = widget.onTap;
+    final onToggleFavorite = widget.onToggleFavorite;
+    final current = widget.now;
+    final upcoming = widget.next;
+    // Drop the "Next" line only when the four lines genuinely don't fit the
+    // extent ([LiveLayoutMetrics.denseChannelRow]). This used to be
+    // `extent < kChannelRowExtentWithEpg`, i.e. "any reduction at all", which
+    // cost a 700 px-tall desktop window its "Next" line with room to spare —
+    // and which text scaling inverts, since the extent then grows past the
+    // baseline while the text inside grows faster.
+    final dense = metrics.denseChannelRow;
     double? progress;
     if (current != null) {
       final total = current.stop.difference(current.start).inSeconds;
@@ -1506,12 +1706,12 @@ class _ChannelTile extends StatelessWidget {
     final label = StringBuffer(channel.name);
     if (current != null) label.write(', ${nowProgrammeLabel(current)}');
     if (upcoming != null) label.write(', ${nextProgrammeLabel(upcoming)}');
-    label.write(', $position of $total');
+    label.write(', ${widget.position} of ${widget.total}');
     label.write(favorite ? ', Favorite' : ', Not favorite');
     final semanticsLabel = label.toString();
     final favoriteAction = favorite
-        ? _removeFavoriteAction
-        : _addFavoriteAction;
+        ? _ChannelTile._removeFavoriteAction
+        : _ChannelTile._addFavoriteAction;
     return Semantics(
       label: semanticsLabel,
       button: true,
@@ -1527,13 +1727,22 @@ class _ChannelTile extends StatelessWidget {
           child: InkWell(
             canRequestFocus: false,
             borderRadius: BorderRadius.circular(AppRadius.tile),
-            hoverColor: AppColors.panelHi,
+            onHover: (hovered) {
+              if (hovered != _hovered) setState(() => _hovered = hovered);
+            },
             onTap: onTap,
-            onLongPress: onLongPress,
+            onLongPress: widget.onLongPress,
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              duration: appMotion(context, const Duration(milliseconds: 120)),
               decoration: BoxDecoration(
-                color: cursor ? AppColors.panelHi : AppColors.panel,
+                // Hover is painted by this container, not by the InkWell's
+                // (fully occluded) hoverColor, and stays distinct from the
+                // cursor's panelHi — see [_kRowHoverFill].
+                color: cursor
+                    ? AppColors.panelHi
+                    : _hovered
+                    ? _kRowHoverFill
+                    : AppColors.panel,
                 borderRadius: BorderRadius.circular(AppRadius.tile),
                 border: Border.all(
                   color: active ? AppColors.accent : AppColors.line,
@@ -1559,7 +1768,13 @@ class _ChannelTile extends StatelessWidget {
                             channel.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleMedium,
+                            // Density-scaled, unlike the theme's fixed 16 px
+                            // titleMedium it used to take verbatim: the extent
+                            // around this line shrinks on compact/short
+                            // layouts, and a fixed title was the biggest single
+                            // consumer of the headroom that left.
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(fontSize: metrics.rowTitleSize),
                           ),
                           if (current != null) ...[
                             const SizedBox(height: 4),
@@ -1634,37 +1849,54 @@ class _ChannelTile extends StatelessWidget {
                     const SizedBox(width: 8),
                     // Always-visible favorite star: a touch target on every row,
                     // and the D-pad's intra-row favorite column when
-                    // [favoriteCursor] holds the cursor. Sized well inside the
-                    // fixed itemExtents (including compact 56 / 88), so the row
-                    // never overflows.
+                    // [favoriteCursor] holds the cursor.
+                    //
+                    // The hit area is [LiveLayoutMetrics.favoriteTargetSize] —
+                    // 44 px wherever a pointer is plausible, because on a phone
+                    // this sits beside a row whose tap starts *fullscreen
+                    // playback*, and a 32 px miss is an accidental channel
+                    // change. The compact (Android TV, remote-only) row is
+                    // 56 px tall and can't hold 44, so it keeps 32. The
+                    // decorated cell inside stays its natural size, so the
+                    // accent ring doesn't balloon with the target.
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: onToggleFavorite,
-                      child: Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: favoriteCursor && listFocused
-                              ? AppColors.panelHi
-                              : null,
-                          borderRadius: BorderRadius.circular(AppRadius.tile),
-                          border: favoriteCursor && listFocused
-                              ? Border.all(color: AppColors.accent, width: 2)
-                              : null,
-                        ),
-                        child: Icon(
-                          favorite
-                              ? Icons.star_rounded
-                              : Icons.star_outline_rounded,
-                          size: 20,
-                          color: favorite
-                              ? AppColors.accent
-                              : AppColors.textLo.withValues(alpha: 0.8),
+                      child: SizedBox.square(
+                        dimension: metrics.favoriteTargetSize,
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: favoriteCursor && listFocused
+                                  ? AppColors.panelHi
+                                  : null,
+                              borderRadius: BorderRadius.circular(
+                                AppRadius.tile,
+                              ),
+                              border: favoriteCursor && listFocused
+                                  ? Border.all(
+                                      color: AppColors.accent,
+                                      width: 2,
+                                    )
+                                  : null,
+                            ),
+                            child: Icon(
+                              favorite
+                                  ? Icons.star_rounded
+                                  : Icons.star_outline_rounded,
+                              size: 20,
+                              color: favorite
+                                  ? AppColors.accent
+                                  : AppColors.textLo.withValues(alpha: 0.8),
+                            ),
+                          ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Icon(
-                      previewing
+                      widget.previewing
                           ? Icons.play_circle_fill_rounded
                           : Icons.play_arrow_rounded,
                       color: enabled ? AppColors.accent : AppColors.textLo,

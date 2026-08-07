@@ -80,7 +80,13 @@ fun BoxScope.PlayerMenusLayer(
         selectedId = selectedId,
         modifier = Modifier
             .align(Alignment.BottomEnd)
-            .padding(end = PlayerDimens.EdgePadding, bottom = 96.dp),
+            // The 96dp clears the bottom bar; on TV that bar's outer inset grows
+            // for overscan, so the menu has to rise with it (see
+            // `PlayerDimens.TvEdgePadding`).
+            .padding(
+                end = PlayerDimens.edgePadding(state.isTv),
+                bottom = 96.dp + PlayerDimens.edgeExtraVertical(state.isTv),
+            ),
         onSelect = { id ->
             onInteract()
             onSelect(id)

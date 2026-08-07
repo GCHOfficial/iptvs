@@ -83,6 +83,7 @@ class LiveFocusCoordinator extends ChangeNotifier {
     required this.onPlayChannel,
     required this.onToggleFavorite,
     required this.onFocusTabs,
+    this.reduceMotion = _motionOn,
   }) {
     // The cursor highlight is drawn from each list's `hasFocus`, and a focus
     // change rebuilds nothing on its own — so without this the highlight stayed
@@ -102,7 +103,10 @@ class LiveFocusCoordinator extends ChangeNotifier {
     // `hasFocus`, so a handover still repaints both sides (the losing pane's
     // node fires too) without waking the panes that can't have changed.
     channelSelection = Listenable.merge([_channelCursor, channelsFocusNode]);
-    categorySelection = Listenable.merge([_categoryCursor, categoriesFocusNode]);
+    categorySelection = Listenable.merge([
+      _categoryCursor,
+      categoriesFocusNode,
+    ]);
     // The wide preview panel follows the channel cursor (it shows the selected
     // channel while no preview is locked in) and owns the Favorite/Catch-up
     // controls — but nothing about *which* list holds the D-pad.
@@ -191,6 +195,14 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   /// Escape hatch upward out of the live body (search → the content tabs).
   final VoidCallback onFocusTabs;
+
+  /// The platform's "remove animations" accessibility preference, which this
+  /// class cannot read itself (it holds no `BuildContext`, only scroll
+  /// controllers). When it reports true, [_reveal] jumps instead of animating —
+  /// the same thing `appMotion` does for the widgets that *do* have a context.
+  final bool Function() reduceMotion;
+
+  static bool _motionOn() => false;
 
   final FocusNode channelsFocusNode = RoutedFocusNode(channelsLabel);
   final FocusNode categoriesFocusNode = RoutedFocusNode(categoriesLabel);
@@ -389,7 +401,11 @@ class LiveFocusCoordinator extends ChangeNotifier {
     if (target == null) return;
     controller.animateTo(
       target.clamp(0.0, position.maxScrollExtent),
-      duration: const Duration(milliseconds: 140),
+      // `animateTo` short-circuits a zero duration into a `jumpTo`, so this is
+      // the reveal's own honouring of "remove animations".
+      duration: reduceMotion()
+          ? Duration.zero
+          : const Duration(milliseconds: 140),
       curve: Curves.easeOutCubic,
     );
   }
@@ -398,7 +414,16 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   void focusChannels() {
     final visible = visibleChannels();
-    if (visible.isEmpty) return;
+    if (visible.isEmpty) {
+      // Nothing to land on. Every caller has already consumed the key press,
+      // so returning silently left the D-pad dead — Down from the search cell
+      // went nowhere on a category with no channels. On a wide layout the
+      // sidebar is still mounted (the empty message replaces only the list,
+      // not the whole tab), so hand it the focus; `focusCategories` is itself
+      // a no-op when narrow, where the toolbar dropdown covers this instead.
+      focusCategories();
+      return;
+    }
     // (Re)entering the pane always lands on the row body, never the star.
     resetChannelColumn();
     channelsFocusNode.requestFocus();

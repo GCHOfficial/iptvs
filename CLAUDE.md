@@ -166,7 +166,23 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   TV navigation — see docs/tv-navigation.md), `profile_avatar.dart`, `favorite_controls.dart`,
   `release_notes_view.dart` (dependency-free changelog renderer used by the update dialog), and
   `image_utils.dart` (all network images go through `cached_network_image` with display-sized
-  decode — don't add bare `Image.network`).
+  decode — don't add bare `Image.network`). **Pass `memCacheWidth` alone, never both dimensions:**
+  both non-null selects `ResizeImagePolicy.exact`, which decodes to the target aspect *regardless
+  of the source's* — i.e. `BoxFit.fill` at decode time, leaving the `BoxFit.cover` that was meant
+  to crop with nothing to crop. Every VOD poster was stretched 5–38% (varying tile to tile in one
+  row, since the box aspect moved with how much text a tile carried) and a backdrop-less
+  continue-watching thumb squashed 2:3 into 16:9. Use `ResizeImage(..., policy: .fit)` explicitly
+  if a ceiling on the other axis is ever genuinely wanted.
+- **`lib/theme.dart` carries the design tokens, the breakpoints, and the motion helper.**
+  `AppColors` includes semantic `danger`/`warning`/`success` (they exist because six call sites had
+  hand-rolled the same red) and `accentFill` — `accent` darkened just enough that white 14 px bold
+  clears WCAG AA 4.5:1 on a filled button (measured 4.64:1; plain `accent` is 3.95:1), while
+  `accent` itself stays the brand hue for rings and progress, where it sits on the dark ground.
+  Every breakpoint lives here and **must be measured against `MediaQuery.sizeOf`**, never a
+  `LayoutBuilder`'s post-`SafeArea` constraints. Route explicit animation durations through
+  `appMotion(context, …)` — Flutter honours the "remove animations" accessibility flag for its own
+  route transitions but not for `AnimatedContainer` and friends, which is most of what this app
+  animates.
 - **`lib/player/player_screen.dart`** — playback lifecycle/native coordination;
   `player_overlay.dart` contains the embedded presentation widgets. See "Player" below +
   docs/player.md.
@@ -255,7 +271,7 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
 - **Exception:** the two live-tab lists and the EPG grid are **selection models** — one focus
   node + a selected index; rows are *not* focus targets. Never add focus nodes to their rows.
   Both live lists set an explicit `itemExtent` (`kChannelRowExtentWithEpg` 112 /
-  `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 44 in `live_tab_view.dart`) — uniform rows
+  `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 48 in `live_tab_view.dart`) — uniform rows
   make index→offset exact; the tallest EPG row must fit the extent.
 - **Movement is deliberately asymmetric: Down wraps; Up never wraps — it escapes upward.**
   Right first enters the selected channel row's **favorite star** (the intra-row

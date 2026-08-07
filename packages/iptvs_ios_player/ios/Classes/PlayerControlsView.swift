@@ -1,3 +1,4 @@
+import AVKit
 import UIKit
 
 /// Everything the overlay can ask the player to do. One enum + one closure
@@ -23,6 +24,13 @@ enum PlayerControlsAction {
   /// ``close`` — on the Dart overlay that button pops the route, which is what
   /// ``close`` already does here.
   case retry
+  /// AVKit is about to put the AirPlay route sheet on screen, and is done with
+  /// it. Not a user command like the rest — a report, so the controller can pin
+  /// the chrome for the sheet's lifetime. None of the interaction inside an
+  /// AVKit-presented sheet reaches this overlay, so without these two the
+  /// auto-hide timer runs to completion behind it.
+  case routePickerWillPresent
+  case routePickerDidDismiss
 }
 
 /// The native player's control overlay — the port of Android's `ControlsOverlay`
@@ -73,6 +81,19 @@ final class PlayerControlsView: UIView {
   private let resolutionBadge = PlayerBadgeLabel()
   private let hdrBadge = PlayerBadgeLabel()
   private let fpsBadge = PlayerBadgeLabel()
+  /// Wall clock, rightmost — the same slot Android's TV overlay and the Windows
+  /// GDI overlay put theirs in.
+  ///
+  /// **Not gated the way Android gates its clock.** There it is TV-only
+  /// (`PlayerUiState.isTv`), because a phone already shows the system clock in
+  /// its status bar. This controller *hides* the status bar
+  /// (`prefersStatusBarHidden`), and — the load-bearing half — the same phone
+  /// reaches the shared Flutter overlay on every mpv-routed channel, which shows
+  /// an `HH:mm` badge unconditionally. An extension-less Stalker `create_link`
+  /// locator routes to mpv by `selectIosEngine` rule 4 while an `.m3u8` one
+  /// routes here, so one session on one device meets both surfaces; a gate would
+  /// mean the clock appearing and disappearing per channel.
+  private let clockBadge = PlayerBadgeLabel()
 
   // MARK: Bottom bar
 
@@ -141,6 +162,17 @@ final class PlayerControlsView: UIView {
     title: PlayerAspectMode.fit.label,
     accessibilityLabel: "Aspect ratio"
   ) { [weak self] in self?.onAction?(.cycleAspect) }
+  /// AirPlay — the one capability no other platform in this repo has, and until
+  /// now reachable only through Control Centre.
+  ///
+  /// **Deliberately present here and nowhere else.** This controller *is* the
+  /// AVPlayer engine: mpv-routed content never reaches it (libmpv is only
+  /// reachable from Dart — docs/ios.md "engineFailed is a cross-language
+  /// handoff"), and mpv has no AirPlay at all, so the shared Flutter overlay the
+  /// mpv path renders correctly has no counterpart control. That asymmetry is
+  /// the routing rule showing through, not an oversight — do not "fix" it by
+  /// adding a picker to `EmbeddedPlayerControls`.
+  private lazy var airPlayButton = PlayerRoutePickerView(delegate: self)
   private lazy var pipButton = PlayerIconButton(
     systemName: "pip.enter",
     accessibilityLabel: "Picture in picture",
@@ -235,7 +267,9 @@ final class PlayerControlsView: UIView {
     badgesStack.axis = .horizontal
     badgesStack.alignment = .center
     badgesStack.spacing = PlayerDimens.controlSpacing
-    for badge in [sourceBadge, liveBadge, resolutionBadge, hdrBadge, fpsBadge] {
+    // Same order as Kotlin `TopBadges` and Dart `_badges()`: source, LIVE,
+    // resolution, HDR, fps, clock — clock always last.
+    for badge in [sourceBadge, liveBadge, resolutionBadge, hdrBadge, fpsBadge, clockBadge] {
       badgesStack.addArrangedSubview(badge)
     }
 
@@ -341,13 +375,16 @@ final class PlayerControlsView: UIView {
     clusterStack.alignment = .center
     clusterStack.spacing = PlayerDimens.controlSpacing
     // Order mirrors Kotlin's `RightCluster`: go-live, favorite, speed, audio,
-    // subtitles, aspect, PiP, info.
+    // subtitles, aspect, PiP, info — with AirPlay inserted next to PiP, its
+    // nearest sibling (both are "send this picture somewhere else") and the only
+    // control in the row Kotlin has no counterpart for.
     clusterStack.addArrangedSubview(goLiveButton)
     clusterStack.addArrangedSubview(favoriteButton)
     clusterStack.addArrangedSubview(speedButton)
     clusterStack.addArrangedSubview(audioButton)
     clusterStack.addArrangedSubview(subtitlesButton)
     clusterStack.addArrangedSubview(aspectButton)
+    clusterStack.addArrangedSubview(airPlayButton)
     clusterStack.addArrangedSubview(pipButton)
     clusterStack.addArrangedSubview(infoButton)
 
@@ -549,9 +586,9 @@ final class PlayerControlsView: UIView {
   /// changes, and the sub-views that would otherwise churn (menu rows, info
   /// rows, SF symbols) each guard on their own last-rendered value.
   ///
-  /// - Parameter nowMs: wall-clock epoch for the live EPG progress bar. Passed
-  ///   in rather than read here so the clock stays a controller concern and the
-  ///   view has no hidden time dependency.
+  /// - Parameter nowMs: wall-clock epoch for the live EPG progress bar **and the
+  ///   clock badge**. Passed in rather than read here so the clock stays a
+  ///   controller concern and the view has no hidden time dependency.
   func render(_ state: PlayerChromeState, nowMs: Int64) {
     // Both render outside the `controlsVisible` gate, and they are mutually
     // exclusive by `showReconnectChip` — a spinner promising a retry must not
@@ -565,7 +602,7 @@ final class PlayerControlsView: UIView {
     safeContainer.isHidden = !visible
     guard visible else { return }
 
-    renderTopBar(state)
+    renderTopBar(state, nowMs: nowMs)
     renderProgress(state, nowMs: nowMs)
     renderTransport(state)
     renderCluster(state)
@@ -574,13 +611,18 @@ final class PlayerControlsView: UIView {
     infoPanel.render(state)
   }
 
-  private func renderTopBar(_ state: PlayerChromeState) {
+  private func renderTopBar(_ state: PlayerChromeState, nowMs: Int64) {
     titleLabel.text = state.title
     sourceBadge.apply(state.sourceBadge)
     resolutionBadge.apply(state.resolutionBadge)
     hdrBadge.apply(state.hdrBadge)
     hdrBadge.backgroundColor = PlayerColors.accent
     fpsBadge.apply(state.fpsBadge)
+    // `HH:mm`, device time zone, POSIX locale — the same `playerClockHm` the EPG
+    // strip's time ranges use, and the same 24-hour zero-padded shape Kotlin's
+    // `formatClock`/`clockHm`, the Windows `FormatClock` and Dart's `_hm` all
+    // produce. Never nil, so unlike its neighbours the badge never collapses.
+    clockBadge.apply(playerClockHm(ms: nowMs))
 
     liveBadge.isHidden = !state.showLiveBadge
     if state.showLiveBadge {
@@ -660,6 +702,99 @@ final class PlayerControlsView: UIView {
     aspectButton.setLabel(state.aspectLabel)
     // Step 7 flips `supportsPip` once an `AVPictureInPictureController` exists.
     pipButton.isHidden = !state.showPictureInPictureButton
+    // `airPlayButton` has no render branch on purpose: AVKit owns its glyph and
+    // its active/inactive appearance, and there is no state under which this
+    // controller should hide it — the AVPlayer engine can always route audio,
+    // even for content with no picture.
+  }
+}
+
+// MARK: - AVRoutePickerViewDelegate
+
+/// Pins the chrome for the lifetime of the AirPlay route sheet.
+///
+/// AVKit presents that sheet itself, so none of the interaction inside it
+/// reaches `pokeControls` and the auto-hide timer would otherwise run to
+/// completion behind it — the viewer would dismiss the sheet onto a bare
+/// picture. This is the same "a pinned overlay never auto-hides" rule the open
+/// menu/info cases already have (docs/player.md); the decision lives in
+/// `PlayerChromeState.pinned`, and these two callbacks only report the edges.
+extension PlayerControlsView: AVRoutePickerViewDelegate {
+  func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+    onAction?(.routePickerWillPresent)
+  }
+
+  func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+    onAction?(.routePickerDidDismiss)
+  }
+}
+
+/// The AirPlay route picker, dressed as one of this overlay's chip buttons.
+///
+/// `AVRoutePickerView` rather than a hand-rolled button because the route list,
+/// the "connecting" state and the active-route glyph are all AVKit's; there is
+/// no public API to present the system route sheet yourself. What is ours is the
+/// chrome around it: the translucent chip, the corner radius, and the
+/// ``PlayerDimens/buttonSize`` square its neighbours honour.
+///
+/// ``PlayerTapAbsorbing`` for the same reason the menus are: a press here is a
+/// press on a control, and the root tap recogniser's ladder must not also fire.
+/// The other controls get that for free by being `UIControl`s — this one is a
+/// plain `UIView` wrapping AVKit's own button, so the ancestor walk in
+/// `IptvsPlayerViewController`'s gesture delegate needs something to stop on.
+///
+/// **Two things to confirm on a device**, neither observable in the Simulator
+/// (which has no AirPlay routes at all):
+///
+/// 1. that AVKit's internal button really fills these 44x44 bounds rather than
+///    centring a smaller glyph-sized button inside them — if it centres, the
+///    *tap* target shrinks below the 44pt floor even though the chip does not;
+/// 2. how the route sheet behaves over an `.overFullScreen` presentation. It is
+///    a popover on a regular-width layout (iPad) and a sheet on a compact one,
+///    and an `.overFullScreen` presenter is exactly the configuration where a
+///    popover's anchoring is worth eyeballing rather than assuming.
+final class PlayerRoutePickerView: UIView, PlayerTapAbsorbing {
+  private let picker = AVRoutePickerView()
+
+  init(delegate: AVRoutePickerViewDelegate) {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = PlayerColors.buttonBackground
+    layer.cornerRadius = PlayerDimens.buttonCorner
+    layer.masksToBounds = true
+
+    picker.translatesAutoresizingMaskIntoConstraints = false
+    // `AVRoutePickerView.delegate` is a weak reference, so the owning
+    // `PlayerControlsView` passing itself here is not a cycle.
+    picker.delegate = delegate
+    // `.plain` because the chip behind it is ours: `.system` would draw AVKit's
+    // own background under our own and read as a double-height button.
+    picker.routePickerButtonStyle = .plain
+    picker.tintColor = PlayerColors.textHi
+    // Accent while a route is actually in use — the same colour a pressed
+    // `PlayerIconButton` takes, spent here on "AirPlay is on" instead.
+    picker.activeTintColor = PlayerColors.accent
+    // This is a video player; an Apple TV should outrank a HomePod in the list.
+    picker.prioritizesVideoDevices = true
+    // AVKit's own button carries a system "AirPlay" label, so this is belt and
+    // braces rather than the only label — but a control this overlay places is a
+    // control this overlay names.
+    picker.accessibilityLabel = "AirPlay"
+    accessibilityLabel = "AirPlay"
+    addSubview(picker)
+
+    NSLayoutConstraint.activate([
+      widthAnchor.constraint(equalToConstant: PlayerDimens.buttonSize),
+      heightAnchor.constraint(equalToConstant: PlayerDimens.buttonSize),
+      picker.topAnchor.constraint(equalTo: topAnchor),
+      picker.leadingAnchor.constraint(equalTo: leadingAnchor),
+      picker.trailingAnchor.constraint(equalTo: trailingAnchor),
+      picker.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("PlayerRoutePickerView is created in code, never from a nib")
   }
 }
 

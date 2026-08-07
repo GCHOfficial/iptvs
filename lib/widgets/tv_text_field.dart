@@ -39,6 +39,13 @@ class TvTextField extends StatefulWidget {
   /// floating label for credential forms (it stays visible once text is entered).
   final String? label;
 
+  /// Optional inline validation message rendered below the field in
+  /// [AppColors.danger] — and, while set, tints the cell's own border/border
+  /// width the same colour (unless the cell is focused/editing, which still
+  /// wins so the accent ring is never fought). Callers own when to set/clear
+  /// this; it does not affect submission.
+  final String? errorText;
+
   /// Built-in clear (×) button. Unlike a [suffixIcon] — which sits *inside*
   /// the edit barrier and can never be a D-pad target — this renders as its
   /// own always-focusable sibling stop (the same pattern as the password
@@ -64,6 +71,7 @@ class TvTextField extends StatefulWidget {
     this.cellFocusNode,
     this.onClear,
     this.showClear = false,
+    this.errorText,
   });
 
   @override
@@ -129,22 +137,31 @@ class _TvTextFieldState extends State<TvTextField> {
   Widget build(BuildContext context) {
     final highlighted = _editing || _cellFocused;
     final cell = _buildCell(highlighted);
-    if (widget.label == null) return cell;
+    if (widget.label == null && widget.errorText == null) return cell;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 6),
-          child: Text(
-            widget.label!,
-            style: const TextStyle(
-              color: AppColors.textLo,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+        if (widget.label != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 6),
+            child: Text(
+              widget.label!,
+              style: const TextStyle(
+                color: AppColors.textLo,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
-        ),
         cell,
+        if (widget.errorText != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, top: 6),
+            child: Text(
+              widget.errorText!,
+              style: const TextStyle(color: AppColors.danger, fontSize: 12),
+            ),
+          ),
       ],
     );
   }
@@ -166,8 +183,12 @@ class _TvTextFieldState extends State<TvTextField> {
           color: highlighted ? AppColors.panelHi : AppColors.panel,
           borderRadius: BorderRadius.circular(AppRadius.tile),
           border: Border.all(
-            color: highlighted ? AppColors.accent : AppColors.line,
-            width: highlighted ? 2 : 1,
+            color: highlighted
+                ? AppColors.accent
+                : (widget.errorText != null
+                      ? AppColors.danger
+                      : AppColors.line),
+            width: highlighted ? 2 : (widget.errorText != null ? 1.5 : 1),
           ),
         ),
         child: Row(
@@ -336,7 +357,7 @@ class _TvTextFieldState extends State<TvTextField> {
           child: Tooltip(
             message: 'Clear',
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              duration: appMotion(context, const Duration(milliseconds: 120)),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
@@ -384,7 +405,7 @@ class _TvTextFieldState extends State<TvTextField> {
           child: Tooltip(
             message: _obscured ? 'Show' : 'Hide',
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              duration: appMotion(context, const Duration(milliseconds: 120)),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,

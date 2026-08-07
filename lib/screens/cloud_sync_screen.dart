@@ -157,6 +157,9 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         actions: [
           TextButton(
+            // See the note in sources_screen: a D-pad dialog with nothing
+            // focused eats the first OK press.
+            autofocus: true,
             onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Cancel'),
           ),
@@ -327,10 +330,12 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           ),
           actions: [
             TextButton(
+              autofocus: true,
               onPressed: () => Navigator.of(ctx).pop(false),
               child: const Text('Cancel'),
             ),
             FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
               onPressed: () => Navigator.of(ctx).pop(true),
               child: const Text('Replace panel profile'),
             ),
@@ -352,10 +357,12 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         ),
         actions: [
           TextButton(
+            autofocus: true,
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Push'),
           ),
@@ -422,27 +429,37 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         top: false,
         child: _loading
             ? const Center(child: CircularProgressIndicator())
-            : SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_paired) ..._pairedBody() else ..._pairingBody(),
-                    if (_status != null) ...[
-                      const SizedBox(height: 20),
-                      Text(
-                        _status!,
-                        style: const TextStyle(color: AppColors.accent),
-                      ),
-                    ],
-                    if (_error != null) ...[
-                      const SizedBox(height: 20),
-                      Text(
-                        _error!,
-                        style: const TextStyle(color: Color(0xFFE5484D)),
-                      ),
-                    ],
-                  ],
+            // Capped and centred: this screen is mostly running prose and a
+            // pairing code, and unconstrained it ran edge to edge on a
+            // maximised desktop window.
+            : Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    maxWidth: kSettingsMaxContentWidth,
+                  ),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (_paired) ..._pairedBody() else ..._pairingBody(),
+                        if (_status != null) ...[
+                          const SizedBox(height: 20),
+                          Text(
+                            _status!,
+                            style: const TextStyle(color: AppColors.accent),
+                          ),
+                        ],
+                        if (_error != null) ...[
+                          const SizedBox(height: 20),
+                          Text(
+                            _error!,
+                            style: const TextStyle(color: AppColors.danger),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
       ),
@@ -621,7 +638,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
           const Icon(
             Icons.gpp_maybe_outlined,
             size: 18,
-            color: Color(0xFFE5484D),
+            color: AppColors.danger,
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -630,7 +647,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
               children: [
                 const Text(
                   kCloudE2eeDowngradedMessage,
-                  style: TextStyle(color: Color(0xFFE5484D), fontSize: 13),
+                  style: TextStyle(color: AppColors.danger, fontSize: 13),
                 ),
                 const SizedBox(height: 4),
                 TextButton(
@@ -661,7 +678,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         'This profile is end-to-end encrypted. Open the panel and unlock it to '
             'finish setting up this device. Until then, Push is disabled and '
             'sources without saved credentials need attention.',
-        const Color(0xFFE5484D),
+        AppColors.danger,
       ),
     };
     return Row(

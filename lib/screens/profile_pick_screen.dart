@@ -289,6 +289,9 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
         ),
         actions: [
           TextButton(
+            // See the note in sources_screen: a D-pad dialog with nothing
+            // focused eats the first OK press.
+            autofocus: true,
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Cancel'),
           ),
@@ -446,12 +449,13 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
         ),
         actions: [
           TextButton(
+            autofocus: true,
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('Cancel'),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFE5484D),
+              backgroundColor: AppColors.danger,
             ),
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('Delete'),
@@ -489,13 +493,13 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   Widget build(BuildContext context) {
     if (_checking) {
       return const Scaffold(
-        backgroundColor: Color(0xFF0B1220),
+        backgroundColor: AppColors.ink,
         body: Center(child: CircularProgressIndicator()),
       );
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0B1220),
+      backgroundColor: AppColors.ink,
       body: Stack(
         children: [
           Positioned.fill(
@@ -602,7 +606,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                           _error!,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
-                            color: Color(0xFFE5484D),
+                            color: AppColors.danger,
                             fontSize: 13,
                           ),
                         ),
@@ -814,7 +818,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
             mainAxisSize: MainAxisSize.min,
             children: [
               AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
+                duration: appMotion(context, const Duration(milliseconds: 150)),
                 width: widget.avatarSize,
                 height: widget.avatarSize,
                 decoration: BoxDecoration(
@@ -862,7 +866,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           width: 28,
                           height: 28,
                           decoration: const BoxDecoration(
-                            color: Color(0xFFE5484D),
+                            color: AppColors.danger,
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
@@ -902,7 +906,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                           width: 26,
                           height: 26,
                           decoration: const BoxDecoration(
-                            color: Color(0xFF22C55E),
+                            color: AppColors.success,
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
@@ -1012,7 +1016,7 @@ class _AddProfileCircleState extends State<_AddProfileCircle> {
             mainAxisSize: MainAxisSize.min,
             children: [
               AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
+                duration: appMotion(context, const Duration(milliseconds: 150)),
                 width: widget.avatarSize,
                 height: widget.avatarSize,
                 decoration: BoxDecoration(

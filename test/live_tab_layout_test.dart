@@ -26,7 +26,10 @@
 // `channel_list_focus_test.dart`, which construct a real preview player).
 
 import 'package:flutter/foundation.dart'
-    show debugDefaultTargetPlatformOverride;
+    show
+        debugDefaultTargetPlatformOverride,
+        defaultTargetPlatform,
+        TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -73,13 +76,27 @@ void main() {
     final list = visible ?? channels(6);
     final scroll = ScrollController();
     final categoryScroll = ScrollController();
+    // Derive the extents from the *same* metrics the view builds, exactly as
+    // `ChannelListScreen._liveChannelRowExtent` does. Hard-coding the base
+    // constants here made the harness disagree with the view under any
+    // density scaling (Android's compact wide layout drops the plain row to
+    // 56 and the category row to 40), which the view now asserts against —
+    // the selection model scrolls by `index * extent`, so a harness that
+    // pinned one value while the view laid out another was not modelling
+    // production at all.
+    final metrics = LiveLayoutMetrics.forSize(
+      size,
+      compactWideLayout: defaultTargetPlatform == TargetPlatform.android,
+    );
+    // `now`/`next` are empty below, so rows render without the EPG lines.
+    final rowExtent = metrics.channelRowExtent(false);
     final focus = LiveFocusCoordinator(
       scrollController: scroll,
       categoryScrollController: categoryScroll,
       visibleChannels: () => list,
       orderedCategoryIds: () => const [null, 'news'],
-      channelRowExtent: () => kChannelRowExtentPlain,
-      categoryRowExtent: () => kCategoryRowExtent,
+      channelRowExtent: () => rowExtent,
+      categoryRowExtent: () => metrics.categoryRowExtent,
       isWide: () => size.width >= kWideLayoutMinWidth,
       isMounted: () => true,
       onChannelSelectionChanged: (_, _) {},
@@ -105,7 +122,9 @@ void main() {
                 error: null,
                 onRetry: () {},
                 visible: list,
-                resolvePreviewChannel: () => list.first,
+                // Mirrors `ChannelListScreen._resolvePreviewChannel`, which
+                // returns null for an empty list rather than throwing.
+                resolvePreviewChannel: () => list.isEmpty ? null : list.first,
                 now: const {},
                 next: const {},
                 deliberate: deliberate,
@@ -113,8 +132,8 @@ void main() {
                 scrollController: scroll,
                 categoryScrollController: categoryScroll,
                 focus: focus,
-                channelRowExtent: kChannelRowExtentPlain,
-                categoryRowExtent: kCategoryRowExtent,
+                channelRowExtent: rowExtent,
+                categoryRowExtent: metrics.categoryRowExtent,
                 lastPlayedChannelId: null,
                 previewChannelId: previewChannelId,
                 isFavorite: (_) => false,
@@ -213,6 +232,39 @@ void main() {
         await tester.pump();
         expect(played, ['c2']);
       });
+    });
+  });
+
+  group('an empty channel list keeps the category sidebar', () {
+    // Regression: the empty-state `Center` used to be returned *before* the
+    // width branch, so on a wide layout it replaced the whole tab — sidebar
+    // included. `ChannelListScreen` nulls the toolbar's category dropdown
+    // whenever live && wide, so with the sidebar gone there was no remaining
+    // caller of `_selectCategory` at all: picking a provider category that
+    // happens to have zero channels (common on portals) stranded the user
+    // there until the app was restarted.
+    testWidgets('wide keeps the sidebar and shows the message beside it', (
+      tester,
+    ) async {
+      await pumpLiveTab(
+        tester,
+        size: const Size(1280, 800),
+        visible: const [],
+      );
+      expect(sidebar, findsOneWidget, reason: 'the way back must survive');
+      expect(find.textContaining('has no channels'), findsOneWidget);
+    });
+
+    testWidgets('narrow still replaces the body (the dropdown is the way back)', (
+      tester,
+    ) async {
+      await pumpLiveTab(
+        tester,
+        size: const Size(500, 800),
+        visible: const [],
+      );
+      expect(sidebar, findsNothing);
+      expect(find.textContaining('has no channels'), findsOneWidget);
     });
   });
 }

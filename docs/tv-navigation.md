@@ -10,6 +10,15 @@ navigation code.
 - **Lists/grids** use `FocusableCard` (`lib/widgets/focusable_card.dart`): a
   `FocusableActionDetector` tile that shows an accent focus ring, activates on OK/Enter/Select
   (`ActivateIntent`), and scrolls itself into view on focus. First item gets `autofocus`.
+  **The ring paints from `hasFocus`, not `onShowFocusHighlight`** — the latter is gated on
+  `FocusManager.highlightMode == traditional`, which starts as `touch` on Android, so a cold start
+  into the Movies tab drew *no* ring on the autofocused tile until some key was pressed, and any
+  TV box whose remote emits pointer events never got one at all. (The live tab was always immune
+  because its cursor is drawn from `hasFocus`; this brings the card in line.) Tapping never
+  focuses a card — the inner `InkWell` sets `canRequestFocus: false` — so touch interaction
+  produces no rings. An explicit `autofocus: true` **does** now ring on a phone (the first media
+  tile, the first Legal link): deliberate, and the same resting-cursor behaviour the live list
+  has always had on touch.
   **Exception: the two live-tab lists and the EPG grid.** They are *selection models* (one focus
   node + a selected index; rows aren't focusable) — see below. Reach for `FocusableCard` for
   short, fixed sets (media grid, sources, sheets); reach for a selection model when it's a long
@@ -22,7 +31,12 @@ navigation code.
   `IgnorePointer`'d until then — takes focus and the keyboard opens); the IME action or **Back**
   (via `PopScope`, *not* `BackButtonListener`, which needs a `Router` this app doesn't have) exits
   edit and returns focus to the cell. Applied to the channel search box and every
-  `sources_screen` credential/config field. Implementation notes: its prefix/suffix icons live
+  `sources_screen` credential/config field. It also takes an optional **`errorText`**, rendered
+  below the field in `AppColors.danger` and tinting the cell's own border to match — the focused
+  /editing accent ring still wins, so validation never fights the focus indicator. That exists so
+  add/edit-source validation reports *at* the field instead of in a `SnackBar` at the far edge of
+  the screen, which on a TV is nowhere near where the user is looking. Callers own when to set and
+  clear it; it does not gate submission. Implementation notes: its prefix/suffix icons live
   *outside* the `InputDecoration` in a manually centered Row, and the field uses a collapsed
   `InputDecoration` with **every border slot explicitly `InputBorder.none`** — not the
   `InputDecoration.collapsed` constructor, whose null border slots get filled from the theme's
@@ -56,7 +70,9 @@ focus node (`live.channels` / `live.categories`) and a **selected index**; rows 
 targets (they stay tappable for touch), and the coordinator drives the scroll itself with exact
 `index * itemExtent` maths. This is why both lists set an explicit **`itemExtent`**. Their baseline
 extents are `kChannelRowExtentWithEpg` 112 / `kChannelRowExtentPlain` 72 /
-`kCategoryRowExtent` 44 in `live_tab_view.dart`; `LiveLayoutMetrics` reduces them within guarded
+`kCategoryRowExtent` 48 in `live_tab_view.dart` — raised from 44 so the row clears the 48 px touch
+minimum, with the 2 px visual gap drawn *inside* the extent so the selection model still scrolls by
+one uniform value. `LiveLayoutMetrics` reduces them within guarded
 minimums on short wide viewports, and the coordinator receives those exact computed values so its
 index→offset calculation cannot drift from the rendered list.
 
@@ -101,14 +117,38 @@ that id before repainting; if the channel disappeared it clamps to the nearest
 valid index. Explicit search and category changes intentionally reset to the
 first result.
 
-Wide-layout geometry is also platform- and height-aware. Android TV images can expose either a
-960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot identify the
-required density. Android wide layouts use a compact 0.625 geometry scale, with 56/88 px live
-rows, a 120 px preview, and movie/series grids sized from a bounded ~180 px poster target (5–10
-columns). Other platforms scale from 0.75–1.0 only when their viewport is short. Category rows
-retain a 40 px D-pad target and `MediaQuery` text scaling is not overridden. Phone portrait
-layouts retain the normal scale. Metric regressions pin both Android TV viewport forms and the
-poster column counts at 960, 1280, and 1920 px.
+Wide-layout geometry is platform-, height- and **text-scale**-aware. Android TV images can expose
+either a 960×540 or 1920×1080 logical viewport on a 4K panel, so logical height alone cannot
+identify the required density. Android wide layouts use a compact 0.625 geometry scale, with 56/88
+px live rows and a 120 px preview. Other platforms scale from 0.75–1.0 when their viewport is
+short — and **"short" is not a wide-layout privilege**: an 800×360 landscape phone is short for
+the same reason a 1280×600 desktop window is, and at full density it fitted two channel rows, so
+narrow layouts below `kShortViewportMaxHeight` scale too. Phone *portrait* (tall and narrow)
+retains the normal scale. Category rows retain a 40 px D-pad target.
+
+`MediaQuery` text scaling **feeds the extents** (clamped at `kMaxLiveTextScale`) rather than being
+ignored. It has to: the tall EPG row had ~1.10× headroom and the compact 88 px row ~3% at default
+scale, while Android's first font step is already 1.15 and iOS reaches 1.35 — and the row `Column`
+has no clip, so an overflow painted across the neighbouring row. The scaler must be read at
+**both** `LiveLayoutMetrics.forSize` call sites (`live_tab_view.dart` and
+`ChannelListScreen._liveChannelRowExtent`/`_liveCategoryRowExtent`), because the selection model
+scrolls by `index * extent` — if the view lays out one extent while the coordinator scrolls by
+another, every D-pad move drifts. `LiveTabView.build` asserts the two agree; the assert is what
+caught `live_tab_layout_test.dart` hard-coding the base constants while the view scaled them.
+Relatedly, the "drop the *Next* line" test is a **content-height** comparison, not
+`extent < kChannelRowExtentWithEpg` — the latter fired on any scaling at all, so a 700 px-tall
+desktop window dropped the line with ~19 px to spare.
+
+Movie/series grids are **not** part of the platform fork any more. One continuous ladder divides
+the viewport width by `kMediaPosterTargetWidth`, clamped 3–16 columns, so a poster stays in a
+~176–230 px band from a 600 px window to a 4K panel. It reproduces the Android-TV counts the fork
+existed to produce (960 → 5, 1920 → 10) and desktop's 1280 → 6 exactly, so the fork bought nothing
+but divergence — an Android tablet used to show 7 columns where an iPad of the same width showed
+6. Only the tighter gutters survive, keyed off viewport size rather than the platform. The
+grid/list switch is two-dimensional (`kMediaGridMinWidth` × `kMediaGridMinHeight`) so a tablet in
+portrait no longer flips to a list while its own landscape shows a grid. Metric regressions pin
+both Android TV viewport forms, the ladder's reproduction of the old column counts, and the
+tile-width band.
 
 - **Movement rules (deliberately asymmetric).** **Down wraps** at the end of the channel list and
   of the category list — the *only* infinite motion in the tab. **Up never wraps**: at the first
@@ -123,7 +163,15 @@ poster column counts at 960, 1280, and 1920 px.
   `test/channel_list_focus_test.dart` (real key events).
 - **Category activation.** Up/Down moves only the sidebar cursor; **OK applies that category and
   enters the first/resumed channel in the filtered list**. If a provider exposes an empty category,
-  focus remains in the sidebar rather than moving to a channel pane with no activation target.
+  focus remains in the sidebar rather than moving to a channel pane with no activation target —
+  `focusChannels()` falls back to `focusCategories()` when the visible list is empty, because
+  every caller has already consumed the key press and returning silently left the D-pad dead
+  (Down from the search cell went nowhere). The sidebar is guaranteed to still be there: on a wide
+  layout the empty-state message replaces only the **channel list**, never the whole tab. That
+  matters more than it sounds — `ChannelListScreen` nulls the toolbar's category dropdown whenever
+  live && wide, so an empty state that unmounted the sidebar removed *every* caller of
+  `_selectCategory` at once, and picking a zero-channel category (common on portals) was
+  unrecoverable short of restarting the app.
   Pointer taps and the phone dropdown apply the same filter without forcing D-pad focus.
 - **Drawing the cursor.** Each list draws its cursor row accented **only while it owns the D-pad**
   (`listFocused`), and subdued (a panel-lift, no accent) when it doesn't — so the accent always
@@ -168,7 +216,7 @@ with no dialog to route focus through and no hold-timing gesture to discover.
 - **Drawing**: the row body carries the accent border only while the `body` column holds the
   cursor; on the `favorite` column the star cell draws its own accent ring + panel lift instead.
   The selected row's `panelHi` fill stays either way, so the row remains visible. The star cell
-  fits well inside the fixed `itemExtent`s (72 / 112) — the extents are unchanged.
+  fits inside the row extents, which are no longer fixed: they scale with density *and* with the platform text scale, and the star target scales with the text scale alongside them.
 - **Touch**: tapping the star toggles directly (selecting the row first, so cursor and pointer
   never disagree). Tapping the row body **plays only on a phone** — on a wide layout the first tap
   starts/switches the preview and a second tap (or tap while already previewing that channel) goes

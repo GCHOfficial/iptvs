@@ -204,6 +204,28 @@ final class PlayerChromeStateTests: XCTestCase {
     XCTAssertTrue(state.pinned)
   }
 
+  /// The AirPlay route sheet pins the chrome too. AVKit presents it, so none of
+  /// the interaction that keeps it up reaches `pokeControls`, and an unpinned
+  /// overlay would auto-hide behind it — the viewer would dismiss the sheet onto
+  /// a bare picture.
+  func testRoutePickerSheetPinsTheChrome() {
+    var state = PlayerChromeState()
+    state.routePickerPresenting = true
+    XCTAssertTrue(state.pinned)
+    state.routePickerPresenting = false
+    XCTAssertFalse(state.pinned)
+  }
+
+  /// …and unlike `menu`/`infoOpen`, hiding the controls must **not** clear it:
+  /// this flag mirrors a system presentation whose lifetime only AVKit knows,
+  /// so clearing it locally would leave the state lying about what is on screen.
+  func testHidingControlsLeavesTheRoutePickerFlagAlone() {
+    var state = PlayerChromeState()
+    state.routePickerPresenting = true
+    state.setControlsVisible(false)
+    XCTAssertTrue(state.routePickerPresenting)
+  }
+
   func testHidingControlsClosesTheMenuAndInfoPanel() {
     var state = PlayerChromeState()
     state.menu = .speed

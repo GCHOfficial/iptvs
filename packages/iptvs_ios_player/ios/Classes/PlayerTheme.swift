@@ -9,11 +9,10 @@ import UIKit
 /// lookalikes. `lib/theme.dart` is the single source of truth; every other
 /// surface is a copy that has to be re-synced by hand when it moves.
 ///
-/// **Known drift, deliberately not propagated here:** `PlayerTheme.kt` still
-/// carries `PanelHi = 0xFF1E212B` and `Line = 0xFF262A36`, which `AppColors`
-/// has since moved to `0xFF272B36` / `0xFF353B49`. This file follows
-/// `lib/theme.dart`, not the stale Kotlin copy, so iOS is correct and Android is
-/// the one that needs a catch-up edit (out of scope for this file's owner).
+/// Kotlin's `PlayerTheme.kt` has since caught up — `PanelHi = 0xFF272B36` and
+/// `Line = 0xFF353B49` there now match `AppColors` and the values below — so the
+/// drift note this comment used to carry is gone. Re-check the token block
+/// against `lib/theme.dart` whenever either moves; nothing generates it.
 enum PlayerColors {
   // MARK: Tokens mirrored from lib/theme.dart `AppColors`
 

@@ -179,7 +179,18 @@ NativeControlState g_native_control_state;
 
 bool ControlsPinnedByOverlay() {
   return g_native_control_state.open_menu != NativeMenuKind::kNone ||
-         g_native_control_state.info_open;
+         g_native_control_state.info_open ||
+         // A live reconnect pins the chrome, so the "Reconnecting…" badge
+         // cannot auto-hide out from under a stall. Windows draws that badge
+         // *inside* the auto-hiding overlay, so without this the platform's
+         // primary live path (native HDR) showed a frozen picture with no
+         // explanation at all. Android and iOS instead draw their notice
+         // outside the visibility gate; the Linux Lua OSD both draws it
+         // ungated and pins. Pinning is the smaller change here and gives the
+         // same user-visible result for the auto-hide case, which is the one
+         // that actually bites — the hide timer is the only thing that takes
+         // the chrome away mid-stall.
+         g_native_control_state.reconnecting;
 }
 
 const std::vector<NativeMenuOption> &MenuOptions(NativeMenuKind kind) {
@@ -804,9 +815,27 @@ int MenuAnchorX(const BottomLayout &l) {
   }
 }
 
+// The overlay is two rows, and arrow-key navigation treats them differently:
+// Left/Right cycles within a row, Up returns to Back, Down drops into the
+// transport. Only these two live in the top row.
+bool IsTopBarFocusItem(NativeFocusItem item) {
+  return item == NativeFocusItem::kBack ||
+         item == NativeFocusItem::kFavorite;
+}
+
 std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   std::vector<NativeFocusItem> out;
   out.push_back(NativeFocusItem::kBack);
+  // The favorite star sits in the *top* bar beside Back, and was drawn (with a
+  // focused state computed for it) but never pushed here — so it was reachable
+  // by mouse only, on the one platform whose native surface is also the
+  // keyboard/remote surface. `CommandForFocusedItem` already maps it to
+  // "favorite"; it only ever needed to join the ring. It goes right after
+  // kBack because [IsTopBarFocusItem] makes the two of them one row that
+  // Left/Right walks before stepping down into the bottom bar.
+  if (g_native_control_state.can_favorite) {
+    out.push_back(NativeFocusItem::kFavorite);
+  }
   out.push_back(NativeFocusItem::kPlay);
   if (l.has_seek) {
     out.push_back(NativeFocusItem::kSeekBack);
@@ -2003,35 +2032,58 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
             const int back_index = focus_index_of(NativeFocusItem::kBack);
             if (back_index >= 0) g_native_focus_index = back_index;
           } else if (wparam == VK_DOWN) {
-            if (focusables[g_native_focus_index] == NativeFocusItem::kBack) {
+            if (IsTopBarFocusItem(focusables[g_native_focus_index])) {
               const int play_index = focus_index_of(NativeFocusItem::kPlay);
               if (play_index >= 0) g_native_focus_index = play_index;
             }
           } else {
+            // The top bar is Back plus, when shown, the favorite star;
+            // everything else is the bottom bar. Left/Right walks the row you
+            // are on and steps off its end into the other row. With no star
+            // the top row is just Back, so this reduces to exactly the
+            // previous behaviour (Right -> first bottom item, Left -> last).
+            std::vector<int> top_indices;
             std::vector<int> bottom_indices;
             for (int i = 0; i < static_cast<int>(focusables.size()); ++i) {
-              if (focusables[i] != NativeFocusItem::kBack) {
+              if (IsTopBarFocusItem(focusables[i])) {
+                top_indices.push_back(i);
+              } else {
                 bottom_indices.push_back(i);
               }
             }
-            if (!bottom_indices.empty()) {
-              if (focusables[g_native_focus_index] == NativeFocusItem::kBack) {
-                g_native_focus_index = (wparam == VK_LEFT)
-                    ? bottom_indices.back()
-                    : bottom_indices.front();
-              } else {
-                int current_bottom_pos = 0;
-                for (int i = 0; i < static_cast<int>(bottom_indices.size()); ++i) {
-                  if (bottom_indices[i] == g_native_focus_index) {
-                    current_bottom_pos = i;
-                    break;
-                  }
+            const bool go_left = (wparam == VK_LEFT);
+            if (IsTopBarFocusItem(focusables[g_native_focus_index])) {
+              int pos = 0;
+              for (int i = 0; i < static_cast<int>(top_indices.size()); ++i) {
+                if (top_indices[i] == g_native_focus_index) {
+                  pos = i;
+                  break;
                 }
-                const int dir = (wparam == VK_LEFT) ? -1 : 1;
-                const int count = static_cast<int>(bottom_indices.size());
-                current_bottom_pos = (current_bottom_pos + dir + count) % count;
-                g_native_focus_index = bottom_indices[current_bottom_pos];
               }
+              const int next = pos + (go_left ? -1 : 1);
+              if (next < 0) {
+                if (!bottom_indices.empty()) {
+                  g_native_focus_index = bottom_indices.back();
+                }
+              } else if (next >= static_cast<int>(top_indices.size())) {
+                if (!bottom_indices.empty()) {
+                  g_native_focus_index = bottom_indices.front();
+                }
+              } else {
+                g_native_focus_index = top_indices[next];
+              }
+            } else if (!bottom_indices.empty()) {
+              int current_bottom_pos = 0;
+              for (int i = 0; i < static_cast<int>(bottom_indices.size()); ++i) {
+                if (bottom_indices[i] == g_native_focus_index) {
+                  current_bottom_pos = i;
+                  break;
+                }
+              }
+              const int dir = go_left ? -1 : 1;
+              const int count = static_cast<int>(bottom_indices.size());
+              current_bottom_pos = (current_bottom_pos + dir + count) % count;
+              g_native_focus_index = bottom_indices[current_bottom_pos];
             }
           }
           InvalidateNativeControls();

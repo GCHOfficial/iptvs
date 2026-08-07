@@ -737,8 +737,12 @@ inside the `Runner` target — for **engineering-hygiene reasons, not compile-cy
 **Line-count check, since it's what the trade above turns on:** the estimate that justified
 taking on native chrome is **~1,310 UI lines vs Android's ~1,442** (`ControlsOverlay` + friends)
 — iOS's custom overlay subtracts what Android's Compose chrome carries and iOS doesn't need:
-the D-pad focus apparatus, the custom OK-to-edit slider widgets, the volume slider (AirPlay/
-hardware volume covers it), and the clock badge. Total native Swift, view controller plus
+the D-pad focus apparatus, the custom OK-to-edit slider widgets, and the volume slider (AirPlay/
+hardware volume covers it — literally true now that the picker is on the bar). It *adds* the one
+control with no Android counterpart, the `AVRoutePickerView`. The clock badge is present and,
+unlike Android's, deliberately **not** TV-gated: the status bar is hidden here, and the same phone
+reaches the Flutter overlay (which draws the badge unconditionally) on mpv-routed channels, so
+gating would make the clock blink in and out per channel. Total native Swift, view controller plus
 engine shim plus overlay, comes to an estimated **~2,790 lines vs Android's ~4,206**. The
 premise the platform-view design was built on — "native chrome is prohibitively expensive on
 iOS" — does not hold up against Android's own numbers; iOS chrome is smaller.
@@ -961,7 +965,16 @@ separately, and no `v1`/`v2` split left in this design.
   textures in GLES"), and media_kit has no PiP path (upstream #587, #1410 open feature requests).
   Mirrors DV P5 tone-mapped-to-SDR being a hard ceiling of Android's mpv fallback.
 - **No AirPlay through the mpv fallback** — AirPlay is an AVFoundation feature, so it exists only
-  for AVPlayer-routed content.
+  for AVPlayer-routed content. This is now visible as a *control* asymmetry, not just a capability
+  one: the native controller carries an `AVRoutePickerView`, and the Flutter overlay the same
+  device reaches on an mpv-routed channel has none. That is deliberate — offering a picker that
+  cannot route anything would be worse than its absence — but it means a Stalker user, whose
+  extension-less `create_link` locators route to mpv by rule, may never see the control at all.
+- **The route sheet is a third auto-hide pin.** AVKit presents it itself, so nothing inside it
+  reaches `pokeControls` and the auto-hide timer would otherwise run to completion behind it,
+  dropping the viewer back onto a bare picture on dismiss. `PlayerChromeState.routePickerPresenting`
+  folds into `pinned` alongside `menu`/`infoOpen`, and is deliberately **not** cleared by
+  `setControlsVisible(false)` the way those two are — the sheet outlives a hide request.
 
 **Permanent, independent of engine:**
 

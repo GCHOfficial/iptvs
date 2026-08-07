@@ -34,48 +34,57 @@ class LegalScreen extends StatelessWidget {
       // landscape sits on the *side*, hiding the cards' trailing link icons.
       body: SafeArea(
         top: false,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            const Text(
-              'IPTVS Player is a free, open-source player for the IPTV sources you '
-              'already have access to. It ships no channels — bring your own '
-              'Stalker portal, Xtream account, or M3U playlist, or try the '
-              'built-in Demo (no account needed). Cloud sync is optional.',
-              style: TextStyle(color: AppColors.textLo),
+        // Capped and centred: this screen is entirely running prose, which is
+        // unreadable stretched across a maximised desktop window.
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: kSettingsMaxContentWidth,
             ),
-            const SizedBox(height: 16),
-            _LinkCard(
-              // A D-pad user entering this screen should land on a visible focus
-              // ring immediately, not on an unfocused scaffold.
-              autofocus: true,
-              icon: Icons.help_outline,
-              title: 'Support',
-              subtitle: 'Troubleshooting and contact information',
-              onTap: () => _open(context, AppLinks.support),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                const Text(
+                  'IPTVS Player is a free, open-source player for the IPTV sources you '
+                  'already have access to. It ships no channels — bring your own '
+                  'Stalker portal, Xtream account, or M3U playlist, or try the '
+                  'built-in Demo (no account needed). Cloud sync is optional.',
+                  style: TextStyle(color: AppColors.textLo),
+                ),
+                const SizedBox(height: 16),
+                _LinkCard(
+                  // A D-pad user entering this screen should land on a visible focus
+                  // ring immediately, not on an unfocused scaffold.
+                  autofocus: true,
+                  icon: Icons.help_outline,
+                  title: 'Support',
+                  subtitle: 'Troubleshooting and contact information',
+                  onTap: () => _open(context, AppLinks.support),
+                ),
+                _LinkCard(
+                  icon: Icons.code,
+                  title: 'Source code & issues',
+                  subtitle: 'View the code or report a problem on GitHub',
+                  onTap: () => _open(context, AppLinks.repository),
+                ),
+                _LinkCard(
+                  icon: Icons.privacy_tip_outlined,
+                  title: 'Privacy policy',
+                  subtitle: 'What the app stores and sends',
+                  onTap: () => _open(context, AppLinks.privacyPolicy),
+                ),
+                _LinkCard(
+                  icon: Icons.delete_outline,
+                  title: 'Delete cloud account',
+                  subtitle:
+                      'Permanently remove an optional panel account and its cloud data',
+                  onTap: () => _open(context, AppLinks.deleteCloudAccount),
+                ),
+                const SizedBox(height: 20),
+                const _VersionLine(),
+              ],
             ),
-            _LinkCard(
-              icon: Icons.code,
-              title: 'Source code & issues',
-              subtitle: 'View the code or report a problem on GitHub',
-              onTap: () => _open(context, AppLinks.repository),
-            ),
-            _LinkCard(
-              icon: Icons.privacy_tip_outlined,
-              title: 'Privacy policy',
-              subtitle: 'What the app stores and sends',
-              onTap: () => _open(context, AppLinks.privacyPolicy),
-            ),
-            _LinkCard(
-              icon: Icons.delete_outline,
-              title: 'Delete cloud account',
-              subtitle:
-                  'Permanently remove an optional panel account and its cloud data',
-              onTap: () => _open(context, AppLinks.deleteCloudAccount),
-            ),
-            const SizedBox(height: 20),
-            const _VersionLine(),
-          ],
+          ),
         ),
       ),
     );

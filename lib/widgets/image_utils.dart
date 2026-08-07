@@ -2,9 +2,20 @@ import 'package:flutter/widgets.dart';
 
 /// Decode-size for a network image displayed at [logicalSize] logical pixels:
 /// physical pixels for the current display, with the DPR clamped so ultra-high
-/// density screens don't inflate the decode again. Pass to `memCacheWidth`/
-/// `memCacheHeight` (or `ResizeImage`) so posters/logos are decoded at display
-/// size instead of their native resolution.
+/// density screens don't inflate the decode again. Pass to **`memCacheWidth`
+/// alone** so posters/logos are decoded at display size instead of their
+/// native resolution.
+///
+/// **Pass one dimension, never both.** `cached_network_image` hands both
+/// through to `ResizeImage.resizeIfNeeded`, whose default
+/// `ResizeImagePolicy.exact` sizes the bitmap to *both* targets "regardless of
+/// whether it matches the source image's intrinsic aspect ratio … similar to
+/// [BoxFit.fill]". The image is then decoded pre-distorted and the
+/// [BoxFit.cover] that was meant to crop it has nothing left to crop. Passing
+/// width alone scales the height to preserve aspect, which is what every call
+/// site here wants. If a ceiling on the other axis is ever genuinely needed,
+/// construct `ResizeImage(..., policy: ResizeImagePolicy.fit)` explicitly
+/// rather than adding a second `memCache*` argument.
 int imageCacheSize(BuildContext context, double logicalSize) {
   return scaledImageCacheSize(
     logicalSize,

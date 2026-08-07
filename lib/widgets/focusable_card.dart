@@ -3,6 +3,13 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'routed_focus_node.dart';
 
+/// Outer vertical padding a [FocusableCard] adds around itself (top and
+/// bottom), so adjacent cards never share a border. Exported because a grid
+/// laying these out has to subtract it from its own main-axis spacing —
+/// otherwise the vertical gutter is `spacing + 2 * this` while the horizontal
+/// one is just `spacing`, and the lattice reads visibly lopsided.
+const double kFocusableCardVerticalPadding = 4.0;
+
 /// A card that behaves well under mouse, touch, and a TV remote's D-pad:
 /// - shows a clear accent focus ring when focused (not just a hover tint),
 /// - activates on OK/Enter/Select/Space (via [ActivateIntent]) as well as tap,
@@ -46,6 +53,17 @@ class FocusableCard extends StatefulWidget {
 }
 
 class _FocusableCardState extends State<FocusableCard> {
+  /// Focused fill: an accent-tinted lift rather than the neutral
+  /// [AppColors.panelHi] hover tint, following the EPG grid's selected cell
+  /// (`_ProgrammeCell._selectedFill`). These tiles get as small as ~176 px in a
+  /// 10-column TV grid viewed from across the room, where a 1-step-lighter grey
+  /// plus a hairline ring reads as "nothing is selected". Hover deliberately
+  /// keeps the neutral tint so the two states stay distinguishable on desktop.
+  static final Color _focusedFill = Color.alphaBlend(
+    AppColors.accent.withValues(alpha: 0.22),
+    AppColors.panel,
+  );
+
   bool _focused = false;
   late final FocusNode _ownedFocusNode = RoutedFocusNode(
     widget.debugLabel ?? 'FocusableCard',
@@ -53,7 +71,20 @@ class _FocusableCardState extends State<FocusableCard> {
 
   FocusNode get _effectiveFocusNode => widget.focusNode ?? _ownedFocusNode;
 
-  void _onHighlight(bool value) {
+  /// Drawn from **`hasFocus`**, not `onShowFocusHighlight`.
+  /// `FocusableActionDetector` gates that callback on
+  /// `FocusManager.highlightMode == traditional`, and the mode starts as
+  /// `touch` on Android: a cold start into Movies autofocused the first tile
+  /// and drew **no ring at all** until some key was pressed — same for any TV
+  /// box whose remote also emits pointer events. The live tab never had the bug
+  /// because it paints its cursor from `hasFocus` (docs/tv-navigation.md,
+  /// "Drawing the cursor"); this matches it.
+  ///
+  /// Safe on touch: [InkWell] here sets `canRequestFocus: false` and nothing
+  /// requests focus on tap, so tapping a card never focuses it. An explicit
+  /// `autofocus: true` does show its ring on a phone — deliberately, exactly
+  /// like the live list's resting cursor row.
+  void _onFocusChange(bool value) {
     if (mounted) setState(() => _focused = value);
     if (!value || !widget.scrollOnFocus) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -62,7 +93,7 @@ class _FocusableCardState extends State<FocusableCard> {
         Scrollable.ensureVisible(
           context,
           alignment: 0.5,
-          duration: const Duration(milliseconds: 220),
+          duration: appMotion(context, const Duration(milliseconds: 220)),
           curve: Curves.easeOutCubic,
         );
       }
@@ -78,7 +109,9 @@ class _FocusableCardState extends State<FocusableCard> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        vertical: kFocusableCardVerticalPadding,
+      ),
       child: Focus(
         canRequestFocus: false,
         skipTraversal: true,
@@ -87,7 +120,7 @@ class _FocusableCardState extends State<FocusableCard> {
           autofocus: widget.autofocus,
           focusNode: _effectiveFocusNode,
           mouseCursor: SystemMouseCursors.click,
-          onShowFocusHighlight: _onHighlight,
+          onFocusChange: _onFocusChange,
           actions: {
             ActivateIntent: CallbackAction<ActivateIntent>(
               onInvoke: (_) {
@@ -104,9 +137,9 @@ class _FocusableCardState extends State<FocusableCard> {
             child: ExcludeSemantics(
               excluding: widget.semanticsLabel != null,
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
+                duration: appMotion(context, const Duration(milliseconds: 120)),
                 decoration: BoxDecoration(
-                  color: _focused ? AppColors.panelHi : AppColors.panel,
+                  color: _focused ? _focusedFill : AppColors.panel,
                   borderRadius: BorderRadius.circular(AppRadius.tile),
                   border: Border.all(
                     color: _focused ? AppColors.accent : AppColors.line,
