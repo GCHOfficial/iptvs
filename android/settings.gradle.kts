@@ -22,7 +22,18 @@ plugins {
     // Keep AGP 9.2.1 until the 9.3 lint regression in CommentDetector is
     // fixed upstream. AGP 9.3 crashes release lint on url_launcher_android
     // with NoSuchMethodError: java.util.List.removeLast() under JDK 17.
-    id("com.android.application") version "9.3.1" apply false
+    //
+    // **Do not let Dependabot raise this.** It already did once (405cdf8, the
+    // gradle-minor group) — the version went to 9.3.1 while this comment
+    // stayed put, and the next release build died exactly as described:
+    // `Unexpected failure during lint analysis of UrlLauncher.java` out of
+    // `CommentDetector.visitFile`, on the v0.1.44 tag. Nothing caught it
+    // earlier because `lintVitalAnalyze*` runs on **release** variants only —
+    // CI's smoke APK and every local `--debug` build skip it entirely, and
+    // debug lint passes fine on 9.3.1. `dependabot.yml` now ignores this
+    // artifact so the bump cannot come back silently; drop that ignore
+    // together with this pin once upstream fixes the regression.
+    id("com.android.application") version "9.2.1" apply false
     // Declared with `apply false` only to pin the Kotlin version that Flutter's
     // built-in Kotlin (AGP 9+) adopts. KGP is NOT applied to the app module — see
     // the plugins block in app/build.gradle.kts.

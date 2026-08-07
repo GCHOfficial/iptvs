@@ -38,3 +38,14 @@ updates:
       gradle-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # AGP is pinned to 9.2.1 in android/settings.gradle.kts — 9.3 crashes
+      # **release** lint on url_launcher_android (NoSuchMethodError out of
+      # CommentDetector, JDK 17). A grouped minor bump already carried it to
+      # 9.3.1 once and broke the v0.1.44 release build; nothing caught it in
+      # review or CI because `lintVitalAnalyze*` runs on release variants only,
+      # so the smoke APK and every local `--debug` build skip it. Ignoring the
+      # artifact keeps that decision from being undone silently. Remove this
+      # together with the pin once the upstream regression is fixed.
+      - dependency-name: "com.android.tools.build:gradle"
+      - dependency-name: "com.android.application"
