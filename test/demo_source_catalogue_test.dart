@@ -25,15 +25,41 @@ void main() {
   test('generates now/next and past guide rows for archive channels', () async {
     final channels = await source.channels();
     final guide = await source.epg(channels);
-    expect(guide, hasLength(channels.length * 9));
+    // Assert the *properties* the guide has to have rather than a slot count.
+    // The count used to be pinned at 9 per channel (±2 h), which meant the
+    // guide silently expired about two hours into a session and looked like
+    // broken EPG. Pinning the window width again would just re-freeze whatever
+    // number is current; these three checks are what actually make the demo
+    // source useful as a guide stand-in.
+    final now = DateTime.now();
+    expect(guide, isNotEmpty);
     expect(
-      guide.where((programme) => programme.channelId == 'bbb'),
-      hasLength(9),
-    );
-    expect(
-      guide.any((programme) => programme.start.isBefore(DateTime.now())),
+      guide.every((programme) => programme.stop.isAfter(programme.start)),
       isTrue,
     );
+    for (final channel in channels) {
+      final rows = guide.where((p) => p.channelId == channel.id);
+      expect(
+        rows.any((p) => !p.start.isAfter(now) && p.stop.isAfter(now)),
+        isTrue,
+        reason: '${channel.id} must have a *current* programme',
+      );
+      expect(
+        rows.any((p) => p.stop.isBefore(now)),
+        isTrue,
+        reason: '${channel.id} must have a past programme for catch-up',
+      );
+      expect(
+        rows.any((p) => p.start.isAfter(now)),
+        isTrue,
+        reason: '${channel.id} must have a future programme for next/guide',
+      );
+    }
+    // Wide enough to outlast a long session, not merely the next few minutes.
+    final furthest = guide
+        .map((p) => p.stop)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+    expect(furthest.difference(now).inHours, greaterThanOrEqualTo(12));
 
     final bbb = channels.first;
     final past = guide
