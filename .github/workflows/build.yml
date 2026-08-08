@@ -34,12 +34,20 @@ jobs:
           cache: true
       # The persistence tests use sqflite_common_ffi, which loads the system
       # libsqlite3 at runtime; the channel-list focus tests build a media_kit
-      # preview player, which needs libmpv (MediaKit.ensureInitialized).
+      # preview player, which needs libmpv (MediaKit.ensureInitialized). Lua 5.1
+      # is mpv's own dialect, for the OSD layout test below.
       - name: Install native test deps
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0 libmpv-dev
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-0 libmpv-dev lua5.1
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      # The Linux native OSD is ASS rendered inside mpv on the Wayland+HDR path
+      # only, so nothing else here ever executes it — without this a syntax error
+      # or a layout regression in the script would ship unnoticed.
+      - name: Lua OSD layout test
+        run: |
+          luac5.1 -p linux/mpv/iptvs_overlay.lua
+          lua5.1 linux/mpv/overlay_layout_test.lua
 
   # Skip the heavy platform builds on doc-only commits (README/CLAUDE.md/memory).
   # `code` is an allowlist of paths that actually affect a build.

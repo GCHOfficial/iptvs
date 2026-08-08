@@ -41,7 +41,9 @@ flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=d
 ```
 
 Lints: `package:flutter_lints`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
-analyze + test, then Windows and a universal Android APK. The Windows libmpv DLL is fetched at
+analyze + test + the Lua OSD gate (`luac5.1 -p` and `linux/mpv/overlay_layout_test.lua` — the only
+thing that executes the Linux native overlay outside a Wayland+HDR session), then Windows and a
+universal Android APK. The Windows libmpv DLL is fetched at
 configure time by `windows/CMakeLists.txt`; the Android libdovi AAR comes from **Git LFS**
 (`android/app/libs/libmpv-dovi.aar`), so a clone needs LFS to build Android. The Windows runner
 compiles `/utf-8` (non-ASCII literals trip C4066 under `/WX`). A fixed public debug keystore is
@@ -443,7 +445,25 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   unpaused different-channel preview would.
 - On a TV remote the preview is **deliberate and locked**: only OK (or a pointer tap on the row)
   starts/switches it; D-pad focus movement never does. The preview engine is stopped when the app
-  backgrounds or exits.
+  backgrounds or exits. A second OK **while that same channel's preview is still resolving waits
+  for the in-flight resolve and then goes fullscreen** (`decideChannelPlayAction` →
+  `LivePreviewController.pendingStart`) — it must never fall through to "start a preview", which
+  superseded the in-flight `create_link` with a second one and reloaded the running shared engine:
+  the visible stream reload behind the Android TV "it reconnects when I go fullscreen" reports.
+- **The live chrome is one layout on every surface that draws its own overlay.** Where the VOD
+  scrubber sits, live gets a three-row EPG strip (programme title + `HH:mm – HH:mm`, progress bar,
+  `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,
+  resolution, HDR, fps, clock — in the compact labels every native uses (`1080p`, `HDR10`, `50fps`,
+  **nothing** for SDR; Dart's pure `resolutionBadgeLabel`/`hdrBadgeLabel`/`fpsBadgeLabel`/
+  `sourceBadgeLabel`/`playerClockLabel`). The jump-to-live-edge control is a plain text chip reading
+  **"Go to live"** on every surface — never "LIVE", which duplicated the status badge greying beside
+  it — and it **hands focus to play/pause before it disappears** (it is the one control that removes
+  itself while focused; on a D-pad that stranded the remote until Back). Android Compose, iOS UIKit,
+  the Windows GDI overlay, the Linux Lua OSD and the shared Flutter `EmbeddedPlayerControls` must all
+  agree — the two Windows surfaces show the same channel to the same user, chosen only by whether
+  the stream is HDR. The Lua OSD is pinned by `linux/mpv/overlay_layout_test.lua` (headless ASS
+  render, run in CI with `luac5.1 -p`) — the only thing that executes that script outside a
+  Wayland+HDR session.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
   control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
   Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
@@ -551,6 +571,11 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   for pure logic
   extracted from the native player. `integration_test/player_soak_test.dart` is owner-run on real
   hardware only (see docs/player.md) — plain `flutter test` doesn't collect it.
+- The Linux native OSD has its own harness, in Lua: `linux/mpv/overlay_layout_test.lua` stubs the
+  three mpv modules `iptvs_overlay.lua` requires, renders a frame per scenario and asserts on the
+  emitted ASS events (row order, badge order, the live strip clearing the transport row). Run it with
+  `lua linux/mpv/overlay_layout_test.lua` — mpv's dialect is 5.1, and CI runs it plus `luac5.1 -p`.
+  Nothing else in the suite executes that script: it only renders on Wayland+HDR.
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
   every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
   literal `username=…&password=…` pattern when the parser under test doesn't need it.

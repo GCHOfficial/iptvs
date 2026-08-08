@@ -53,6 +53,13 @@ navigation code.
   the tabs (media) via the Back ladder's `TvTextField.clear` route-key branch.
 - **The same "OK to edit" model** governs the player's sliders (see docs/player.md) — focus
   passes them freely; OK enters adjust mode.
+- **A control that removes itself must hand focus on first.** `TvTextField`'s clear (×) above does
+  it (`onClear` parks focus on the cell before the button disappears); so does the player overlay's
+  "Go to live", which vanishes the moment the reload reaches the live edge and used to take the
+  D-pad with it — no focused node was left in the overlay, so no arrow key did anything until Back
+  tore the player down (docs/player.md, "hands focus to play/pause before it disappears"). Any new
+  *contextual* control — one whose visibility depends on state the control itself changes — owes the
+  same treatment.
 - **Content-kind selector** (`channel_list_chrome.dart` `ChannelContentTabs`) is a focusable chip
   strip (not
   `SegmentedButton`), the natural top of the focus order — reached by Up or the Back ladder. The

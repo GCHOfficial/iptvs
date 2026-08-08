@@ -1334,6 +1334,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       // return value straight back to the platform side.
       final fresh = await _freshLiveStream();
       return <String, Object?>{'url': fresh.url, 'headers': fresh.headers};
+    } else if (call.method == 'nativeDiagnostic') {
+      // A credential-free note from the native player (Android's
+      // `MainActivity.logPlaybackDiagnostic`), recorded in the same exportable
+      // log as Dart's own playback lines so a handoff can be read end to end:
+      // `fullscreen open decision=…` from the channel list, then what the
+      // Activity actually did with it. `_logPlayback` redacts regardless.
+      final args = call.arguments;
+      if (args is Map) {
+        final note = args['note']?.toString();
+        if (note != null && note.isNotEmpty) _logPlayback(note);
+      }
     } else if (call.method == 'nativePlayback') {
       final args = call.arguments;
       if (args is! Map) return null;

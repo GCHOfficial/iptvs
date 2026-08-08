@@ -168,6 +168,14 @@ class HdrPlayerActivity : ComponentActivity() {
             null
         }
         adoptedShared = shared != null
+        // The handoff's outcome, in the *exportable* log rather than logcat: a
+        // refused adoption is a full stream reload, which is exactly what a user
+        // reporting a slow, "reconnecting" preview→fullscreen transition sees.
+        // Both halves are credential-free booleans.
+        MainActivity.instance?.get()?.logPlaybackDiagnostic(
+            "native fullscreen adoptShared=" +
+                "${intent.getBooleanExtra(EXTRA_ADOPT_SHARED, false)} adopted=$adoptedShared",
+        )
 
         uiState = shared?.second
             ?: PlayerUiState(
@@ -230,6 +238,14 @@ class HdrPlayerActivity : ComponentActivity() {
             }
         }
 
+        // The video view is hosted *by Compose* (`AndroidView` in [PlayerScreen]),
+        // not attached here in `onCreate`. That was measured, not assumed: hoisting
+        // it into a FrameLayout under the ComposeView changed nothing, because
+        // `AndroidView` adds the SurfaceView during the first **composition**,
+        // which happens inside the window's first traversal — the same traversal
+        // that would lay out a pre-attached view. There is no second traversal to
+        // save, and the ~150 ms between composition and `surfaceCreated` is
+        // surface allocation, not scheduling. See docs/player.md.
         setContent {
             engineState.value?.let { active ->
                 PlayerScreen(

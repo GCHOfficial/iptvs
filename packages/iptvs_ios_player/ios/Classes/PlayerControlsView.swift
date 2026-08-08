@@ -135,8 +135,14 @@ final class PlayerControlsView: UIView {
     accessibilityLabel: "Mute",
     fallbackTitle: "Mute"
   ) { [weak self] in self?.onAction?(.toggleMute) }
+  /// "Jump to the live edge", shown only once playback is behind it. The label
+  /// is the action, not the state: it used to read "LIVE", duplicating the LIVE
+  /// *status* badge in the top bar — which greys at the very moment this button
+  /// appears — with a word that says nothing about what tapping it does. The
+  /// accessible name was already "Go to live" on every surface; the visible
+  /// title now agrees with it, as it does on Android, Windows and Linux.
   private lazy var goLiveButton = PlayerTextButton(
-    title: "LIVE",
+    title: "Go to live",
     accessibilityLabel: "Go to live"
   ) { [weak self] in self?.onAction?(.goLive) }
   private lazy var favoriteButton = PlayerIconButton(

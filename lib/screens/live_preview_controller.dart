@@ -272,10 +272,31 @@ class LivePreviewController extends ChangeNotifier {
   bool _useNative(Channel channel) =>
       Platform.isAndroid && !_nativeUnsupportedIds.contains(channel.id);
 
+  /// The most recent [start], so a caller that arrives mid-resolve can wait for
+  /// it instead of starting a competing one. Already-completed (or never
+  /// started) resolves make this a no-op future.
+  ///
+  /// This exists for the second OK press on a channel whose preview is still
+  /// resolving: the channel list waits here and then goes fullscreen, rather
+  /// than restarting the preview (which superseded the in-flight `create_link`
+  /// with a second one and reloaded the shared engine — see
+  /// [ChannelPlayAction.awaitPreviewThenOpen] in `channel_list_screen.dart`).
+  /// It deliberately reports *completion*, not success: the caller re-reads
+  /// [channelId]/[stream] afterwards, because the resolve it waited on may have
+  /// failed or been superseded.
+  Future<void> get pendingStart => _pendingStart ?? Future<void>.value();
+  Future<void>? _pendingStart;
+
   /// Resolve [channel] and open it in the preview player. [muted] is true for
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
-  Future<void> start(Channel channel, {bool muted = true}) async {
+  Future<void> start(Channel channel, {bool muted = true}) {
+    final pending = _start(channel, muted: muted);
+    _pendingStart = pending;
+    return pending;
+  }
+
+  Future<void> _start(Channel channel, {bool muted = true}) async {
     // No guard on `loading`: a newer call must supersede an in-flight resolve
     // (a slow Stalker create_link would otherwise swallow the user's channel
     // change). The request id makes the stale attempt's completions no-ops.

@@ -550,4 +550,65 @@ void main() {
       });
     }
   });
+
+  /// What an OK press does *before* any of the above runs. The regression this
+  /// pins is Android-TV-shaped: previews there are deliberate (OK starts one),
+  /// a slow portal makes `create_link` take seconds, and a second OK during
+  /// that window used to fall through to "start a preview" — superseding the
+  /// in-flight resolve with a second one and reloading the running shared
+  /// engine, which is exactly the "it reconnects when I go fullscreen" report.
+  group('decideChannelPlayAction', () {
+    test('a resolved same-channel preview goes straight to fullscreen', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: true,
+          previewLoading: false,
+        ),
+        ChannelPlayAction.openFullscreen,
+      );
+    });
+
+    test('a still-resolving same-channel preview is waited on, never '
+        'restarted', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: false,
+          previewLoading: true,
+        ),
+        ChannelPlayAction.awaitPreviewThenOpen,
+      );
+    });
+
+    test('a failed same-channel preview retries', () {
+      expect(
+        decideChannelPlayAction(
+          sameChannelPreview: true,
+          previewHasStream: false,
+          previewLoading: false,
+        ),
+        ChannelPlayAction.startPreview,
+      );
+    });
+
+    test('another channel always starts a preview, whatever this one is '
+        'doing', () {
+      for (final values in [
+        (stream: true, loading: false),
+        (stream: false, loading: true),
+        (stream: false, loading: false),
+      ]) {
+        expect(
+          decideChannelPlayAction(
+            sameChannelPreview: false,
+            previewHasStream: values.stream,
+            previewLoading: values.loading,
+          ),
+          ChannelPlayAction.startPreview,
+          reason: '$values',
+        );
+      }
+    });
+  });
 }

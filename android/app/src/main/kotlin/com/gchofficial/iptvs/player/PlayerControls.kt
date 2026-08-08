@@ -46,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -163,6 +164,12 @@ fun PlayerScreen(
     ) {
         // key() so swapping engines (ExoPlayer -> mpv fallback) rebuilds the host
         // with the new engine's view.
+        //
+        // Hosting the video here rather than attaching it to the Activity's
+        // content in `onCreate` costs nothing: `AndroidView` adds the SurfaceView
+        // during the first composition, inside the window's first traversal, so
+        // a pre-attached view would be laid out in that same traversal. Measured
+        // both ways on a TV emulator — see docs/player.md.
         key(videoView) {
             AndroidView(factory = { videoView }, modifier = Modifier.fillMaxSize())
         }
@@ -433,7 +440,7 @@ private fun BottomBar(
                     ) {
                         // The parent Row supplies the 8dp gaps, so skip the
                         // cluster's own inter-button spacers (`spread = true`).
-                        RightCluster(state, callbacks, onInteract, spread = true)
+                        RightCluster(state, callbacks, playFocus, onInteract, spread = true)
                     }
                 }
             } else {
@@ -443,7 +450,7 @@ private fun BottomBar(
                 ) {
                     TransportControls(state, callbacks, playFocus, onInteract, Modifier.width(120.dp))
                     Spacer(Modifier.weight(1f))
-                    RightCluster(state, callbacks, onInteract)
+                    RightCluster(state, callbacks, playFocus, onInteract)
                 }
             }
         }
@@ -489,6 +496,9 @@ private fun RowScope.TransportControls(
         value = if (state.muted) 0f else state.volume,
         onValueChange = { onInteract(); callbacks.onSetVolume(it) },
         modifier = volumeModifier,
+        // In the transport row it reads as one of the controls, and needs a
+        // focus state a remote user can actually see — see [SlimSlider].
+        chip = true,
     )
 }
 
@@ -497,17 +507,47 @@ private fun RowScope.TransportControls(
 private fun RowScope.RightCluster(
     state: PlayerUiState,
     callbacks: PlayerCallbacks,
+    playFocus: FocusRequester,
     onInteract: () -> Unit,
     spread: Boolean = false,
 ) {
     // When `spread`, the parent Row supplies the gaps (portrait, `spacedBy`), so we
     // omit the manual spacers; otherwise (landscape) we space the buttons ourselves.
     // Live-only "jump to live edge", shown only once behind (paused) — separate
-    // from play/pause, which keeps resuming from where you paused. Text "LIVE"
-    // for parity with the Windows overlay button.
+    // from play/pause, which keeps resuming from where you paused. The label is
+    // the action, not the state: this used to read "LIVE", duplicating the LIVE
+    // *status* badge in the top bar (which greys at the very moment this button
+    // appears) with a word that says nothing about what pressing it does. Every
+    // overlay already declared "Go to live" as the accessible name; the visible
+    // label now agrees with it. Same wording on Windows, iOS, Linux and the
+    // shared Flutter overlay.
+    //
+    // **It is the one control that removes itself while you are standing on
+    // it**, and on a D-pad that used to strand the remote: pressing OK reloads
+    // to the live edge, `liveSynced` flips true, the button leaves composition,
+    // and Compose's focus went with it — no control in the overlay held focus
+    // any more, so no arrow key did anything until Back tore the whole thing
+    // down. Focus therefore moves to play/pause on the press, and again from
+    // `onDispose` if the button disappears while focused for any *other* reason
+    // (the reconnect watchdog reaching the live edge on its own). Both go
+    // through `runCatching` because the requester's node is gone when the whole
+    // bar is leaving composition — the chrome-hidden case, where
+    // `PlayerScreen`'s own effect parks focus on the root instead.
     if (state.isLive && !state.liveSynced) {
-        TextControlButton("LIVE", "Go to live") {
-            onInteract(); callbacks.onGoLive()
+        var goLiveFocused by remember { mutableStateOf(false) }
+        DisposableEffect(Unit) {
+            onDispose {
+                if (goLiveFocused) runCatching { playFocus.requestFocus() }
+            }
+        }
+        TextControlButton(
+            label = "Go to live",
+            contentDescription = "Go to live",
+            onFocusChanged = { goLiveFocused = it },
+        ) {
+            onInteract()
+            callbacks.onGoLive()
+            runCatching { playFocus.requestFocus() }
         }
         if (!spread) Spacer(Modifier.width(8.dp))
     }
@@ -619,11 +659,18 @@ fun IconControlButton(
     }
 }
 
+/**
+ * [onFocusChanged] lets a caller observe focus without owning the visual state.
+ * It exists for controls that can *remove themselves* while focused — "Go to
+ * live" is the only one — so the caller can hand focus somewhere else before it
+ * goes; see [RightCluster].
+ */
 @Composable
 fun TextControlButton(
     label: String,
     contentDescription: String,
     modifier: Modifier = Modifier,
+    onFocusChanged: ((Boolean) -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -633,7 +680,10 @@ fun TextControlButton(
             .height(PlayerDimens.ButtonSize)
             .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
             .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                onFocusChanged?.invoke(it.isFocused)
+            }
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp),
     ) {
@@ -756,16 +806,55 @@ fun SlimSlider(
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
     step: Float = 0.05f,
+    chip: Boolean = false,
 ) {
     var focused by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var widthPx by remember { mutableFloatStateOf(0f) }
     val f = value.coerceIn(0f, 1f)
     val thumbSize = if (editing) 18.dp else 14.dp
+    // A focused chip is filled with `ButtonBgFocused`, which *is* `Accent` — the
+    // same colour as the slider's own fill, so on accent the value has to be
+    // drawn in white or it vanishes into its own background.
+    val onAccent = chip && (focused || editing)
+    val trackColor = if (onAccent) {
+        androidx.compose.ui.graphics.Color.White.copy(alpha = 0.35f)
+    } else {
+        PlayerColors.TrackInactive
+    }
+    val fillColor = if (onAccent) {
+        androidx.compose.ui.graphics.Color.White
+    } else {
+        PlayerColors.Accent
+    }
 
     Box(
         modifier
-            .height(28.dp) // comfortable touch / focus target around the thin track
+            // [chip] gives the volume slider the same rounded fill its neighbours
+            // in the transport row have, lit the same way on focus. Without it
+            // the slider was the one focus stop in the overlay whose focused
+            // state was a 2dp ring on a 14dp thumb — walking onto it with a
+            // D-pad read as "the focus disappeared", which is exactly how the
+            // "Go to live" stranding was first described. Opt-in so the VOD
+            // scrubber, which spans the bar, stays a bare track.
+            .then(
+                if (chip) {
+                    Modifier
+                        .height(PlayerDimens.ButtonSize)
+                        .clip(RoundedCornerShape(PlayerDimens.ButtonCorner))
+                        .background(
+                            if (focused || editing) {
+                                PlayerColors.ButtonBgFocused
+                            } else {
+                                PlayerColors.ButtonBg
+                            },
+                        )
+                        .padding(horizontal = 12.dp)
+                } else {
+                    // Comfortable touch / focus target around the thin track.
+                    Modifier.height(28.dp)
+                },
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 if (!it.isFocused) editing = false
@@ -807,14 +896,14 @@ fun SlimSlider(
                 .fillMaxWidth()
                 .height(4.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(PlayerColors.TrackInactive),
+                .background(trackColor),
         ) {
             Box(
                 Modifier
                     .fillMaxWidth(f)
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(PlayerColors.Accent),
+                    .background(fillColor),
             )
         }
         // Thumb positioned at the fill end via [f : 1-f] weighted spacers (centers
@@ -825,9 +914,11 @@ fun SlimSlider(
                 Modifier
                     .size(thumbSize)
                     .clip(CircleShape)
-                    .background(PlayerColors.Accent)
+                    .background(fillColor)
                     .then(
-                        if (editing || focused) {
+                        // On an accent chip the thumb is already white; a white
+                        // ring around it would only blur its edge.
+                        if ((editing || focused) && !onAccent) {
                             Modifier.border(
                                 2.dp,
                                 androidx.compose.ui.graphics.Color.White.copy(alpha = 0.92f),

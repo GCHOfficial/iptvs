@@ -850,10 +850,11 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
     place(l.speed, 54);
   }
   // "Go to live" button, shown only once behind the live edge; left end of the
-  // right cluster.
+  // right cluster. 92px carries the full label at 13px semibold (the old 54
+  // sized a bare "LIVE").
   l.has_go_live = live && !g_native_control_state.live_synced;
   if (l.has_go_live) {
-    place(l.go_live, 54);
+    place(l.go_live, 92);
   }
 
   l.has_scrubber = !live;
@@ -1090,22 +1091,29 @@ std::vector<RECT> MenuOptionRects(const RECT &rect) {
   return out;
 }
 
+// Tiers match Kotlin `PlayerUiState.resolutionBadge`, Swift
+// `BadgeFormatting.resolutionBadge` and Dart `resolutionBadgeLabel`. They are
+// deliberately loose: a 1088-tall or 1912-wide stream (both common from IPTV
+// providers) is still 1080p, which the old exact `h >= 1080` test called 720p.
 std::wstring ResolutionBadge() {
   const int w = g_native_control_state.video_width;
   const int h = g_native_control_state.video_height;
-  if (w >= 3840 || h >= 2160) {
+  if (w <= 0 || h <= 0) {
+    return L"";
+  }
+  if (h >= 2000 || w >= 3500) {
     return L"4K";
   }
-  if (h >= 1080) {
+  if (h >= 1400 || w >= 2400) {
+    return L"1440p";
+  }
+  if (h >= 1000 || w >= 1800) {
     return L"1080p";
   }
-  if (h >= 720) {
+  if (h >= 700 || w >= 1200) {
     return L"720p";
   }
-  if (h > 0) {
-    return L"SD";
-  }
-  return L"";
+  return L"SD";
 }
 
 std::wstring HdrBadge() {
@@ -1166,7 +1174,10 @@ std::wstring FormatClock() {
     return L"";
   }
   wchar_t buffer[64];
-  if (wcsftime(buffer, 64, L"%a %d %b · %H:%M", &local) == 0) {
+  // `%#d` is MSVC's "no leading zero" flag: "Sat 8 Aug", the same shape Kotlin's
+  // `EEE d MMM` and Dart's `playerClockLabel` produce. `%d` here was the only
+  // one padding it to "Sat 08 Aug".
+  if (wcsftime(buffer, 64, L"%a %#d %b · %H:%M", &local) == 0) {
     return L"";
   }
   return buffer;
@@ -1187,6 +1198,19 @@ std::wstring FormatClockHm(double epoch_ms) {
     return L"";
   }
   return buffer;
+}
+
+// Badge form of the frame rate: "25fps" / "23.976fps", **no space** — matching
+// Kotlin `fpsBadge`, Swift `BadgeFormatting.fpsBadge` and Dart `fpsBadgeLabel`.
+// The info panel keeps [FormatFps]'s spaced "25 fps", which is a reading line
+// rather than a badge (the natives split it the same way).
+std::wstring FpsBadge(double fps) {
+  std::wstring text = FormatFps(fps);
+  const size_t space = text.find(L' ');
+  if (space != std::wstring::npos) {
+    text.erase(space, 1);
+  }
+  return text;
 }
 
 std::wstring TruncateBadge(const std::wstring &text, size_t max_len) {
@@ -1488,8 +1512,13 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, RectFrom(16, top_cy - 19, 54, top_cy + 19),
                  L"\xE72B", is_focused(NativeFocusItem::kBack));
 
-  // Top-right badges, stacked leftward: clock, LIVE, dynamic range, resolution,
-  // fps, then source name.
+  // Top-right badges, stacked leftward: clock, fps, dynamic range, resolution,
+  // LIVE, then source name — i.e. left-to-right they read source, LIVE,
+  // resolution, HDR, fps, clock, the order Kotlin `TopBadges`, iOS
+  // `badgesStack` and Dart `_badges()` all use. This cluster used to sit at
+  // fps/resolution/LIVE in a different order, which made the Windows SDR
+  // (embedded Flutter) overlay and this one disagree on a channel's chrome
+  // depending only on whether the stream was HDR.
   const COLORREF kNeutralBg = RGB(30, 33, 45);
   const COLORREF kNeutralFg = RGB(206, 210, 224);
   int badge_right = rect.right - 16;
@@ -1515,13 +1544,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     badge_right -=
         DrawBadge(paint_hdc, badge_right, top_cy, clock, kNeutralBg, kNeutralFg);
   }
-  if (g_native_control_state.is_live) {
-    // Red at the live edge; grey once behind (paired with the go-to-live button).
-    const bool synced = g_native_control_state.live_synced;
-    badge_right -= DrawBadge(
-        paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
-        synced ? RGB(255, 64, 112) : RGB(74, 80, 94),
-        synced ? RGB(255, 255, 255) : RGB(200, 205, 216));
+  const std::wstring fps_badge = FpsBadge(g_native_control_state.fps);
+  if (!fps_badge.empty()) {
+    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, fps_badge,
+                             kNeutralBg, kNeutralFg);
   }
   const std::wstring hdr_badge = HdrBadge();
   if (!hdr_badge.empty()) {
@@ -1533,15 +1559,21 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, res_badge,
                              RGB(60, 52, 137), RGB(206, 203, 246));
   }
-  const std::wstring fps_badge = FormatFps(g_native_control_state.fps);
-  if (!fps_badge.empty()) {
-    badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, fps_badge,
-                             kNeutralBg, kNeutralFg);
+  if (g_native_control_state.is_live) {
+    // Red at the live edge; grey once behind (paired with the go-to-live button).
+    const bool synced = g_native_control_state.live_synced;
+    badge_right -= DrawBadge(
+        paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
+        synced ? RGB(255, 64, 112) : RGB(74, 80, 94),
+        synced ? RGB(255, 255, 255) : RGB(200, 205, 216));
   }
   if (!g_native_control_state.source_name.empty()) {
     badge_right -=
         DrawBadge(paint_hdc, badge_right, top_cy,
-                  TruncateBadge(g_native_control_state.source_name, 22),
+                  // 20, the same ceiling Kotlin `sourceBadge`, Swift
+                  // `BadgeFormatting.sourceBadge` and Dart `sourceBadgeLabel`
+                  // apply.
+                  TruncateBadge(g_native_control_state.source_name, 20),
                   kNeutralBg, kNeutralFg);
   }
 
@@ -1612,10 +1644,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                   RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
                   RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
-      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" - " +
+      // "Next · HH:mm – HH:mm · title" — the one next-programme format the app
+      // uses (Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
+      // `_liveEpgStrip`, the Lua OSD). This overlay was the only one writing
+      // "Next: title (HH:mm - HH:mm)".
+      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" \x2013 " +
                                       FormatClockHm(s.epg_next_stop_ms);
       DrawTextWithFont(paint_hdc,
-                       L"Next: " + s.epg_next_title + L" (" + next_range + L")",
+                       L"Next \x00B7 " + next_range + L" \x00B7 " + s.epg_next_title,
                        l.epg_next,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                        epg_meta_font, RGB(184, 190, 204));
@@ -1652,7 +1688,12 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                  g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740",
                  is_focused(NativeFocusItem::kFullscreen));
   if (l.has_go_live) {
-    DrawTextButton(paint_hdc, l.go_live, L"LIVE",
+    // The label is the action, not the state: this button used to read "LIVE",
+    // duplicating the LIVE *status* badge in the top bar (which greys at the
+    // very moment this appears) with a word that says nothing about what
+    // clicking it does. Same wording now on Android, iOS, Linux and the shared
+    // Flutter overlay.
+    DrawTextButton(paint_hdc, l.go_live, L"Go to live",
                    is_focused(NativeFocusItem::kGoLive));
   }
 
@@ -2182,6 +2223,20 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
         const std::string command =
             CommandForFocusedItem(focusables[g_native_focus_index]);
+        // "Go to live" removes itself once the reload reaches the live edge, and
+        // the ring is rebuilt from scratch on the next paint — so the index left
+        // behind silently points at whatever control slid into that slot (or is
+        // clamped to the end). Park focus on play/pause instead, the same
+        // landing spot Compose uses for the same disappearing control. Done
+        // before the command is sent, so the rebuild can only find it here.
+        if (command == "goLive") {
+          const auto play = std::find(focusables.begin(), focusables.end(),
+                                      NativeFocusItem::kPlay);
+          if (play != focusables.end()) {
+            g_native_focus_index =
+                static_cast<int>(std::distance(focusables.begin(), play));
+          }
+        }
         ApplyOverlayOwnedCommand(native_controls_overlay_, hwnd, command);
         if (command.rfind("menu:", 0) == 0 || command == "info") {
           InvalidateNativeControls();

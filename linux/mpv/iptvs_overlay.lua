@@ -172,25 +172,24 @@ local function duration_label(seconds)
     return string.format('%d:%02d', mm, ss)
 end
 
-local function hm_now()
-    return os.date('%H:%M')
-end
-
 local function hm_ms(ms)
     if not ms then return '' end
     local d = os.date('*t', math.floor(ms / 1000))
     return string.format('%02d:%02d', d.hour, d.min)
 end
 
--- Mirrors PlayerVideoSurfaceState._programmeLine: "HH:MM – HH:MM · title" and,
--- when a next programme is known, "  •  Next HH:MM – HH:MM · title" appended.
-local function programme_line()
-    if not state.epgNowTitle then return nil end
-    local current = string.format('%s – %s · %s',
-        hm_ms(state.epgNowStartMs), hm_ms(state.epgNowStopMs), state.epgNowTitle)
-    if not state.epgNextTitle then return current end
-    return string.format('%s  •  Next %s – %s · %s',
-        current, hm_ms(state.epgNextStartMs), hm_ms(state.epgNextStopMs), state.epgNextTitle)
+-- "HH:MM – HH:MM" for a programme, the one range format every overlay renders.
+local function programme_range(start_ms, stop_ms)
+    return string.format('%s – %s', hm_ms(start_ms), hm_ms(stop_ms))
+end
+
+-- "Next · HH:MM – HH:MM · title", the third row of the live EPG strip. Same
+-- string Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
+-- `_liveEpgStrip` and the Windows GDI overlay build.
+local function next_programme_line()
+    if not state.epgNextTitle then return nil end
+    return string.format('Next · %s · %s',
+        programme_range(state.epgNextStartMs, state.epgNextStopMs), state.epgNextTitle)
 end
 
 -- Mirrors Dart's `dynamicRangeLabelFrom` (player_screen.dart). `target` is
@@ -245,6 +244,77 @@ local function speed_display(rate)
     if rate == 1 then return 'Normal (1.0×)' end
     if rate == math.floor(rate) then return string.format('%.1f×', rate) end
     return tostring(rate) .. '×'
+end
+
+-- ===== Badge labels =====
+-- The top-bar badges are the same six facts on every surface, formatted by the
+-- same rules: Kotlin `PlayerUiState.resolutionBadge`/`hdrBadge`/`fpsBadge`/
+-- `sourceBadge`, Swift `BadgeFormatting`, the Windows GDI `ResolutionBadge`/
+-- `HdrBadge`/`FpsBadge`, Dart's `resolutionBadgeLabel` &c. This overlay used to
+-- print raw `1920×1080`, the *full* dynamic-range label (including a bare `SDR`
+-- badge no other surface shows) and `50.00 FPS`.
+
+local function resolution_badge(vw, vh)
+    if not vw or not vh or vw <= 0 or vh <= 0 then return nil end
+    -- Deliberately loose: a 1088-tall or 1912-wide stream is still 1080p.
+    if vh >= 2000 or vw >= 3500 then return '4K' end
+    if vh >= 1400 or vw >= 2400 then return '1440p' end
+    if vh >= 1000 or vw >= 1800 then return '1080p' end
+    if vh >= 700 or vw >= 1200 then return '720p' end
+    return 'SD'
+end
+
+-- Compact HDR badge derived from the *full* label `dynamic_range()` returns
+-- (which the info panel keeps using); nil for SDR/unknown — no overlay badges
+-- "SDR", they simply say nothing.
+local function hdr_badge(dr)
+    dr = tostring(dr or '')
+    if dr == '' then return nil end
+    if dr:lower():find('dolby', 1, true) then return 'DV' end
+    if dr:find('HDR10+', 1, true) then return 'HDR10+' end
+    if dr:find('HDR10', 1, true) then return 'HDR10' end
+    if dr:find('HLG', 1, true) then return 'HLG' end
+    if dr:sub(1, 3) == 'HDR' then return 'HDR' end
+    return nil
+end
+
+-- Rounded to 3 decimals then stripped of trailing zeros ("25", "23.976").
+local function trimmed_decimal(value)
+    local rounded = math.floor(value * 1000 + 0.5) / 1000
+    if rounded == math.floor(rounded) then return string.format('%d', rounded) end
+    local text = string.format('%.3f', rounded)
+    text = text:gsub('0+$', '')
+    text = text:gsub('%.$', '')
+    return text
+end
+
+local function fps_badge(fps)
+    if not fps or fps <= 0 then return nil end
+    return trimmed_decimal(fps) .. 'fps'
+end
+
+local function source_badge(name)
+    local trimmed = tostring(name or ''):match('^%s*(.-)%s*$')
+    if trimmed == '' then return nil end
+    if utf8_len(trimmed) <= 20 then return trimmed end
+    local out = trimmed
+    while utf8_len(out) > 19 do out = utf8_trim_last(out) end
+    return out .. '…'
+end
+
+-- "Sat 8 Aug · 17:47" — the dated form the Windows GDI (`%a %#d %b · %H:%M`),
+-- Android TV (`EEE d MMM · HH:mm`) and Dart (`playerClockLabel`) all show.
+-- Hand-rolled rather than `os.date('%a %d %b')`: that is locale-dependent and
+-- zero-pads the day, and parity with the surface next door is the point.
+local CLOCK_DAYS = {'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'}
+local CLOCK_MONTHS = {
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+}
+local function clock_badge()
+    local d = os.date('*t')
+    return string.format('%s %d %s · %02d:%02d',
+        CLOCK_DAYS[d.wday], d.day, CLOCK_MONTHS[d.month], d.hour, d.min)
 end
 
 -- Draws a filled (optionally rounded) rectangle. round_rect_cw degrades to a
@@ -347,17 +417,22 @@ local function badge(ass, right_x, cy, text)
     return w + px(6)
 end
 
--- The bottom-row LIVE pill (_LiveBadge): dot + "LIVE", filled `live` when
--- synced, greyed (white24) when behind. `x` is the pill's left edge; returns
--- its width.
+-- The LIVE pill (_LiveBadge): dot + "LIVE", filled `live` when synced, greyed
+-- (white24) when behind. It lives in the **top bar's badge cluster** on every
+-- surface, so [live_pill_badge] is what the overlay actually calls; this
+-- left-anchored form and its width are kept separate because the badge run is
+-- laid out right-to-left.
+local function live_pill_width()
+    return px(8) * 2 + px(4) * 2 + px(5) + measure('LIVE', fs(11))
+end
+
 local function live_pill(ass, x, cy, synced)
     local font_px = fs(11)
     local dot_r = px(4)
     local pad_h = px(8)
     local gap = px(5)
     local text = 'LIVE'
-    local text_w = measure(text, font_px)
-    local w = pad_h * 2 + dot_r * 2 + gap + text_w
+    local w = live_pill_width()
     local h = font_px + px(6)
     local x1, x2 = x, x + w
     local y1, y2 = cy - h / 2, cy + h / 2
@@ -373,6 +448,15 @@ local function live_pill(ass, x, cy, synced)
         '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
         dcx + dot_r + gap, cy, font_px, COLOR.white, text))
     return w
+end
+
+-- Right-anchored LIVE pill for the top-bar badge run, matching [badge]'s
+-- contract exactly (right edge in, width-plus-gap out) so the two can be mixed
+-- in one right-to-left pass.
+local function live_pill_badge(ass, right_x, cy, synced)
+    local w = live_pill_width()
+    live_pill(ass, right_x - w, cy, synced)
+    return w + px(6)
 end
 
 -- The live-reconnect chip, mirroring PlayerReconnectChip in
@@ -420,8 +504,15 @@ local function render()
     geo = {}
 
     if visible then
+    local has_live_epg = state.isLive
+        and state.epgNowTitle ~= nil and state.epgNowTitle ~= ''
     local top_h = px(96)
-    local bottom_h = px(112)
+    -- Live-with-guide puts a three-row EPG strip where VOD puts one scrubber
+    -- row, so the bar grows by the two extra rows — and only then. px(34) keeps
+    -- the same gap between the strip and the control row that the old
+    -- single-row live layout had. The scrim below follows `bottom_h`, and the
+    -- list menu already anchors to `by`, so both track this for free.
+    local bottom_h = px(112) + (has_live_epg and px(34) or 0)
     gradient_bar(ass, 0, 0, w, top_h, true)
     gradient_bar(ass, 0, h - bottom_h, w, h, false)
 
@@ -437,20 +528,33 @@ local function render()
     local fps = video_track['demux-fps'] or property('container-fps', nil)
         or property('estimated-vf-fps', nil)
 
-    local badge_items = {}
+    -- Badge cluster, left to right: source, LIVE, resolution, HDR, fps, clock —
+    -- the order Kotlin `TopBadges`, iOS `badgesStack`, the Windows GDI cluster
+    -- and Dart `_badges()` all use. The LIVE pill belongs here, not in the
+    -- bottom bar where this overlay used to keep it.
     local vw, vh = params.w or video_track['demux-w'], params.h or video_track['demux-h']
-    if vw and vh and vw > 0 then table.insert(badge_items, vw .. '×' .. vh) end
-    if dr ~= '' then table.insert(badge_items, dr) end
-    if fps and fps > 0 then table.insert(badge_items, string.format('%.2f FPS', fps)) end
-    if state.sourceName and state.sourceName ~= '' then
-        table.insert(badge_items, state.sourceName)
+    local badge_items = {}
+    local function add_text_badge(text)
+        if text and text ~= '' then table.insert(badge_items, {text = text}) end
     end
-    table.insert(badge_items, hm_now())
+    add_text_badge(source_badge(state.sourceName))
+    if state.isLive then
+        table.insert(badge_items, {live = true, synced = state.liveSynced})
+    end
+    add_text_badge(resolution_badge(vw, vh))
+    add_text_badge(hdr_badge(dr))
+    add_text_badge(fps_badge(fps))
+    add_text_badge(clock_badge())
 
     local favorite_w = state.canFavorite and (px(44) + px(8)) or 0
     local bx = w - pad - favorite_w
     for i = #badge_items, 1, -1 do
-        bx = bx - badge(ass, bx, icon_cy, badge_items[i])
+        local item = badge_items[i]
+        if item.live then
+            bx = bx - live_pill_badge(ass, bx, icon_cy, item.synced)
+        else
+            bx = bx - badge(ass, bx, icon_cy, item.text)
+        end
     end
     local badges_left_x = bx
 
@@ -463,16 +567,13 @@ local function render()
     local title_max_w = math.max(px(40), badges_left_x - px(12) - title_x1)
     ass:new_event()
     ass:append(string.format(
-        '{\\pos(%.2f,%.2f)\\an7\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
-        title_x1, px(10), fs(20), COLOR.white, esc(truncate(state.title, fs(20), title_max_w))))
-    local prog_line = programme_line()
-    if prog_line then
-        ass:new_event()
-        ass:append(string.format(
-            '{\\pos(%.2f,%.2f)\\an7\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
-            title_x1, px(42), fs(13), COLOR.textLo,
-            esc(truncate(prog_line, fs(13), title_max_w))))
-    end
+        '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
+        title_x1, icon_cy, fs(20), COLOR.white,
+        esc(truncate(state.title, fs(20), title_max_w))))
+    -- Title only. The programme used to be compacted onto a second line here;
+    -- it now lives in the bottom bar's EPG strip, where every native overlay
+    -- puts it — which also lets the title sit vertically centred on the back
+    -- button and badges instead of being top-aligned to make room.
 
     -- ===== bottom bar =====
     local by = h - bottom_h
@@ -484,30 +585,55 @@ local function render()
     local position = tonumber(property('time-pos', 0)) or 0
 
     if state.isLive then
-        local now_title = state.epgNowTitle
-        local pill_w = live_pill(ass, bpad, row1_y, state.liveSynced)
-        local title_reserve = now_title
-            and math.min(px(260), math.max(px(60), (w - 2 * bpad) * 0.32)) or 0
-        local track_x1 = bpad + pill_w + px(12)
-        local track_x2 = w - bpad - (now_title and (title_reserve + px(12)) or 0)
-        rrect(ass, track_x1, row1_y - track_h / 2, track_x2, row1_y + track_h / 2,
-            COLOR.line, ALPHA.opaque, track_h / 2)
-        local progress = 0
-        local now_start, now_stop = state.epgNowStartMs, state.epgNowStopMs
-        if now_start and now_stop and now_stop > now_start then
-            progress = math.min(1, math.max(0, (os.time() * 1000 - now_start) / (now_stop - now_start)))
-        end
-        local fill_x2 = track_x1 + (track_x2 - track_x1) * progress
-        if fill_x2 > track_x1 then
-            rrect(ass, track_x1, row1_y - track_h / 2, fill_x2, row1_y + track_h / 2,
-                COLOR.accent, ALPHA.opaque, track_h / 2)
-        end
-        if now_title then
+        -- The live EPG strip, where the VOD scrubber sits: programme title with
+        -- its HH:MM – HH:MM right-aligned opposite it, a thin elapsed-progress
+        -- bar, then "Next · HH:MM – HH:MM · title". Structural copy of Kotlin
+        -- `LiveEpgStrip` / iOS `epgStrip` / the Windows GDI `epg_*` rects /
+        -- Dart `_liveEpgStrip`. Dropped entirely with no guide (a bar frozen at
+        -- 0.0 reads as "still loading"); the LIVE pill is unaffected — it is a
+        -- top-bar badge now. No hitbox: live has nothing to seek.
+        if has_live_epg then
+            local title_cy = by + px(18)
+            local track_cy = by + px(38)
+            local next_cy = by + px(56)
+            local range = programme_range(state.epgNowStartMs, state.epgNowStopMs)
+            local range_fs = fs(12)
+            local range_w = measure(range, range_fs)
+            local title_max_w =
+                math.max(px(60), (w - 2 * bpad) - range_w - px(12))
             ass:new_event()
             ass:append(string.format(
-                '{\\pos(%.2f,%.2f)\\an4\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
-                track_x2 + px(12), row1_y, fs(14), COLOR.white,
-                esc(truncate(now_title, fs(14), title_reserve))))
+                '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
+                bpad, title_cy, fs(14), COLOR.white,
+                esc(truncate(state.epgNowTitle, fs(14), title_max_w))))
+            ass:new_event()
+            ass:append(string.format(
+                '{\\pos(%.2f,%.2f)\\an6\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
+                w - bpad, title_cy, range_fs, COLOR.textLo, esc(range)))
+
+            local strip_h = px(4)
+            local track_x1, track_x2 = bpad, w - bpad
+            rrect(ass, track_x1, track_cy - strip_h / 2, track_x2, track_cy + strip_h / 2,
+                COLOR.line, ALPHA.opaque, strip_h / 2)
+            local progress = 0
+            local now_start, now_stop = state.epgNowStartMs, state.epgNowStopMs
+            if now_start and now_stop and now_stop > now_start then
+                progress = math.min(1, math.max(0, (os.time() * 1000 - now_start) / (now_stop - now_start)))
+            end
+            local fill_x2 = track_x1 + (track_x2 - track_x1) * progress
+            if fill_x2 > track_x1 then
+                rrect(ass, track_x1, track_cy - strip_h / 2, fill_x2, track_cy + strip_h / 2,
+                    COLOR.accent, ALPHA.opaque, strip_h / 2)
+            end
+
+            local next_line = next_programme_line()
+            if next_line then
+                ass:new_event()
+                ass:append(string.format(
+                    '{\\pos(%.2f,%.2f)\\an4\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
+                    bpad, next_cy, range_fs, COLOR.textLo,
+                    esc(truncate(next_line, range_fs, w - 2 * bpad))))
+            end
         end
     else
         local track_x1, track_x2 = bpad, w - bpad
@@ -600,10 +726,13 @@ local function render()
 
     if state.isLive and not state.liveSynced then
         right = right - px(8)
+        -- Plain text chip, no leading glyph: the label is the whole control on
+        -- Android, iOS, Windows and the shared Flutter overlay, and none of
+        -- those text buttons (aspect, speed) carries an icon either.
         local label = 'Go to live'
-        local go_w = text_button_width(label, fs(14), true)
+        local go_w = text_button_width(label, fs(14), false)
         right = right - go_w
-        text_button(ass, right, row2_cy, label, 'goLive', ICON.skip_next)
+        text_button(ass, right, row2_cy, label, 'goLive')
     end
 
     -- ===== info panel =====
