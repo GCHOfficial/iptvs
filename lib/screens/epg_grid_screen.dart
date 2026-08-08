@@ -804,7 +804,10 @@ class _ChannelRow extends StatelessWidget {
                             height: 30,
                             fit: BoxFit.cover,
                             memCacheWidth: imageCacheSize(context, 30),
-                            errorWidget: (_, _, _) => const SizedBox(width: 30),
+                            errorWidget: (_, url, error) {
+                              logImageFailure(error, url);
+                              return const SizedBox(width: 30);
+                            },
                           ),
                         )
                       else

@@ -110,7 +110,20 @@ the final install step is the only platform-specific part.
   child of a GUI process was torn down at that moment before creating any staging folder — the
   app closed and the update silently no-opped. `start` launches it as an independent,
   console-owning process that outlives the app. The helper also opens a `Start-Transcript`
-  (`%TEMP%\iptvs_update.log`) so a failed run is diagnosable instead of invisible. This can only
+  (`%TEMP%\iptvs_update.log`) so a failed run is diagnosable instead of invisible.
+  **Both scratch directories are siblings of the install and are created hidden.** They have to
+  share the install's volume — the swap is a rename, not a copy — so they cannot be moved to
+  `%TEMP%`; an install in a visible location (a Desktop folder is the common case for the GitHub
+  Direct zip) otherwise flashed `.iptvs-update-stage-*` and `.iptvs-update-backup-*` at the user
+  for the seconds the swap took. Two consequences to keep intact: the staging folder *becomes* the
+  install folder, so its Hidden attribute must be **cleared after the rename** (likewise on the
+  rollback path, which restores from the hidden backup) or the app's own folder disappears from
+  Explorer; and the helper `Set-Location`s to the parent first, because it inherits its working
+  directory from the app it is replacing and a directory that is a live process's CWD cannot be
+  deleted — which would strand the backup beside the install permanently. Backup/stage removal
+  retries briefly rather than making one silent attempt. The success path (swap, un-hide, relaunch,
+  cleanup) is covered by `test/windows_update_script_test.dart`, which runs the generated script for
+  real against a launchable payload. This can only
   be executed end to end against a **packaged Release folder** on Windows, not `flutter run`; it
   requires a user-writable, unelevated install directory. **Linux** copies the verified AppImage beside the
 running `APPIMAGE`, then a detached POSIX helper waits for our PID, atomically

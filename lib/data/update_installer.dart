@@ -374,6 +374,35 @@ String windowsUpdateScript({
 \$backupCreated = \$false
 \$swapped = \$false
 
+# Step out of the install directory before touching it. This helper inherits
+# its working directory from the app being replaced — i.e. the very folder
+# about to be renamed — and a directory that is a live process's CWD cannot be
+# deleted, which would strand the backup folder beside the install forever.
+try { Set-Location -LiteralPath \$parentDir } catch {}
+
+# Both scratch folders sit next to the install (they must share its volume for
+# the swap to be a rename rather than a copy), so they are created hidden: an
+# install on the Desktop would otherwise flash two junk folders at the user for
+# the few seconds the swap takes.
+function Hide-Dir(\$dir) {
+  try {
+    \$item = Get-Item -LiteralPath \$dir -Force
+    \$item.Attributes = \$item.Attributes -bor [System.IO.FileAttributes]::Hidden
+  } catch {}
+}
+
+# The backup is the pre-update install; losing the race to delete it is not
+# worth failing an otherwise-good update over, but one silent attempt left
+# litter behind whenever a scanner still held a handle. Retry briefly instead.
+function Remove-DirWithRetry(\$dir) {
+  for (\$i = 0; \$i -lt 5; \$i++) {
+    if (-not (Test-Path -LiteralPath \$dir)) { return }
+    Remove-Item -LiteralPath \$dir -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath \$dir)) { return }
+    Start-Sleep -Milliseconds 400
+  }
+}
+
 # Record what the (otherwise invisible) detached helper does, so a failed
 # self-update leaves a diagnosable trail instead of silently no-opping.
 \$logPath = Join-Path ([System.IO.Path]::GetTempPath()) 'iptvs_update.log'
@@ -383,6 +412,7 @@ try { Wait-Process -Id $pid -Timeout 60 } catch {}
 Start-Sleep -Milliseconds 800
 try {
   New-Item -ItemType Directory -Path \$stageDir -ErrorAction Stop | Out-Null
+  Hide-Dir \$stageDir
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   \$separator = [System.IO.Path]::DirectorySeparatorChar
   \$stageRoot = [System.IO.Path]::GetFullPath(\$stageDir + \$separator)
@@ -421,8 +451,17 @@ try {
 
   Move-Item -LiteralPath \$installDir -Destination \$backupDir
   \$backupCreated = \$true
+  Hide-Dir \$backupDir
   Move-Item -LiteralPath \$stageDir -Destination \$installDir
   \$swapped = \$true
+  # The staging folder carries its Hidden attribute through the rename, and it
+  # is now the install folder — clear it or the app's own directory vanishes
+  # from Explorer.
+  try {
+    \$installed = Get-Item -LiteralPath \$installDir -Force
+    \$installed.Attributes = \$installed.Attributes -band
+      -bnot [System.IO.FileAttributes]::Hidden
+  } catch {}
   \$newExe = Join-Path \$installDir \$exeName
   \$newProcess = Start-Process -FilePath \$newExe -WorkingDirectory \$installDir -PassThru
   Start-Sleep -Seconds 5
@@ -430,19 +469,25 @@ try {
   if (\$newProcess.HasExited -and \$newProcess.ExitCode -ne 0) {
     throw 'Updated application exited during startup.'
   }
-  Remove-Item -LiteralPath \$backupDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-DirWithRetry \$backupDir
 } catch {
   if (\$backupCreated) {
     if (\$swapped) {
-      Remove-Item -LiteralPath \$installDir -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-DirWithRetry \$installDir
     }
     if (Test-Path -LiteralPath \$backupDir -PathType Container) {
       Move-Item -LiteralPath \$backupDir -Destination \$installDir
+      # Restored from a hidden backup — put the install folder back on screen.
+      try {
+        \$restored = Get-Item -LiteralPath \$installDir -Force
+        \$restored.Attributes = \$restored.Attributes -band
+          -bnot [System.IO.FileAttributes]::Hidden
+      } catch {}
       \$oldExe = Join-Path \$installDir \$exeName
       Start-Process -FilePath \$oldExe -WorkingDirectory \$installDir
     }
   }
-  Remove-Item -LiteralPath \$stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-DirWithRetry \$stageDir
   throw
 }
 ''';

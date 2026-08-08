@@ -381,7 +381,24 @@ hot-swaps `vo` on the *same* player (no fresh resolve, unlike Linux's separate m
 flipping `_windowsNativeActive`/`_didWindowsHotSwap` true so exit discards+restarts the preview like
 a normal native open. This covers the cold/fast preview→fullscreen where the ahead-of-time
 colorimetry read missed HDR; the cost is a brief mid-playback switch. VOD/direct opens never set
-`preferWindowsEmbedded`, so they open native immediately. Control state is mirrored
+`preferWindowsEmbedded`, so they open native immediately.
+
+**Never ask `_nativePlaybackLaunched` whether this `_player` owns playback — ask
+`_separateEngineOwnsPlayback`.** That flag starts **true** on Windows for every non-preview open
+(`_usesWindowsNativeSurface`), because the happy path deliberately builds no `VideoController`. But
+the Windows HWND surface *is* this same `_player` presenting through a `vo` swap, so Dart remains
+the transport authority (same reason the full `setControlState` payload applies on Windows and not
+iOS). `_separateEngineOwnsPlayback` — `_linuxNativeSession != null || ((Android || iOS) &&
+_nativePlaybackLaunched)` — is the honest test, and both the clean-EOF live reconnect
+(`shouldReconnectOnCompleted`) and the VOD resume seek (`shouldApplyEmbeddedResume`) go through it.
+The resume seek is where this last went wrong: gated on `_nativePlaybackLaunched`, it was suppressed
+for **every Windows VOD**, so positions were saved correctly (`_persistPlaybackPosition` gates on
+Android/iOS only) but never restored and "Continue watching" always restarted from zero. The engines
+that really do own playback receive the resume point up front instead — Android/iOS in the `resumeMs`
+open payload, Linux native mpv as `--start=` — and must not be seeked here. Pinned by
+`test/reconnect_policy_test.dart`.
+
+Control state is mirrored
 to native via `setControlState` (Dart→C++) / `nativeControl` (C++→Dart commands); the GDI overlay
 (`windows/runner/flutter_window.cpp`) draws the **same control set, badges, live EPG strip,
 go-to-live, favorite star, and "Reconnecting…" indicator** as the Android Compose overlay, and

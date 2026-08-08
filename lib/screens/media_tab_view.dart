@@ -926,7 +926,12 @@ class _Thumb extends StatelessWidget {
         // here: when a title has no backdrop this falls back to the *poster*,
         // and squashing 2:3 into 16:9 makes the entry unrecognisable.
         memCacheWidth: imageCacheSize(context, width),
-        errorWidget: (_, _, _) => fallback,
+        // Same widget for both states by design; the log is what tells them
+        // apart (see [logImageFailure]).
+        errorWidget: (_, url, error) {
+          logImageFailure(error, url);
+          return fallback;
+        },
         placeholder: (_, _) => fallback,
       ),
     );
@@ -1430,7 +1435,12 @@ class _Poster extends StatelessWidget {
             // [MediaGridMetrics.childAspectRatio]), so the stretch would be
             // uniform rather than per-tile — still wrong, just less obviously.
             memCacheWidth: imageCacheSize(context, renderedWidth),
-            errorWidget: (_, _, _) => fallback,
+            // Same widget for both states by design; the log is what tells
+            // them apart (see [logImageFailure]).
+            errorWidget: (_, url, error) {
+              logImageFailure(error, url);
+              return fallback;
+            },
             placeholder: (_, _) => fallback,
           ),
         );

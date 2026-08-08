@@ -172,7 +172,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   to crop with nothing to crop. Every VOD poster was stretched 5–38% (varying tile to tile in one
   row, since the box aspect moved with how much text a tile carried) and a backdrop-less
   continue-watching thumb squashed 2:3 into 16:9. Use `ResizeImage(..., policy: .fit)` explicitly
-  if a ceiling on the other axis is ever genuinely wanted.
+  if a ceiling on the other axis is ever genuinely wanted. Every `errorWidget` must call
+  `logImageFailure` (`image` diagnostics scope, redacted, throttled): call sites deliberately render
+  the *same* widget for `placeholder` and `errorWidget`, so a screen of fallbacks is otherwise
+  indistinguishable from one still loading — which is exactly why a real "no artwork until restart"
+  report left nothing in the exported log.
 - **`lib/theme.dart` carries the design tokens, the breakpoints, and the motion helper.**
   `AppColors` includes semantic `danger`/`warning`/`success` (they exist because six call sites had
   hand-rolled the same red) and `accentFill` — `accent` darkened just enough that white 14 px bold

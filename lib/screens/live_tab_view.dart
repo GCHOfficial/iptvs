@@ -1009,11 +1009,14 @@ class _LivePreviewPanel extends StatelessWidget {
                                 ? constraints.maxWidth
                                 : 480,
                           ),
-                          errorWidget: (_, _, _) => const Icon(
-                            Icons.live_tv_rounded,
-                            color: AppColors.textLo,
-                            size: 42,
-                          ),
+                          errorWidget: (_, url, error) {
+                            logImageFailure(error, url);
+                            return const Icon(
+                              Icons.live_tv_rounded,
+                              color: AppColors.textLo,
+                              size: 42,
+                            );
+                          },
                         ),
                       )
                     else

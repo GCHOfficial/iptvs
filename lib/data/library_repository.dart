@@ -877,6 +877,19 @@ class LibraryRepository {
     if (metadataProviders.isEmpty ||
         items.isEmpty ||
         (limit != null && limit <= 0)) {
+      // Say so rather than returning in silence. A catalog refresh *deletes*
+      // and re-inserts `media_items` (`replaceMediaLibrary`), so the enriched
+      // poster/backdrop/title are gone until this method re-merges them from
+      // the `external_metadata` cache. When it no-ops, every tile falls back to
+      // the placeholder with no network request and therefore no error to log
+      // anywhere — the artwork simply never appears and the session looks
+      // healthy. That is the shape of a real report that took a full
+      // investigation to place.
+      if (metadataProviders.isEmpty && items.isNotEmpty) {
+        _logMetadata(
+          'enrich skipped: no metadata providers configured (items=${items.length})',
+        );
+      }
       return items;
     }
     final out = [...items];
@@ -917,6 +930,17 @@ class LibraryRepository {
         : _enrichConcurrency;
     await Future.wait(List.generate(workerCount, (_) => worker()));
     await db.updateMediaDisplayFields(source.id, out);
+    // Bounded outcome summary. Per-item lines already exist, but they don't
+    // answer the question that matters when a user reports "no artwork":
+    // whether enrichment ran and still produced nothing. A pass that targets
+    // items and returns almost none with a poster is the signature of that
+    // failure, and it is invisible from the individual lines.
+    final withPoster = targets
+        .where((index) => (out[index].poster ?? '').isNotEmpty)
+        .length;
+    _logMetadata(
+      'enrich done targets=${targets.length} with_poster=$withPoster',
+    );
     return out;
   }
 
