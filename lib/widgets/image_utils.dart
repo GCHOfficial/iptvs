@@ -1,5 +1,58 @@
 import 'package:flutter/widgets.dart';
 
+import '../data/diagnostics_log.dart';
+import '../data/net.dart';
+
+/// How long one logged image failure suppresses the next. Settable so tests can
+/// reach the throttle's release path without sleeping through the real window.
+@visibleForTesting
+Duration debugImageFailureLogWindow = const Duration(seconds: 10);
+DateTime? _lastImageFailureLog;
+int _suppressedImageFailures = 0;
+
+/// Records a failed network-image fetch in the diagnostics log.
+///
+/// Image failures are otherwise **completely invisible**: every call site
+/// deliberately renders the same widget for `placeholder` and `errorWidget`
+/// (an artwork grid that flickers between two different fallbacks looks
+/// broken), so a screen full of fallback tiles is indistinguishable from one
+/// still loading. That ambiguity is what left a real "no artwork at all until
+/// the app is restarted" report undiagnosable from an exported log — the
+/// library, EPG and titles all came from SQLite and looked healthy, and
+/// nothing anywhere recorded that every image fetch had failed.
+///
+/// Deliberately bounded. Failures arrive per tile, so a systemic outage would
+/// otherwise flood the 800-entry ring buffer and evict the very context that
+/// explains it. The first failure in a window is logged in full and the rest
+/// are counted and reported with the next one.
+void logImageFailure(Object error, String url) {
+  final now = DateTime.now();
+  final last = _lastImageFailureLog;
+  if (last != null && now.difference(last) < debugImageFailureLogWindow) {
+    _suppressedImageFailures++;
+    return;
+  }
+  _lastImageFailureLog = now;
+  final suppressed = _suppressedImageFailures;
+  _suppressedImageFailures = 0;
+  // Channel logos and catch-up artwork can come straight off the provider, so
+  // these URLs are not all public CDN links — redact like any other.
+  DiagnosticsLog.instance.add(
+    'image',
+    'fetch failed url=${redactUrl(url)} error=$error'
+    '${suppressed > 0 ? ' (+$suppressed suppressed)' : ''}',
+  );
+}
+
+/// Resets the failure-log throttle and its window. Tests only — the counters
+/// are top-level, so they leak between cases otherwise.
+@visibleForTesting
+void debugResetImageFailureLog() {
+  _lastImageFailureLog = null;
+  _suppressedImageFailures = 0;
+  debugImageFailureLogWindow = const Duration(seconds: 10);
+}
+
 /// Decode-size for a network image displayed at [logicalSize] logical pixels:
 /// physical pixels for the current display, with the DPR clamped so ultra-high
 /// density screens don't inflate the decode again. Pass to **`memCacheWidth`
