@@ -262,10 +262,11 @@ void main() {
         dynamicRangeLabel: (_) => 'HDR10 · PQ',
       );
 
-      // Resolution / HDR / FPS / source / clock all present …
-      expect(find.text('3840×2160'), findsOneWidget);
-      expect(find.text('HDR10 · PQ'), findsOneWidget);
-      expect(find.text('50.00 FPS'), findsOneWidget);
+      // Resolution / HDR / FPS / source / clock all present, in the compact
+      // forms the native overlays use …
+      expect(find.text('4K'), findsOneWidget);
+      expect(find.text('HDR10'), findsOneWidget);
+      expect(find.text('50fps'), findsOneWidget);
       // … and no RenderFlex overflow from any of it.
       expect(tester.takeException(), isNull);
     });
@@ -390,14 +391,165 @@ void main() {
       );
     });
   });
+
+  // The Windows SDR (embedded) surface and the Windows native GDI surface show
+  // the *same* channel to the same user depending only on whether the stream is
+  // HDR, so their live chrome has to agree. These pin the structure the three
+  // native overlays share — Kotlin `LiveEpgStrip`, iOS `epgStrip`, the GDI
+  // `epg_title`/`epg_time`/`epg_progress`/`epg_next` rects — which this overlay
+  // used to contradict: it compacted now/next into one line under the *title*
+  // and put a `LIVE ▸ bar ▸ title` row where the strip belongs.
+  group('live EPG strip (parity with the native overlays)', () {
+    testWidgets('now/next render as a three-row strip in the bottom bar', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        epgNow: _programme('News at Nine'),
+        epgNext: _programme('Late Film', startHour: 21, stopHour: 23),
+      );
+
+      // Row 1: programme title + its own range. Row 3: the next programme,
+      // labelled the way every other overlay labels it.
+      expect(find.text('News at Nine'), findsOneWidget);
+      expect(find.text('20:00 – 21:00'), findsOneWidget);
+      expect(find.text('Next · 21:00 – 23:00 · Late Film'), findsOneWidget);
+
+      final title = tester.getRect(find.text('News at Nine'));
+      final progress = tester.getRect(find.byType(LinearProgressIndicator));
+      final next = tester.getRect(find.text('Next · 21:00 – 23:00 · Late Film'));
+      final transport = tester.getRect(find.byIcon(Icons.play_arrow));
+
+      // Stacked in that order, above the transport row.
+      expect(title.bottom, lessThanOrEqualTo(progress.top));
+      expect(progress.bottom, lessThanOrEqualTo(next.top));
+      expect(next.bottom, lessThanOrEqualTo(transport.top));
+
+      // The range is right-aligned against the strip; the bar spans it.
+      final range = tester.getRect(find.text('20:00 – 21:00'));
+      expect(range.left, greaterThan(title.right - 1));
+      expect(progress.width, greaterThan(range.right - title.left - 1));
+    });
+
+    testWidgets('the LIVE pill sits in the top-bar badge cluster, not the '
+        'strip', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        sourceName: 'Provider Network HD',
+        epgNow: _programme('News at Nine'),
+      );
+
+      final live = tester.getRect(find.text('LIVE'));
+      final source = tester.getRect(find.text('Provider Network HD'));
+      final strip = tester.getRect(find.text('News at Nine'));
+
+      expect(live.bottom, lessThan(strip.top), reason: 'top bar, not the strip');
+      // Native badge order is source, LIVE, resolution, HDR, fps, clock.
+      expect(source.right, lessThanOrEqualTo(live.left));
+      expect(
+        tester.getRect(find.byIcon(Icons.arrow_back)).right,
+        lessThan(source.left),
+      );
+    });
+
+    testWidgets('a live channel with no guide drops the strip but keeps the '
+        'LIVE pill', (tester) async {
+      await pumpOverlay(tester, isLive: true);
+
+      expect(find.text('LIVE'), findsOneWidget);
+      expect(
+        find.byType(LinearProgressIndicator),
+        findsNothing,
+        reason: 'a bar frozen at 0.0 reads as "still loading" forever',
+      );
+    });
+  });
+
+  // The badges say the same thing on every surface or they say nothing useful:
+  // a Windows user meets this overlay on an SDR channel and the GDI one on an
+  // HDR channel, and used to be told `3840×2160`/`50.00 FPS`/`SDR` on one and
+  // `4K`/`50fps`/nothing on the other.
+  group('badge labels (shared with the native overlays)', () {
+    test('resolution tiers are the loose ones every overlay uses', () {
+      expect(resolutionBadgeLabel(width: 3840, height: 2160), '4K');
+      expect(resolutionBadgeLabel(width: 2560, height: 1440), '1440p');
+      expect(resolutionBadgeLabel(width: 1920, height: 1080), '1080p');
+      // The cases the old exact `h >= 1080` / `h >= 720` tests got wrong.
+      expect(resolutionBadgeLabel(width: 1920, height: 1088), '1080p');
+      expect(resolutionBadgeLabel(width: 1280, height: 718), '720p');
+      expect(resolutionBadgeLabel(width: 720, height: 576), 'SD');
+      expect(resolutionBadgeLabel(width: 0, height: 0), isNull);
+      expect(resolutionBadgeLabel(width: null, height: 1080), isNull);
+    });
+
+    test('the HDR badge is compact, and SDR shows nothing at all', () {
+      expect(hdrBadgeLabel('HDR10+ · PQ'), 'HDR10+');
+      expect(hdrBadgeLabel('HDR10 · PQ'), 'HDR10');
+      expect(hdrBadgeLabel('HLG'), 'HLG');
+      expect(hdrBadgeLabel('HDR · BT.2020'), 'HDR');
+      expect(hdrBadgeLabel('Dolby Vision'), 'DV');
+      expect(hdrBadgeLabel('SDR'), isNull);
+      expect(hdrBadgeLabel(''), isNull);
+    });
+
+    test('fps drops trailing zeros and the space', () {
+      expect(fpsBadgeLabel(50), '50fps');
+      expect(fpsBadgeLabel(23.976), '23.976fps');
+      expect(fpsBadgeLabel(29.97), '29.97fps');
+      expect(fpsBadgeLabel(0), isNull);
+      expect(fpsBadgeLabel(null), isNull);
+    });
+
+    test('a long source name is truncated at 20', () {
+      expect(sourceBadgeLabel('  CandyCloud '), 'CandyCloud');
+      expect(
+        sourceBadgeLabel('A Provider With A Very Long Name'),
+        'A Provider With A V…',
+      );
+      expect(sourceBadgeLabel('   '), isNull);
+      expect(sourceBadgeLabel(null), isNull);
+    });
+
+    test('the clock is dated on pointer surfaces and bare under touch', () {
+      final when = DateTime(2026, 8, 8, 16, 2);
+      expect(playerClockLabel(when, dated: true), 'Sat 8 Aug · 16:02');
+      expect(playerClockLabel(when, dated: false), '16:02');
+    });
+
+    testWidgets('the overlay renders the compact forms, not raw values', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        sourceName: 'CandyCloud',
+        state: const PlayerState(
+          videoParams: VideoParams(w: 1920, h: 1080),
+          tracks: Tracks(
+            video: [VideoTrack('1', null, null, codec: 'hevc', fps: 25)],
+          ),
+        ),
+        dynamicRangeLabel: (_) => 'SDR',
+      );
+
+      expect(find.text('1080p'), findsOneWidget);
+      expect(find.text('25fps'), findsOneWidget);
+      expect(find.text('CandyCloud'), findsOneWidget);
+      expect(find.text('1920×1080'), findsNothing);
+      expect(find.text('SDR'), findsNothing);
+    });
+  });
 }
 
-Programme _programme(String title) => Programme(
-  channelId: 'c1',
-  start: DateTime(2026, 1, 1, 20),
-  stop: DateTime(2026, 1, 1, 21),
-  title: title,
-);
+Programme _programme(String title, {int startHour = 20, int stopHour = 21}) =>
+    Programme(
+      channelId: 'c1',
+      start: DateTime(2026, 1, 1, startHour),
+      stop: DateTime(2026, 1, 1, stopHour),
+      title: title,
+    );
 
 /// Pure [EmbeddedControls] stub — no libmpv. Only the streams the overlay
 /// actually listens to carry real broadcast controllers; the rest are empty

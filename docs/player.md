@@ -142,9 +142,89 @@ reconnecting chip and reset the backoff counter every single tick of the wait �
 checks `resolveGate.inFlight` and returns immediately whenever a re-resolve already owns the next
 reload.
 
-The embedded media_kit top bar compacts EPG now/next into one ellipsized line. This keeps the
-overlay within short desktop/Linux video heights while retaining both programme labels; native
-Android/Windows overlays keep their existing platform-specific EPG layout.
+**The live EPG strip is one layout, shared by every overlay that draws its own chrome.** Where the
+VOD scrubber sits, a live channel gets three stacked rows: the current programme's title with its
+`HH:mm – HH:mm` range right-aligned opposite it, a thin elapsed-progress bar, then
+`Next · HH:mm – HH:mm · title`. That is Kotlin `LiveEpgStrip`, iOS `epgStrip`, the Windows GDI
+`epg_title`/`epg_time`/`epg_progress`/`epg_next` rects, and — since the Windows SDR/HDR parity fix —
+Dart `EmbeddedPlayerControlsState._liveEpgStrip`. The **LIVE pill is a top-bar badge** in all of
+them, and the badge cluster reads source, LIVE, resolution, HDR, fps, clock left to right. No guide
+for the channel → the strip is dropped entirely (a bar frozen at 0.0 reads as "still loading"), and
+only the pill remains.
+
+The shared Flutter overlay used to do neither: it compacted now/next into one ellipsized line under
+the *title* and put a `LIVE ▸ progress ▸ title` row where the strip belongs, so the two Windows
+surfaces — which show the same channel to the same user, chosen only by whether the stream is HDR —
+looked visibly different. The Windows GDI cluster was also the only one ordering its badges
+fps/resolution/LIVE and writing `Next: title (HH:mm - HH:mm)`; both now match everything else.
+Pinned by the "live EPG strip (parity with the native overlays)" group in
+`test/player_overlay_test.dart`.
+
+**The volume slider is a chip, so its focus is visible.** It is the one focus stop in the Compose
+overlay that isn't a button, and its focused state used to be a 2 dp ring on a 14 dp thumb — walking
+onto it with a D-pad read as "focus disappeared", the same symptom as the "Go to live" stranding
+below but harmless. `SlimSlider(chip = true)` gives it the same rounded fill and focus colour as its
+neighbours in the transport row. Opt-in, because the VOD scrubber spans the bar and stays a bare
+track. One catch worth keeping: `ButtonBgFocused` **is** `Accent`, the slider's own fill colour, so a
+focused chip draws its track and thumb in white instead — otherwise the value vanishes into its own
+background.
+
+**"Go to live" hands focus to play/pause before it disappears.** It is the only control in any
+overlay that *removes itself while you are standing on it*: pressing it reloads to the live edge,
+`liveSynced` flips true and the button leaves the tree. On Android TV that took the D-pad with it —
+Compose had no focused node left inside the overlay, so no arrow key did anything until Back tore
+the whole player down. `RightCluster` now moves focus to play/pause on the press, and again from an
+`onDispose` if the button vanishes while focused for any *other* reason (the reconnect watchdog
+reaching the live edge by itself). The Windows GDI keyboard ring had the same shape in a quieter
+form — the ring is rebuilt every paint and the stale index silently pointed at whichever control
+slid into that slot — so it parks `g_native_focus_index` on play/pause for the same command.
+Verified on the TV emulator: pause → focus the chip → OK → the chip goes, the stream returns to the
+live edge, and focus is on play/pause with the D-pad still walking the row.
+
+**"Go to live" is labelled with the action, everywhere.** The control that jumps to the live edge
+(shown only once playback is behind it) read **"LIVE"** on Android, iOS and Windows and
+**"Go to live"** on Linux and the shared Flutter overlay, while *all five* already declared
+"Go to live" as its accessible name. "LIVE" was the wrong half of that split: the top bar carries a
+LIVE **status** badge that greys at the very moment this button appears, so the screen showed the
+same word twice for two different things, and the one that was actionable said nothing about what
+pressing it does. Every surface now renders a plain text chip reading `Go to live` — no icon, which
+is what the other text buttons in that row (speed, aspect) already do; the Windows chip widened
+54→92 px to fit. The shared overlay still collapses to an icon below `kCompactControlsWidth`, a
+width no native surface reaches. Confirmed on the TV emulator by pausing a live stream (LIVE badge
+greys, `Go to live` appears leftmost in the right cluster).
+
+**Badge *labels* are one contract too**, not just their order: `4K`/`1440p`/`1080p`/`720p`/`SD` on
+deliberately loose thresholds (a 1088-tall stream is 1080p), a compact `DV`/`HDR10+`/`HDR10`/`HLG`/
+`HDR` — **nothing at all for SDR** — `50fps`/`23.976fps` with no space, a source name truncated at
+20, and a dated `Sat 8 Aug · 16:02` clock — **unpadded day** — on the pointer/TV surfaces (bare
+`HH:mm` under `touch`, matching the iOS controller; the GDI overlay needs MSVC's `%#d` for that,
+and the Lua one builds it from `os.date('*t')` because `os.date`'s `%a`/`%b` are locale-dependent). Kotlin `PlayerUiState`, Swift `BadgeFormatting`, the GDI
+`ResolutionBadge`/`HdrBadge`/`FpsBadge` and Dart's top-level `resolutionBadgeLabel`/`hdrBadgeLabel`/
+`fpsBadgeLabel`/`sourceBadgeLabel`/`playerClockLabel` (`player_overlay.dart`, pure and directly
+tested) all implement it. The shared overlay previously printed `3840×2160`, `50.00 FPS`, the *full*
+dynamic-range label and a bare `SDR` badge no other surface shows; the GDI overlay had drifted to an
+exact `h >= 1080` tier test (calling a 1088-tall stream 720p), `25 fps`, and a 22-character source
+truncation. `FormatFps` keeps its spaced form for the info panel's "Frame rate" **row** — the
+natives split badge and reading form the same way.
+
+**The Linux Lua OSD is on the same layout** (`linux/mpv/iptvs_overlay.lua`, the Wayland-HDR window):
+the programme line under the title is gone, the LIVE pill moved into the top-bar badge run
+(`live_pill_badge`, right-anchored to match `badge`'s contract), the badges use the shared compact
+labels (`resolution_badge`/`hdr_badge`/`fps_badge`/`source_badge`/`clock_badge` — `dynamic_range()`
+still returns the *full* label for the info panel), and the bottom bar draws the three-row strip.
+`bottom_h` grows by `px(34)` **only** for live-with-guide, which keeps the old gap between the strip
+and the transport row; the scrim takes `bottom_h` and the list menu already anchors to `by`, so both
+follow for free. Everything is in `px()`/`fs()`, which scale with window height, so the info panel
+can't collide with the taller bar at any size.
+
+**It is also the first Linux OSD change with a test.** `linux/mpv/overlay_layout_test.lua` stubs the
+three mpv modules the script requires, renders a frame per scenario and asserts on the emitted ASS
+events — row order, the badge order, the strip clearing the transport row, no raw `1920×1080` or
+`50.00 FPS`, VOD keeping its scrubber. `lua linux/mpv/overlay_layout_test.lua` runs anywhere Lua 5.1
+does (mpv's own dialect), and CI now runs it plus `luac5.1 -p` in `analyze-test`: before this,
+nothing anywhere executed the script, so a syntax error or a layout regression could ship. It proves
+the geometry is *ordered and clear*, not that it *looks right* — the Wayland+HDR session check is
+still outstanding.
 
 **FPS** comes from `Format.frameRate` when present (container-declared, authoritative); otherwise
 it's derived **once** from a short burst of real frame-presentation timestamps
@@ -423,7 +503,8 @@ menu/info), so anything drawn must fall inside it — `UpdateNativeControlState`
 when the bar height changes (e.g. the taller live-EPG bar). The **SDR embedded path** instead uses
 the shared Flutter overlay (`EmbeddedPlayerControls` in `player_overlay.dart`, also Linux's and —
 in `touch` mode — iOS's mpv path, see "iOS"), kept
-at visual parity with the GDI overlay (chip buttons, badges, favorite star). It reads/drives the
+at visual parity with the GDI overlay (chip buttons, badges in the same order, favorite star, and
+the same three-row live EPG strip — see "The live EPG strip" under "Android"). It reads/drives the
 media_kit `Player` through a narrow `EmbeddedControls` seam (`PlayerBackedEmbeddedControls` in
 production) purely so the overlay is widget-testable without a libmpv engine —
 `test/player_overlay_test.dart` pins the gesture layering/latency, the live-vs-VOD control set,
@@ -841,6 +922,85 @@ different channel switches it), see `_deliberatePreview`/`_onChannelFocusChanged
 its mouse-hover auto-preview.) The preview engine is stopped when the app itself backgrounds or
 back-exits (Dart lifecycle observer in `channel_list_screen` + a finishing-`MainActivity.onStop`
 safety net in Kotlin) so no audio survives behind the launcher.
+
+### Two things that made the TV handoff look like a reconnect
+
+Both are Android-TV-shaped for the same structural reason: **the preview→fullscreen handoff only
+exists on a wide layout**. A phone's narrow layout goes straight to fullscreen from a fresh resolve
+(`_play`'s `!isWide` branch), so none of this is on the phone path at all — "works on mobile, not on
+TV" is the expected shape of a handoff bug, not evidence against one.
+
+- **A second OK during the preview's own resolve used to restart the channel.** `_play` asked only
+  "is this channel previewing *with a stream*?"; while `create_link` was still in flight the answer
+  was no, so a second press fell through to `_preview.start(...)` — superseding the in-flight
+  resolve with a second one (both burning single-use Stalker `play_token`s) and calling
+  `SharedEngine.openPreview` → `ExoPlayerEngine.load()` on the running engine, i.e. a visible stream
+  reload, after which the user still needed a *third* press to reach fullscreen. On a remote, with a
+  portal that takes seconds, that second press is the normal thing to do. `decideChannelPlayAction`
+  (`channel_list_screen.dart`, pinned in `test/fullscreen_handoff_test.dart`) adds the missing rung:
+  a still-resolving same-channel preview is **waited on** (`LivePreviewController.pendingStart`) and
+  then handed to fullscreen, never restarted; `_resolving` is held across the wait so further
+  presses are swallowed rather than stacked.
+- **Adoption claimed the fullscreen surface before that surface existed.**
+  `SharedEngine.adoptForFullscreen` runs in `HdrPlayerActivity.onCreate`, before the Compose tree
+  hosting the engine's `PlayerView` is attached — and `ExoPlayer.setVideoSurfaceView` on a
+  SurfaceView whose holder has no surface sets the video output to **null** and waits for
+  `surfaceCreated`. So the decoder made two output transitions (preview texture → placeholder →
+  the Activity's surface) where the handoff is supposed to make one, and on any device in media3's
+  `codecNeedsSetOutputSurfaceWorkaround` list — thick with TV/set-top chipsets — each transition
+  releases and re-instantiates the video codec, meaning two waits for the next IDR on a live
+  MPEG-TS stream. `ExoPlayerEngine.claimViewSurface` now defers the swap to `surfaceCreated` (with a
+  1 s backstop for a view that never attaches, and cancellation from `attachPreviewTexture`/
+  `release`), collapsing it back to one transition.
+
+**The surface-claim half is measured, on an Android TV emulator** (API 36 `android-tv` x86_64, 4K,
+demo source, live HLS): the same preview→fullscreen handoff was run against a build with the old
+immediate claim and one with the deferred claim, counting
+`MediaCodec: [c2.goldfish.h264.decoder] setting surface generation` / `Surface configure completed`
+pairs in logcat between `START … HdrPlayerActivity` and `Displayed`:
+
+| build | decoder output-surface reconfigurations | when |
+| --- | --- | --- |
+| immediate claim (old) | **2** | +183 ms (surfaceless → placeholder), +977 ms (real surface) |
+| deferred claim (new) | **1** | +948 ms (real surface) |
+
+So the extra transition is real and the fix removes it. The emulator's goldfish decoder handles
+`setOutputSurface` natively, so both builds report `Displayed` at ~1.0–1.2 s — the win is not
+visible *there*, and won't be on any device outside media3's
+`codecNeedsSetOutputSurfaceWorkaround` list. On a device that is on it, each of those two
+transitions is a codec release + re-instantiate + IDR wait, which is what the reports describe;
+that part remains unconfirmed until a real TV is measured. Adoption itself was confirmed working on
+the emulator (`iptvs.shared: fullscreen adopted the shared preview engine`, video carried across
+with no black frame, and the preview alive again on return).
+
+**What remains of the handoff latency is Activity start + surface allocation, not the stream.**
+Instrumented on the emulator (warm process, so no class-loading), from `START HdrPlayerActivity`:
++93 ms adoption (inside `onCreate`), +97 ms `setContent` returns, +208 ms the Compose body first
+runs, +358 ms `surfaceCreated`, +376 ms the decoder is on the new surface, +471 ms `Displayed`. A
+cold first open is roughly double, dominated by the same phases.
+
+**Hoisting the video view out of Compose was tried, measured, and reverted — don't try it again
+without new evidence.** The idea was that hosting the engine's `PlayerView` in a `FrameLayout`
+attached in `onCreate`, with the `ComposeView` above it, would let the surface be allocated *while*
+the overlay composes instead of after it. Built and run on the emulator, it moved nothing:
+`surfaceCreated` at +374 ms and `Displayed` at +511 ms against +358/+471 for the Compose-hosted
+build, inside a run-to-run spread (471–1030 ms before, 511–754 ms after) far wider than any
+difference. The reason is structural, not a tuning miss: `AndroidView` adds the SurfaceView **during
+the first composition**, and that composition happens inside the window's *first traversal* — the
+same traversal that lays out a pre-attached view. There is no second traversal to save, and the
+~150 ms between composition and `surfaceCreated` is surface allocation (4K buffers here), which
+neither arrangement can shorten. The revert also gave back the costs the hoist carried: a manual
+view swap on the mpv fallback, a Compose root that had to stay transparent so the SurfaceView's
+punch-hole showed through, and PiP/aspect paths reasoning about a hierarchy Compose no longer owned.
+
+To make the same thing confirmable in the field, `HdrPlayerActivity` now reports the handoff
+outcome into the **exportable**
+diagnostics log (`MainActivity.logPlaybackDiagnostic` → Dart `nativeDiagnostic` → `_logPlayback`):
+`native fullscreen adoptShared=… adopted=…`, which pairs with the channel list's
+`fullscreen open decision=…` line. `adoptShared=true adopted=false` means the URL Dart asked to
+adopt didn't match the one `SharedEngine` was playing and the Activity silently reloaded — a real
+reconnect, and previously visible only in logcat. Keep anything sent through that relay
+credential-free: it is exported verbatim.
 
 ## PiP note
 

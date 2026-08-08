@@ -445,6 +445,101 @@ class EmbeddedPlayerControls extends StatefulWidget {
   State<EmbeddedPlayerControls> createState() => EmbeddedPlayerControlsState();
 }
 
+// ---------------------------------------------------------------------------
+// Badge labels
+//
+// The top-bar badges are the same six facts on every surface, so they are
+// formatted by the same rules everywhere: Kotlin `PlayerUiState.resolutionBadge`
+// /`hdrBadge`/`fpsBadge`/`sourceBadge`, Swift `BadgeFormatting`, the Windows GDI
+// `ResolutionBadge`/`HdrBadge`/`FormatFps`/`TruncateBadge`, and these. This
+// overlay used to format them its own way — `3840×2160` where every native says
+// `4K`, `50.00 FPS` where they say `50fps`, the *full* dynamic-range label
+// (including a bare `SDR` badge no native shows) where they show a compact
+// `HDR10`/`DV` or nothing — which, on Windows, meant the SDR and HDR surfaces of
+// the same channel disagreed about what the picture was.
+//
+// Public and pure so they can be tested directly (`test/player_overlay_test.dart`).
+// ---------------------------------------------------------------------------
+
+/// `4K`/`1440p`/`1080p`/`720p`/`SD`, or null when the size isn't known yet.
+/// The thresholds are deliberately loose (a 1088-tall stream is still 1080p).
+String? resolutionBadgeLabel({int? width, int? height}) {
+  if (width == null || height == null || width <= 0 || height <= 0) return null;
+  if (height >= 2000 || width >= 3500) return '4K';
+  if (height >= 1400 || width >= 2400) return '1440p';
+  if (height >= 1000 || width >= 1800) return '1080p';
+  if (height >= 700 || width >= 1200) return '720p';
+  return 'SD';
+}
+
+/// Compact HDR badge from an already-formatted dynamic-range label
+/// (`dynamicRangeLabelFrom`), or null when the stream is SDR/unknown — no
+/// overlay in the app badges "SDR", it simply says nothing.
+String? hdrBadgeLabel(String dynamicRange) {
+  if (dynamicRange.toLowerCase().contains('dolby')) return 'DV';
+  if (dynamicRange.contains('HDR10+')) return 'HDR10+';
+  if (dynamicRange.contains('HDR10')) return 'HDR10';
+  if (dynamicRange.contains('HLG')) return 'HLG';
+  if (dynamicRange.startsWith('HDR')) return 'HDR';
+  return null;
+}
+
+/// `50fps` / `23.976fps`, or null when the rate isn't known.
+String? fpsBadgeLabel(double? fps) =>
+    fps == null || fps <= 0 ? null : '${trimmedDecimal(fps)}fps';
+
+/// A number the way every player label in this repo renders one: rounded to 3
+/// decimals, then stripped of trailing zeros (`25`, `23.976`, `0.75`).
+String trimmedDecimal(double value) {
+  final rounded = (value * 1000).round() / 1000;
+  if (rounded == rounded.truncateToDouble()) return rounded.toInt().toString();
+  var text = rounded.toStringAsFixed(3);
+  while (text.endsWith('0')) {
+    text = text.substring(0, text.length - 1);
+  }
+  return text.endsWith('.') ? text.substring(0, text.length - 1) : text;
+}
+
+/// Source name, truncated so a long provider label can't crowd the bar; null
+/// when blank.
+String? sourceBadgeLabel(String? name) {
+  final trimmed = name?.trim() ?? '';
+  if (trimmed.isEmpty) return null;
+  return trimmed.length > 20 ? '${trimmed.substring(0, 19)}…' : trimmed;
+}
+
+/// The clock badge. Pointer surfaces (Windows/Linux) carry the **dated** form
+/// their native counterparts do (GDI `%a %d %b · %H:%M`, Android TV's
+/// `EEE d MMM · HH:mm`); the touch surface stays bare `HH:mm`, matching the iOS
+/// controller's `playerClockHm`. Weekday/month names are hand-rolled English
+/// rather than localized — the C-locale `wcsftime` the GDI overlay uses prints
+/// exactly these, and parity with the surface next door is the point.
+String playerClockLabel(DateTime now, {required bool dated}) {
+  final hm =
+      '${now.hour.toString().padLeft(2, '0')}:'
+      '${now.minute.toString().padLeft(2, '0')}';
+  if (!dated) return hm;
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  // Unpadded day ("Sat 8 Aug"), matching Kotlin's `EEE d MMM · HH:mm` — checked
+  // against the Compose overlay on an Android TV emulator, which is also why
+  // the GDI overlay's `%d` became `%#d`.
+  return '${days[now.weekday - 1]} ${now.day} ${months[now.month - 1]} · $hm';
+}
+
 /// Width below which the control row can no longer carry its optional pieces:
 /// the volume slider collapses to the mute button and "Go to live" drops its
 /// text label. Applies on **both** paths, and is measured against the bar's
@@ -517,6 +612,7 @@ class EmbeddedOverlayMetrics {
     required this.topPadTop,
     required this.topPadBottom,
     required this.badgeGap,
+    required this.epgGap,
     required this.bottomPadTop,
     required this.bottomPadBottom,
     required this.buttonWidth,
@@ -542,6 +638,12 @@ class EmbeddedOverlayMetrics {
       topPadTop: dense ? 6 : 12,
       topPadBottom: dense ? 10 : 28,
       badgeGap: dense ? 4 : 8,
+      // The live EPG strip's internal gaps (title row / progress / next). 6 is
+      // the value all three native overlays use (Compose `Spacer(6.dp)`, the
+      // iOS `epgStrip` stack spacing, the GDI strip's 30/46px row offsets);
+      // dense shaves it for a landscape phone, where the strip now costs three
+      // rows instead of one.
+      epgGap: dense ? 4 : 6,
       bottomPadTop: dense ? 14 : 36,
       bottomPadBottom: dense ? 8 : 14,
       // A finger needs Apple's 44pt minimum in *both* axes. 44 is the floor,
@@ -568,6 +670,7 @@ class EmbeddedOverlayMetrics {
     topPadTop: 12,
     topPadBottom: 28,
     badgeGap: 8,
+    epgGap: 6,
     bottomPadTop: 36,
     bottomPadBottom: 14,
     // Deliberately shorter than they are wide — fine for a cursor, and not for
@@ -594,6 +697,10 @@ class EmbeddedOverlayMetrics {
   final double topPadTop;
   final double topPadBottom;
   final double badgeGap;
+
+  /// Vertical gap between the live EPG strip's three rows (title+range,
+  /// programme progress, "Next ·"). See [_liveEpgStrip].
+  final double epgGap;
   final double bottomPadTop;
   final double bottomPadBottom;
   final double buttonWidth;
@@ -614,6 +721,7 @@ class EmbeddedOverlayMetrics {
       other.topPadTop == topPadTop &&
       other.topPadBottom == topPadBottom &&
       other.badgeGap == badgeGap &&
+      other.epgGap == epgGap &&
       other.bottomPadTop == bottomPadTop &&
       other.bottomPadBottom == bottomPadBottom &&
       other.buttonWidth == buttonWidth &&
@@ -633,6 +741,7 @@ class EmbeddedOverlayMetrics {
     topPadTop,
     topPadBottom,
     badgeGap,
+    epgGap,
     bottomPadTop,
     bottomPadBottom,
     buttonWidth,
@@ -1002,35 +1111,22 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 widget.onBack,
               ),
               const SizedBox(width: 8),
+              // Title only — the programme lives in the bottom bar's EPG strip
+              // ([_liveEpgStrip]), exactly as all three native overlays lay it
+              // out. This used to carry a second, compacted "HH:mm – HH:mm ·
+              // now • Next …" line under the title, which was the single most
+              // visible way the Windows SDR overlay didn't look like the
+              // Windows GDI one it is supposed to be at parity with.
               Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (widget.epgNow case final now?)
-                      Text(
-                        PlayerVideoSurfaceState._programmeLine(
-                          now,
-                          widget.epgNext,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppColors.textLo,
-                          fontSize: 12,
-                        ),
-                      ),
-                  ],
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -1079,23 +1175,29 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     ),
   );
 
+  /// Top-right badge cluster, in the order every native overlay uses: source,
+  /// LIVE, resolution, dynamic range, fps, clock (Kotlin `TopBadges`, iOS
+  /// `badgesStack`, the Windows GDI cluster). The **LIVE pill belongs here**,
+  /// not in the bottom bar where this overlay used to keep it — that placement
+  /// was the other half of the Windows SDR/HDR mismatch, and it left the bottom
+  /// bar showing a lone pill on a channel with no guide data.
   List<Widget> _badges() {
     final params = widget.controls.state.videoParams;
-    final width = params.w ?? widget.controls.state.width;
-    final height = params.h ?? widget.controls.state.height;
-    final video = _realVideoTrack();
-    final items = <String>[
-      if (width != null && height != null && width > 0 && height > 0)
-        '$width×$height',
-      if (widget.dynamicRangeLabel(params).isNotEmpty)
-        widget.dynamicRangeLabel(params),
-      if (video.fps case final fps? when fps > 0)
-        '${fps.toStringAsFixed(2)} FPS',
-      if (widget.sourceName case final source? when source.trim().isNotEmpty)
-        source,
-      _hm(DateTime.now()),
+    final resolution = resolutionBadgeLabel(
+      width: params.w ?? widget.controls.state.width,
+      height: params.h ?? widget.controls.state.height,
+    );
+    final hdr = hdrBadgeLabel(widget.dynamicRangeLabel(params));
+    final fps = fpsBadgeLabel(_realVideoTrack().fps);
+    final source = sourceBadgeLabel(widget.sourceName);
+    return [
+      if (source != null) _badge(source),
+      if (widget.isLive) _LiveBadge(synced: widget.liveSynced),
+      if (resolution != null) _badge(resolution),
+      if (hdr != null) _badge(hdr),
+      if (fps != null) _badge(fps),
+      _badge(playerClockLabel(DateTime.now(), dated: !widget.touch)),
     ];
-    return [for (final item in items) _badge(item)];
   }
 
   Widget _bottomBar(BuildContext context) =>
@@ -1125,8 +1227,16 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (widget.isLive) _liveProgress() else _positionRebuild(_seekBar),
-          const SizedBox(height: 4),
+          if (widget.isLive) _liveEpgStrip() else _positionRebuild(_seekBar),
+          // A live channel with no guide renders no strip at all, so it gets no
+          // gap either — the natives shrink the whole bar in that case
+          // (`BottomControlsHeight`), and a floating gap above the transport is
+          // the closest this stacked layout gets to that.
+          SizedBox(
+            height: widget.isLive
+                ? (widget.epgNow == null ? 0 : _m.epgGap + 2)
+                : 4,
+          ),
           LayoutBuilder(
             builder: (context, constraints) {
               // Below this width the fixed controls + volume slider stop
@@ -1193,6 +1303,19 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                       : _positionRebuild(_timeLabel),
               ];
               final cluster = <Widget>[
+                // "Go to live", as a plain text chip — the same control every
+                // other overlay now draws, in the same chip chrome as the
+                // aspect label beside it. It used to be a Material
+                // `TextButton.icon` (the one Material-themed control left in a
+                // row of app chips), while Android/iOS/Windows labelled the
+                // same button **"LIVE"** — a second "LIVE" on a screen that
+                // already carries the LIVE *status* badge in the top bar, and a
+                // label that never said what pressing it does. All four
+                // surfaces already declared "Go to live" as the control's
+                // accessible name, so this only makes the visible label agree
+                // with what they were telling a screen reader. Below the
+                // compact width it collapses to its icon (the natives never
+                // reach that width, and the accessible name is unchanged).
                 if (widget.isLive && !widget.liveSynced)
                   compact
                       ? _button(
@@ -1200,10 +1323,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                           'Go to live',
                           () => unawaited(widget.onGoLive()),
                         )
-                      : TextButton.icon(
-                          onPressed: () => unawaited(widget.onGoLive()),
-                          icon: const Icon(Icons.skip_next),
-                          label: const Text('Go to live'),
+                      : _textButton(
+                          'Go to live',
+                          'Go to live',
+                          () => unawaited(widget.onGoLive()),
                         ),
                 if (_audioTracks().length > 1) _audioMenu(),
                 // Only when the stream actually carries a subtitle track:
@@ -1391,45 +1514,81 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     );
   }
 
-  Widget _liveProgress() {
+  /// The live EPG strip, where the VOD scrubber sits — three stacked rows:
+  /// programme title + its `HH:mm – HH:mm` range, a thin elapsed-progress bar,
+  /// then the next programme.
+  ///
+  /// This is a **structural copy of the three native overlays** (Kotlin
+  /// `LiveEpgStrip`, iOS `epgStrip`, the Windows GDI `epg_title`/`epg_time`/
+  /// `epg_progress`/`epg_next` rects), because this overlay is what the Windows
+  /// *SDR* path shows and it must look like the GDI overlay the same user sees
+  /// on an HDR channel. It replaced a one-row `LIVE ▸ progress ▸ title` layout
+  /// that shared no geometry, no typography and no field order with any of
+  /// them, and pushed the programme labels into the top bar instead.
+  ///
+  /// No guide for this channel → the strip is *omitted*, not rendered empty: a
+  /// progress bar stuck at 0.0 reads as "still loading" forever, and all three
+  /// natives drop it in this case too (`HasLiveEpg`, `epgStrip.isHidden`,
+  /// `state.epgNow?.let`). The LIVE pill is unaffected — it lives in the top
+  /// bar's badge cluster ([_badges]), the way every native overlay carries it.
+  Widget _liveEpgStrip() {
     final now = widget.epgNow;
-    // No guide for this channel → no programme to show progress through. The
-    // strip is *omitted*, not rendered empty: a `LinearProgressIndicator` stuck
-    // at 0.0 reads as "still loading" forever, and all three native overlays
-    // drop the strip entirely in this case rather than showing a dead bar.
-    if (now == null) {
-      return Align(
-        alignment: Alignment.centerLeft,
-        child: _LiveBadge(synced: widget.liveSynced),
-      );
-    }
+    if (now == null) return const SizedBox.shrink();
     final total = now.stop.difference(now.start).inSeconds;
     final elapsed = DateTime.now().difference(now.start).inSeconds;
     final progress = total <= 0 ? 0.0 : (elapsed / total).clamp(0.0, 1.0);
-    return LayoutBuilder(
-      builder: (context, constraints) => Row(
-        children: [
-          _LiveBadge(synced: widget.liveSynced),
-          const SizedBox(width: 12),
-          Expanded(child: LinearProgressIndicator(value: progress)),
-          const SizedBox(width: 12),
-          // The title is width-capped and non-flex so the progress bar keeps
-          // all the remaining width. A `Flexible` title shared the row ~50/50
-          // with the `Expanded` bar, leaving the bar ending mid-screen with
-          // dead space to its right.
-          ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.4),
-            child: Text(
-              now.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white),
+    final next = widget.epgNext;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            // The title gives way (it is the only elastic piece); the range is
+            // rigid, matching the natives' compression-resistance split.
+            Expanded(
+              child: Text(
+                now.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.textHi,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
+            const SizedBox(width: 8),
+            Text(
+              _programmeRange(now),
+              maxLines: 1,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+          ],
+        ),
+        SizedBox(height: _m.epgGap),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(value: progress, minHeight: 4),
+        ),
+        if (next != null) ...[
+          SizedBox(height: _m.epgGap),
+          Text(
+            'Next · ${_programmeRange(next)} · ${next.title}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: AppColors.textLo, fontSize: 12),
           ),
         ],
-      ),
+      ],
     );
   }
+
+  /// `HH:mm – HH:mm` for a programme, the one range format every overlay in the
+  /// app renders (Kotlin `clockHm`, Swift `playerEpgRangeLabel`, the GDI
+  /// `FormatClockHm` pair, the Lua `hm_ms` pair).
+  static String _programmeRange(Programme programme) =>
+      '${_hm(programme.start)} – ${_hm(programme.stop)}';
 
   Widget _timeLabel() => Text(
     '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',

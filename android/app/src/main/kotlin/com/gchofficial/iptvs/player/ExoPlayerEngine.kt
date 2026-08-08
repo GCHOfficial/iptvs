@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
 import androidx.media3.common.C
@@ -117,6 +119,15 @@ class ExoPlayerEngine(
     // platform view racing the shared engine's own teardown).
     private var released = false
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // A [claimViewSurface] waiting for the PlayerView's surface to exist, and
+    // the backstop that claims anyway if it never does. See claimViewSurface.
+    private var pendingClaim: Pair<SurfaceHolder, SurfaceHolder.Callback>? = null
+    private val pendingClaimFallback = Runnable {
+        pendingClaim?.let { (holder, callback) -> holder.removeCallback(callback) }
+        pendingClaim = null
+        if (!released) attachOwnSurface()
+    }
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
     // Reset per load so a new stream re-derives instead of inheriting the last one.
@@ -560,6 +571,7 @@ class ExoPlayerEngine(
      * audio pipeline and buffer are untouched.
      */
     fun attachPreviewTexture(texture: TextureView) {
+        cancelPendingClaim()
         playerView.player = null
         player.setVideoTextureView(texture)
     }
@@ -581,15 +593,64 @@ class ExoPlayerEngine(
      * video output — used when the fullscreen Activity adopts a preview-owned
      * engine. The null/reset dance forces [PlayerView] to re-take the surface
      * even though the player instance hasn't changed.
+     *
+     * **Deferred until the [PlayerView]'s surface actually exists.** Adoption
+     * runs in `HdrPlayerActivity.onCreate`, before the Compose tree that hosts
+     * [view] has been attached to a window, so the SurfaceView has no surface
+     * yet — and `ExoPlayer.setVideoSurfaceView` answers that by setting the
+     * video output to **null** and waiting for `surfaceCreated`. The decoder
+     * therefore made *two* output transitions across the handoff (preview
+     * texture → placeholder → the Activity's surface) instead of one, and on
+     * any device in media3's `codecNeedsSetOutputSurfaceWorkaround` list — which
+     * is thick with TV/set-top chipsets — each transition releases and
+     * re-instantiates the video codec, i.e. two waits for the next IDR on a live
+     * MPEG-TS stream. That is the black/stuttering "it reloads the stream when I
+     * go fullscreen" beat reported on Android TV and not on phones (whose narrow
+     * layout skips the preview handoff entirely).
+     *
+     * Waiting for `surfaceCreated` collapses it back to the single
+     * texture → real-surface swap the handoff is supposed to be. The delayed
+     * fallback is a safety net only: if the view is never attached (the Activity
+     * finished under us) nothing else would ever claim the output back.
      */
     fun claimViewSurface() {
+        val holder = (playerView.videoSurfaceView as? SurfaceView)?.holder
+        if (holder == null || holder.surface?.isValid == true) {
+            attachOwnSurface()
+            return
+        }
+        cancelPendingClaim()
+        val callback = object : SurfaceHolder.Callback {
+            override fun surfaceCreated(created: SurfaceHolder) {
+                cancelPendingClaim()
+                if (!released) attachOwnSurface()
+            }
+
+            override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+            override fun surfaceDestroyed(h: SurfaceHolder) = Unit
+        }
+        pendingClaim = holder to callback
+        holder.addCallback(callback)
+        mainHandler.postDelayed(pendingClaimFallback, CLAIM_FALLBACK_MS)
+    }
+
+    private fun attachOwnSurface() {
         playerView.player = null
         playerView.player = player
+    }
+
+    /** Drops a deferred [claimViewSurface] without claiming (and its timer). */
+    private fun cancelPendingClaim() {
+        mainHandler.removeCallbacks(pendingClaimFallback)
+        val (holder, callback) = pendingClaim ?: return
+        pendingClaim = null
+        holder.removeCallback(callback)
     }
 
     override fun release() {
         if (released) return
         released = true
+        cancelPendingClaim()
         playerView.player = null
         player.removeListener(playerListener)
         player.release()
@@ -626,5 +687,11 @@ class ExoPlayerEngine(
         // 200ms (5fps) — no real broadcast video runs this slow; a gap wider
         // than this between two frames is a seek/live-edge jump/stall.
         private const val MAX_FRAME_INTERVAL_US = 200_000L
+
+        // Backstop for a deferred [claimViewSurface]: comfortably longer than
+        // the frame or two an attached SurfaceView takes to produce its
+        // surface, short enough that a view which never attaches doesn't leave
+        // the adopted engine rendering nowhere. See claimViewSurface.
+        private const val CLAIM_FALLBACK_MS = 1_000L
     }
 }

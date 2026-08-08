@@ -119,6 +119,47 @@ FullscreenHandoff decideFullscreenHandoff({
   return FullscreenHandoff.stopPreview;
 }
 
+/// What an OK/click on a channel row does on a wide (split-pane) layout, given
+/// the preview's state for that same channel. Pure so the branching is
+/// unit-testable; pinned by `test/fullscreen_handoff_test.dart`.
+///
+/// The [awaitPreviewThenOpen] rung is the one that used to be missing, and it
+/// is the whole point of this function. A second OK landing while the preview's
+/// own `create_link` was still in flight fell through to "start a preview" and
+/// **restarted the channel**: a new resolve superseding the in-flight one (both
+/// burning single-use Stalker `play_token`s) and, on Android,
+/// `SharedEngine.openPreview` → `ExoPlayerEngine.load()` on the running engine —
+/// a visible stream reload, after which the user still had to press OK a third
+/// time to actually go fullscreen. It is an Android-TV-shaped bug: there the
+/// preview is deliberate (OK starts it, see `_deliberatePreview`) and a remote
+/// invites a second press while a slow portal resolves, whereas a phone bypasses
+/// the preview entirely on its narrow layout and a desktop preview auto-starts
+/// on hover well before the click.
+enum ChannelPlayAction {
+  /// This channel is previewing and resolved — go fullscreen, adopting it.
+  openFullscreen,
+
+  /// This channel's preview is still resolving. Wait for *that* resolve and
+  /// then go fullscreen; never start a second one.
+  awaitPreviewThenOpen,
+
+  /// Nothing is previewing this channel (or its preview failed) — start one.
+  startPreview,
+}
+
+ChannelPlayAction decideChannelPlayAction({
+  required bool sameChannelPreview,
+  required bool previewHasStream,
+  required bool previewLoading,
+}) {
+  if (!sameChannelPreview) return ChannelPlayAction.startPreview;
+  if (previewHasStream) return ChannelPlayAction.openFullscreen;
+  if (previewLoading) return ChannelPlayAction.awaitPreviewThenOpen;
+  // Same channel, not loading, no stream: the preview errored out. Retrying it
+  // is the useful answer, and it's what a first OK would have done.
+  return ChannelPlayAction.startPreview;
+}
+
 /// Native Linux discovery may spawn/version-check an external mpv process on
 /// its first call. Pay that cost only when its result can change the handoff:
 /// a same-channel HDR preview that would otherwise be adopted embedded.
@@ -821,14 +862,44 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       return;
     }
 
-    // On wide screens, check if we're already previewing
-    final samePreviewChannel = _preview.channelId == channel.id;
-    if (samePreviewChannel && _preview.stream != null) {
-      await _openLivePlayer(channel, _preview.stream!);
-      return;
+    // On wide screens, reconcile with whatever this channel's preview is doing.
+    switch (decideChannelPlayAction(
+      sameChannelPreview: _preview.channelId == channel.id,
+      previewHasStream: _preview.stream != null,
+      previewLoading: _preview.loading,
+    )) {
+      case ChannelPlayAction.openFullscreen:
+        await _openLivePlayer(channel, _preview.stream!);
+      case ChannelPlayAction.awaitPreviewThenOpen:
+        await _openLivePlayerWhenPreviewReady(channel);
+      case ChannelPlayAction.startPreview:
+        // First OK starts the preview; on a TV remote it's deliberate, so
+        // unmuted.
+        await _preview.start(channel, muted: !_deliberatePreview);
     }
-    // First OK starts the preview; on a TV remote it's deliberate, so unmuted.
-    await _preview.start(channel, muted: !_deliberatePreview);
+  }
+
+  /// Second OK on a channel whose preview is still resolving: wait for the
+  /// resolve already in flight and then hand it to fullscreen, rather than
+  /// starting a competing one (see [ChannelPlayAction.awaitPreviewThenOpen]).
+  ///
+  /// `_resolving` is held across the wait, which both shows the list's
+  /// in-progress affordance and makes [_play]'s own re-entry guard swallow
+  /// further presses — a remote user leaning on OK can't stack resolves.
+  Future<void> _openLivePlayerWhenPreviewReady(Channel channel) async {
+    setState(() => _resolving = true);
+    try {
+      await _preview.pendingStart;
+    } finally {
+      if (mounted) setState(() => _resolving = false);
+    }
+    if (!mounted) return;
+    // The wait can end in something other than "this channel is playing": the
+    // resolve failed, or a newer `start` superseded it. Open only what actually
+    // came up, and never restart anything from here — a failed preview shows
+    // its own error and the next OK retries it.
+    if (_preview.channelId != channel.id || _preview.stream == null) return;
+    await _openLivePlayer(channel, _preview.stream!);
   }
 
   /// Opens fullscreen playback for [channel]/[stream]. When [reusePreview] and

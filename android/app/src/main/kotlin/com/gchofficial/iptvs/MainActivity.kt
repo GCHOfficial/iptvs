@@ -381,6 +381,26 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
+     * Relays a short, credential-free note from [HdrPlayerActivity] into Dart's
+     * exportable diagnostics log (`playback` scope).
+     *
+     * The seamless preview→fullscreen handoff either adopts the shared engine or
+     * silently reloads the stream, and until now that outcome existed only in
+     * logcat — unreachable for a user reporting "it reconnects when I go
+     * fullscreen" from a TV. Dart already logs which handoff it *asked* for
+     * (`fullscreen open decision=…`); this is the other half, what the Activity
+     * actually did. Fire-and-forget: a missing channel or handler is not worth
+     * reacting to.
+     *
+     * **Never pass anything derived from a URL, header or provider reply** —
+     * this text is exported verbatim.
+     */
+    fun logPlaybackDiagnostic(note: String) {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod("nativeDiagnostic", mapOf("note" to note))
+    }
+
+    /**
      * Fails closed unless [apk] is a cache-owned APK for this exact application
      * and is signed by the same certificate as the installed build. Dart has
      * already verified the signed release-manifest digest; this native check

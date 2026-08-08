@@ -325,9 +325,10 @@ void main() {
       // four native overlays do), so there is no icon to find.
       expect(find.text('Fill'), findsOneWidget);
       expect(find.byIcon(Icons.skip_next), findsOneWidget);
-      // Badges keep their own row under the title rather than squeezing it.
-      expect(find.text('1920×1080'), findsOneWidget);
-      expect(find.text('HDR10 · PQ'), findsOneWidget);
+      // Badges keep their own row under the title rather than squeezing it,
+      // and carry the compact labels the native controller shows.
+      expect(find.text('1080p'), findsOneWidget);
+      expect(find.text('HDR10'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
