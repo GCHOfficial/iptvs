@@ -103,6 +103,10 @@ object SharedEngine {
         target.onUnsupportedVideo = { handlePreviewUnsupported() }
         target.onRecoverableError = { onPreviewError?.invoke("stream error") }
         target.onVideoSizeChanged = { w, h -> applyPreviewAspect(w, h) }
+        // The preview has no diagnostics of its own to report, and this is the
+        // path a detaching fullscreen returns through — so it is also what
+        // drops the Activity closure `adoptForFullscreen` installed.
+        target.onDiagnostic = null
     }
 
     private fun handlePreviewUnsupported() {
@@ -155,7 +159,10 @@ object SharedEngine {
      * matches the running preview, re-claiming the engine's own view surface.
      * Null → the caller starts a fresh engine (normal cold open).
      */
-    fun adoptForFullscreen(streamUrl: String): Pair<ExoPlayerEngine, PlayerUiState>? {
+    fun adoptForFullscreen(
+        streamUrl: String,
+        diagnostics: ((String) -> Unit)? = null,
+    ): Pair<ExoPlayerEngine, PlayerUiState>? {
         val e = engine ?: return null
         val s = uiState ?: return null
         if (streamUrl != url) {
@@ -164,6 +171,12 @@ object SharedEngine {
         }
         adoptedByFullscreen = true
         stopAfterDetach = false
+        // Bound *before* the claim: how that claim goes is the single most
+        // useful thing the handoff can report, and it happens on the next line.
+        // Only on the success path, so a refused adoption never leaves the
+        // preview engine holding an Activity's closure (bindPreviewCallbacks
+        // clears it again on the way back).
+        e.onDiagnostic = diagnostics
         e.claimViewSurface()
         Log.i(TAG, "fullscreen adopted the shared preview engine")
         return e to s

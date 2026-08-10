@@ -5,6 +5,8 @@ import 'package:flutter/services.dart' show KeyRepeatEvent;
 import '../data/app_database.dart';
 import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
+import '../data/diagnostics_log.dart';
+import '../data/expiry_cache.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
 import '../data/net.dart';
@@ -13,8 +15,7 @@ import '../data/update_service.dart';
 import '../data/update_store.dart';
 import '../sources/source_config.dart';
 import '../sources/source.dart';
-import '../sources/expiry.dart';
-import '../sources/xtream_source.dart';
+import '../sources/m3u_upgrade.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
@@ -195,6 +196,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
     );
     if (ok == true) {
       await widget.store.delete(c.id);
+      // The cached expiry describes a source that no longer exists. It would
+      // age out on its own, but a re-added source can reuse nothing here (ids
+      // are freshly minted) so there is no reason to keep it around.
+      await const ExpiryCache().forget(c.id);
       await _reload();
     }
   }
@@ -380,6 +385,19 @@ class _SourceCardState extends State<_SourceCard> {
   final FocusNode _editNode = FocusNode(skipTraversal: true);
   final FocusNode _deleteNode = FocusNode(skipTraversal: true);
 
+  final ExpiryCache _expiryCache = const ExpiryCache();
+
+  /// Generation guard for [_fetchExpiry], following the same convention as
+  /// `MediaTabController`/`LiveController` (CLAUDE.md, "Async publishes are
+  /// generation-guarded").
+  ///
+  /// `didUpdateWidget` re-fetches whenever the config changes, so an edit can
+  /// start a second fetch while the first is still in flight — and the first
+  /// now describes credentials that are no longer current. Without this the
+  /// slower of the two wins the badge *and* the cache entry, which is the
+  /// worst possible pairing: a wrong answer, persisted.
+  int _expiryGeneration = 0;
+
   SubscriptionExpiry _expiry = const SubscriptionExpiry.unknown();
   CatchupCapability _catchup = CatchupCapability.unsupported;
   SourceCapabilities _capabilities = const SourceCapabilities(
@@ -396,31 +414,101 @@ class _SourceCardState extends State<_SourceCard> {
     _fetchExpiry();
   }
 
-  Future<void> _fetchExpiry() async {
-    if (mounted) {
-      setState(() {
-        _expiryLoading = true;
-        _expiryFailed = false;
-      });
-    }
-    final source = widget.config.build();
+  /// Loads the expiry badge, preferring the device-local cache.
+  ///
+  /// Every card builds its own `Source` and asks the provider directly, so an
+  /// uncached sources screen is one full portal round trip *per card*, on every
+  /// visit — and for Stalker that is now a handshake plus `get_profile` plus
+  /// `get_main_info`, since the badge has to authorize before the portal will
+  /// answer (see `StalkerSource.subscriptionExpiry`). A subscription end date
+  /// changes when the user renews and at no other time, so re-asking on every
+  /// screen open buys nothing.
+  ///
+  /// A fresh entry renders with no network at all. A stale one still renders
+  /// immediately and is revalidated behind the badge: it is almost certainly
+  /// still correct, and showing it beats a spinner on a screen whose whole job
+  /// is to tell you about sources at a glance.
+  Future<void> _fetchExpiry({bool force = false}) async {
+    final generation = ++_expiryGeneration;
+    bool current() => mounted && generation == _expiryGeneration;
+    final config = widget.config;
+    final source = config.build();
     if (mounted) {
       setState(() {
         _catchup = source.catchupCapability;
         _capabilities = capabilitiesOf(source);
       });
     }
+    CachedExpiry? cached;
+    try {
+      cached = await _expiryCache.readAny(config);
+    } catch (_) {
+      // Cache unavailable (locked keychain, corrupt blob) — just ask.
+    }
+    if (!current()) {
+      await source.dispose();
+      return;
+    }
+    final entry = cached;
+    final fresh = canServeCachedExpiry(entry, force: force);
+    setState(() {
+      if (entry != null) _expiry = entry.expiry;
+      // Only spin when there is nothing at all to show.
+      _expiryLoading = entry == null;
+      _expiryFailed = false;
+    });
+    if (fresh) {
+      // Say that the badge came from the cache, and how old it is.
+      //
+      // Without this the cache is a silence amplifier, and it hid a real
+      // investigation: a source whose lookup had once returned unknown served
+      // that answer from cache on every subsequent visit *without calling the
+      // provider*, so the source's own "here is why it was unknown" logging
+      // never ran either. An exported log then showed a stubbornly unknown
+      // badge and — correctly, but uselessly — nothing at all about it.
+      // Non-null by `canServeCachedExpiry`, which returns false for a null
+      // entry — the analyzer just can't see through the call.
+      final served = entry!;
+      final ageMinutes = DateTime.now().difference(served.fetchedAt).inMinutes;
+      // The hint rides along only on `unknown`, the one kind where the reader
+      // wants a different answer and the cache is what is standing in the way.
+      // On a dated or unlimited entry it is pure noise on a line that repeats
+      // per card per visit.
+      final hint = served.expiry.kind == SubscriptionExpiryKind.unknown
+          ? ' (save the source to force a re-check)'
+          : '';
+      DiagnosticsLog.instance.add(
+        'library',
+        'expiry from cache source=${config.label} '
+            'kind=${served.expiry.kind.name} ageMin=$ageMinutes$hint',
+      );
+      await source.dispose();
+      return;
+    }
     try {
       final value = await source.subscriptionExpiry();
-      if (!mounted) return;
+      // Cached even when this widget is gone — the answer cost a round trip
+      // and is just as useful to the next build of this card. Superseded
+      // results are the exception: `config` is stale by then, so writing would
+      // persist an answer for credentials that have already been replaced.
+      if (generation == _expiryGeneration) {
+        try {
+          await _expiryCache.write(config, value);
+        } catch (_) {
+          // A cache write failing must never fail the badge.
+        }
+      }
+      if (!current()) return;
       setState(() {
         _expiry = value;
         _expiryLoading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!current()) return;
       setState(() {
-        _expiryFailed = true;
+        // A failed revalidation keeps the value already on screen rather than
+        // replacing a good answer with an error.
+        _expiryFailed = entry == null;
         _expiryLoading = false;
       });
     } finally {
@@ -434,7 +522,14 @@ class _SourceCardState extends State<_SourceCard> {
     if (old.config.fields.toString() != widget.config.fields.toString() ||
         old.config.settings.toString() != widget.config.settings.toString() ||
         old.config.kind != widget.config.kind) {
-      _fetchExpiry();
+      // `force`: this only fires when the user actually changed the source, and
+      // that is the moment they expect the badge to re-check. It is also the
+      // only control the UI offers for doing so — the cache is otherwise
+      // authoritative until it ages out, and an edit that leaves the
+      // credentials alone (a label, a catch-up override) keeps the same
+      // fingerprint, so without this a cached answer could not be dislodged at
+      // all. Save the source to retry a lookup that came back unknown.
+      _fetchExpiry(force: true);
     }
   }
 
@@ -1011,6 +1106,18 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
         kind: _kind,
         label: label,
         fields: fields,
+        // Per-source preferences live on the same config but are managed by
+        // `SourceSettingsScreen`, and this form rebuilds the config from its
+        // own controllers — so without carrying them, editing a source (even
+        // just to fix a typo in its label) silently wiped every hidden
+        // category and catch-up override it had.
+        //
+        // Only when the kind is unchanged: hidden-category ids are provider
+        // specific, so carrying them onto a different provider would hide
+        // arbitrary categories rather than the ones the user picked.
+        settings: widget.existing?.kind == _kind
+            ? (widget.existing?.settings ?? const {})
+            : const {},
       );
       if (_kind == SourceKind.m3u) {
         final converted = await _maybeConvertM3uToXtream(config);
@@ -1023,42 +1130,11 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
     }
   }
 
-  /// If the M3U playlist URL is really an Xtream panel (`get.php`) whose
-  /// `player_api.php` authenticates, return an equivalent Xtream config so the
-  /// user gets Movies/Series. Returns null to keep the source as a flat M3U.
-  Future<SourceConfig?> _maybeConvertM3uToXtream(SourceConfig m3u) async {
-    final uri = Uri.tryParse(m3u.fields['playlistUrl'] ?? '');
-    if (uri == null) return null;
-    final creds = xtreamCredentialsFromUrl(uri);
-    if (creds == null) return null;
-    final probe = XtreamSource(
-      sourceId: m3u.id,
-      host: creds.host,
-      username: creds.username,
-      password: creds.password,
-    );
-    try {
-      await probe.connect(); // player_api auth check; throws on failure
-    } catch (_) {
-      return null; // not a working Xtream panel → keep as M3U
-    } finally {
-      await probe.dispose();
-    }
-    return SourceConfig(
-      id: m3u.id,
-      kind: SourceKind.xtream,
-      label: m3u.label,
-      fields: {
-        'host': creds.host,
-        'username': creds.username,
-        'password': creds.password,
-        // Keep URL-only expiry metadata when the panel's player API does not
-        // repeat it. The original playlist URL is deliberately not retained.
-        if (expiryFromPlaylistUrl(uri.toString()) case final expiry?)
-          'playlistExpiryHint': expiry.toIso8601String(),
-      },
-    );
-  }
+  /// Kept as a thin delegate: the same upgrade now also runs at load time
+  /// (`HomeShell`), so the rule for what qualifies and what the converted
+  /// config looks like lives in one place rather than being restated here.
+  Future<SourceConfig?> _maybeConvertM3uToXtream(SourceConfig m3u) =>
+      upgradeM3uToXtream(m3u);
 
   @override
   Widget build(BuildContext context) {
@@ -1081,6 +1157,25 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                // Label above the field, exactly like every `TvTextField`
+                // below it. It used to be an `InputDecoration.labelText`, but
+                // that decoration is also `isCollapsed`, which removes the
+                // vertical space a floating label needs — so "Type" was drawn
+                // *on top of* the kind icon and its value. Matching the
+                // surrounding fields fixes the overlap and the inconsistency in
+                // one move: this was the only field in the form with a floating
+                // label at all.
+                const Padding(
+                  padding: EdgeInsets.only(left: 4, bottom: 6),
+                  child: Text(
+                    'Type',
+                    style: TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
                 _SourceKindFieldFrame(
                   builder: (focusNode) => DropdownButtonFormField<SourceKind>(
                     focusNode: focusNode,
@@ -1089,7 +1184,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
                     isDense: true,
                     isExpanded: true,
                     decoration: const InputDecoration(
-                      labelText: 'Type',
+                      // No `labelText`: see the Text above.
                       border: InputBorder.none,
                       enabledBorder: InputBorder.none,
                       focusedBorder: InputBorder.none,

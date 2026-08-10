@@ -37,4 +37,17 @@ interface PlaybackEngine {
 
     /** Poll-driven progress refresh (ExoPlayer). mpv pushes via observers, so no-op. */
     fun syncProgress() {}
+
+    /**
+     * Frames the video renderer has actually put on screen since this engine
+     * loaded, or **-1** when the engine can't report it (no video renderer, or
+     * no counter of its own).
+     *
+     * The liveness signal behind [FrameLivenessWatch]: every other health flag
+     * an engine exposes is a *claim*, and the failure mode that matters here is
+     * the one where the claim and the screen disagree. -1 is inert by
+     * construction, so an engine that doesn't implement this simply keeps the
+     * old buffering/ended-only watchdog.
+     */
+    val renderedFrameCount: Int get() = -1
 }

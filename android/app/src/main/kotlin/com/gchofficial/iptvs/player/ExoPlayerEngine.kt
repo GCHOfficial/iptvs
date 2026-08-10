@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -100,6 +101,22 @@ class ExoPlayerEngine(
     var onRecoverableError: (() -> Unit)? = null
     var onVideoSizeChanged: ((Int, Int) -> Unit)? = null
 
+    /**
+     * Short, **credential-free** notes for the host's exportable diagnostics
+     * log: how the fullscreen surface was claimed, when the first frame landed,
+     * and the shape of the stream that produced it.
+     *
+     * These exist because the preview→fullscreen handoff was, from an exported
+     * log, entirely opaque past `adopted=true` — the reports it had to explain
+     * ("high-bitrate channels stay black after going fullscreen") name exactly
+     * the variables none of them recorded. Rebindable for the same reason the
+     * callbacks above are: the shared preview engine outlives its host.
+     *
+     * Anything passed here is relayed verbatim into a log the user can share.
+     * Never a URL, a header, or a provider reply.
+     */
+    var onDiagnostic: ((String) -> Unit)? = null
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -123,11 +140,29 @@ class ExoPlayerEngine(
     // A [claimViewSurface] waiting for the PlayerView's surface to exist, and
     // the backstop that claims anyway if it never does. See claimViewSurface.
     private var pendingClaim: Pair<SurfaceHolder, SurfaceHolder.Callback>? = null
+    // When the deferred claim started, so its outcome can report how long the
+    // SurfaceView actually took — the number the 1s backstop is a bet against.
+    private var claimRequestedAtMs = 0L
     private val pendingClaimFallback = Runnable {
         pendingClaim?.let { (holder, callback) -> holder.removeCallback(callback) }
         pendingClaim = null
-        if (!released) attachOwnSurface()
+        if (!released) {
+            // The surface never arrived within the backstop, so this claims a
+            // holder that still has none: ExoPlayer parks the video output at
+            // null and waits for its own surfaceCreated, i.e. an *extra* output
+            // transition — on a codecNeedsSetOutputSurfaceWorkaround device, an
+            // extra codec re-init and IDR wait. Worth seeing in a report.
+            reportClaim("backstop", CLAIM_FALLBACK_MS)
+            attachOwnSurface()
+        }
     }
+    // Set when the video output is (re)claimed for fullscreen, so the first
+    // frame after it can be reported as a handoff latency rather than a bare
+    // timestamp. 0 = no claim yet (a cold open measures from load instead).
+    private var claimedAtMs = 0L
+    private var loadedAtMs = 0L
+    private var reportedFirstFrame = false
+    private var reportedStreamShape = false
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
     // Reset per load so a new stream re-derives instead of inheriting the last one.
@@ -152,6 +187,24 @@ class ExoPlayerEngine(
     private var lastFpsSampleNs = 0L
 
     override val view: View get() = playerView
+
+    /**
+     * Frames the video renderer has put on screen since the last load. Null
+     * counters (no video renderer — an audio-only channel) report -1, which
+     * [FrameLivenessWatch] treats as "can't judge" rather than "frozen".
+     *
+     * The [released] guard is for the window where a poll can outlive the
+     * engine: the Activity's 500ms ticker holds `engine`, and an mpv fallback
+     * releases this one mid-session. Reading a released ExoPlayer is not worth
+     * finding out about the hard way for a number whose only job is a
+     * heuristic.
+     */
+    override val renderedFrameCount: Int
+        get() = if (released) {
+            -1
+        } else {
+            player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
+        }
 
     override fun load(url: String, subtitles: List<SubtitleSpec>) {
         val item = MediaItem.Builder()
@@ -178,6 +231,9 @@ class ExoPlayerEngine(
         frameIntervalsUs.clear()
         lastFramePresentationUs = Long.MIN_VALUE
         fpsLocked = false
+        loadedAtMs = SystemClock.elapsedRealtime()
+        reportedFirstFrame = false
+        reportedStreamShape = false
         // Re-armed per load — locking unregisters it (see stopFrameMetadataMeasurement).
         stopFrameMetadataMeasurement()
         val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->
@@ -226,6 +282,24 @@ class ExoPlayerEngine(
 
         override fun onPlaybackParametersChanged(parameters: PlaybackParameters) {
             state.speed = parameters.speed
+        }
+
+        /**
+         * The only honest "the picture is up" signal ExoPlayer gives. Reported
+         * against the fullscreen surface claim when there was one, because
+         * that — not the load — is the interval the preview→fullscreen handoff
+         * is judged on; a cold open falls back to measuring from load.
+         */
+        override fun onRenderedFirstFrame() {
+            if (reportedFirstFrame) return
+            reportedFirstFrame = true
+            val since = if (claimedAtMs > 0L) "sinceClaimMs" else "sinceLoadMs"
+            val from = if (claimedAtMs > 0L) claimedAtMs else loadedAtMs
+            if (from > 0L) {
+                onDiagnostic?.invoke(
+                    "first frame $since=${SystemClock.elapsedRealtime() - from}",
+                )
+            }
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -401,11 +475,35 @@ class ExoPlayerEngine(
             }
             state.videoCodec = codecLabel(v.sampleMimeType)
             state.dynamicRange = dynamicRangeLabel(v)
+            reportStreamShape()
         }
         player.audioFormat?.let { a ->
             state.audioCodec = codecLabel(a.sampleMimeType)
             if (a.channelCount != Format.NO_VALUE) state.audioChannels = a.channelCount
         }
+    }
+
+    /**
+     * Reports the shape of the stream once, as soon as the decoder has told us
+     * what it is.
+     *
+     * The reports this instrumentation serves all describe the *same* class of
+     * channel — "the 4K ones", "the 50fps ones", "the high-bitrate ones" — and
+     * nothing in an exported log ever said which channel was which. Resolution,
+     * rate and codec are the closest proxy for bitrate available without
+     * measuring the socket, and they are all already on screen as badges.
+     * Purely descriptive: no locator, no header, nothing provider-derived.
+     */
+    private fun reportStreamShape() {
+        if (reportedStreamShape) return
+        if (state.videoWidth <= 0 || state.videoHeight <= 0) return
+        reportedStreamShape = true
+        onDiagnostic?.invoke(
+            "stream ${state.videoWidth}x${state.videoHeight} " +
+                "fps=${state.fpsBadge() ?: "?"} " +
+                "codec=${state.videoCodec.ifBlank { "?" }} " +
+                "range=${state.dynamicRange.ifBlank { "?" }}",
+        )
     }
 
     private fun dynamicRangeLabel(format: Format): String {
@@ -614,16 +712,36 @@ class ExoPlayerEngine(
      * finished under us) nothing else would ever claim the output back.
      */
     fun claimViewSurface() {
+        claimedAtMs = SystemClock.elapsedRealtime()
+        // An output-surface change makes MediaCodecVideoRenderer re-announce its
+        // first frame, which on an *adopted* engine is the only first frame that
+        // describes the handoff — the preview's own already fired seconds ago.
+        reportedFirstFrame = false
+        // Same problem, opposite fix. An adopted engine never calls [load], so
+        // its stream shape was reported during the preview — to a null sink,
+        // since the preview binds none. Re-report it here rather than clearing
+        // the flag and hoping for another state transition: a steadily playing
+        // stream may not produce one, and the adopted handoff is exactly the
+        // case the shape was added to describe. Self-guards on the size being
+        // known, which for a running preview it is.
+        reportedStreamShape = false
+        reportStreamShape()
         val holder = (playerView.videoSurfaceView as? SurfaceView)?.holder
         if (holder == null || holder.surface?.isValid == true) {
+            reportClaim("immediate", 0L)
             attachOwnSurface()
             return
         }
         cancelPendingClaim()
+        claimRequestedAtMs = claimedAtMs
         val callback = object : SurfaceHolder.Callback {
             override fun surfaceCreated(created: SurfaceHolder) {
+                val waited = SystemClock.elapsedRealtime() - claimRequestedAtMs
                 cancelPendingClaim()
-                if (!released) attachOwnSurface()
+                if (!released) {
+                    reportClaim("deferred", waited)
+                    attachOwnSurface()
+                }
             }
 
             override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
@@ -632,6 +750,19 @@ class ExoPlayerEngine(
         pendingClaim = holder to callback
         holder.addCallback(callback)
         mainHandler.postDelayed(pendingClaimFallback, CLAIM_FALLBACK_MS)
+    }
+
+    /**
+     * How the fullscreen surface was taken, and how long it took.
+     *
+     * `mode=deferred` with a `waitMs` approaching [CLAIM_FALLBACK_MS] is the
+     * measurement that decides whether that 1 s backstop is the right bet on
+     * real hardware — every number behind it so far came from an emulator
+     * allocating emulated buffers. `mode=backstop` means the bet was lost and
+     * the decoder took an extra output transition it didn't need.
+     */
+    private fun reportClaim(mode: String, waitMs: Long) {
+        onDiagnostic?.invoke("surface claim mode=$mode waitMs=$waitMs")
     }
 
     private fun attachOwnSurface() {

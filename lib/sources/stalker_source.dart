@@ -174,6 +174,12 @@ class StalkerSource
   final Map<String, String> _vodCategoryTitles = {};
   Future<void>? _connectFuture;
   bool _profileLoaded = false;
+
+  /// The `js` map from the most recent `get_profile`. Kept because
+  /// [subscriptionExpiry] wants to read fields off the profile that
+  /// [connect] has *already* fetched, rather than spending a second round trip
+  /// on the same payload.
+  Map<dynamic, dynamic>? _lastProfileJs;
   String? _providerCatchupTimezone;
 
   StalkerSource({
@@ -765,11 +771,32 @@ class StalkerSource
 
   @override
   Future<SubscriptionExpiry> subscriptionExpiry() async {
-    // account_info/get_main_info is the canonical action, so it's tried
-    // first — but not every portal supports it, and a failure here must fall
-    // through to the profile-based fallbacks below rather than aborting the
-    // whole chain (the badge would otherwise show "Expiry unknown" even when
-    // the profile carries a usable date).
+    // **Authorize first.** A MAG portal's session is not established by the
+    // handshake alone — `get_profile` is what binds the token to this STB, and
+    // the real set-top always sends it before anything else. `_call` only
+    // guarantees `_resolveEndpoint` (handshake + token), so asking
+    // `account_info` straight out of a freshly built source made it the first
+    // action on an unauthorized session, which portals answer with an empty
+    // `js` or an error rather than the account.
+    //
+    // That is not a rare path: the sources screen builds a *fresh* source per
+    // card and calls this directly (`_SourceCard._fetchExpiry`), so it was the
+    // *only* path the badge ever took — which is why the answer was "unknown"
+    // on every portal rather than on some of them. `connect()` is idempotent
+    // and memoised, so this costs nothing on an already-connected source.
+    Map<dynamic, dynamic>? profile;
+    try {
+      await connect();
+      profile = _lastProfileJs;
+    } on Exception catch (e) {
+      _debug('expiry: portal authorization failed: $e');
+    }
+    // account_info/get_main_info is the canonical action, so it's preferred —
+    // but not every portal supports it, and a failure here must fall through
+    // to the profile-based fallbacks below rather than aborting the whole
+    // chain (the badge would otherwise show "Expiry unknown" even when the
+    // profile carries a usable date).
+    Map<dynamic, dynamic>? mainInfo;
     try {
       final r = await _call({
         'type': 'account_info',
@@ -777,6 +804,7 @@ class StalkerSource
       });
       final js = r['js'];
       if (js is Map) {
+        mainInfo = js;
         final parsed = subscriptionExpiryFromStalkerFields(js);
         if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
       }
@@ -784,12 +812,36 @@ class StalkerSource
       _debug('account_info:get_main_info unavailable: $e');
     }
     // Some portals omit the expiry from account_info and only carry it on the
-    // STB profile.
+    // STB profile. Reuse the one `connect()` already fetched; only pay for
+    // another round trip if authorization above didn't happen.
     try {
-      final profile = await _getProfile();
-      if (profile is Map) return subscriptionExpiryFromStalkerFields(profile);
+      if (profile == null) {
+        final js = await _getProfile();
+        if (js is Map) profile = js;
+      }
+      if (profile != null) {
+        final parsed = subscriptionExpiryFromStalkerFields(profile);
+        if (parsed.kind != SubscriptionExpiryKind.unknown) return parsed;
+      }
     } on Exception {
       // Best-effort fallback — the badge shows "Expiry unknown".
+    }
+    // Nothing recognised. Which field a panel uses and how it formats it are
+    // the only two things needed to fix that, and neither survives into a bug
+    // report — so record both, in the shape-only form that is safe to export
+    // (see [describeStalkerExpiryPayload]). Without this the report is
+    // "expiry shows unknown", with no way to tell a payload that never carried
+    // a date from one carrying it under a name this parser doesn't know.
+    if (mainInfo != null) {
+      _debug('expiry unknown from=get_main_info '
+          '${describeStalkerExpiryPayload(mainInfo)}');
+    }
+    if (profile != null) {
+      _debug('expiry unknown from=get_profile '
+          '${describeStalkerExpiryPayload(profile)}');
+    }
+    if (mainInfo == null && profile == null) {
+      _debug('expiry unknown: no account payload was readable');
     }
     return const SubscriptionExpiry.unknown();
   }
@@ -2010,6 +2062,7 @@ class StalkerSource
     });
     final js = r['js'];
     if (js is Map) {
+      _lastProfileJs = js;
       final reported = _firstString(js, const [
         'timezone',
         'default_timezone',

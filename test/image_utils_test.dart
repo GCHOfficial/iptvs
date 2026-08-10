@@ -5,21 +5,46 @@ import 'package:iptvs/widgets/image_utils.dart';
 void main() {
   group('scaledImageCacheSize', () {
     test('uses physical pixels and clamps excessive DPR', () {
-      expect(scaledImageCacheSize(100, 2), 200);
-      expect(scaledImageCacheSize(100, 5), 300);
+      // Physical pixels, then rounded up to the bucket: 100x2 = 200 -> 224,
+      // and the DPR clamp holds 5 at 3, so 100x5 = 300 -> 320 rather than 500.
+      expect(scaledImageCacheSize(100, 2), 224);
+      expect(scaledImageCacheSize(100, 5), 320);
+      expect(scaledImageCacheSize(100, 5), lessThan(scaledImageCacheSize(200, 3)));
     });
 
     test('never converts infinity or NaN to an integer', () {
-      expect(scaledImageCacheSize(double.infinity, 2), 2);
-      expect(scaledImageCacheSize(double.nan, 2), 2);
-      expect(scaledImageCacheSize(100, double.infinity), 100);
-      expect(scaledImageCacheSize(100, double.nan), 100);
+      expect(scaledImageCacheSize(double.infinity, 2), kImageCacheSizeBucket);
+      expect(scaledImageCacheSize(double.nan, 2), kImageCacheSizeBucket);
+      // An unusable DPR falls back to 1, so these stay at the logical size.
+      expect(scaledImageCacheSize(100, double.infinity), 128);
+      expect(scaledImageCacheSize(100, double.nan), 128);
     });
 
     test('keeps invalid and extreme dimensions within codec bounds', () {
-      expect(scaledImageCacheSize(0, 0), 1);
-      expect(scaledImageCacheSize(-20, -2), 1);
+      expect(scaledImageCacheSize(0, 0), kImageCacheSizeBucket);
+      expect(scaledImageCacheSize(-20, -2), kImageCacheSizeBucket);
       expect(scaledImageCacheSize(100000, 3), 8192);
+    });
+
+    test('rounds the bucket up, never down', () {
+      // Never below the display size: a short decode would be upscaled by the
+      // BoxFit.cover above it.
+      expect(scaledImageCacheSize(193, 1), 224);
+      expect(scaledImageCacheSize(223, 1), 224);
+      expect(scaledImageCacheSize(192, 1), 192);
+    });
+
+    test('a small layout wobble keeps one cache key', () {
+      // The bug this bucket exists for: a poster sized from its own
+      // constraints re-decoded (placeholder and all) every time its box moved
+      // by a pixel or two. The focus ring no longer resizes anything (see
+      // kFocusableCardBorderWidth); this is what covers everything else that
+      // wobbles — a window drag, a text-scale change, a fractional grid
+      // division — so a few pixels resolve to the same key instead of a miss.
+      final resting = scaledImageCacheSize(176.0, 2);
+      for (final width in [172.0, 173.5, 175.0, 176.0]) {
+        expect(scaledImageCacheSize(width, 2), resting);
+      }
     });
   });
 

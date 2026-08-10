@@ -314,3 +314,42 @@ export function acknowledgeDowngrade(profileId, storage = defaultStorage()) {
   const next = ids.filter((id) => id !== profileId);
   if (next.length !== ids.length) writeSeen(next, storage);
 }
+
+// ---------------------------------------------------------------------------
+// Xtream-panel detection for M3U playlist URLs.
+//
+// A very large share of M3U sources are an Xtream panel's `get.php` link. As a
+// flat playlist such a source works — live channels play — but it is strictly
+// worse than the Xtream config the same credentials support: no Movies, no
+// Series, no subscription expiry, none of which a playlist carries.
+//
+// **Shape only — this never verifies.** The app converts a source only after
+// `player_api.php` actually authenticates, and the panel cannot make that call:
+// the panel is served over HTTPS, so an `http://` provider URL is blocked as
+// mixed content before CORS is even consulted, and IPTV panels send no
+// `Access-Control-Allow-Origin` anyway. So this is a *suggestion the user
+// confirms*, never an automatic rewrite: some resellers proxy `get.php` without
+// serving `player_api.php` at all, and converting one of those would turn a
+// working source into a broken one.
+//
+// Mirrors `xtreamCredentialsFromUrl` in lib/sources/xtream_source.dart.
+export function xtreamCredentialsFromPlaylistUrl(playlistUrl) {
+  const raw = (playlistUrl ?? '').trim();
+  if (!raw) return null;
+  let url;
+  try {
+    url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (!url.hostname) return null;
+  // Either `http://user:pass@host/...` or `?username=…&password=…`.
+  let username = url.username ? decodeURIComponent(url.username) : '';
+  let password = url.password ? decodeURIComponent(url.password) : '';
+  if (!username) username = url.searchParams.get('username') ?? '';
+  if (!password) password = url.searchParams.get('password') ?? '';
+  if (!username || !password) return null;
+  const port = url.port ? `:${url.port}` : '';
+  return { host: `${url.protocol}//${url.hostname}${port}`, username, password };
+}

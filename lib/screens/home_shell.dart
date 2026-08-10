@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -17,6 +19,7 @@ import '../data/tvdb_client.dart';
 import '../data/update_installer.dart';
 import '../data/update_service.dart';
 import '../data/update_store.dart';
+import '../sources/m3u_upgrade.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
@@ -176,6 +179,66 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _loading = false;
     });
     _loadProfileInfo();
+    if (cfg != null) unawaited(_maybeUpgradeM3uSource(cfg));
+  }
+
+  /// Upgrades an active M3U source that is really an Xtream panel, in the
+  /// background.
+  ///
+  /// The edit screen has offered this since the feature existed, but only on
+  /// *save* — so a source added once and never touched again stayed a flat
+  /// playlist forever: live channels only, no Movies, no Series, no expiry,
+  /// while the same credentials would have answered for all three. That is not
+  /// a hypothetical; it is how the M3U source in the field report got there.
+  ///
+  /// **Deliberately not awaited, and deliberately after the UI is up.** It ends
+  /// in a `player_api.php` round trip, and putting that on the boot path would
+  /// let a slow or dead panel hold the whole app on a spinner. The cost when it
+  /// does nothing is one small background request per app start, and only for a
+  /// source whose URL actually carries credentials — [couldBeXtreamPanel] is
+  /// what keeps a plain playlist from paying anything at all.
+  ///
+  /// On success the config is saved and [_loadActive] re-runs against it. That
+  /// recursion terminates by construction: the saved config is `xtream`, so the
+  /// second pass fails [couldBeXtreamPanel] immediately.
+  Future<void> _maybeUpgradeM3uSource(SourceConfig cfg) async {
+    if (!couldBeXtreamPanel(cfg)) return;
+    // A cloud-managed source's shape belongs to the panel. `pullSources`
+    // replaces every managed source wholesale from its cloud row
+    // (`store.setAll`), and a pull runs on profile switch as well as on demand
+    // — so converting one here would be undone by the next pull and attempted
+    // again on the load after it: the source flipping between kinds, a panel
+    // probe and a library reload each time, and the upgrade never reaching the
+    // cloud anyway, because pushing is a deliberate user action this must not
+    // take on their behalf. Saving the source in the edit screen still converts
+    // it; that *is* an explicit act, and the user can push it.
+    if (await _isCloudManagedSource(cfg.id)) return;
+    final gen = _loadActiveGeneration;
+    final upgraded = await upgradeM3uToXtream(cfg);
+    // The user switched sources (or left) while the panel was answering — that
+    // newer load owns the screen now, and saving here would fight it.
+    if (upgraded == null || !mounted || gen != _loadActiveGeneration) return;
+    await widget.store.save(upgraded);
+    if (!mounted || gen != _loadActiveGeneration) return;
+    // Same id, so the SQLite cache, favorites and positions all carry over —
+    // this reload is a rebuild on the better config, not a re-ingestion.
+    await _loadActive();
+  }
+
+  /// Whether [id] is a source the cloud panel owns.
+  ///
+  /// **Fails closed**: anything that stops us answering (no Supabase build, an
+  /// unreadable keychain) reports *managed*, so the upgrade is skipped. The
+  /// cost of skipping is a source that stays a flat M3U until the user saves
+  /// it; the cost of guessing wrong is a source that flips kind on every pull.
+  Future<bool> _isCloudManagedSource(String id) async {
+    if (!CloudConfig.isConfigured) return false;
+    try {
+      final managed = await CloudSync(db: widget.db).managedSourceIds();
+      return managed.contains(id);
+    } catch (_) {
+      return true;
+    }
   }
 
   Future<void> _loadProfileInfo() async {

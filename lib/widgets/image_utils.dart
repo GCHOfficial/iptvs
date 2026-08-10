@@ -76,6 +76,24 @@ int imageCacheSize(BuildContext context, double logicalSize) {
   );
 }
 
+/// Granularity the decode width is rounded **up** to.
+///
+/// `memCacheWidth` is part of the `ResizeImage` cache key, so two builds of the
+/// same image at widths that differ by a pixel are two different entries: the
+/// second is a miss, and a miss re-runs the whole asynchronous resolve with the
+/// `placeholder` on screen. Most call sites size themselves from live
+/// constraints, which wobble for reasons that have nothing to do with how the
+/// image should look — a window drag, a text-scale change, a focus ring (see
+/// `kFocusableCardBorderWidth`, the bug that prompted this). Snapping to a
+/// bucket makes the key stable across all of them, and makes a tile that
+/// re-lays-out by a pixel reuse the bitmap it already had.
+///
+/// Rounded up, never down: the decode must stay at or above the display size or
+/// `BoxFit.cover` upscales a too-small bitmap. The cost is at most this many
+/// extra pixels of width, which at every size this app decodes is noise against
+/// the `kAndroidImageCacheBytes` budget.
+const int kImageCacheSizeBucket = 32;
+
 /// Pure sizing boundary used by tests and as a last line of defence for
 /// widgets built with `double.infinity` inside a bounded LayoutBuilder.
 @visibleForTesting
@@ -87,6 +105,8 @@ int scaledImageCacheSize(double logicalSize, double devicePixelRatio) {
       ? devicePixelRatio.clamp(1.0, 3.0)
       : 1.0;
   final physical = safeLogical * safeDpr;
-  if (!physical.isFinite || physical <= 0) return 1;
-  return physical.round().clamp(1, 8192);
+  if (!physical.isFinite || physical <= 0) return kImageCacheSizeBucket;
+  final bucketed =
+      (physical / kImageCacheSizeBucket).ceil() * kImageCacheSizeBucket;
+  return bucketed.clamp(kImageCacheSizeBucket, 8192);
 }
