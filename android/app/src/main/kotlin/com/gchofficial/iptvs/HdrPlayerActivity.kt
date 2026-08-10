@@ -23,6 +23,7 @@ import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.ExoPlayerEngine
+import com.gchofficial.iptvs.player.FrameLivenessWatch
 import com.gchofficial.iptvs.player.LiveLocator
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
@@ -77,6 +78,21 @@ class HdrPlayerActivity : ComponentActivity() {
     private var lastReconnectMs = 0L
     private var reconnectAttempt = 0
 
+    // The third stall shape, and the one that used to be invisible: playing
+    // normally by every flag the engine exposes, with nothing reaching the
+    // screen. See [FrameLivenessWatch].
+    private val frameLiveness = FrameLivenessWatch()
+
+    // Why the current reconnect fired, for the diagnostics line. Set at the
+    // point of decision so the log distinguishes an underrun from a drop from
+    // a frozen renderer, which otherwise all read as "reconnect attempt=1".
+    private var stallKind = "none"
+
+    // Wall clock for this Activity's own timeline: every diagnostic it emits is
+    // stamped with ms since onCreate, so a report shows where in the handoff the
+    // time went instead of only that it went.
+    private var startedAtMs = 0L
+
     // Live re-resolve round trip (see [withFreshLiveLocator]). The gate keeps
     // the watchdog and "Go to live" to one in-flight `create_link` between them
     // and settles the reply-vs-timeout race exactly once.
@@ -124,8 +140,35 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Relays one short, credential-free note into Dart's **exportable**
+     * diagnostics log, stamped with ms since this Activity started.
+     *
+     * Past `adopted=…` the whole native player used to be silent in an exported
+     * log: no first frame, no stall, no reconnect, no engine swap. A user
+     * reporting "high-bitrate channels stay black after going fullscreen" could
+     * therefore send a complete, healthy-looking export of the exact session
+     * that failed. Everything routed through here is chosen to be safe to
+     * export verbatim — never a URL, header or provider reply.
+     */
+    private fun logNative(note: String) {
+        MainActivity.instance?.get()?.logPlaybackDiagnostic(
+            "native $note ms=${SystemClock.elapsedRealtime() - startedAtMs}",
+        )
+    }
+
+    /**
+     * The sink handed to whichever [ExoPlayerEngine] this Activity drives —
+     * one it built, or the shared preview engine it adopted. Engines report
+     * from the playback thread as well as the main one, so it hops.
+     */
+    private val diagnosticSink: (String) -> Unit = { note ->
+        runOnUiThread { logNative(note) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startedAtMs = SystemClock.elapsedRealtime()
         // Gesture navigation and Android's system Back dispatcher terminate at
         // this same Activity boundary as remote key events. Do not register a
         // second Compose BackHandler: some TV images deliver one press through
@@ -163,7 +206,7 @@ class HdrPlayerActivity : ComponentActivity() {
         // stream, adopt its running engine — only the video output moves to this
         // Activity's surface; audio, decoder and buffer carry over untouched.
         val shared = if (intent.getBooleanExtra(EXTRA_ADOPT_SHARED, false)) {
-            SharedEngine.adoptForFullscreen(streamUrl)
+            SharedEngine.adoptForFullscreen(streamUrl, diagnosticSink)
         } else {
             null
         }
@@ -265,6 +308,7 @@ class HdrPlayerActivity : ComponentActivity() {
         )
         exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
+        exo.onDiagnostic = diagnosticSink
         setEngine(exo)
         exo.load(url, subtitles)
     }
@@ -273,6 +317,11 @@ class HdrPlayerActivity : ComponentActivity() {
     private fun fallbackToMpv() {
         if (engine is MpvEngine || isFinishing) return
         Log.i(TAG, "falling back to libmpv (video unsupported by ExoPlayer)")
+        // An engine swap mid-session is a full stream reload on a channel the
+        // user was already watching — very much part of "it stopped working
+        // when I went fullscreen", and previously logcat-only.
+        logNative("engine fallback from=exo to=mpv adopted=$adoptedShared")
+        frameLiveness.reset()
         if (adoptedShared) {
             // The adopted engine can't decode this stream, so the shared preview
             // engine is dead too: release it through the holder, which tells the
@@ -308,20 +357,39 @@ class HdrPlayerActivity : ComponentActivity() {
         // `reconnectLive` already cleared `ended`, so both flags are false until
         // the reload actually starts.
         if (resolveGate.inFlight) return
-        val stalled = uiState.isBuffering || uiState.ended
+        val now = System.currentTimeMillis()
+        // "Playing normally" by the engine's own account. When that is true and
+        // no frame has reached the screen for NO_FRAME_STALL_MS, the account is
+        // wrong — see [FrameLivenessWatch] for the failure it catches.
+        val claimsHealthy =
+            uiState.isPlaying && !uiState.isBuffering && !uiState.ended
+        val frameStalled = frameLiveness.sample(
+            nowMs = now,
+            playingNormally = claimsHealthy,
+            renderedFrames = engine?.renderedFrameCount ?: -1,
+        )
+        val stalled = uiState.isBuffering || uiState.ended || frameStalled
         if (!stalled) {
             // Healthy playback: clear the stall clock and any reconnecting state.
             stalledSinceMs = 0L
             reconnectAttempt = 0
+            stallKind = "none"
             if (uiState.reconnecting) uiState.reconnecting = false
             return
         }
-        val now = System.currentTimeMillis()
         if (stalledSinceMs == 0L) stalledSinceMs = now
-        val threshold = if (uiState.ended) {
-            ReconnectPolicy.ENDED_RECONNECT_MS
-        } else {
-            ReconnectPolicy.STALL_RECONNECT_MS
+        // A frozen renderer needs no further grace period: the watch has
+        // already waited out its own window while everything read healthy, so
+        // requiring the stall threshold on top would double it.
+        val threshold = when {
+            frameStalled -> 0L
+            uiState.ended -> ReconnectPolicy.ENDED_RECONNECT_MS
+            else -> ReconnectPolicy.STALL_RECONNECT_MS
+        }
+        stallKind = when {
+            frameStalled -> "noframes"
+            uiState.ended -> "ended"
+            else -> "buffering"
         }
         if (now - stalledSinceMs >= threshold) reconnectLive(force = false)
     }
@@ -352,6 +420,15 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.reconnecting = true
         uiState.ended = false
         Log.i(TAG, "live reconnect attempt=$reconnectAttempt force=$force")
+        // Rate-limited above, so this is once per real attempt rather than once
+        // per 500 ms tick. `kind` is what makes it worth exporting: an underrun,
+        // a drop and a frozen renderer want completely different answers, and
+        // all three used to arrive as the same silent black screen.
+        logNative(
+            "live reconnect attempt=$reconnectAttempt force=$force " +
+                "kind=${if (force) "error" else stallKind}",
+        )
+        frameLiveness.reset()
         withFreshLiveLocator {
             // The round trip is asynchronous, so restart the stall clock when
             // the reload actually begins rather than when it was requested.
@@ -417,8 +494,12 @@ class HdrPlayerActivity : ComponentActivity() {
         // never-blank rule in ResolveAgainReply is what keeps a MAG User-Agent
         // from being dropped if a reply ever omits them.
         headers = next.headers
-        // Never log the locator itself — provider URLs embed credentials.
+        // Never log the locator itself — provider URLs embed credentials. The
+        // two booleans are safe and are what separate "the portal gave us a new
+        // link and it still didn't play" from "we retried a locator we already
+        // knew was dead because the round trip timed out".
         Log.i(TAG, "live re-resolve settled refreshed=$refreshed timedOut=$timedOut")
+        logNative("live re-resolve refreshed=$refreshed timedOut=$timedOut")
         onFresh()
     }
 

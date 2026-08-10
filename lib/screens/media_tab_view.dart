@@ -45,16 +45,17 @@ class MediaGridMetrics {
   /// [_MediaGridTile]'s own inner padding, each side.
   static const double tilePadding = 10;
 
-  /// Border width [FocusableCard] draws on each side, reserved at the
-  /// **focused** width of 2 rather than the resting 1.
+  /// Border width [FocusableCard] reserves on each side.
   ///
-  /// It used to be 1, on the reasoning that "a focused card draws 2, which the
-  /// `Expanded` poster absorbs" — true while the poster was flexible, and false
-  /// the moment it became a fixed [posterAspectRatio]. Nothing stretches any
-  /// more, so the focused tile overflowed by ~1.6 px. Reserving the larger
-  /// width costs the resting tile one pixel of poster and keeps every state
-  /// inside the cell.
-  static const double tileBorder = 2;
+  /// Taken from the widget itself rather than restated, because the number has
+  /// to match exactly: it used to be 1 here while a focused card drew 2, on the
+  /// reasoning that "the `Expanded` poster absorbs it" — true while the poster
+  /// was flexible, false the moment it became a fixed [posterAspectRatio], and
+  /// the focused tile overflowed by ~1.6 px. The card now reserves
+  /// [kFocusableCardBorderWidth] in *every* state (the ring moved to a
+  /// `foregroundDecoration`, so focus no longer resizes the poster and no
+  /// longer re-decodes it), which is what makes one shared constant correct.
+  static const double tileBorder = kFocusableCardBorderWidth;
 
   /// Gap between a tile's poster and its text block.
   static const double posterTextGap = 8;

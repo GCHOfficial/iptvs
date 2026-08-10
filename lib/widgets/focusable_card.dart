@@ -10,6 +10,29 @@ import 'routed_focus_node.dart';
 /// one is just `spacing`, and the lattice reads visibly lopsided.
 const double kFocusableCardVerticalPadding = 4.0;
 
+/// Width of the inset a [FocusableCard]'s border reserves on every side, in
+/// **every** state.
+///
+/// The focus ring itself is drawn as a `foregroundDecoration` (painted *over*
+/// the child) rather than as the box's own border, so gaining focus cannot
+/// change the child's constraints. It used to: the ring was a
+/// `Border.all(width: _focused ? 2 : 1)` on the [AnimatedContainer]'s
+/// `decoration`, and a `BoxDecoration`'s border is exactly what insets a
+/// `Container`'s child — so focusing a tile narrowed everything inside it by
+/// 2 logical px, through ~7 interpolated fractional widths as the 120 ms
+/// animation ran.
+///
+/// That was invisible for text, and expensive for artwork. A poster sized from
+/// its own constraints feeds that width to `imageCacheSize`, so every frame of
+/// the animation minted a *different* `memCacheWidth` — a different
+/// `ResizeImage` cache key, i.e. a cache miss, a fresh asynchronous resolve
+/// and a re-decode, with the `placeholder` showing in between. Walking the
+/// media grid with a D-pad or Tab therefore made each poster visibly reload
+/// even though the image had been decoded and cached seconds earlier, and
+/// reload a second time on the way back out. Grids reserve this constant
+/// rather than assuming a resting width (see `MediaGridMetrics.tileBorder`).
+const double kFocusableCardBorderWidth = 2.0;
+
 /// A card that behaves well under mouse, touch, and a TV remote's D-pad:
 /// - shows a clear accent focus ring when focused (not just a hover tint),
 /// - activates on OK/Enter/Select/Space (via [ActivateIntent]) as well as tap,
@@ -140,6 +163,20 @@ class _FocusableCardState extends State<FocusableCard> {
                 duration: appMotion(context, const Duration(milliseconds: 120)),
                 decoration: BoxDecoration(
                   color: _focused ? _focusedFill : AppColors.panel,
+                  borderRadius: BorderRadius.circular(AppRadius.tile),
+                  // Transparent and fixed-width: this border exists only to
+                  // reserve the ring's space, so the child's constraints are
+                  // identical focused and unfocused. See
+                  // [kFocusableCardBorderWidth] for what animating it cost.
+                  border: Border.all(
+                    color: const Color(0x00000000),
+                    width: kFocusableCardBorderWidth,
+                  ),
+                ),
+                // The visible ring, painted over the child rather than beside
+                // it — `foregroundDecoration` contributes no padding, so its
+                // width is free to animate.
+                foregroundDecoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(AppRadius.tile),
                   border: Border.all(
                     color: _focused ? AppColors.accent : AppColors.line,

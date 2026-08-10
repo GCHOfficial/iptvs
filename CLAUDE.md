@@ -10,6 +10,7 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
 - [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
+- [docs/sources.md](docs/sources.md) — the provider layer's two intricate corners: how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (implemented, on-device validation pending), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -118,11 +119,23 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   the largest/most intricate), `xtream_source.dart`, `m3u_source.dart`, `demo_source.dart` (used
   by tests). `Source.subscriptionExpiry()` feeds the sources screen's expiry badge as an explicit
   dated/unlimited/unknown value (never collapse unlimited into unknown); shared parsing lives in
-  `expiry.dart`. Stalker tries `account_info`/`get_main_info` first (the canonical action,
-  wrapped so a portal that doesn't support it falls through rather than aborting the chain), then
-  `get_profile` — MAG portals stuff the end date into odd fields on either, classically `phone`.
-  M3U playlists carry no expiry metadata themselves, so `expiryFromPlaylistUrl` best-effort-reads
-  it off a provider query param (`exp`/`expiry`/`expire`/`expires`) on the playlist URL.
+  `expiry.dart` — **read [docs/sources.md](docs/sources.md) before touching expiry or the
+  M3U→Xtream upgrade.** Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
+  handshake **+ `get_profile`**, before `account_info` — `_call` only guarantees the handshake, and
+  the sources screen builds a fresh source per card, which is why the badge read unknown on every
+  portal). A far-future sentinel is **unlimited**, but only when written as a date — a bare number
+  that far out is a phone number, not a lifetime. An unknown answer logs the payload as key *names*
+  plus `expiryValueShape` masks, never values (`phone`/`fname`/`ls` are customer PII). Answers are
+  cached device-side (`data/expiry_cache.dart`) — **never in `SourceConfig.settings`**, which rides
+  the source row into the cloud; serving from cache is logged and saving a source forces a
+  re-check, because a cache that can hide a diagnostic has to say when it is doing so.
+  An M3U source that is really an Xtream `get.php` panel is **upgraded** (`upgradeM3uToXtream`):
+  fails closed on anything but a real `player_api.php` authentication, keeps the same source id,
+  runs on edit-save, at load time (`HomeShell`, background, never on the boot path), and from
+  `source_settings_screen`'s tile. **Load time skips cloud-managed sources** — a pull would revert
+  them. The web panel detects the same shape but only ever *suggests*: a browser cannot verify a
+  provider (mixed content, then CORS, then an unreadable opaque response), so the panel asks and
+  the app proves.
 - **`lib/data/library_repository.dart`** — orchestration between a `Source` and the cache: serves
   from SQLite when fresh, refreshes EPG on its own schedule, handles paging (`loadMore*`), runs
   metadata enrichment. The most logic-dense file; treat its cache/refresh/merge paths carefully.
@@ -174,7 +187,15 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   to crop with nothing to crop. Every VOD poster was stretched 5–38% (varying tile to tile in one
   row, since the box aspect moved with how much text a tile carried) and a backdrop-less
   continue-watching thumb squashed 2:3 into 16:9. Use `ResizeImage(..., policy: .fit)` explicitly
-  if a ceiling on the other axis is ever genuinely wanted. Every `errorWidget` must call
+  if a ceiling on the other axis is ever genuinely wanted.
+  **`memCacheWidth` is part of the cache key, so a size that wobbles is a re-decode** — a miss
+  re-runs the whole async resolve with the `placeholder` on screen. Decode widths snap *up* to
+  `kImageCacheSizeBucket` (32 physical px) so a window drag / text-scale change / fractional grid
+  division reuses the bitmap, and — the bug that prompted it — **a focus indicator must never
+  change layout**: `FocusableCard`'s ring is a `foregroundDecoration` behind a fixed-width
+  transparent border (`kFocusableCardBorderWidth`, which `MediaGridMetrics.tileBorder` reads
+  rather than restates), because a `decoration` border insets the child and animating it
+  1→2 px re-decoded every poster the D-pad walked over (docs/tv-navigation.md). Every `errorWidget` must call
   `logImageFailure` (`image` diagnostics scope, redacted, throttled): call sites deliberately render
   the *same* widget for `placeholder` and `errorWidget`, so a screen of fallbacks is otherwise
   indistinguishable from one still loading — which is exactly why a real "no artwork until restart"
@@ -470,7 +491,20 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   **favorite star** in both overlays; the native one round-trips state via Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
-  keeps the manual error/Retry overlay. Four independent watchdogs (Kotlin for Android native;
+  keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
+  ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,
+  and a decoder re-instantiated across the preview→fullscreen surface swap sits in `STATE_READY`
+  reporting `isPlaying` with nothing on screen, so every flag read healthy and the freeze was
+  permanent *and* unlogged. `FrameLivenessWatch` (pure, in `ReconnectPolicy.kt`) samples
+  `PlaybackEngine.renderedFrameCount` on the existing 500 ms tick; `-1` (mpv, audio-only channels),
+  any non-healthy state, and **a counter never seen to advance** are all **inert**, never a stall —
+  that last one because a counter that never moved can't be told apart from a decode path that
+  doesn't report one, and a stream rendering *nothing* is a buffering stall the older watchdog
+  already owns. The Activity also reports surface-claim
+  mode/wait, first-frame latency, stream shape, reconnect `kind=`, re-resolve outcome and engine
+  swaps into the **exportable** log — everything after `adopted=…` used to be silent, which is why
+  a handoff report could arrive looking healthy. Keep that relay credential-free (docs/player.md).
+  Four independent watchdogs (Kotlin for Android native;
   Dart for Windows/embedded; Dart-over-IPC for Linux native mpv; Swift for iOS native), sharing one
   timing policy (`reconnectMinGapMs`, mirrored by Kotlin `ReconnectPolicy` and Swift
   `ReconnectPolicy`). **All four now re-resolve before reloading** (Stalker `play_token`s are

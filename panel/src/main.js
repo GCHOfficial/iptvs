@@ -10,6 +10,7 @@ import {
   kindHasSecret,
   deviceProvisionState,
   deviceNeedsKey,
+  xtreamCredentialsFromPlaylistUrl,
   SOURCE_SECRET_KEYS,
   METADATA_SECRET_KEYS,
 } from './validate.js';
@@ -329,16 +330,60 @@ function editSource(existing, nextPos = 0, decoded = null) {
         </select>
       </label>
       <div id="fields">${fieldsHtml()}</div>
+      <div id="xtream-hint"></div>
       <div class="form-actions">
         <button type="submit" class="primary">Save</button>
         <button type="button" id="cancel" class="ghost">Cancel</button>
       </div>
     </form>`;
 
+  // Offer to turn an M3U source that looks like an Xtream `get.php` link into a
+  // real Xtream source. Shape only — the panel cannot verify it (see
+  // xtreamCredentialsFromPlaylistUrl), so this asks rather than rewrites, and
+  // the user can switch the kind straight back if the panel turns out not to
+  // serve `player_api.php`.
+  const syncXtreamHint = () => {
+    const box = document.getElementById('xtream-hint');
+    if (!box) return;
+    const url = kind === 'm3u'
+      ? (document.querySelector('[name=playlistUrl]')?.value ?? '')
+      : '';
+    const creds = kind === 'm3u' ? xtreamCredentialsFromPlaylistUrl(url) : null;
+    if (!creds) {
+      box.innerHTML = '';
+      return;
+    }
+    box.innerHTML = `
+      <p class="muted hint">This looks like an Xtream panel link. As an Xtream
+        source it also gives <strong>Movies, Series and the subscription
+        expiry</strong>, which a playlist can't carry.
+        <button type="button" id="use-xtream" class="ghost">Switch to Xtream</button>
+      </p>`;
+    document.getElementById('use-xtream').onclick = () => {
+      kind = 'xtream';
+      view().querySelector('[name=kind]').value = 'xtream';
+      document.getElementById('fields').innerHTML = fieldsHtml();
+      // Prefill from the link the user already pasted, so switching costs no
+      // retyping. Applied after the re-render, since that replaced the inputs.
+      const set = (name, value) => {
+        const input = document.querySelector(`[name=${name}]`);
+        if (input) input.value = value;
+      };
+      set('host', creds.host);
+      set('username', creds.username);
+      set('password', creds.password);
+      syncXtreamHint();
+    };
+  };
+
   view().querySelector('[name=kind]').onchange = (e) => {
     kind = e.target.value;
     document.getElementById('fields').innerHTML = fieldsHtml();
+    syncXtreamHint();
   };
+  // Re-evaluate as the URL is typed or pasted.
+  view().querySelector('#fields').addEventListener('input', syncXtreamHint);
+  syncXtreamHint();
   document.getElementById('cancel').onclick = renderSources;
   document.getElementById('form').onsubmit = async (e) => {
     e.preventDefault();

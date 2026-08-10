@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/source_store.dart';
+import '../sources/m3u_upgrade.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../sources/xtream_source.dart' show kXtreamStreamExtensions;
@@ -82,6 +83,7 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       );
   String _query = '';
   String? _catchupError;
+  bool _upgrading = false;
 
   @override
   void initState() {
@@ -240,6 +242,53 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     await _save(_config.copyWith(settings: settings));
   }
 
+  /// Converts this M3U source into a real Xtream one, after the panel proves
+  /// it is one.
+  ///
+  /// The probe is the whole point: the panel URL *shape* is only a guess (some
+  /// resellers serve `get.php` and no `player_api.php` at all), and this
+  /// rewrites a saved source — so it converts on a real authentication or not
+  /// at all. That verification is also why the offer lives here rather than in
+  /// the web panel, which can't reach a provider from a browser.
+  Future<void> _upgradeToXtream() async {
+    if (_upgrading) return;
+    setState(() => _upgrading = true);
+    SourceConfig? upgraded;
+    try {
+      upgraded = await upgradeM3uToXtream(_config);
+    } finally {
+      if (mounted) setState(() => _upgrading = false);
+    }
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (upgraded == null) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Couldn't reach an Xtream panel at that address — the source is "
+            'unchanged.',
+          ),
+        ),
+      );
+      return;
+    }
+    await _save(upgraded);
+    // Categories were read for the M3U source; the id is unchanged, but the
+    // kind now exposes movie/series categories the previous load never asked
+    // for.
+    await _load();
+    if (!mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Upgraded to Xtream. Movies and Series are now available — push to '
+          'the cloud panel to keep it across your devices.',
+        ),
+        duration: Duration(seconds: 5),
+      ),
+    );
+  }
+
   bool get _hasAnyMatch =>
       ContentKind.values.any((k) => _filtered(k).isNotEmpty);
 
@@ -368,6 +417,39 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                           ),
                         ),
                       ),
+                      // Only for an M3U source whose URL carries Xtream
+                      // credentials. The load-time upgrade already converts
+                      // local sources silently; this is how a **cloud-managed**
+                      // one gets there, since that path deliberately leaves
+                      // panel-owned sources alone (a pull would revert it) —
+                      // and it is the one place the user can ask for it
+                      // explicitly and then push.
+                      if (couldBeXtreamPanel(_config)) ...[
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                          child: Text(
+                            'Source type',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                          child: Text(
+                            'This playlist URL looks like an Xtream panel. As '
+                            'an Xtream source it also gives Movies, Series and '
+                            'the subscription expiry, which a playlist can’t '
+                            'carry.',
+                            style: TextStyle(
+                              color: AppColors.textLo,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                        _UpgradeToXtreamTile(
+                          busy: _upgrading,
+                          onTap: _upgradeToXtream,
+                        ),
+                      ],
                       if (_config.kind == SourceKind.xtream) ...[
                         const Padding(
                           padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
@@ -514,6 +596,62 @@ class _BulkButton extends StatelessWidget {
 /// [value] is `null` for "unset" — kept distinct from an explicit choice so
 /// merely opening this screen never pins a source away from the platform
 /// default.
+/// Offers the verified M3U → Xtream upgrade. Shown only when the playlist URL
+/// carries Xtream credentials; the panel is contacted on tap, never before, so
+/// opening this screen costs no network for a source that will never qualify.
+class _UpgradeToXtreamTile extends StatelessWidget {
+  final bool busy;
+  final VoidCallback onTap;
+
+  const _UpgradeToXtreamTile({required this.busy, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: busy ? () {} : onTap,
+      scrollOnFocus: false,
+      debugLabel: 'sourceSettings.upgradeXtream',
+      semanticsLabel: 'Upgrade to Xtream, unlocks Movies, Series and the '
+          'subscription expiry',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.upgrade, size: 20, color: AppColors.textLo),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Upgrade to Xtream'),
+                  Text(
+                    'Checks the panel first — nothing changes if it does not '
+                    'answer.',
+                    style: TextStyle(fontSize: 12, color: AppColors.textLo),
+                  ),
+                ],
+              ),
+            ),
+            if (busy)
+              const SizedBox.square(
+                dimension: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Text(
+                'Upgrade',
+                style: TextStyle(
+                  color: AppColors.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StreamFormatTile extends StatelessWidget {
   final String? value;
   final VoidCallback onTap;

@@ -508,6 +508,18 @@ reorder; new sources append); devices show sources in that order. Branded with t
 `deploy-pages@v5`; Supabase values from repo Variables). Note: the Flutter web target lives in
 `web/`; the panel deliberately lives in `panel/`.
 
+### Xtream detection on an M3U source (suggest, never convert)
+
+The add/edit form detects an Xtream `get.php` shape in an M3U playlist URL
+(`xtreamCredentialsFromPlaylistUrl` in `panel/src/validate.js`, pinned by
+`panel/test/xtream_detect.test.js`) and offers **"Switch to Xtream"** with host/username/password
+prefilled from the link already pasted.
+
+**It offers; it never rewrites** — a browser cannot verify a provider panel, so this is a guess
+about a URL shape and converting on it blind could break a working source. The app is the half
+that verifies. Full rationale, including why `no-cors` doesn't help and why a server-side probe
+was deferred, is in **[sources.md](sources.md)** ("Why the web panel suggests and the app proves").
+
 ## Profiles (device-side)
 
 The app boots into `ProfilePickScreen` (`main.dart` `home:`, `bootMode: true`) — a "Who's

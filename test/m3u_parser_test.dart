@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/data/diagnostics_log.dart';
 import 'package:iptvs/sources/m3u_source.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_identity.dart';
@@ -158,26 +159,97 @@ http://stream.invalid/two
   });
 
   group('M3uSource.subscriptionExpiry', () {
+    /// Unix seconds, the form an Xtream `user_info.exp_date` arrives in.
+    final expSeconds =
+        DateTime.utc(2026, 9, 1).millisecondsSinceEpoch ~/ 1000;
+
+    List<String> m3uLog() => DiagnosticsLog.instance.entries
+        .where((entry) => entry.scope == 'm3u')
+        .map((entry) => entry.message)
+        .toList();
+
     test('reads an expiry param embedded in the playlist URL', () async {
+      var asked = false;
       final source = M3uSource(
         sourceId: 'm3u-test',
         playlistUrl: 'http://host/get.php?username=u&password=p&exp=2026-09-01',
+        debugXtreamApi: (_) async {
+          asked = true;
+          return <String, dynamic>{};
+        },
       );
       expect((await source.subscriptionExpiry()).date, DateTime(2026, 9, 1));
+      // The URL already answered, so the panel is never troubled for it.
+      expect(asked, isFalse);
     });
 
-    test(
-      'returns null when the playlist URL carries no expiry param',
-      () async {
-        final source = M3uSource(
-          sourceId: 'm3u-test',
-          playlistUrl: 'http://host/get.php?username=u&password=p',
-        );
-        expect(
-          (await source.subscriptionExpiry()).kind,
-          SubscriptionExpiryKind.unknown,
-        );
-      },
-    );
+    test('asks the panel when the URL is an Xtream link with no expiry param',
+        () async {
+      // The gap behind "M3U source shows Expiry unknown with nothing in the
+      // log": a `get.php` link carries username/password and *no* expiry
+      // parameter, so the URL read had nothing to find while `player_api.php`
+      // would have answered on request.
+      final source = M3uSource(
+        sourceId: 'm3u-test',
+        playlistUrl: 'http://host/get.php?username=u&password=p',
+        debugXtreamApi: (_) async => {
+          'user_info': {'exp_date': '$expSeconds'},
+        },
+      );
+      final expiry = await source.subscriptionExpiry();
+      expect(expiry.kind, SubscriptionExpiryKind.dated);
+      expect(expiry.date!.toUtc().year, 2026);
+      expect(expiry.date!.toUtc().month, 9);
+    });
+
+    test('a panel that answers with nothing usable stays unknown, and says so',
+        () async {
+      final source = M3uSource(
+        sourceId: 'm3u-test',
+        playlistUrl: 'http://host/get.php?username=u&password=p',
+        debugXtreamApi: (_) async => {'user_info': <String, dynamic>{}},
+      );
+      expect(
+        (await source.subscriptionExpiry()).kind,
+        SubscriptionExpiryKind.unknown,
+      );
+      expect(m3uLog().last, contains('no usable exp_date'));
+    });
+
+    test('a failing panel lookup degrades rather than throwing', () async {
+      final source = M3uSource(
+        sourceId: 'm3u-test',
+        playlistUrl: 'http://host/get.php?username=u&password=p',
+        debugXtreamApi: (_) async => throw const FormatException('nope'),
+      );
+      expect(
+        (await source.subscriptionExpiry()).kind,
+        SubscriptionExpiryKind.unknown,
+      );
+      final logged = m3uLog().last;
+      expect(logged, contains('lookup failed'));
+      // The exception type is enough to triage; its message can embed the URL.
+      expect(logged, isNot(contains('nope')));
+    });
+
+    test('a plain playlist never probes a panel that is not there', () async {
+      var asked = false;
+      final source = M3uSource(
+        sourceId: 'm3u-test',
+        playlistUrl: 'http://host/playlist.m3u8',
+        debugXtreamApi: (_) async {
+          asked = true;
+          return <String, dynamic>{};
+        },
+      );
+      expect(
+        (await source.subscriptionExpiry()).kind,
+        SubscriptionExpiryKind.unknown,
+      );
+      expect(asked, isFalse);
+      // A hand-written playlist genuinely has no expiry, and saying that is
+      // what distinguishes it from a lookup that failed.
+      expect(m3uLog().last, contains('no expiry parameter'));
+    });
   });
 }

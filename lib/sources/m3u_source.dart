@@ -12,6 +12,9 @@ import 'expiry.dart';
 import 'source.dart';
 import 'source_identity.dart';
 import 'xmltv.dart';
+// For the Xtream-panel expiry probe in [M3uSource.subscriptionExpiry]. One-way:
+// `xtream_source.dart` does not import this file, so there is no cycle.
+import 'xtream_source.dart';
 
 /// A [Source] backed by an extended M3U/M3U8 playlist (URL).
 ///
@@ -51,10 +54,17 @@ class M3uSource
     this.catchupOffsetMinutes,
     this.catchupMaxDays,
     this.displayName,
+    this.debugXtreamApi,
   });
 
   /// User-assigned label (from SourceConfig); preferred over the derived name.
   final String? displayName;
+
+  /// Test seam for the Xtream panel probe in [subscriptionExpiry], threaded
+  /// straight through to [XtreamSource.debugApi] so a test can exercise the
+  /// `get.php` → `player_api.php` path without HTTP. Null in production.
+  @visibleForTesting
+  final Future<dynamic> Function(Map<String, String> params)? debugXtreamApi;
 
   @override
   String get id => sourceId;
@@ -219,9 +229,73 @@ class M3uSource
   Future<StreamInfo> resolveMedia(MediaItem item) async =>
       throw UnsupportedError('M3U source only exposes playlist channels');
 
+  /// Playlist expiry, from the URL when it carries one and from the panel when
+  /// the URL is really an Xtream link.
+  ///
+  /// A plain M3U genuinely has no expiry metadata, so the URL-parameter read
+  /// ([subscriptionExpiryFromPlaylistUrl]) is all there is — and for a hand-
+  /// written playlist "unknown" is the honest answer. But a very large share of
+  /// M3U sources are an Xtream panel's `get.php` link, which carries
+  /// `username`/`password` and **no expiry parameter at all**: nothing for the
+  /// URL read to find, so those reported unknown forever while the panel would
+  /// have answered on request. `player_api.php` is exactly where
+  /// [XtreamSource.subscriptionExpiry] gets it, so this asks the same question
+  /// the same way rather than reimplementing it — the probe is short-lived and
+  /// disposed, and it only runs when the URL actually looks like a panel link.
+  ///
+  /// The add-source flow already offers to convert such a source to a real
+  /// Xtream config (`_maybeConvertM3uToXtream`), which is the better outcome
+  /// because it also unlocks Movies/Series. This covers the ones that stayed
+  /// M3U anyway: added before that existed, or converted-probe failed at the
+  /// time, or deliberately kept flat.
   @override
-  Future<SubscriptionExpiry> subscriptionExpiry() async =>
-      subscriptionExpiryFromPlaylistUrl(playlistUrl);
+  Future<SubscriptionExpiry> subscriptionExpiry() async {
+    final fromUrl = subscriptionExpiryFromPlaylistUrl(playlistUrl);
+    if (fromUrl.kind != SubscriptionExpiryKind.unknown) return fromUrl;
+
+    final uri = Uri.tryParse(playlistUrl);
+    final credentials = uri == null ? null : xtreamCredentialsFromUrl(uri);
+    if (credentials == null) {
+      // Nothing else to ask. Say so, rather than leaving the badge
+      // unexplained: an M3U with no expiry parameter and no panel behind it is
+      // a correct "unknown", and that is worth being able to tell apart from a
+      // lookup that failed.
+      DiagnosticsLog.instance.add(
+        'm3u',
+        'expiry unknown: playlist url carries no expiry parameter and no '
+            'xtream credentials',
+      );
+      return fromUrl;
+    }
+    final probe = XtreamSource(
+      sourceId: sourceId,
+      host: credentials.host,
+      username: credentials.username,
+      password: credentials.password,
+      debugApi: debugXtreamApi,
+    );
+    try {
+      final parsed = await probe.subscriptionExpiry();
+      if (parsed.kind == SubscriptionExpiryKind.unknown) {
+        DiagnosticsLog.instance.add(
+          'm3u',
+          'expiry unknown: xtream player_api returned no usable exp_date',
+        );
+      }
+      return parsed;
+    } catch (e) {
+      // Best-effort — the badge shows "Expiry unknown". The type alone is
+      // enough to separate "panel refused/unreachable" from "panel answered
+      // with nothing"; the message can embed the URL, so it stays out.
+      DiagnosticsLog.instance.add(
+        'm3u',
+        'expiry unknown: xtream player_api lookup failed (${e.runtimeType})',
+      );
+      return fromUrl;
+    } finally {
+      await probe.dispose();
+    }
+  }
 
   @override
   Future<void> dispose() async => _http.close(force: true);

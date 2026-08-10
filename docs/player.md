@@ -993,7 +993,7 @@ neither arrangement can shorten. The revert also gave back the costs the hoist c
 view swap on the mpv fallback, a Compose root that had to stay transparent so the SurfaceView's
 punch-hole showed through, and PiP/aspect paths reasoning about a hierarchy Compose no longer owned.
 
-To make the same thing confirmable in the field, `HdrPlayerActivity` now reports the handoff
+To make the same thing confirmable in the field, `HdrPlayerActivity` reports the handoff
 outcome into the **exportable**
 diagnostics log (`MainActivity.logPlaybackDiagnostic` → Dart `nativeDiagnostic` → `_logPlayback`):
 `native fullscreen adoptShared=… adopted=…`, which pairs with the channel list's
@@ -1001,6 +1001,33 @@ diagnostics log (`MainActivity.logPlaybackDiagnostic` → Dart `nativeDiagnostic
 adopt didn't match the one `SharedEngine` was playing and the Activity silently reloaded — a real
 reconnect, and previously visible only in logcat. Keep anything sent through that relay
 credential-free: it is exported verbatim.
+
+**Past that line the Activity used to say nothing at all, which is why a second round of "it
+still stutters, and the big channels just stay black" arrived with a log that looked perfectly
+healthy.** An export could contain a complete adopted handoff and nothing about whether a frame
+ever appeared. The Activity now stamps every note with ms since its own `onCreate`
+(`HdrPlayerActivity.logNative`) and reports:
+
+| line | what it answers |
+| --- | --- |
+| `native surface claim mode=immediate\|deferred\|backstop waitMs=…` | how the fullscreen surface was taken, and how long the SurfaceView really took — `mode=backstop` means the `CLAIM_FALLBACK_MS` bet was lost and the decoder took an output transition it didn't need |
+| `native first frame sinceClaimMs=…` (or `sinceLoadMs=…` on a cold open) | whether the picture came back after the handoff, and how late |
+| `native stream 1920x1080 fps=50 codec=HEVC range=HDR10` | which channels the reports are actually about — resolution/rate/codec is the closest bitrate proxy available without measuring the socket |
+| `native live reconnect attempt=N force=… kind=buffering\|ended\|noframes\|error` | why a reconnect fired, once per real attempt (the rate limit already gates it) |
+| `native live re-resolve refreshed=… timedOut=…` | whether the portal handed back a new locator, or the round trip timed out and the spent one was retried |
+| `native engine fallback from=exo to=mpv adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching |
+
+Every one of those is a bare boolean/number/label by construction — never a URL, header or
+provider reply. `ExoPlayerEngine.onDiagnostic` is the sink; `SharedEngine.adoptForFullscreen`
+binds it **before** `claimViewSurface` (the claim is the first thing worth reporting) and only on
+the success path, and `bindPreviewCallbacks` clears it again, so a preview engine never keeps a
+finished Activity's closure.
+
+**`onRenderedFirstFrame` is re-armed by the claim, not just by a load.** An output-surface change
+makes `MediaCodecVideoRenderer` re-announce its first frame, and on an *adopted* engine that is
+the only first frame describing the handoff — the preview's own fired seconds earlier. So
+`claimViewSurface` clears `reportedFirstFrame`; without that the handoff's own latency is the one
+number the instrumentation would still be missing.
 
 ## PiP note
 
@@ -1021,7 +1048,27 @@ unwired or the resolve fails). **Four independent watchdogs** because the platfo
 different stacks:
 
 - **Android** in `HdrPlayerActivity` (its 500ms progress ticker watches `PlayerUiState`;
-  ExoPlayer network errors that leave it idle trigger an immediate reconnect). Its reload
+  ExoPlayer network errors that leave it idle trigger an immediate reconnect). **It watches three
+  stall shapes, not two**: buffering, ended, and — since the Android TV handoff reports —
+  **playing-but-not-rendering**. `isBuffering || ended` are *claims*, and the failure the handoff
+  produces is precisely the one where the claim and the screen disagree: a decoder released and
+  re-instantiated across the output-surface swap and still waiting for an IDR, or one holding a
+  surface that no longer exists, sits in `STATE_READY` reporting `isPlaying` with the position
+  advancing and nothing drawn. Every flag reads healthy, so nothing ever reconnected and nothing
+  was ever logged — a permanent freeze. `FrameLivenessWatch` (`ReconnectPolicy.kt`, pure, pinned
+  by `FrameLivenessWatchTest`) samples `PlaybackEngine.renderedFrameCount` on the same 500 ms tick
+  and calls it stalled after `NO_FRAME_STALL_MS` (6 s) of a frozen counter while the engine claims
+  health. It **fails inert three ways**: `renderedFrameCount` is -1 for any engine that can't count
+  (mpv, and an audio-only channel, which has no video renderer at all); any not-healthy state
+  resets the window rather than accumulating toward one; and **it only ever fires on a counter it
+  has watched advance**. That last one is the important one. A counter that has never moved is
+  indistinguishable from a decode path that doesn't report one, and reconnect-looping a healthy
+  stream every few seconds would be a far worse bug than the freeze this fixes — while nothing is
+  lost by demanding proof, because a stream that renders *nothing* never leaves `STATE_BUFFERING`,
+  which the buffering watchdog already owns. The shape this catches is the other one: a stream that
+  *was* rendering (the preview) and stopped (the handoff) while still claiming to play. It also
+  skips the stall threshold on firing — it has already waited out its own window while everything
+  read healthy, so applying `STALL_RECONNECT_MS` on top would double it. Its reload
   **re-resolves first** through `withFreshLiveLocator`/`ResolveGate`
   (`android/.../player/LiveResolve.kt`) — a Stalker `play_token` the portal already killed can
   never work a second time — single-flight with "Go to live" (see "Android" above) and falling

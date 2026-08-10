@@ -19,6 +19,22 @@ navigation code.
   produces no rings. An explicit `autofocus: true` **does** now ring on a phone (the first media
   tile, the first Legal link): deliberate, and the same resting-cursor behaviour the live list
   has always had on touch.
+  **The ring is a `foregroundDecoration`, and the box's own border is a fixed-width transparent
+  spacer (`kFocusableCardBorderWidth`).** A `BoxDecoration`'s border is what insets a
+  `Container`'s child, so the old `Border.all(width: _focused ? 2 : 1)` on `decoration` meant
+  focusing a card narrowed its whole subtree by 2 logical px — through ~7 interpolated fractional
+  widths, since the `AnimatedContainer` lerps it over 120 ms. Harmless for text; expensive for
+  artwork. A poster sized from its own constraints feeds that width to `imageCacheSize`, and
+  `memCacheWidth` is part of the `ResizeImage` cache key: every frame of the animation minted a
+  fresh key, i.e. a cache miss, an asynchronous re-resolve and a re-decode with the `placeholder`
+  on screen. Walking the media grid therefore made each poster visibly reload on the way in *and*
+  on the way out, for artwork that had been decoded seconds earlier — reported as "posters
+  refresh when hovered over", and not TV-specific (keyboard traversal on desktop does the same
+  thing). Painting the ring over the child instead leaves the layout identical in both states.
+  Grids that reserve the border in their own arithmetic (`MediaGridMetrics.tileBorder`) take the
+  constant from the widget rather than restating it — the two drifting apart is what previously
+  overflowed a focused tile by ~1.6 px. Keep any future focus affordance out of the layout:
+  scale, paint and colour are free; anything that changes constraints is not.
   **Exception: the two live-tab lists and the EPG grid.** They are *selection models* (one focus
   node + a selected index; rows aren't focusable) — see below. Reach for `FocusableCard` for
   short, fixed sets (media grid, sources, sheets); reach for a selection model when it's a long
