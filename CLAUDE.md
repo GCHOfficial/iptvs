@@ -500,8 +500,23 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   any non-healthy state, and **a counter never seen to advance** are all **inert**, never a stall —
   that last one because a counter that never moved can't be told apart from a decode path that
   doesn't report one, and a stream rendering *nothing* is a buffering stall the older watchdog
-  already owns. The Activity also reports surface-claim
-  mode/wait, first-frame latency, stream shape, reconnect `kind=`, re-resolve outcome and engine
+  already owns. **The one exception is the adopted handoff, where the proof already exists:** the
+  Activity calls `armHandoff(now, renderedFrameCount)` when it adopts, because those frames were
+  drawn by that same renderer moments ago — without it, a handoff that freezes the decoder *before
+  its first frame* stays inert forever (measured: 11.2 s of black ending in the user pressing Back).
+  Arming also shortens the clock to `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) for `HANDOFF_WINDOW_MS`
+  (5 s) after the claim, and inside that window the **first recovery is a local decoder rebuild, not
+  a reload** (`tryHandoffDecoderRebuild` → `PlaybackEngine.rebuildVideoDecoder` → a custom
+  `PlayerMessage` making `HdrMediaCodecVideoRenderer` do `releaseCodec()` +
+  `maybeInitCodecOrBypass()` — verbatim what media3 does for itself on a device it *knows*
+  mishandles `MediaCodec.setOutputSurface`, decided by evidence instead of by a device list this
+  chipset isn't on). One attempt, then the ordinary reload: a reload spends a provider round trip,
+  the whole buffer and a second connection to replace the one thing that broke, and the evidence
+  says only the decoder did (same URL, same surface, minutes of clean playback after).
+  The Activity also reports surface-claim
+  mode/wait, first-frame latency, stream shape, reconnect `kind=` + frame tallies
+  (`rendered/dropped/toKeyframe/skipped/inits`, which separate "throwing frames away to catch up"
+  from "stopped emitting"), re-resolve outcome and engine
   swaps into the **exportable** log — everything after `adopted=…` used to be silent, which is why
   a handoff report could arrive looking healthy. Keep that relay credential-free (docs/player.md).
   Four independent watchdogs (Kotlin for Android native;

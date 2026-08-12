@@ -923,7 +923,7 @@ its mouse-hover auto-preview.) The preview engine is stopped when the app itself
 back-exits (Dart lifecycle observer in `channel_list_screen` + a finishing-`MainActivity.onStop`
 safety net in Kotlin) so no audio survives behind the launcher.
 
-### Two things that made the TV handoff look like a reconnect
+### Three things that made the TV handoff look like a reconnect
 
 Both are Android-TV-shaped for the same structural reason: **the preview→fullscreen handoff only
 exists on a wide layout**. A phone's narrow layout goes straight to fullscreen from a fresh resolve
@@ -952,6 +952,34 @@ TV" is the expected shape of a handoff bug, not evidence against one.
   MPEG-TS stream. `ExoPlayerEngine.claimViewSurface` now defers the swap to `surfaceCreated` (with a
   1 s backstop for a view that never attaches, and cancellation from `attachPreviewTexture`/
   `release`), collapsing it back to one transition.
+- **The one transition that remains still kills the decoder on some chipsets — and the picture
+  never came back.** With the claim deferred and the surface real, `ExoPlayer.setVideoSurfaceView`
+  applies the switch through `MediaCodec.setOutputSurface` unless media3's hardcoded
+  `codecNeedsSetOutputSurfaceWorkaround` device list says otherwise; a TV that mishandles it but
+  isn't on the list gets a decoder that reports `STATE_READY`/`isPlaying`, keeps its position
+  advancing, and emits nothing. `FrameLivenessWatch` was written for exactly that and still could
+  not act on it, because it waits to *observe* the counter move and here it never moves once —
+  see "Live auto-reconnect" below for the arm that fixes it and the local decoder rebuild that
+  recovers it without touching the network.
+
+The third one is the best-evidenced of the three, from a user export (128 entries, one session,
+one provider):
+
+| channel | fps | adopted handoffs | outcome |
+| --- | --- | --- | --- |
+| PRO TV FIBRA | 25 | 2 | first frame at 216/775 ms, no stall |
+| DIGI SPORT 1 FIBRA | 42.86 | 1 | first frame at 197 ms, then 10 min unattended |
+| ANTENA 1 FIBRA | 59.94 / 42.86 | 5 | **5/5 frozen** |
+
+Of those five, two drew a first frame (198/278 ms after the claim) and stopped roughly a quarter
+second later; three drew nothing at all, and two of those were never judged by anything — one sat
+black for **11.2 s until the user pressed Back**, with a surface claim as its last log line. Every
+one that did recover recovered the same way: a reload, on the **same URL** (`refreshed=false`), on
+the same surface, after which the same 59.94 fps channel played 14–66 s with no further stall.
+A stream and a device that demonstrably work, through a decoder that stopped when its output
+surface was switched under it. Note also that the two "drew nothing" sessions were the ones whose
+engine had already been through a detach→re-attach cycle (fullscreen → preview → fullscreen, i.e.
+a third output transition), which is the direction the `setOutputSurface` reading predicts.
 
 **The surface-claim half is measured, on an Android TV emulator** (API 36 `android-tv` x86_64, 4K,
 demo source, live HLS): the same preview→fullscreen handoff was run against a build with the old
@@ -1013,7 +1041,9 @@ ever appeared. The Activity now stamps every note with ms since its own `onCreat
 | `native surface claim mode=immediate\|deferred\|backstop waitMs=…` | how the fullscreen surface was taken, and how long the SurfaceView really took — `mode=backstop` means the `CLAIM_FALLBACK_MS` bet was lost and the decoder took an output transition it didn't need |
 | `native first frame sinceClaimMs=…` (or `sinceLoadMs=…` on a cold open) | whether the picture came back after the handoff, and how late |
 | `native stream 1920x1080 fps=50 codec=HEVC range=HDR10` | which channels the reports are actually about — resolution/rate/codec is the closest bitrate proxy available without measuring the socket |
-| `native live reconnect attempt=N force=… kind=buffering\|ended\|noframes\|error` | why a reconnect fired, once per real attempt (the rate limit already gates it) |
+| `native handoff frame watch armed=…` | whether the adopted engine could hand `FrameLivenessWatch` proof that its frame counter advances. `armed=false` means it reported no frames at all, so the inert rule still applies and a frozen handoff will only be caught by the buffering watchdog |
+| `native handoff decoder rebuild attempt=N rendered=… dropped=… toKeyframe=… skipped=… inits=…` | the local recovery fired (decoder rebuilt in place, stream untouched). The tallies are the **frozen** decoder's, sampled before the rebuild: `dropped`/`toKeyframe` climbing means frames were being decoded and thrown away to catch up, all-flat means the decoder had stopped emitting, and `inits` says how many times the codec had been instantiated — i.e. whether an output change was applied in place or re-created it |
+| `native live reconnect attempt=N force=… kind=buffering\|ended\|noframes\|error rendered=… dropped=… …` | why a reconnect fired, once per real attempt (the rate limit already gates it), with the same frame tallies at the moment of the decision |
 | `native live re-resolve refreshed=… timedOut=…` | whether the portal handed back a new locator, or the round trip timed out and the spent one was retried |
 | `native engine fallback from=exo to=mpv adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching |
 
@@ -1061,7 +1091,8 @@ different stacks:
   health. It **fails inert three ways**: `renderedFrameCount` is -1 for any engine that can't count
   (mpv, and an audio-only channel, which has no video renderer at all); any not-healthy state
   resets the window rather than accumulating toward one; and **it only ever fires on a counter it
-  has watched advance**. That last one is the important one. A counter that has never moved is
+  has watched advance — or been given proof about** (`armHandoff`, below). That last one is the
+  important one. A counter that has never moved is
   indistinguishable from a decode path that doesn't report one, and reconnect-looping a healthy
   stream every few seconds would be a far worse bug than the freeze this fixes — while nothing is
   lost by demanding proof, because a stream that renders *nothing* never leaves `STATE_BUFFERING`,
@@ -1073,6 +1104,42 @@ different stacks:
   (`android/.../player/LiveResolve.kt`) — a Stalker `play_token` the portal already killed can
   never work a second time — single-flight with "Go to live" (see "Android" above) and falling
   back to the held locator if the round trip times out or fails.
+
+  **The proof rule had a hole, and it was in the exact case the class was written for.** When the
+  handoff freezes the renderer *before it draws a single frame on the new surface* — three of the
+  five frozen handoffs in the export above, one of them 11.2 s of black ending in the user pressing
+  Back — the counter never moves under this watch's own observation, so it stays inert and the
+  freeze is permanent. Yet the proof it was waiting for already existed: the preview had been
+  rendering that same counter, on that same renderer, seconds earlier. So `HdrPlayerActivity` calls
+  `FrameLivenessWatch.armHandoff(now, engine.renderedFrameCount)` when it adopts, handing it that
+  count as the proof (a zero/-1 count is refused and reported as `armed=false` — inert rule 3 is
+  unchanged for a cold open, an mpv engine, or an audio-only channel). Arming is also what
+  justifies a shorter clock: for `HANDOFF_WINDOW_MS` (5 s) after the claim a frozen renderer stalls
+  at `HANDOFF_NO_FRAME_STALL_MS` (1.5 s, three consecutive identical 500 ms samples) instead of 6 s,
+  because the ambiguity the long window is generous about doesn't exist here — the preview was
+  demonstrably rendering, and the only thing that changed is which surface the decoder writes to.
+  One asymmetry falls out of that: a not-healthy tick (buffering) normally revokes the proof and
+  restarts the window, but **inside the handoff window it doesn't**, because the proof is the
+  preview's frames rather than an observation of this watch's own — and the claim is precisely when
+  a buffering tick is most likely, so revoking there would put the freeze back out of reach. A
+  `renderedFrameCount` of -1 (the mpv fallback arriving) still disarms completely: there is nothing
+  left to be armed against.
+
+  **Inside that window the first recovery is not a reload — it rebuilds the decoder in place**
+  (`HdrPlayerActivity.tryHandoffDecoderRebuild` → `PlaybackEngine.rebuildVideoDecoder`, one attempt
+  per handoff). A reload spends a provider round trip, the whole buffer, and a *new connection* on a
+  single-connection account, to replace the one thing that was actually broken; the rebuild sends a
+  custom `PlayerMessage` (`HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC`, numbered from media3's
+  reserved `Renderer.MSG_CUSTOM_BASE`) to this player's own video renderer, which does
+  `releaseCodec()` + `maybeInitCodecOrBypass()` — **verbatim what `MediaCodecVideoRenderer.setOutput`
+  does for itself on a device it knows mishandles `setOutputSurface`**, just decided by evidence
+  rather than by a device list this chipset isn't on. Demuxer, buffer, audio pipeline and HTTP
+  connection all keep running; the cost is one wait for the next IDR. If the fresh decoder still
+  draws nothing, the re-arm means the next stall lands ~1.5 s later and escalates to the ordinary
+  reload — so the ladder is roughly *1.5 s rebuild → 3 s reload* against the 6.5 s reload (or the
+  never) it replaces. The rebuild is only ever reachable through an armed handoff: `reset()` (a
+  reload, an engine swap) drops the window, so a decoder built against the surface it will keep is
+  never rebuilt on this path.
 - **iOS**, Swift-side and Kotlin-shaped: `IptvsPlayerViewController` runs its own progress
   watchdog (`LiveReconnectWatchdog`,
   `packages/iptvs_ios_player/ios/Core/Sources/IptvsPlayerCore/LiveReconnectWatchdog.swift`) —
