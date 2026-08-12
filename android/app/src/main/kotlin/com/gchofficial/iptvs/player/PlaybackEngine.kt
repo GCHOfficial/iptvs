@@ -50,4 +50,36 @@ interface PlaybackEngine {
      * old buffering/ended-only watchdog.
      */
     val renderedFrameCount: Int get() = -1
+
+    /**
+     * Re-create the **video decoder** against the output surface it is already
+     * pointed at, keeping everything else running: the demuxer, the loaded
+     * buffer, the audio pipeline, and — the one that matters on
+     * single-connection provider accounts — the open HTTP connection.
+     *
+     * This is the recovery for a decoder that survived the preview→fullscreen
+     * output-surface switch in name only (see [FrameLivenessWatch]). It is the
+     * same thing media3 does for itself when it *knows* a chipset mishandles
+     * `MediaCodec.setOutputSurface` (`codecNeedsSetOutputSurfaceWorkaround`) —
+     * a device list that is, necessarily, always missing someone.
+     *
+     * Returns false when the engine has no such lever (libmpv, a released
+     * player), leaving the caller's reload as the only recovery.
+     */
+    fun rebuildVideoDecoder(): Boolean = false
+
+    /**
+     * Renderer counters for a stall report — **credential-free by
+     * construction**, they are frame tallies — or null when the engine keeps
+     * none.
+     *
+     * They separate the two ways a picture stops while the engine claims to be
+     * playing, which want opposite answers and are identical from the outside:
+     * frames being *decoded and thrown away* to catch up (dropped/toKeyframe
+     * climbing) is a stream/device that can't keep up, while a decoder that has
+     * simply stopped emitting (every tally flat) is the surface-switch failure.
+     * `inits` counts decoder instantiations, so it also says whether an output
+     * change re-created the codec or was applied in place.
+     */
+    val videoFrameCounters: String? get() = null
 }

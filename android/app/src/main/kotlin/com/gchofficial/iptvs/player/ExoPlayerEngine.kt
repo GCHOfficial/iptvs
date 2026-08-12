@@ -127,6 +127,9 @@ class ExoPlayerEngine(
         playerView.findViewById(androidx.media3.ui.R.id.exo_content_frame)
 
     private val player: ExoPlayer
+    // Held because it is the only handle on the video renderer instance
+    // ([rebuildVideoDecoder] addresses a PlayerMessage at it).
+    private val renderersFactory: HdrRenderersFactory
     private val audioOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private val subtitleOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private var volumeBeforeMute = 1f
@@ -204,6 +207,37 @@ class ExoPlayerEngine(
             -1
         } else {
             player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
+        }
+
+    /**
+     * Sends [HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC] to this player's own
+     * video renderer. Asynchronous by construction — the message is applied on
+     * the playback thread — so `true` means "asked", and the answer arrives as
+     * frames (or as the next stall, which escalates to a reload).
+     */
+    override fun rebuildVideoDecoder(): Boolean {
+        if (released) return false
+        val renderer = renderersFactory.videoRenderer ?: return false
+        return runCatching {
+            player.createMessage(renderer)
+                .setType(HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC)
+                .send()
+            true
+        }.getOrElse {
+            Log.w(TAG, "video decoder rebuild could not be sent", it)
+            false
+        }
+    }
+
+    override val videoFrameCounters: String?
+        get() {
+            if (released) return null
+            val c = player.videoDecoderCounters ?: return null
+            return "rendered=${c.renderedOutputBufferCount} " +
+                "dropped=${c.droppedBufferCount} " +
+                "toKeyframe=${c.droppedToKeyframeCount} " +
+                "skipped=${c.skippedOutputBufferCount} " +
+                "inits=${c.decoderInitCount}"
         }
 
     override fun load(url: String, subtitles: List<SubtitleSpec>) {
@@ -318,13 +352,14 @@ class ExoPlayerEngine(
             .setDefaultRequestProperties(headers)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
-        val renderersFactory = HdrRenderersFactory(context) { label ->
+        renderersFactory = HdrRenderersFactory(context) { label ->
             // Reported on the playback thread; marshal to main for Compose state.
             mainHandler.post {
                 decoderDynamicRange = label
                 state.dynamicRange = label
             }
-        }.setEnableDecoderFallback(true)
+        }
+        renderersFactory.setEnableDecoderFallback(true)
 
         // Without this the media3 DefaultLoadControl defaults apply, which hold
         // the first frame back by 2.5s on every open — see [ExoBufferPolicy].

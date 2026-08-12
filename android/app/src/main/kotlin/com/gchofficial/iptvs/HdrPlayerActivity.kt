@@ -83,6 +83,11 @@ class HdrPlayerActivity : ComponentActivity() {
     // screen. See [FrameLivenessWatch].
     private val frameLiveness = FrameLivenessWatch()
 
+    // Cheap recoveries spent on this session's handoff. One is the budget: if a
+    // fresh decoder on the same surface still draws nothing, the surface switch
+    // wasn't the problem and the reload watchdog owns it from there.
+    private var handoffRebuilds = 0
+
     // Why the current reconnect fired, for the diagnostics line. Set at the
     // point of decision so the log distinguishes an underrun from a drop from
     // a frozen renderer, which otherwise all read as "reconnect attempt=1".
@@ -263,6 +268,18 @@ class HdrPlayerActivity : ComponentActivity() {
             // Fullscreen always plays unmuted, and resumes a paused preview.
             sharedEngine.setVolume(1f)
             sharedEngine.play()
+            // The surface claim happened inside adoptForFullscreen above, and
+            // the frames the preview drew before it are the proof
+            // FrameLivenessWatch otherwise has to wait to observe — which, when
+            // the handoff freezes the renderer before its first frame, never
+            // arrives. Arming here is what turns that permanent silent freeze
+            // into a stall the watchdog can act on. armed=false means the
+            // engine reported no frames at all, so the inert rule still stands.
+            val armed = frameLiveness.armHandoff(
+                System.currentTimeMillis(),
+                sharedEngine.renderedFrameCount,
+            )
+            logNative("handoff frame watch armed=$armed")
         } else {
             startWithExoPlayer()
             // VOD resume: jump to the saved position once the engine loads.
@@ -377,6 +394,10 @@ class HdrPlayerActivity : ComponentActivity() {
             if (uiState.reconnecting) uiState.reconnecting = false
             return
         }
+        // A renderer frozen this soon after the fullscreen surface claim gets
+        // the local fix first — reloading the stream to repair a decoder is
+        // both slower and more expensive than repairing the decoder.
+        if (frameStalled && tryHandoffDecoderRebuild(now)) return
         if (stalledSinceMs == 0L) stalledSinceMs = now
         // A frozen renderer needs no further grace period: the watch has
         // already waited out its own window while everything read healthy, so
@@ -392,6 +413,47 @@ class HdrPlayerActivity : ComponentActivity() {
             else -> "buffering"
         }
         if (now - stalledSinceMs >= threshold) reconnectLive(force = false)
+    }
+
+    /**
+     * First rung of the recovery ladder for the preview→fullscreen handoff:
+     * rebuild the video decoder in place instead of reloading the stream.
+     *
+     * The reports this answers are all the same session shape — an adopted
+     * handoff, a claimed surface, and then either no picture at all or a
+     * picture that stops within a second — and the exported logs behind them
+     * all end the same way: the reload that eventually fired *fixed* it, on the
+     * same URL (`refreshed=false`), on the same surface, after which the same
+     * channel played for minutes without a drop. A stream and a device that
+     * demonstrably work, through a decoder that stopped when its output surface
+     * was switched under it. Nothing about that needs the network re-touched:
+     * a reload spends a provider round trip and the whole buffer to build the
+     * one thing that was actually broken, while carrying the risk that a
+     * single-connection account refuses the new connection.
+     *
+     * Bounded to one attempt inside the handoff window ([FrameLivenessWatch]);
+     * everything past that is the reload watchdog's, unchanged. Re-arms the
+     * watch so a rebuild that *doesn't* restore the picture escalates on the
+     * short handoff clock rather than the full six-second one.
+     */
+    private fun tryHandoffDecoderRebuild(nowMs: Long): Boolean {
+        if (!frameLiveness.inHandoffWindow(nowMs)) return false
+        if (handoffRebuilds >= MAX_HANDOFF_REBUILDS) return false
+        val active = engine ?: return false
+        // Counters first: after the rebuild they describe the new decoder, and
+        // it is the frozen one's tallies that say *which* failure this was —
+        // frames decoded and thrown away to catch up, or a decoder that had
+        // stopped emitting entirely.
+        val counters = active.videoFrameCounters
+        if (!active.rebuildVideoDecoder()) return false
+        handoffRebuilds++
+        logNative(
+            "handoff decoder rebuild attempt=$handoffRebuilds${counters?.let { " $it" } ?: ""}",
+        )
+        stalledSinceMs = 0L
+        stallKind = "none"
+        frameLiveness.armHandoff(nowMs, active.renderedFrameCount)
+        return true
     }
 
     /**
@@ -426,7 +488,12 @@ class HdrPlayerActivity : ComponentActivity() {
         // all three used to arrive as the same silent black screen.
         logNative(
             "live reconnect attempt=$reconnectAttempt force=$force " +
-                "kind=${if (force) "error" else stallKind}",
+                "kind=${if (force) "error" else stallKind}" +
+                // Frame tallies at the moment of the decision: they are what
+                // separate a decoder throwing frames away to catch up from one
+                // that has stopped emitting, which read identically from every
+                // health flag the engine exposes.
+                (engine?.videoFrameCounters?.let { " $it" } ?: ""),
         )
         frameLiveness.reset()
         withFreshLiveLocator {
@@ -829,6 +896,14 @@ class HdrPlayerActivity : ComponentActivity() {
         const val RESULT_POSITION_MS = "position_ms"
         const val RESULT_DURATION_MS = "duration_ms"
         const val RESULT_FAVORITE = "favorite"
+
+        /**
+         * Local decoder rebuilds allowed per handoff. One: a second would be a
+         * loop with a stall threshold, and the failure it treats is a
+         * one-time event (a surface switch) that a rebuild either survives or
+         * doesn't. See [tryHandoffDecoderRebuild].
+         */
+        private const val MAX_HANDOFF_REBUILDS = 1
         private const val TAG = "iptvs.hdr"
     }
 }

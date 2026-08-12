@@ -36,6 +36,16 @@ class HdrRenderersFactory(
     private val onDynamicRange: (String) -> Unit,
 ) : DefaultRenderersFactory(context) {
 
+    /**
+     * The renderer this factory built, so the engine can address a
+     * [PlayerMessage][androidx.media3.exoplayer.PlayerMessage] at it —
+     * `ExoPlayer` hands out no way to find its own renderers by type.
+     * Non-null from the moment the player is constructed (a player builds its
+     * renderers eagerly, and this app has exactly one video renderer).
+     */
+    var videoRenderer: HdrMediaCodecVideoRenderer? = null
+        private set
+
     override fun buildVideoRenderers(
         context: Context,
         extensionRendererMode: Int,
@@ -49,19 +59,19 @@ class HdrRenderersFactory(
         // Replace the default video renderer entirely with our HDR-reporting one.
         // This app keeps extension renderers off (the default), so the MediaCodec
         // renderer is the only video renderer DefaultRenderersFactory would add.
-        out.add(
-            HdrMediaCodecVideoRenderer(
-                context,
-                getCodecAdapterFactory(),
-                mediaCodecSelector,
-                allowedVideoJoiningTimeMs,
-                enableDecoderFallback,
-                eventHandler,
-                eventListener,
-                MAX_DROPPED_FRAMES_TO_NOTIFY,
-                onDynamicRange,
-            ),
+        val renderer = HdrMediaCodecVideoRenderer(
+            context,
+            getCodecAdapterFactory(),
+            mediaCodecSelector,
+            allowedVideoJoiningTimeMs,
+            enableDecoderFallback,
+            eventHandler,
+            eventListener,
+            MAX_DROPPED_FRAMES_TO_NOTIFY,
+            onDynamicRange,
         )
+        videoRenderer = renderer
+        out.add(renderer)
     }
 
     private companion object {
@@ -71,7 +81,7 @@ class HdrRenderersFactory(
 }
 
 @UnstableApi
-private class HdrMediaCodecVideoRenderer(
+class HdrMediaCodecVideoRenderer(
     context: Context,
     codecAdapterFactory: MediaCodecAdapter.Factory,
     mediaCodecSelector: MediaCodecSelector,
@@ -93,6 +103,38 @@ private class HdrMediaCodecVideoRenderer(
 ) {
 
     private var lastReported: String? = null
+
+    /**
+     * Adds one message type to the renderer's vocabulary:
+     * [MSG_REBUILD_CODEC], which throws the current `MediaCodec` away and lets
+     * the renderer build a fresh one against the surface it is already pointed
+     * at, on the next `render` pass.
+     *
+     * `releaseCodec()` + `maybeInitCodecOrBypass()` is not an improvisation:
+     * it is verbatim what `MediaCodecVideoRenderer.setOutput` does for itself
+     * on a device it knows mishandles `MediaCodec.setOutputSurface`. The
+     * decision it makes there is driven by a hardcoded device list, and this
+     * exists because a TV chipset that is *not* on that list still comes back
+     * from the preview→fullscreen surface switch as a decoder that reports
+     * healthy and emits nothing (see [FrameLivenessWatch], docs/player.md).
+     * The demuxer, the loaded buffer and the audio pipeline are untouched, so
+     * unlike a reload this costs one wait for the next IDR and no provider
+     * connection.
+     *
+     * Runs on the playback thread, addressed through `ExoPlayer.createMessage`.
+     */
+    override fun handleMessage(messageType: Int, message: Any?) {
+        if (messageType == MSG_REBUILD_CODEC) {
+            // No codec = nothing to rebuild; the renderer will initialise one
+            // against the current surface on its own.
+            if (codec != null) {
+                releaseCodec()
+                maybeInitCodecOrBypass()
+            }
+            return
+        }
+        super.handleMessage(messageType, message)
+    }
 
     override fun onOutputFormatChanged(format: Format, mediaFormat: MediaFormat?) {
         super.onOutputFormatChanged(format, mediaFormat)
@@ -129,4 +171,14 @@ private class HdrMediaCodecVideoRenderer(
 
     private fun intKey(mediaFormat: MediaFormat, key: String): Int =
         if (mediaFormat.containsKey(key)) mediaFormat.getInteger(key) else -1
+
+    companion object {
+        /**
+         * Rebuild the video decoder in place. Numbered from
+         * [Renderer.MSG_CUSTOM_BASE] (10_000), the range media3 reserves for
+         * exactly this, so it can never collide with a message type a future
+         * media3 adds.
+         */
+        const val MSG_REBUILD_CODEC = Renderer.MSG_CUSTOM_BASE + 1
+    }
 }
