@@ -11,6 +11,11 @@ import {
   deviceProvisionState,
   deviceNeedsKey,
   xtreamCredentialsFromPlaylistUrl,
+  pairingCodeFromUrl,
+  urlWithoutPairingCode,
+  stashPairingCode,
+  readStashedPairingCode,
+  clearStashedPairingCode,
   SOURCE_SECRET_KEYS,
   METADATA_SECRET_KEYS,
 } from './validate.js';
@@ -34,6 +39,20 @@ const app = document.getElementById('app');
 const MAX_PROFILES = 20;
 let session = null;
 let tab = 'sources';
+// A code carried in by the QR on a device's Cloud sync screen. Stashed on
+// arrival so it survives the magic-link sign-in (which redirects without the
+// query, often into a fresh tab), and read back from the stash on the way in.
+const scannedFromUrl = pairingCodeFromUrl(location.href);
+if (scannedFromUrl) stashPairingCode(scannedFromUrl);
+// Held in memory until the pair actually succeeds — deliberately *not* consumed
+// when the form renders. `onAuthStateChange` and `getSession().then` both call
+// `render()` on load, so a signed-in user runs `renderDevices()` twice
+// concurrently; a consume-on-render would let the second pass overwrite the
+// first's prefilled form with an empty one. Rendering has to stay idempotent.
+let pendingPairCode = scannedFromUrl ?? readStashedPairingCode();
+// Land on the tab the link is about. Set before the first render, so a signed-in
+// user arrives on Devices and a signed-out one gets there straight after login.
+if (pendingPairCode) tab = 'devices';
 // Profiles: an account holds several; sources/metadata are scoped to the one
 // selected here. `profiles === null` means "not loaded yet".
 let profiles = null;
@@ -1020,12 +1039,16 @@ async function renderDevices() {
     }
   }
 
+  // Read, never consume — see [pendingPairCode]. Cleared on a successful pair.
+  const scanned = pendingPairCode;
   view().innerHTML = `
     <form id="claim" class="form claim">
       <h2>Pair a device</h2>
-      <p class="muted">Enter the code shown on the device's Cloud sync screen.</p>
+      <p class="muted">${scanned
+        ? 'Scanned from the device — check the code matches and give it a name.'
+        : "Enter the code shown on the device's Cloud sync screen."}</p>
       <div class="claim-row">
-        <input name="code" placeholder="ABCD2345" autocomplete="off" />
+        <input name="code" placeholder="ABCD2345" autocomplete="off" value="${esc(scanned ?? '')}" />
         <input name="label" placeholder="Name (optional)" maxlength="64" autocomplete="off" />
         <button class="primary">Pair</button>
       </div>
@@ -1051,9 +1074,24 @@ async function renderDevices() {
       ({ error } = await supabase.rpc('claim_pairing', { p_code: code }));
     }
     if (error) { logError(error); return toast(friendlyError(error), true); }
+    // Claimed: the code is spent, so drop it from memory and from the stash
+    // before anything re-renders with it.
+    pendingPairCode = null;
+    clearStashedPairingCode();
     toast('Device paired');
     renderDevices();
   };
+  if (scanned) {
+    // The code is already in, so the only thing left to type is the optional
+    // name — put the caret there rather than on a field that's done.
+    view().querySelector('[name="label"]')?.focus();
+    // Clean the address bar now that the code is in the form (and stashed
+    // against a sign-in redirect). Idempotent: once the parameter is gone
+    // `urlWithoutPairingCode` returns null and history is left alone, which is
+    // what keeps the double render from churning it.
+    const cleaned = urlWithoutPairingCode(location.href);
+    if (cleaned) history.replaceState(null, '', cleaned);
+  }
   for (const el of view().querySelectorAll('[data-revoke]'))
     el.onclick = () => revokeDevice(el.dataset.revoke);
   for (const el of view().querySelectorAll('[data-rename]'))

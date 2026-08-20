@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
+import 'package:iptvs/screens/live_preview_controller.dart';
 
 /// Pure-logic coverage for `decideFullscreenHandoff`, the classification
 /// behind `_ChannelListScreenState._openLivePlayer`'s preview→fullscreen
@@ -609,6 +610,68 @@ void main() {
           reason: '$values',
         );
       }
+    });
+  });
+
+  // The other half of the embedded seamless handoff: while it is up, the
+  // fullscreen route and the preview controller are pointed at the *same*
+  // media_kit player, and both carry a live-EOF watchdog.
+  //
+  // One clean server-side EOF therefore fired two recoveries on one engine —
+  // and the preview's ends in `setVolume(muted ? 0 : 100)` against its own
+  // remembered mute, which is true for any desktop hover-started preview. The
+  // stream came back silent with the mute button lit, and a single-connection
+  // provider saw two overlapping `create_link` calls for one reconnect.
+  group('previewOwnsEofRecovery', () {
+    bool owns({
+      bool completed = true,
+      bool disposed = false,
+      bool nativeActive = false,
+      bool pausedByApp = false,
+      bool adoptedByFullscreen = false,
+      bool loading = false,
+      String? previewChannelId = 'ch1',
+      String? activeChannelId = 'ch1',
+    }) => previewOwnsEofRecovery(
+      completed: completed,
+      disposed: disposed,
+      nativeActive: nativeActive,
+      pausedByApp: pausedByApp,
+      adoptedByFullscreen: adoptedByFullscreen,
+      loading: loading,
+      previewChannelId: previewChannelId,
+      activeChannelId: activeChannelId,
+    );
+
+    test('a plain preview recovers its own clean EOF', () {
+      expect(owns(), isTrue);
+    });
+
+    test('an adopted preview leaves recovery to the fullscreen watchdog', () {
+      // The regression: without this the fullscreen player was reopened twice
+      // and re-muted to the preview's volume.
+      expect(owns(adoptedByFullscreen: true), isFalse);
+    });
+
+    test('only the rising edge of completed is an EOF', () {
+      // media_kit reports `completed: false` on a stop and on a fresh open.
+      expect(owns(completed: false), isFalse);
+    });
+
+    test('states that are not this controller\'s to answer stay out', () {
+      expect(owns(disposed: true), isFalse);
+      // Android's shared native engine reconnects in Kotlin.
+      expect(owns(nativeActive: true), isFalse);
+      // Paused around a handoff: this EOF is a consequence of that.
+      expect(owns(pausedByApp: true), isFalse);
+    });
+
+    test('a superseded or in-flight selection is not recovered', () {
+      expect(owns(previewChannelId: 'ch2'), isFalse);
+      expect(owns(activeChannelId: null), isFalse);
+      expect(owns(previewChannelId: null), isFalse);
+      // Mid-`start()`, where a restart would race the resolve already running.
+      expect(owns(loading: true), isFalse);
     });
   });
 }

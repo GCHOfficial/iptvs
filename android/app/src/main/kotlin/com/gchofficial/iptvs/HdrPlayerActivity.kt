@@ -211,7 +211,16 @@ class HdrPlayerActivity : ComponentActivity() {
         // stream, adopt its running engine — only the video output moves to this
         // Activity's surface; audio, decoder and buffer carry over untouched.
         val shared = if (intent.getBooleanExtra(EXTRA_ADOPT_SHARED, false)) {
-            SharedEngine.adoptForFullscreen(streamUrl, diagnosticSink)
+            SharedEngine.adoptForFullscreen(
+                streamUrl,
+                diagnosticSink,
+                // Bound with the diagnostics, i.e. *before* the claim: it is
+                // the claimed surface's own first frame that moves
+                // FrameLivenessWatch off the first-frame clock, and inferring
+                // it from the frame counter would fire during the deferred
+                // claim, while the preview texture is still the output.
+                onClaimedSurfaceFirstFrame = { frameLiveness.markHandoffFirstFrame() },
+            )
         } else {
             null
         }
@@ -445,10 +454,17 @@ class HdrPlayerActivity : ComponentActivity() {
         // frames decoded and thrown away to catch up, or a decoder that had
         // stopped emitting entirely.
         val counters = active.videoFrameCounters
+        // Which of the two handoff failures this was: a picture that never
+        // arrived on the claimed surface, or one that arrived and stopped. They
+        // are indistinguishable in the tallies (a single rendered frame is lost
+        // in a preview's running total) and they are the two shapes the reports
+        // keep alternating between, so the watch's own answer is worth a word.
+        val phase = if (frameLiveness.drewSinceArm()) "afterFirstFrame" else "noFirstFrame"
         if (!active.rebuildVideoDecoder()) return false
         handoffRebuilds++
         logNative(
-            "handoff decoder rebuild attempt=$handoffRebuilds${counters?.let { " $it" } ?: ""}",
+            "handoff decoder rebuild attempt=$handoffRebuilds phase=$phase" +
+                (counters?.let { " $it" } ?: ""),
         )
         stalledSinceMs = 0L
         stallKind = "none"
@@ -611,7 +627,19 @@ class HdrPlayerActivity : ComponentActivity() {
             while (isActive) {
                 engine?.syncProgress()
                 pollLiveReconnect()
-                delay(500)
+                // Faster while a frozen renderer is still attributable to the
+                // fullscreen surface claim: that window is judged on
+                // HANDOFF_POST_FRAME_STALL_MS, which the base cadence cannot
+                // resolve (a single tick gap would decide it). Bounded by
+                // HANDOFF_WINDOW_MS, so it costs five seconds per handoff and
+                // nothing for the rest of the session.
+                delay(
+                    if (frameLiveness.inHandoffWindow(System.currentTimeMillis())) {
+                        ReconnectPolicy.HANDOFF_POLL_MS
+                    } else {
+                        ReconnectPolicy.PROGRESS_TICK_MS
+                    },
+                )
             }
         }.also { job ->
             DebugCounters.incProgressTicker()

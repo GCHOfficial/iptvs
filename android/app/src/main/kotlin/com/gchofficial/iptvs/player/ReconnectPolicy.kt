@@ -43,6 +43,37 @@ object ReconnectPolicy {
     const val HANDOFF_NO_FRAME_STALL_MS = 1_500L
 
     /**
+     * The same judgement again, once the handoff has demonstrably drawn at
+     * least one frame on the **new** surface and then stopped.
+     *
+     * This is the shape real hardware actually produced: armed at the claim,
+     * one frame rendered 251 ms later, and the counter never moved again — a
+     * decoder that took the output switch, emitted a single frame and wedged.
+     * At that point every ambiguity [HANDOFF_NO_FRAME_STALL_MS] is being
+     * generous about is gone. The first-frame latency it was covering has
+     * already been paid, so the only question left is whether a live stream
+     * that drew a frame half a second ago and claims to be playing, unbuffered,
+     * has drawn another. At any broadcast frame rate it has drawn twelve.
+     *
+     * Half a second rather than "immediately" because the recovery is still a
+     * guess about a decoder, and [ReconnectPolicy.HANDOFF_POLL_MS] makes it
+     * four consecutive identical samples rather than one unlucky gap.
+     */
+    const val HANDOFF_POST_FRAME_STALL_MS = 500L
+
+    /** Base cadence of `HdrPlayerActivity`'s progress/liveness ticker. */
+    const val PROGRESS_TICK_MS = 500L
+
+    /**
+     * Ticker cadence while [FrameLivenessWatch.inHandoffWindow] — the base
+     * 500 ms cannot resolve [HANDOFF_POST_FRAME_STALL_MS] at all (one tick gap
+     * would decide it), and the window is bounded to [HANDOFF_WINDOW_MS], so
+     * the extra polling is five seconds long and nothing else in the session
+     * pays for it.
+     */
+    const val HANDOFF_POLL_MS = 125L
+
+    /**
      * How long after an adopted handoff a frozen renderer is still attributed
      * to the surface claim rather than to the network.
      *
@@ -110,16 +141,31 @@ object ReconnectPolicy {
  * ([ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS]). Inert rule 3 is unchanged
  * everywhere else: a cold open, an mpv engine and an audio-only channel never
  * arm.
+ *
+ * Inside that window the handoff then fails in **two** shapes, and they want
+ * different patience. Until the claimed surface has drawn a frame of its own,
+ * the clock is judging first-frame latency and stays at
+ * [ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS]; once it has ([drewSinceArm]),
+ * that latency has been paid and a freeze is decided on
+ * [ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS].
  */
 class FrameLivenessWatch(
     private val stallMs: Long = ReconnectPolicy.NO_FRAME_STALL_MS,
     private val handoffStallMs: Long = ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS,
+    private val handoffPostFrameStallMs: Long = ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS,
     private val handoffWindowMs: Long = ReconnectPolicy.HANDOFF_WINDOW_MS,
 ) {
     private var lastFrames = NO_SAMPLE
     private var lastProgressAtMs = 0L
     private var sawProgress = false
     private var handoffUntilMs = NO_HANDOFF
+
+    // Whether the counter has been seen to move since [armHandoff] — i.e.
+    // whether the *new* surface has had a frame of its own, as opposed to the
+    // preview's frames that armed the watch. It separates "the picture hasn't
+    // arrived yet" from "the picture arrived and stopped", which deserve very
+    // different patience.
+    private var drewSinceHandoff = false
 
     /**
      * Arms the watch for a fullscreen surface claim on an *adopted* engine,
@@ -136,6 +182,7 @@ class FrameLivenessWatch(
         lastFrames = renderedFrames
         lastProgressAtMs = nowMs
         sawProgress = true
+        drewSinceHandoff = false
         handoffUntilMs = nowMs + handoffWindowMs
         return true
     }
@@ -149,9 +196,43 @@ class FrameLivenessWatch(
         handoffUntilMs != NO_HANDOFF && nowMs < handoffUntilMs
 
     /**
+     * Records that the **claimed** surface has drawn its first frame, moving
+     * the watch onto [handoffPostFrameStallMs].
+     *
+     * Deliberately *not* inferred from the frame counter moving. The counter is
+     * `renderedOutputBufferCount`, which is surface-agnostic, and
+     * [armHandoff] runs at adoption while `claimViewSurface` is still
+     * **deferred** waiting for `surfaceCreated` (measured at ~117 ms on real
+     * hardware). Every frame drawn in that gap goes to the *preview texture*,
+     * so treating counter movement as proof would drop a healthy handoff onto
+     * the 500 ms clock before the new surface had drawn anything at all — and
+     * a codec release/re-init plus the wait for the next IDR on a live MPEG-TS
+     * stream routinely outlasts that while every health flag reads fine. The
+     * result would be a spurious decoder rebuild on a working handoff, and
+     * (since a frame stall skips the reload threshold entirely) a full reload
+     * right behind it.
+     *
+     * The engine's own `onRenderedFirstFrame` after the claim is the honest
+     * signal, and media3 only re-notifies it when the output surface actually
+     * changed.
+     */
+    fun markHandoffFirstFrame() {
+        if (handoffUntilMs != NO_HANDOFF) drewSinceHandoff = true
+    }
+
+    /**
+     * Whether the surface the last [armHandoff] described has since drawn a
+     * frame of its own. Reported alongside a recovery so an exported log says
+     * which of the two handoff failures it was: a picture that never arrived,
+     * or one that arrived and stopped.
+     */
+    fun drewSinceArm(): Boolean = drewSinceHandoff
+
+    /**
      * Feeds one poll sample and reports whether the renderer has now been
-     * frozen for [stallMs] — or for the shorter [handoffStallMs] while
-     * [inHandoffWindow].
+     * frozen for [stallMs] — or, while [inHandoffWindow], for one of the two
+     * shorter handoff clocks: [handoffStallMs] until the claimed surface has
+     * drawn a frame of its own, [handoffPostFrameStallMs] after it has.
      *
      * [playingNormally] must be the engine's *own* claim of health (playing,
      * not buffering, not ended) — the whole point is to catch the case where
@@ -184,7 +265,13 @@ class FrameLivenessWatch(
             lastProgressAtMs = nowMs
             return false
         }
-        val threshold = if (inHandoffWindow(nowMs)) handoffStallMs else stallMs
+        val threshold = when {
+            !inHandoffWindow(nowMs) -> stallMs
+            // The new surface has had a frame of its own, so nothing is owed to
+            // first-frame latency any more — see [HANDOFF_POST_FRAME_STALL_MS].
+            drewSinceHandoff -> handoffPostFrameStallMs
+            else -> handoffStallMs
+        }
         return sawProgress && nowMs - lastProgressAtMs >= threshold
     }
 
@@ -200,7 +287,13 @@ class FrameLivenessWatch(
         lastFrames = NO_SAMPLE
         lastProgressAtMs = 0L
         sawProgress = keepHandoff
-        if (!keepHandoff) handoffUntilMs = NO_HANDOFF
+        // A buffering tick doesn't un-draw the frame the new surface already
+        // got, so the shorter post-frame threshold survives it. A real reset
+        // (reload / engine swap) forgets the whole handoff, and this with it.
+        if (!keepHandoff) {
+            handoffUntilMs = NO_HANDOFF
+            drewSinceHandoff = false
+        }
     }
 
     private companion object {
