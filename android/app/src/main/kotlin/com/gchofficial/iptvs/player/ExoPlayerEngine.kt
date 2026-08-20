@@ -117,6 +117,16 @@ class ExoPlayerEngine(
      */
     var onDiagnostic: ((String) -> Unit)? = null
 
+    /**
+     * Fired once per [claimViewSurface] when the **claimed** surface renders
+     * its first frame. Bound by the fullscreen Activity so
+     * [FrameLivenessWatch.markHandoffFirstFrame] learns it from the renderer
+     * rather than inferring it from a surface-agnostic frame counter that is
+     * still advancing on the preview's texture while the claim is deferred.
+     * Delivered on the main thread, like every other listener here.
+     */
+    var onClaimedSurfaceFirstFrame: (() -> Unit)? = null
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -327,6 +337,11 @@ class ExoPlayerEngine(
         override fun onRenderedFirstFrame() {
             if (reportedFirstFrame) return
             reportedFirstFrame = true
+            // Only a *claim's* first frame says anything about the handoff, and
+            // media3 re-notifies this only when the output surface really
+            // changed — which is exactly the proof FrameLivenessWatch needs to
+            // stop judging first-frame latency and start judging a freeze.
+            if (claimedAtMs > 0L) onClaimedSurfaceFirstFrame?.invoke()
             val since = if (claimedAtMs > 0L) "sinceClaimMs" else "sinceLoadMs"
             val from = if (claimedAtMs > 0L) claimedAtMs else loadedAtMs
             if (from > 0L) {
@@ -800,6 +815,28 @@ class ExoPlayerEngine(
         onDiagnostic?.invoke("surface claim mode=$mode waitMs=$waitMs")
     }
 
+    /**
+     * Point the video output at [playerView]'s own SurfaceView — the last step
+     * of [claimViewSurface].
+     *
+     * **Both lines are load-bearing, and it is not the "extra output
+     * transition" it looks like.** By the time an adopted handoff gets here
+     * `playerView.player` is already `null`: [attachPreviewTexture] clears it
+     * on every preview so the PlayerView stops driving the output while the
+     * texture owns it. `PlayerView.setPlayer(null)` therefore early-returns on
+     * an unchanged (null) player, and only the second line does any work — one
+     * `setVideoSurfaceView`, one `MediaCodec.setOutputSurface`.
+     *
+     * Calling `player.setVideoSurfaceView(...)` directly instead would move the
+     * video output and leave the PlayerView player-less, which is worse than it
+     * sounds: `setPlayer(null)` ran `closeShutter()` (`keepContentOnPlayerReset`
+     * defaults false) and the opaque `exo_shutter` sits *above* the SurfaceView,
+     * reopened only by the PlayerView's own `onRenderedFirstFrame` — which is
+     * unregistered while it has no player. The decoder would render, the frame
+     * counter would advance, and the screen would stay black forever. The
+     * PlayerView also owns the `AspectRatioFrameLayout` resize and the
+     * `SubtitleView` cues, both of which go with it.
+     */
     private fun attachOwnSurface() {
         playerView.player = null
         playerView.player = player

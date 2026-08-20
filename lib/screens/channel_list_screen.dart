@@ -1114,6 +1114,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         reverseTransitionDuration: Duration.zero,
         pageBuilder: (_, _, _) => buildPlayer(),
       );
+      // The embedded seamless handoff hands `_preview.player` to the fullscreen
+      // route, so from here until the pop that one engine has two live-EOF
+      // watchdogs on it. Silence the preview's for the duration — the
+      // fullscreen one owns recovery, and the preview's would reopen the stream
+      // under it and reset the volume to the preview's mute state (see
+      // [LivePreviewController.adoptedByFullscreen]).
+      _preview.adoptedByFullscreen = decision.adoptsEmbeddedPreview;
       final hotSwapped = await navigator.push<bool>(route) ?? false;
       // The push (and whatever PlayerScreen did while up) completed — a
       // failure past this point isn't the stop-and-resolve-fresh setup
@@ -1148,6 +1155,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // (different channel) is intentionally not restarted.
         await _preview.play();
       }
+      // Only now: the restore above is the preview's own re-entry, and
+      // `PlayerScreen.dispose` (which pauses the adopted player and drops its
+      // `completed` subscription) is not guaranteed to have finished when the
+      // route popped. Handing recovery back any earlier lets a `completed`
+      // landing in that window restart the channel underneath the restore — and
+      // on the `hotSwapped` branch, restart a player about to be discarded.
+      _preview.adoptedByFullscreen = false;
       _restoreListFocusAfterPlayback();
     } catch (e) {
       if (restorePreviewOnFailure) {
@@ -1164,6 +1178,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         SnackBar(content: Text('Could not play: ${redactText('$e')}')),
       );
     } finally {
+      // Belt-and-braces for the throw-before-pop path: a preview left marked as
+      // adopted would never recover from an EOF again.
+      _preview.adoptedByFullscreen = false;
       if (mounted) setState(() => _resolving = false);
     }
   }

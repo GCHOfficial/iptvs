@@ -353,3 +353,132 @@ export function xtreamCredentialsFromPlaylistUrl(playlistUrl) {
   const port = url.port ? `:${url.port}` : '';
   return { host: `${url.protocol}//${url.hostname}${port}`, username, password };
 }
+
+// ── Pairing links ───────────────────────────────────────────────────────────
+//
+// The device's Cloud sync screen shows its pairing code as a QR encoding
+// `<panel>/?code=ABCD2345` (Dart: `pairingPanelLink` in
+// lib/data/cloud_config.dart). Scanning it lands the user here with the code
+// already in hand, which removes the slowest step of pairing: reading eight
+// characters off a television and typing them into a phone.
+
+/// The alphabet `gen_pairing_code()` emits — no I/L/O/0/1, so a code read off a
+/// screen can't be mistyped into a *different* valid one. Length is fixed at 8
+/// by the same function (supabase/migrations/…_cloud_sync_init.sql).
+export const PAIRING_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+export const PAIRING_CODE_LENGTH = 8;
+
+const PAIRING_CODE_RE = new RegExp(
+  `^[${PAIRING_CODE_ALPHABET}]{${PAIRING_CODE_LENGTH}}$`,
+);
+
+/// A pairing code in canonical form, or null when it isn't one.
+///
+/// Case and surrounding whitespace are forgiven (a scanned or pasted link may
+/// carry either); anything else is refused rather than repaired. The value
+/// comes off a URL, so it is attacker-supplied by construction — everything
+/// downstream treats it as a code, and it reaches `claim_pairing` as one, so
+/// the shape check is the boundary.
+export function normalisePairingCode(raw) {
+  const code = String(raw ?? '').trim().toUpperCase();
+  return PAIRING_CODE_RE.test(code) ? code : null;
+}
+
+/// The pairing code carried by a panel link, or null when there isn't a
+/// well-formed one.
+///
+/// Fails closed in every ambiguous case — a missing parameter, a malformed URL,
+/// a code of the wrong shape — because the fallback is simply the form the user
+/// was going to fill in anyway. There is nothing to be gained by guessing.
+export function pairingCodeFromUrl(href) {
+  let url;
+  try {
+    // The base makes a relative href parseable; it is never read back out.
+    url = new URL(String(href ?? ''), 'https://panel.invalid');
+  } catch {
+    return null;
+  }
+  return normalisePairingCode(url.searchParams.get('code'));
+}
+
+/// [href] with its `code` parameter removed, as a path+query+hash suitable for
+/// `history.replaceState`, or null when there was nothing to remove.
+///
+/// The code is stripped once it has been *used*, not on arrival: a magic-link
+/// sign-in can return in a fresh tab, and that tab re-reads the code from the
+/// URL it was handed. Cleaning earlier would drop it exactly for the users who
+/// aren't signed in yet — which is most people scanning this.
+export function urlWithoutPairingCode(href) {
+  let url;
+  try {
+    url = new URL(String(href ?? ''), 'https://panel.invalid');
+  } catch {
+    return null;
+  }
+  if (!url.searchParams.has('code')) return null;
+  url.searchParams.delete('code');
+  const query = url.searchParams.toString();
+  return `${url.pathname}${query ? `?${query}` : ''}${url.hash}`;
+}
+
+// The scanned code has to survive a magic-link sign-in, which is the whole
+// point of the feature: the person scanning a television's QR on their phone is
+// exactly the person least likely to be signed in already.
+// `signInWithOtp`'s `emailRedirectTo` carries no query string (and widening it
+// would risk the project's redirect allow-list), and the link commonly opens in
+// a *different tab* — so `sessionStorage` is not enough either. It is stashed in
+// `localStorage` instead, under the same short TTL the server gives the code.
+export const PAIRING_CODE_KEY = 'iptvs_pair_code';
+
+/// Matches `request_pairing`'s 10-minute expiry. A stash older than the code it
+/// holds is worse than useless — the claim would fail and the prefill would
+/// only mislead — and it keeps a code from resurfacing days later.
+export const PAIRING_CODE_TTL_MS = 10 * 60 * 1000;
+
+function pairingStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/// Remember [code] across a sign-in redirect. Silently does nothing when
+/// storage is unavailable (private mode, blocked third-party storage) — the
+/// signed-in path never needs the stash, and the fallback is a typed code.
+export function stashPairingCode(code, storage = pairingStorage(), now = Date.now()) {
+  const valid = normalisePairingCode(code);
+  if (!valid) return;
+  try {
+    storage?.setItem(PAIRING_CODE_KEY, JSON.stringify({ code: valid, at: now }));
+  } catch {
+    // Quota/private-mode failure: the shortcut degrades to same-tab only.
+  }
+}
+
+/// The stashed code if there is a live one, else null. Re-validates the shape on
+/// the way out: storage is user-writable, so what went in is not proof.
+export function readStashedPairingCode(storage = pairingStorage(), now = Date.now()) {
+  let parsed;
+  try {
+    const raw = storage?.getItem(PAIRING_CODE_KEY);
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (typeof parsed.at !== 'number' || now - parsed.at > PAIRING_CODE_TTL_MS) return null;
+  // A clock that moved backwards (timezone/NTP correction) shouldn't extend the
+  // TTL indefinitely, but it also shouldn't invalidate a code that is genuinely
+  // fresh — treat only the future beyond one TTL as nonsense.
+  if (parsed.at - now > PAIRING_CODE_TTL_MS) return null;
+  return normalisePairingCode(parsed.code);
+}
+
+export function clearStashedPairingCode(storage = pairingStorage()) {
+  try {
+    storage?.removeItem(PAIRING_CODE_KEY);
+  } catch {
+    // Nothing to do: an unremovable stash still expires on its own TTL.
+  }
+}

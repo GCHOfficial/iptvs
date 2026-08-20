@@ -48,6 +48,20 @@ jobs:
         run: |
           luac5.1 -p linux/mpv/iptvs_overlay.lua
           lua5.1 linux/mpv/overlay_layout_test.lua
+      # The panel's pure-logic suite (crypto, validation, E2EE marks, pairing
+      # links). `pages.yml` only builds the panel, and only on pushes to main
+      # that touch it — so until this step existed these tests ran nowhere in
+      # CI, including on the PRs that changed them.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: panel/package-lock.json
+      - name: Panel unit tests
+        working-directory: panel
+        run: |
+          npm ci
+          npm test
 
   # Skip the heavy platform builds on doc-only commits (README/CLAUDE.md/memory).
   # `code` is an allowlist of paths that actually affect a build.

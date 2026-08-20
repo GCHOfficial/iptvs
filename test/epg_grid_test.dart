@@ -52,6 +52,7 @@ void main() {
     Channel(id: 'a', name: 'ChanA', number: 1),
     Channel(id: 'b', name: 'ChanB', number: 2),
     Channel(id: 'c', name: 'ChanC', number: 3),
+    Channel(id: 'd', name: 'ChanD', number: 4),
   ];
 
   // A long synopsis on A-now to exercise the multi-line detail bar (Bug #3).
@@ -81,12 +82,36 @@ void main() {
     Programme(channelId: 'c', start: at(-60), stop: at(120), title: 'C-long'),
     Programme(channelId: 'c', start: at(0), stop: at(30), title: 'C-1'),
     Programme(channelId: 'c', start: at(30), stop: at(60), title: 'C-2'),
+    // ChanD carries the *broken* runtime: D-bad claims 30 hours, past the end
+    // of the grid's own 25-hour window, and is immediately followed by D-after.
+    // Painted, it is truncated to the 30 minutes before D-after starts; taken
+    // at its word, it is wider than the whole timeline. That gap is what sent
+    // the reveal to the far-right clamp with the selected cell nowhere near it.
+    Programme(channelId: 'd', start: at(-30), stop: at(0), title: 'D-first'),
+    Programme(
+      channelId: 'd',
+      start: at(0),
+      stop: at(30 * 60),
+      title: 'D-bad',
+    ),
+    // Four hours long, and the row's last entry, so nothing truncates it: at a
+    // narrow viewport it is genuinely wider than the timeline, which is the
+    // other way the reveal can put the cursor somewhere invisible.
+    Programme(channelId: 'd', start: at(30), stop: at(270), title: 'D-after'),
   ];
 
   // The detail bar's title Text is the only one at fontSize 15 (cells and the
   // ruler are 12), so it uniquely identifies the currently-selected programme.
   Finder detailTitle(String title) => find.byWidgetPredicate(
     (w) => w is Text && w.data == title && w.style?.fontSize == 15,
+  );
+
+  // The *cell* on the timeline, as opposed to the detail bar's copy of the same
+  // title (fontSize 15). Rows are horizontally virtualized — a cell outside the
+  // panned window plus its buffer is never built — so "findsOneWidget" here is
+  // literally "the user can see it".
+  Finder cellTitle(String title) => find.byWidgetPredicate(
+    (w) => w is Text && w.data == title && w.style?.fontSize == 12,
   );
 
   // Drive the real event loop (runAsync) between fake-clock pumps so the
@@ -254,6 +279,105 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
       await tester.pump();
       expect(detailTitle('C-2'), findsOneWidget);
+
+      await unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'a broken overlong runtime cannot pan the cursor off the timeline',
+    (tester) async {
+      await pumpGrid(tester);
+
+      // Down to ChanD (row 3), holding the time column at "now" — which lands
+      // on D-bad, the entry whose stop is a day and a half out.
+      for (var i = 0; i < 3; i++) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+      }
+      await pumpUntil(tester, detailTitle('D-bad'));
+      expect(detailTitle('D-bad'), findsOneWidget);
+
+      // Left, then Right, so the reveal runs on D-bad as a step rather than as
+      // a row change — the direction the report came in on.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(detailTitle('D-first'), findsOneWidget);
+
+      // A cell that isn't moving, so the pan itself can be measured.
+      final anchorBefore = tester.getRect(cellTitle('D-first'));
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      // The pan is a 220 ms animation; settle it, or this asserts on the
+      // offset the reveal started from rather than the one it chose.
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(detailTitle('D-bad'), findsOneWidget);
+      expect(
+        cellTitle('D-bad'),
+        findsOneWidget,
+        reason:
+            'the selected cell must still be on the timeline: rows are '
+            'horizontally virtualized, so a reveal that pans away from the '
+            'cursor doesn\'t just hide it, it stops building it — the guide '
+            '"jumps somewhere with no apparent focus"',
+      );
+
+      // D-bad is *painted* 30 minutes wide (truncated at D-after's start) and
+      // was already fully in view, so revealing it must not scroll the guide
+      // at all. Taking its own 30-hour runtime at face value pans instead.
+      expect(
+        tester.getRect(cellTitle('D-first')).left,
+        // Tolerance, not equality: the window origin is derived from a live
+        // clock, so a sub-pixel drift between two reveals is expected. The
+        // regression this guards moves it by ~96px.
+        closeTo(anchorBefore.left, 8),
+        reason:
+            'the reveal must measure the cell the row actually painted, not '
+            'the runtime the guide entry claims',
+      );
+
+      await unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'a programme wider than the viewport is revealed from its start',
+    (tester) async {
+      await pumpGrid(tester);
+
+      // Narrow enough that D-after (4h = 960px) is wider than the timeline
+      // (700 - 168 channel column = 532px), which is the case the end-aligned
+      // reveal cannot frame.
+      tester.view.physicalSize = const Size(700, 800);
+      await tester.pump();
+
+      for (var i = 0; i < 3; i++) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+      }
+      await pumpUntil(tester, detailTitle('D-bad'));
+
+      // Right onto D-after: it starts to the right of the current offset, so
+      // this is the "reveal by the trailing edge" branch, not the leading one.
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(detailTitle('D-after'), findsOneWidget);
+
+      // Its title is drawn at the cell's left edge, so ending-aligned reveal
+      // scrolled the title off the left and left a blank stretch of fill as
+      // the only sign of the cursor.
+      final title = tester.getRect(cellTitle('D-after'));
+      expect(
+        title.left,
+        greaterThan(0),
+        reason: 'the selected cell\'s title must be on screen, not past the '
+            'left edge',
+      );
+      expect(title.left, lessThan(700));
 
       await unmount(tester);
     },

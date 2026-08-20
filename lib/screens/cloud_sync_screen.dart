@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/app_database.dart';
@@ -528,6 +529,10 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         style: TextStyle(color: AppColors.textLo, fontSize: 12),
       ),
     ),
+    if (_code case final code?) ...[
+      const SizedBox(height: 20),
+      Center(child: _pairingQr(code.code)),
+    ],
     // Read-only on purpose: naming happens in the panel, on a real keyboard.
     // Adding a text field here would put a focus target — and a Back-ladder
     // rung — on a screen reached by D-pad remote.
@@ -574,6 +579,68 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       label: const Text('New code'),
     ),
   ];
+
+  /// The pairing code as a scannable panel link (see [pairingPanelLink]).
+  ///
+  /// Deliberately *beside* the printed code and link rather than instead of
+  /// them: a QR is no use to someone pairing from the same machine, and a phone
+  /// camera pointed at a lit TV panel across a room is exactly the situation
+  /// where a scan can fail. It shortcuts the slowest step of pairing when it
+  /// works, and costs nothing when it doesn't.
+  ///
+  /// Painted on an explicit white plate with the module colours pinned dark.
+  /// `QrImageView`'s background defaults to transparent, which on this screen's
+  /// dark panel would put dark modules on a dark ground — a QR that is visibly
+  /// present and scans as nothing.
+  Widget _pairingQr(String code) {
+    final link = pairingPanelLink(CloudConfig.panelUrl, code);
+    // A PANEL_URL long enough to overflow the encoder must not take the pairing
+    // screen down with it: drop the QR and leave the code and link, which are
+    // what actually pair the device.
+    final validation = QrValidator.validate(
+      data: link,
+      errorCorrectionLevel: QrErrorCorrectLevel.M,
+    );
+    if (!validation.isValid) return const SizedBox.shrink();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: QrImageView(
+            data: link,
+            size: 180,
+            // Medium rather than the package default (low): this is read off a
+            // lit panel by a hand-held camera, through glare and moiré. The
+            // payload is short enough that the redundancy costs a version at
+            // most.
+            errorCorrectionLevel: QrErrorCorrectLevel.M,
+            backgroundColor: Colors.white,
+            eyeStyle: const QrEyeStyle(
+              eyeShape: QrEyeShape.square,
+              color: Colors.black,
+            ),
+            dataModuleStyle: const QrDataModuleStyle(
+              dataModuleShape: QrDataModuleShape.square,
+              color: Colors.black,
+            ),
+            semanticsLabel:
+                'QR code that opens the panel with this pairing code filled in',
+          ),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'Or scan this with your phone — the panel opens with the code\n'
+          'already filled in',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: AppColors.textLo, fontSize: 12),
+        ),
+      ],
+    );
+  }
 
   List<Widget> _pairedBody() => [
     Row(
