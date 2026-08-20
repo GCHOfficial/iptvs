@@ -378,7 +378,13 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   it only on a successful `claim_pairing`**: both `onAuthStateChange` and `getSession()` render on
   load, so a consume-on-render blanks the form the other pass just filled. The QR sits
   beside the printed code and link, never instead of them, and every failure (bad `PANEL_URL`,
-  blank code, over-long payload) drops the QR rather than the screen.
+  blank code, over-long payload) drops the QR rather than the screen. Rendering is
+  `PairingQrView` (`lib/widgets/pairing_qr.dart`), swept over sizes/text scales in
+  `test/pairing_qr_test.dart`: it sizes the symbol against the window (a fixed `size` narrower than
+  its slot is clamped on **width only** and draws an unscannable rectangle) and bounds the link at
+  `maxLinkLength`, because **`QrValidator.validate` reports `valid` for a payload that then throws
+  in the painter** — `_calculateTypeNumberFromData` walks versions 1..39 and returns the largest
+  when nothing fits rather than failing.
 - **A device is named at pairing time, and RPC overloads here are arity-distinct with no
   `DEFAULT`.** The device sends a platform-derived suggestion (`request_pairing(p_label)` →
   `pairings.suggested_label`); the panel's Pair form sends an optional name

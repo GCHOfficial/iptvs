@@ -446,11 +446,30 @@ Both halves fail closed, because the fallback is the form the user was going to 
 
 - **Device.** The QR sits *beside* the printed code and link, never instead of them — it is no use
   to someone pairing from the same machine, and a phone camera pointed at a lit panel is exactly
-  where a scan fails. A `PANEL_URL` that won't parse yields the plain link, a blank code yields the
-  plain panel URL, and a payload the encoder refuses drops the QR rather than the screen
-  (`QrValidator.validate` before rendering). It is drawn on an explicit white plate with dark
+  where a scan fails. A `PANEL_URL` that won't parse yields the plain link and a blank code yields
+  the plain panel URL (`pairingPanelLink`). It is drawn on an explicit white plate with dark
   modules: `QrImageView`'s background defaults to transparent, which on this screen would be dark
   on dark — visibly present, scannable as nothing.
+
+  Rendering lives in `lib/widgets/pairing_qr.dart` (`PairingQrView`) rather than on the screen, so
+  its layout can be swept across window sizes and text scales without standing up a `SourceStore`,
+  an `AppDatabase` and a fake `CloudSync` — `layout_overflow_test.dart` is scoped to the three
+  fixed-extent browsing surfaces and does not cover this screen. Two things it pins, neither
+  visible at a single window size:
+
+  - **The symbol is sized against the window, not left at a fixed 180 px.** `QrImageView` falls
+    back to `constraints.biggest.shortestSide` with no `size` (infinite inside a Column), and a
+    fixed `size` wider than the incoming constraints is clamped on **width only** — drawing a
+    rectangle no scanner will read. `PairingQrView` clamps between `minSide` and `maxSide` against
+    `MediaQuery.sizeOf` minus the card's own chrome.
+  - **`QrValidator.validate` is not a sufficient guard, and the obvious reading of it is wrong.**
+    `QrCode.fromData` picks a version through `_calculateTypeNumberFromData`, which walks 1..39 and
+    simply returns the largest when nothing fits instead of failing — so validation reports *valid*
+    for a payload that throws `InputTooLongException` the moment it is really encoded, deep inside
+    the painter where no `errorStateBuilder` can catch it. An over-long `PANEL_URL` took the whole
+    pairing screen down. `maxLinkLength` (300) bounds the input well below any version's capacity,
+    which puts that path out of reach; the bound is argued from legibility anyway, since a symbol
+    denser than roughly 60 modules can't be read off a television at `maxSide`.
 - **Panel.** `code` is attacker-supplied by construction, so it is accepted only in the exact shape
   `gen_pairing_code()` emits (8 chars of `ABCDEFGHJKMNPQRSTUVWXYZ23456789` — no I/L/O/0/1, so a
   misread can't become a *different* valid code) and refused otherwise, on the way in *and* on the
