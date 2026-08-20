@@ -107,6 +107,7 @@ object SharedEngine {
         // path a detaching fullscreen returns through — so it is also what
         // drops the Activity closure `adoptForFullscreen` installed.
         target.onDiagnostic = null
+        target.onClaimedSurfaceFirstFrame = null
     }
 
     private fun handlePreviewUnsupported() {
@@ -162,6 +163,7 @@ object SharedEngine {
     fun adoptForFullscreen(
         streamUrl: String,
         diagnostics: ((String) -> Unit)? = null,
+        onClaimedSurfaceFirstFrame: (() -> Unit)? = null,
     ): Pair<ExoPlayerEngine, PlayerUiState>? {
         val e = engine ?: return null
         val s = uiState ?: return null
@@ -177,6 +179,7 @@ object SharedEngine {
         // preview engine holding an Activity's closure (bindPreviewCallbacks
         // clears it again on the way back).
         e.onDiagnostic = diagnostics
+        e.onClaimedSurfaceFirstFrame = onClaimedSurfaceFirstFrame
         e.claimViewSurface()
         Log.i(TAG, "fullscreen adopted the shared preview engine")
         return e to s

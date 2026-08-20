@@ -340,6 +340,24 @@ drives the pan/scroll itself, so navigation never depends on a lazy/async cell b
 vertical reveal **centers** the selected row in the viewport (a bottom-aligned row was covered by
 the detail bar).
 
+**The horizontal reveal must measure the cell the row actually painted.** Rows are horizontally
+virtualized — a cell outside `[offset - 240, offset + timelineWidth + 240]` is never built — so a
+reveal that pans away from the cursor doesn't merely hide it, it stops building it, and the grid
+shows a selected row with no highlight anywhere on it. That is exactly the "browse right along one
+channel until the guide jumps somewhere with no apparent focus" report, and it needs one bad guide
+entry on one channel to reproduce. Two things caused it, both now fixed in `_revealProgrammeAt`
+(pinned in `test/epg_grid_test.dart`):
+
+- `_cellWidth` truncates an entry that overruns the next one's start (bad guide runtimes), but the
+  reveal called it **without `nextStart`** and so measured a span the row never drew. An entry
+  claiming 30 hours is painted 30 minutes wide and revealed as thousands of pixels, panning to the
+  far-right clamp of the 25-hour window with the real cell left far behind. The reveal now takes
+  the row's list and an index, so it computes exactly the geometry `_layouts()` does.
+- A cell **wider than the viewport** can't be framed by its trailing edge at all: the title is
+  drawn at the cell's left edge, so an end-aligned pan scrolls it away and leaves a blank stretch
+  of fill as the only sign of the cursor. `width >= timelineWidth` therefore takes the same
+  leading-edge branch as "it's off the left edge".
+
 **Focus restoration after playback is route-scoped.** The main screen's
 `_restoreListFocusAfterPlayback` (channel_list_screen.dart) bails when its route isn't the
 visible top route (`ModalRoute.isCurrent == false`): when playback was launched *from* the pushed

@@ -43,7 +43,7 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.6
   xml: ^7.0.1
-  flutter_secure_storage: ^10.3.1
+  flutter_secure_storage: ^11.0.0
   crypto: ^3.0.7
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
@@ -51,6 +51,10 @@ dependencies:
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1
+  # Renders the cloud-sync pairing code as a scannable panel link. Pure Dart
+  # (a CustomPainter over the `qr` encoder) — no platform channels, no native
+  # dependency, nothing added to any store build but Dart code.
+  qr_flutter: ^4.1.0
   # Local plugin packaging the native iOS player engine shim (AVPlayer +
   # libmpv fallback method channel, plus the Foundation-only pure-logic Core
   # package). See docs/ios.md "Native code layout". The app has no Dart

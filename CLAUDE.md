@@ -43,8 +43,9 @@ flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=d
 
 Lints: `package:flutter_lints`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
 analyze + test + the Lua OSD gate (`luac5.1 -p` and `linux/mpv/overlay_layout_test.lua` — the only
-thing that executes the Linux native overlay outside a Wayland+HDR session), then Windows and a
-universal Android APK. The Windows libmpv DLL is fetched at
+thing that executes the Linux native overlay outside a Wayland+HDR session) + the panel's
+`npm test` (`pages.yml` is deploy-only and post-merge, so this job is the panel suite's only
+pull-request gate), then Windows and a universal Android APK. The Windows libmpv DLL is fetched at
 configure time by `windows/CMakeLists.txt`; the Android libdovi AAR comes from **Git LFS**
 (`android/app/libs/libmpv-dovi.aar`), so a clone needs LFS to build Android. The Windows runner
 compiles `/utf-8` (non-ASCII literals trip C4066 under `/WX`). A fixed public debug keystore is
@@ -300,6 +301,12 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   Both live lists set an explicit `itemExtent` (`kChannelRowExtentWithEpg` 112 /
   `kChannelRowExtentPlain` 72 / `kCategoryRowExtent` 48 in `live_tab_view.dart`) — uniform rows
   make index→offset exact; the tallest EPG row must fit the extent.
+- **The EPG grid's horizontal reveal must use the geometry the row painted, not the programme's
+  own times.** Grid rows are horizontally virtualized, so a reveal that pans away from the cursor
+  doesn't hide the selected cell — it stops building it, and the guide "jumps somewhere with no
+  apparent focus". `_revealProgrammeAt` therefore takes (items, index) and passes `nextStart` to
+  `_cellWidth` exactly as `_layouts()` does, and a cell `width >= _timelineWidth` is revealed from
+  its **leading** edge (the title is drawn there).
 - **Movement is deliberately asymmetric: Down wraps; Up never wraps — it escapes upward.**
   Right first enters the selected channel row's **favorite star** (the intra-row
   `ChannelRowColumn`; OK there toggles the favorite in place) and Left peels it back before
@@ -363,6 +370,21 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   RLS bugs, **not** vs an unlocked/XSS'd panel or a paired device holding the CK; `rotate_content_key`
   is the revocation remedy (against a compromised *device* — not against a compromised backend). `package:cryptography` 2.9.0 has no VM/native ECDH, so P-256 is pure-Dart
   in `cloud_crypto.dart` (RFC-5903-validated); vectors in `test/fixtures/crypto_vectors.json`.
+- **The pairing screen's QR is a shortcut over the existing code flow, not a new path.** It encodes
+  `<panelUrl>/?code=…` (`pairingPanelLink`); the panel accepts it only in `gen_pairing_code()`'s
+  exact shape (`pairingCodeFromUrl`), **stashes it in `localStorage` under the code's own 10-minute
+  TTL** (`emailRedirectTo` carries no query and the magic link often opens a new tab, so nothing
+  else survives sign-in — and widening the redirect would risk the exact allow-list), and **clears
+  it only on a successful `claim_pairing`**: both `onAuthStateChange` and `getSession()` render on
+  load, so a consume-on-render blanks the form the other pass just filled. The QR sits
+  beside the printed code and link, never instead of them, and every failure (bad `PANEL_URL`,
+  blank code, over-long payload) drops the QR rather than the screen. Rendering is
+  `PairingQrView` (`lib/widgets/pairing_qr.dart`), swept over sizes/text scales in
+  `test/pairing_qr_test.dart`: it sizes the symbol against the window (a fixed `size` narrower than
+  its slot is clamped on **width only** and draws an unscannable rectangle) and bounds the link at
+  `maxLinkLength`, because **`QrValidator.validate` reports `valid` for a payload that then throws
+  in the painter** — `_calculateTypeNumberFromData` walks versions 1..39 and returns the largest
+  when nothing fits rather than failing.
 - **A device is named at pairing time, and RPC overloads here are arity-distinct with no
   `DEFAULT`.** The device sends a platform-derived suggestion (`request_pairing(p_label)` →
   `pairings.suggested_label`); the panel's Pair form sends an optional name
@@ -504,7 +526,20 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   Activity calls `armHandoff(now, renderedFrameCount)` when it adopts, because those frames were
   drawn by that same renderer moments ago — without it, a handoff that freezes the decoder *before
   its first frame* stays inert forever (measured: 11.2 s of black ending in the user pressing Back).
-  Arming also shortens the clock to `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) for `HANDOFF_WINDOW_MS`
+  **Inside the handoff window there are two clocks:** `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) until the
+  claimed surface draws a frame of its own — anything shorter judges first-frame latency, which
+  measured 251 ms on healthy hardware — and `HANDOFF_POST_FRAME_STALL_MS` (500 ms) once it has,
+  because a live stream that drew a frame half a second ago and claims to be
+  playing unbuffered has drawn twelve more. The ticker drops to `HANDOFF_POLL_MS` (125 ms) while
+  `inHandoffWindow` so 500 ms is four samples, not one gap. **"Has drawn" comes from the renderer
+  (`onClaimedSurfaceFirstFrame` → `markHandoffFirstFrame`), never from the frame counter** — the
+  counter is surface-agnostic and the claim is deferred, so preview frames would trip the short
+  clock on a healthy handoff and rebuild (then reload) a working decoder.
+  `attachOwnSurface`'s `playerView.player = null; … = player` is **not** a spare output transition
+  and must not be replaced with a direct `setVideoSurfaceView`: `attachPreviewTexture` already
+  nulled it, so the first line no-ops — and dropping the second leaves PlayerView player-less with
+  its shutter closed over a rendering decoder (permanent black), plus no aspect resize or subtitles.
+  Both clocks run for `HANDOFF_WINDOW_MS`
   (5 s) after the claim, and inside that window the **first recovery is a local decoder rebuild, not
   a reload** (`tryHandoffDecoderRebuild` → `PlaybackEngine.rebuildVideoDecoder` → a custom
   `PlayerMessage` making `HdrMediaCodecVideoRenderer` do `releaseCodec()` +
@@ -532,7 +567,14 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   to media_kit `completed=true`/`buffering=false` — invisible to the buffering-gated stall poll —
   so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
   legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
-  policy (`reconnect_at_eof` must stay out of `kLiveMpvOptions` — it hangs HLS on FFmpeg 8). Live
+  policy (`reconnect_at_eof` must stay out of `kLiveMpvOptions` — it hangs HLS on FFmpeg 8).
+  **One engine must never carry two live watchdogs.** The embedded seamless handoff
+  (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
+  `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF
+  recovery inert (`previewOwnsEofRecovery`) until the route pops. Without it a single clean EOF
+  reopened the player twice *and* re-applied `setVolume(muted ? 0 : 100)` from the preview's
+  remembered mute — a hover-started preview came back from a reconnect silent, and a
+  single-connection provider saw two overlapping `create_link` calls. Live
   reloads **re-resolve** via
   `PlayerScreen.resolveAgain` when wired (Stalker `play_token`s are single-use — a stale URL can
   never reconnect after a portal-side kill).

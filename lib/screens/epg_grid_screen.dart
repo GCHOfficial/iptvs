@@ -218,12 +218,34 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     _panController.forward(from: 0);
   }
 
-  /// Keep [programme]'s span horizontally in view.
-  void _revealProgramme(Programme programme) {
+  /// Keep the programme at [index] of the row's [items] horizontally in view.
+  ///
+  /// The reveal must use the row's **painted** geometry, not the programme's
+  /// own times. [_cellWidth] truncates an entry that overruns the next one's
+  /// start (bad guide runtimes), and revealing without that `nextStart` let an
+  /// overlong entry claim a span it never drew: one entry whose stop landed a
+  /// day out asked to reveal thousands of pixels of cell, which panned the
+  /// timeline to its far-right clamp and left the ~24 px cell that was actually
+  /// painted — and the selection highlight with it — completely off-screen.
+  /// That is the "browse right along one channel and the guide jumps somewhere
+  /// with no apparent focus" report, and it needs exactly one bad entry on one
+  /// channel to happen.
+  void _revealProgrammeAt(List<Programme> items, int index) {
+    if (index < 0 || index >= items.length) return;
+    final programme = items[index];
     final left = _offsetForTime(_clampStart(programme));
-    final width = _cellWidth(programme, _windowStart, _windowEnd);
+    final width = _cellWidth(
+      programme,
+      _windowStart,
+      _windowEnd,
+      nextStart: index + 1 < items.length ? items[index + 1].start : null,
+    );
     final offset = _hOffset.value;
-    if (left < offset) {
+    // A cell wider than the viewport can't be framed by its end: the title is
+    // drawn at the left edge, so ending-aligned reveal would scroll it away and
+    // leave a blank stretch of fill as the only sign of the cursor. Anchor the
+    // start instead — the same answer as "it's off the left edge".
+    if (left < offset || width >= _timelineWidth) {
       _animatePanTo(left - 24);
     } else if (left + width > offset + _timelineWidth) {
       _animatePanTo(left + width - _timelineWidth + 24);
@@ -329,7 +351,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     // view; reveal it anyway in case its span extends off-screen.
     final items = _programmes[channels[next].id];
     if (items != null && items.isNotEmpty) {
-      _revealProgramme(items[_selectedCol.clamp(0, items.length - 1)]);
+      _revealProgrammeAt(items, _selectedCol.clamp(0, items.length - 1));
     }
     return KeyEventResult.handled;
   }
@@ -355,7 +377,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
       _selectedCol = next;
       _cursorTime = _clampStart(programme);
     });
-    _revealProgramme(programme);
+    _revealProgrammeAt(items, next);
     return KeyEventResult.handled;
   }
 

@@ -433,6 +433,70 @@ pulls. Once paired, the screen shows a **profile picker** (list the account's pr
 `set_device_profile` + re-pull) and offers **Pull now** / **Push to panel** (push confirms first,
 since it overwrites that profile).
 
+### The QR shortcut
+
+The primary device here is a television, and reading eight characters off it across a room and
+typing them into a phone is the slowest step in the whole flow — and the one step that can be
+handed to a camera. The pairing screen therefore also renders the code as a QR encoding
+`<panelUrl>/?code=ABCD2345` (`pairingPanelLink`, `lib/data/cloud_config.dart`, pure and
+unit-tested); the panel reads it back with `pairingCodeFromUrl` (`panel/src/validate.js`),
+prefills its Pair field, and puts the caret on the optional name instead.
+
+Both halves fail closed, because the fallback is the form the user was going to fill in anyway:
+
+- **Device.** The QR sits *beside* the printed code and link, never instead of them — it is no use
+  to someone pairing from the same machine, and a phone camera pointed at a lit panel is exactly
+  where a scan fails. A `PANEL_URL` that won't parse yields the plain link and a blank code yields
+  the plain panel URL (`pairingPanelLink`). It is drawn on an explicit white plate with dark
+  modules: `QrImageView`'s background defaults to transparent, which on this screen would be dark
+  on dark — visibly present, scannable as nothing.
+
+  Rendering lives in `lib/widgets/pairing_qr.dart` (`PairingQrView`) rather than on the screen, so
+  its layout can be swept across window sizes and text scales without standing up a `SourceStore`,
+  an `AppDatabase` and a fake `CloudSync` — `layout_overflow_test.dart` is scoped to the three
+  fixed-extent browsing surfaces and does not cover this screen. Two things it pins, neither
+  visible at a single window size:
+
+  - **The symbol is sized against the window, not left at a fixed 180 px.** `QrImageView` falls
+    back to `constraints.biggest.shortestSide` with no `size` (infinite inside a Column), and a
+    fixed `size` wider than the incoming constraints is clamped on **width only** — drawing a
+    rectangle no scanner will read. `PairingQrView` clamps between `minSide` and `maxSide` against
+    `MediaQuery.sizeOf` minus the card's own chrome.
+  - **`QrValidator.validate` is not a sufficient guard, and the obvious reading of it is wrong.**
+    `QrCode.fromData` picks a version through `_calculateTypeNumberFromData`, which walks 1..39 and
+    simply returns the largest when nothing fits instead of failing — so validation reports *valid*
+    for a payload that throws `InputTooLongException` the moment it is really encoded, deep inside
+    the painter where no `errorStateBuilder` can catch it. An over-long `PANEL_URL` took the whole
+    pairing screen down. `maxLinkLength` (300) bounds the input well below any version's capacity,
+    which puts that path out of reach; the bound is argued from legibility anyway, since a symbol
+    denser than roughly 60 modules can't be read off a television at `maxSide`.
+- **Panel.** `code` is attacker-supplied by construction, so it is accepted only in the exact shape
+  `gen_pairing_code()` emits (8 chars of `ABCDEFGHJKMNPQRSTUVWXYZ23456789` — no I/L/O/0/1, so a
+  misread can't become a *different* valid code) and refused otherwise, on the way in *and* on the
+  way back out of storage.
+
+**Two details of the panel side are load-bearing and neither is obvious:**
+
+- **The code is stashed in `localStorage` (`stashPairingCode`), because it has to survive the
+  sign-in.** The person scanning a television's QR on their phone is precisely the person least
+  likely to be signed in already, and `signInWithOtp`'s `emailRedirectTo` is
+  `origin + BASE_URL` — no query string — with the link commonly opening in a *different tab*. So
+  neither the URL nor `sessionStorage` carries it across. (Widening `emailRedirectTo` to include
+  the query was rejected: the project's redirect allow-list is exact, and a mismatch would break
+  sign-in outright rather than degrade the shortcut.) The stash carries a timestamp and expires at
+  `PAIRING_CODE_TTL_MS`, matching `request_pairing`'s own 10-minute expiry — a prefill the server
+  would reject is worse than no prefill.
+- **Rendering stays idempotent: the code is read on render and cleared only on a successful
+  `claim_pairing`.** `onAuthStateChange` (INITIAL_SESSION) and `getSession().then` both call
+  `render()` on load, so a signed-in user runs `renderDevices()` twice concurrently. A
+  consume-on-render let the second pass overwrite the first's prefilled form with an empty one —
+  and take the focus and `history.replaceState` cleanup with it. The URL is stripped once the code
+  reaches the form; `urlWithoutPairingCode` returns null when there is no `code` parameter, which
+  is what keeps the second render from churning history.
+
+The QR is a convenience over the existing flow, not a new authorisation path: it carries the same
+short-lived, rate-limited code to the same `claim_pairing` RPC.
+
 ### The device's name, decided at pairing time
 
 A freshly paired device used to be nameless (`devices.label = ''`, rendered "Device") until the

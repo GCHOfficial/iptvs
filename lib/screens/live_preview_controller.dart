@@ -20,6 +20,50 @@ import '../player/player_screen.dart'
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
 
+/// Whether a `completed: true` from the embedded preview engine is *this*
+/// controller's to recover from.
+///
+/// Pulled out of [LivePreviewController] and made pure so the case that matters
+/// can be pinned without a libmpv engine (which is unavailable on a Windows dev
+/// box, and skips 22 of 23 tests in `channel_list_focus_test.dart` when it is —
+/// see CLAUDE.md "Testing notes").
+///
+/// [adoptedByFullscreen] is the one that was missing. On the embedded seamless
+/// handoff the fullscreen route is built with `existingPlayer: _preview.player`
+/// — one engine, two watchdogs — so a single clean live EOF ran both
+/// recoveries: `PlayerScreen._reconnectLive` re-resolved and reopened the
+/// player, and this one re-resolved and reopened it again, finishing with
+/// `setVolume(muted ? 0 : 100)` against the *preview's* remembered mute. Any
+/// hover-started (muted) preview therefore came back from a reconnect silent,
+/// with the mute button reading muted — and a single-connection provider saw
+/// two overlapping `create_link` calls where one reconnect was intended.
+bool previewOwnsEofRecovery({
+  required bool completed,
+  required bool disposed,
+  required bool nativeActive,
+  required bool pausedByApp,
+  required bool adoptedByFullscreen,
+  required bool loading,
+  required String? previewChannelId,
+  required String? activeChannelId,
+}) {
+  // media_kit reports `completed: false` too (a stop, a fresh open); only the
+  // rising edge is an EOF.
+  if (!completed) return false;
+  // Not ours to answer: no controller left, the native shared engine is
+  // playing (Android reconnects in Kotlin), or the app paused us around a
+  // handoff and this EOF is a consequence of that.
+  if (disposed || nativeActive || pausedByApp) return false;
+  // Fullscreen is driving this very player and carries its own live watchdog.
+  if (adoptedByFullscreen) return false;
+  // Not (or no longer) previewing this channel — including mid-`start()`
+  // resolves, where `loading` is true — so there is nothing to recover.
+  if (activeChannelId == null || previewChannelId != activeChannelId) {
+    return false;
+  }
+  return !loading;
+}
+
 /// Owns the live split-pane/phone **preview** player and its state — which
 /// channel is previewing, its resolved [StreamInfo], and loading/error — as a
 /// [ChangeNotifier] so the screen rebuilds via a listener.
@@ -180,11 +224,21 @@ class LivePreviewController extends ChangeNotifier {
   /// Rate-limited and capped by the shared reconnect min-gap policy so a
   /// stream stuck bouncing at EOF doesn't loop forever.
   void _handleCompleted(bool completed) {
-    if (!completed || _disposed || nativeActive || _pausedByApp) return;
     final channel = _activeChannel;
-    // Not (or no longer) previewing this channel — including mid-`start()`
-    // resolves, where `loading` is true — so there's nothing to recover.
-    if (channel == null || channelId != channel.id || loading) return;
+    if (!previewOwnsEofRecovery(
+      completed: completed,
+      disposed: _disposed,
+      nativeActive: nativeActive,
+      pausedByApp: _pausedByApp,
+      adoptedByFullscreen: adoptedByFullscreen,
+      loading: loading,
+      previewChannelId: channelId,
+      activeChannelId: channel?.id,
+    )) {
+      return;
+    }
+    // Non-null by the guard: it refuses a null `activeChannelId`.
+    final active = channel!;
     final now = DateTime.now().millisecondsSinceEpoch;
     // A completed landing well after the last restart is a fresh incident
     // (the restart held for a full stall window), not a continuation of a
@@ -196,7 +250,7 @@ class LivePreviewController extends ChangeNotifier {
     if (_eofRestartAttempts >= _maxConsecutiveEofRestarts) {
       DiagnosticsLog.instance.add(
         'library',
-        'preview eof giving up channel=${channel.name} '
+        'preview eof giving up channel=${active.name} '
             'attempts=$_eofRestartAttempts',
       );
       _set(() {
@@ -214,10 +268,10 @@ class LivePreviewController extends ChangeNotifier {
     _lastEofRestartMs = now;
     DiagnosticsLog.instance.add(
       'library',
-      'preview eof restart channel=${channel.name} '
+      'preview eof restart channel=${active.name} '
           'attempt=$_eofRestartAttempts',
     );
-    unawaited(start(channel, muted: muted));
+    unawaited(start(active, muted: muted));
   }
 
   Future<void> _logPreviewHwdec(NativePlayer platform) async {
@@ -253,6 +307,26 @@ class LivePreviewController extends ChangeNotifier {
   /// True while the app (not a genuine EOF) has paused the preview around a
   /// fullscreen handoff — an EOF landing in this window is ignored.
   bool _pausedByApp = false;
+
+  /// True while a fullscreen `PlayerScreen` is driving **this controller's own
+  /// media_kit [player]** (the embedded seamless handoff — Windows SDR, Linux
+  /// SDR/X11, iOS mpv — where the route is built with
+  /// `existingPlayer: _preview.player`).
+  ///
+  /// The engine is shared, so every stream this controller listens to is also
+  /// the fullscreen player's, and both sides carry a live-EOF watchdog. Left
+  /// ungated, one clean server-side EOF fired *two* recoveries on one player:
+  /// `PlayerScreen._reconnectLive` re-resolved and reopened it, and
+  /// [_handleCompleted] re-resolved and reopened it again — then finished with
+  /// `setVolume(muted ? 0 : 100)` against the *preview's* remembered mute, which
+  /// is true for any desktop hover-started preview. The stream came back
+  /// silent, the mute button read muted, and a single-connection provider saw
+  /// two overlapping `create_link` calls for one reconnect.
+  ///
+  /// Set by `channel_list_screen._openLivePlayer` around the push, and cleared
+  /// the moment the route pops (including the failure path), because the
+  /// preview owns its own recovery again as soon as fullscreen lets go.
+  bool adoptedByFullscreen = false;
 
   /// Consecutive automatic EOF-restart attempts for the current incident, and
   /// when the last one fired — caps a stuck stream from looping forever and

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/app_database.dart';
@@ -11,6 +12,7 @@ import '../data/device_label.dart';
 import '../data/source_store.dart';
 import '../theme.dart';
 import '../widgets/focusable_card.dart';
+import '../widgets/pairing_qr.dart';
 
 /// Pairs this device with a web-panel account and pulls its source list down.
 /// No login happens here: the device shows a short code, the user enters it in
@@ -528,6 +530,14 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         style: TextStyle(color: AppColors.textLo, fontSize: 12),
       ),
     ),
+    if (_code case final code?) ...[
+      const SizedBox(height: 20),
+      Center(
+        child: PairingQrView(
+          link: pairingPanelLink(CloudConfig.panelUrl, code.code),
+        ),
+      ),
+    ],
     // Read-only on purpose: naming happens in the panel, on a real keyboard.
     // Adding a text field here would put a focus target — and a Back-ladder
     // rung — on a screen reached by D-pad remote.

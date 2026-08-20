@@ -102,15 +102,117 @@ class FrameLivenessWatchTest {
 
     @Test
     fun `an armed handoff also judges a renderer that draws and then stops`() {
-        // The other observed shape: a first frame lands, a few more follow, and
-        // the picture stops about a quarter-second later. Progress resets the
-        // window, but the short handoff threshold still applies to it.
+        // The other observed shape, and the one an exported log has now caught
+        // exactly: the claim's first frame lands a quarter-second in and the
+        // counter never moves again. Because that frame proves the new surface
+        // works, the first-frame latency HANDOFF_NO_FRAME_STALL_MS is being
+        // generous about has already been paid — so the freeze is decided on
+        // the shorter post-frame clock.
         val watch = FrameLivenessWatch()
         watch.armHandoff(0, renderedFrames = 4_210)
-        assertFalse(watch.sample(500, playingNormally = true, renderedFrames = 4_226))
-        val stallAt = 500 + ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS
-        assertFalse(watch.sample(stallAt - 1, playingNormally = true, renderedFrames = 4_226))
-        assertTrue(watch.sample(stallAt, playingNormally = true, renderedFrames = 4_226))
+        assertFalse(watch.drewSinceArm())
+        // The renderer reports the claimed surface's first frame; the counter
+        // moves with it.
+        watch.markHandoffFirstFrame()
+        assertFalse(watch.sample(250, playingNormally = true, renderedFrames = 4_211))
+        assertTrue(watch.drewSinceArm())
+        val stallAt = 250 + ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS
+        assertFalse(watch.sample(stallAt - 1, playingNormally = true, renderedFrames = 4_211))
+        assertTrue(watch.sample(stallAt, playingNormally = true, renderedFrames = 4_211))
+    }
+
+    @Test
+    fun `frames drawn during a deferred claim do not shorten the clock`() {
+        // The counter is surface-agnostic and the claim is deferred until
+        // `surfaceCreated` (~117 ms measured), so the frames still landing on
+        // the preview texture in that gap say nothing about the new surface.
+        // Inferring the first frame from them dropped a *healthy* handoff onto
+        // the 500 ms clock and rebuilt a decoder that was merely waiting for an
+        // IDR.
+        val watch = FrameLivenessWatch()
+        watch.armHandoff(0, renderedFrames = 4_210)
+        var frames = 4_210
+        for (t in 125L..375L step 125) {
+            frames += 7
+            assertFalse(watch.sample(t, playingNormally = true, renderedFrames = frames))
+        }
+        assertFalse(watch.drewSinceArm())
+        // Frozen from here: still judged on the long first-frame clock.
+        val postFrame = 375 + ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS
+        assertFalse(watch.sample(postFrame, playingNormally = true, renderedFrames = frames))
+        val stallAt = 375 + ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS
+        assertFalse(watch.sample(stallAt - 1, playingNormally = true, renderedFrames = frames))
+        assertTrue(watch.sample(stallAt, playingNormally = true, renderedFrames = frames))
+    }
+
+    @Test
+    fun `a first frame outside any handoff window is not remembered`() {
+        // A cold open's first frame must not leave the flag set for a later
+        // arm to inherit.
+        val watch = FrameLivenessWatch()
+        watch.markHandoffFirstFrame()
+        assertFalse(watch.drewSinceArm())
+    }
+
+    @Test
+    fun `a handoff that has not drawn yet keeps the longer first-frame clock`() {
+        // The two clocks must not be confused: before the new surface has drawn
+        // anything, the shorter one would be judging first-frame latency — a
+        // healthy handoff measured 251 ms and a deferred surface claim can add
+        // more — rather than a freeze.
+        val watch = FrameLivenessWatch()
+        watch.armHandoff(0, renderedFrames = 4_210)
+        val postFrame = ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS
+        assertFalse(watch.sample(postFrame, playingNormally = true, renderedFrames = 4_210))
+        assertFalse(watch.drewSinceArm())
+        val stallAt = ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS
+        assertFalse(watch.sample(stallAt - 1, playingNormally = true, renderedFrames = 4_210))
+        assertTrue(watch.sample(stallAt, playingNormally = true, renderedFrames = 4_210))
+    }
+
+    @Test
+    fun `a buffering tick does not un-draw the frame the new surface got`() {
+        // Progress is a fact about the surface, not an observation a moment of
+        // buffering revokes — unlike the frame *window*, which the tick clears.
+        val watch = FrameLivenessWatch()
+        watch.armHandoff(0, renderedFrames = 4_210)
+        watch.markHandoffFirstFrame()
+        assertFalse(watch.sample(250, playingNormally = true, renderedFrames = 4_211))
+        assertFalse(watch.sample(500, playingNormally = false, renderedFrames = 4_211))
+        assertTrue(watch.drewSinceArm())
+        assertFalse(watch.sample(750, playingNormally = true, renderedFrames = 4_211))
+        val stallAt = 750 + ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS
+        assertFalse(watch.sample(stallAt - 1, playingNormally = true, renderedFrames = 4_211))
+        assertTrue(watch.sample(stallAt, playingNormally = true, renderedFrames = 4_211))
+    }
+
+    @Test
+    fun `reset forgets that the new surface had drawn`() {
+        // A rebuild re-arms against a decoder that has drawn nothing yet, so it
+        // must get the first-frame clock back rather than inherit the short one.
+        val watch = FrameLivenessWatch()
+        watch.armHandoff(0, renderedFrames = 4_210)
+        watch.markHandoffFirstFrame()
+        assertTrue(watch.drewSinceArm())
+        watch.reset()
+        assertFalse(watch.drewSinceArm())
+        watch.armHandoff(300, renderedFrames = 4_211)
+        assertFalse(watch.drewSinceArm())
+    }
+
+    @Test
+    fun `the post-frame clock is several polls wide`() {
+        // A threshold the ticker can only sample once is a threshold decided by
+        // one unlucky scheduling gap. Inside the handoff window the ticker runs
+        // at HANDOFF_POLL_MS precisely so this holds.
+        assertTrue(
+            ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS >= ReconnectPolicy.HANDOFF_POLL_MS * 3,
+        )
+        assertTrue(ReconnectPolicy.HANDOFF_POLL_MS < ReconnectPolicy.PROGRESS_TICK_MS)
+        assertTrue(
+            ReconnectPolicy.HANDOFF_POST_FRAME_STALL_MS <
+                ReconnectPolicy.HANDOFF_NO_FRAME_STALL_MS,
+        )
     }
 
     @Test

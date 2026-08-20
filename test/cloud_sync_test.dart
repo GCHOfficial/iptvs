@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/data/cloud_config.dart';
 import 'package:iptvs/data/cloud_crypto.dart';
 import 'package:iptvs/data/cloud_sync.dart';
 import 'package:iptvs/data/device_label.dart';
@@ -844,6 +845,49 @@ void main() {
         '',
       );
       expect(suggestedDeviceLabelFor(operatingSystem: '', isTelevision: true), '');
+    });
+  });
+
+  // The QR on the pairing screen is only as good as the link it encodes: the
+  // panel reads the code straight back out of it
+  // (`pairingCodeFromUrl` in panel/src/validate.js), so the two have to agree
+  // on the parameter name and on leaving the rest of the URL alone.
+  group('pairingPanelLink', () {
+    test('appends the code to the panel URL', () {
+      expect(
+        pairingPanelLink('https://gchofficial.github.io/iptvs/', 'ECA6EVMU'),
+        'https://gchofficial.github.io/iptvs/?code=ECA6EVMU',
+      );
+    });
+
+    test('keeps an existing query and replaces only the code', () {
+      expect(
+        pairingPanelLink('https://example.test/panel/?foo=1', 'ECA6EVMU'),
+        'https://example.test/panel/?foo=1&code=ECA6EVMU',
+      );
+      expect(
+        pairingPanelLink('https://example.test/?code=OLDCODE1', 'ECA6EVMU'),
+        'https://example.test/?code=ECA6EVMU',
+      );
+    });
+
+    test('trims a code that arrives padded', () {
+      expect(
+        pairingPanelLink('https://example.test/', '  ECA6EVMU '),
+        'https://example.test/?code=ECA6EVMU',
+      );
+    });
+
+    test('degrades to the plain panel URL rather than failing', () {
+      // A QR is a convenience; the printed code and link beside it are the
+      // instructions. Neither a blank code (still being requested) nor a
+      // malformed PANEL_URL define is worth breaking the screen over.
+      expect(
+        pairingPanelLink('https://example.test/', ''),
+        'https://example.test/',
+      );
+      expect(pairingPanelLink('not a url', 'ECA6EVMU'), 'not a url');
+      expect(pairingPanelLink('', 'ECA6EVMU'), '');
     });
   });
 }

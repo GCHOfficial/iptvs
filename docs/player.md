@@ -952,6 +952,18 @@ TV" is the expected shape of a handoff bug, not evidence against one.
   MPEG-TS stream. `ExoPlayerEngine.claimViewSurface` now defers the swap to `surfaceCreated` (with a
   1 s backstop for a view that never attaches, and cancellation from `attachPreviewTexture`/
   `release`), collapsing it back to one transition.
+  **`attachOwnSurface`'s `playerView.player = null; playerView.player = player` is not a third
+  transition, and must not be "optimised" into a direct `player.setVideoSurfaceView(...)`.** It
+  reads like one, which is exactly the trap: by the time an adopted handoff reaches it,
+  `playerView.player` is *already* null, because `attachPreviewTexture` clears it on every preview
+  so the PlayerView stops driving the output while the texture owns it. `setPlayer(null)` therefore
+  early-returns on an unchanged player and only the second line does any work. Replacing the pair
+  with a direct surface set moves the video output but leaves the PlayerView player-less — and
+  `setPlayer(null)` already ran `closeShutter()` (`keepContentOnPlayerReset` defaults false), with
+  the opaque `exo_shutter` drawn *above* the SurfaceView and reopened only by the PlayerView's own
+  `onRenderedFirstFrame`, which is unregistered while it has no player. The decoder renders, the
+  frame counter climbs, and the screen stays black on every handoff. The `AspectRatioFrameLayout`
+  resize and the `SubtitleView` cues go with it.
 - **The one transition that remains still kills the decoder on some chipsets — and the picture
   never came back.** With the claim deferred and the surface real, `ExoPlayer.setVideoSurfaceView`
   applies the switch through `MediaCodec.setOutputSurface` unless media3's hardcoded
@@ -1042,7 +1054,7 @@ ever appeared. The Activity now stamps every note with ms since its own `onCreat
 | `native first frame sinceClaimMs=…` (or `sinceLoadMs=…` on a cold open) | whether the picture came back after the handoff, and how late |
 | `native stream 1920x1080 fps=50 codec=HEVC range=HDR10` | which channels the reports are actually about — resolution/rate/codec is the closest bitrate proxy available without measuring the socket |
 | `native handoff frame watch armed=…` | whether the adopted engine could hand `FrameLivenessWatch` proof that its frame counter advances. `armed=false` means it reported no frames at all, so the inert rule still applies and a frozen handoff will only be caught by the buffering watchdog |
-| `native handoff decoder rebuild attempt=N rendered=… dropped=… toKeyframe=… skipped=… inits=…` | the local recovery fired (decoder rebuilt in place, stream untouched). The tallies are the **frozen** decoder's, sampled before the rebuild: `dropped`/`toKeyframe` climbing means frames were being decoded and thrown away to catch up, all-flat means the decoder had stopped emitting, and `inits` says how many times the codec had been instantiated — i.e. whether an output change was applied in place or re-created it |
+| `native handoff decoder rebuild attempt=N phase=noFirstFrame\|afterFirstFrame rendered=… dropped=… toKeyframe=… skipped=… inits=…` | the local recovery fired (decoder rebuilt in place, stream untouched). `phase` is which of the two handoff failures it was — a picture that never arrived on the claimed surface, or one that arrived and stopped — which the tallies can't show, since a single rendered frame is lost in a preview's running total. The tallies are the **frozen** decoder's, sampled before the rebuild: `dropped`/`toKeyframe` climbing means frames were being decoded and thrown away to catch up, all-flat means the decoder had stopped emitting, and `inits` says how many times the codec had been instantiated — i.e. whether an output change was applied in place or re-created it |
 | `native live reconnect attempt=N force=… kind=buffering\|ended\|noframes\|error rendered=… dropped=… …` | why a reconnect fired, once per real attempt (the rate limit already gates it), with the same frame tallies at the moment of the decision |
 | `native live re-resolve refreshed=… timedOut=…` | whether the portal handed back a new locator, or the round trip timed out and the spent one was retried |
 | `native engine fallback from=exo to=mpv adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching |
@@ -1086,7 +1098,8 @@ different stacks:
   surface that no longer exists, sits in `STATE_READY` reporting `isPlaying` with the position
   advancing and nothing drawn. Every flag reads healthy, so nothing ever reconnected and nothing
   was ever logged — a permanent freeze. `FrameLivenessWatch` (`ReconnectPolicy.kt`, pure, pinned
-  by `FrameLivenessWatchTest`) samples `PlaybackEngine.renderedFrameCount` on the same 500 ms tick
+  by `FrameLivenessWatchTest`) samples `PlaybackEngine.renderedFrameCount` on the same progress
+  ticker (`PROGRESS_TICK_MS`, 500 ms outside a handoff window)
   and calls it stalled after `NO_FRAME_STALL_MS` (6 s) of a frozen counter while the engine claims
   health. It **fails inert three ways**: `renderedFrameCount` is -1 for any engine that can't count
   (mpv, and an audio-only channel, which has no video renderer at all); any not-healthy state
@@ -1115,13 +1128,47 @@ different stacks:
   count as the proof (a zero/-1 count is refused and reported as `armed=false` — inert rule 3 is
   unchanged for a cold open, an mpv engine, or an audio-only channel). Arming is also what
   justifies a shorter clock: for `HANDOFF_WINDOW_MS` (5 s) after the claim a frozen renderer stalls
-  at `HANDOFF_NO_FRAME_STALL_MS` (1.5 s, three consecutive identical 500 ms samples) instead of 6 s,
+  at `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) instead of 6 s,
   because the ambiguity the long window is generous about doesn't exist here — the preview was
   demonstrably rendering, and the only thing that changed is which surface the decoder writes to.
-  One asymmetry falls out of that: a not-healthy tick (buffering) normally revokes the proof and
+
+  **Inside that window there are two clocks, not one, because the handoff fails in two shapes.**
+  1.5 s is the right patience for a picture that hasn't arrived yet: a healthy claim measured
+  251 ms to first frame and a deferred surface claim adds its own wait, so anything shorter would
+  be judging first-frame latency rather than a freeze. But once the *new* surface has drawn a frame
+  of its own, that latency has already been paid and the only question left is whether a live
+  stream which drew a frame half a second ago and claims to be playing, unbuffered, has drawn
+  another — at any broadcast frame rate it has drawn twelve. So `FrameLivenessWatch` switches to
+  `HANDOFF_POST_FRAME_STALL_MS` (500 ms) once the claimed surface has drawn
+  (`markHandoffFirstFrame()`/`drewSinceArm()`). This is the shape hardware actually produced:
+  armed at `ms=6`, one frame at `sinceClaimMs=251`, and the counter frozen at 64 from there on,
+  with the rebuild not firing until `ms=2014`. The same session now resolves in roughly a third of
+  that. Because 500 ms cannot be told from a single scheduling gap at the base 500 ms cadence, the
+  Activity's progress ticker drops to `HANDOFF_POLL_MS` (125 ms) while `inHandoffWindow` — bounded
+  by the 5 s window, so it costs five seconds per handoff and nothing for the rest of the session.
+  Which clock decided a recovery is reported as `phase=noFirstFrame` / `phase=afterFirstFrame`,
+  because a single rendered frame is invisible in a preview's running counter total and the two
+  shapes want to be told apart in a report.
+
+  **That "has drawn" signal must come from the renderer, never from the frame counter.**
+  `renderedFrameCount` is `renderedOutputBufferCount`, which is surface-agnostic, and `armHandoff`
+  fires at adoption while `claimViewSurface` is still *deferred* waiting on `surfaceCreated`
+  (117 ms in the export above). Every frame drawn in that gap goes to the preview texture, so
+  inferring the first frame from counter movement drops a **healthy** handoff onto the 500 ms clock
+  before the new surface has drawn anything — and a codec release/re-init plus the wait for the
+  next IDR on a live MPEG-TS stream routinely outlasts 500 ms while `isPlaying && !isBuffering &&
+  !ended` all stay true. That would rebuild a working decoder and, because a frame stall skips the
+  reload threshold entirely (`threshold = 0L`), reload the stream right behind it. So
+  `ExoPlayerEngine.onClaimedSurfaceFirstFrame` — fired from `onRenderedFirstFrame` only when
+  `claimedAtMs > 0`, which media3 re-notifies only when the output surface actually changed — is
+  bound by `adoptForFullscreen` *before* the claim and calls `markHandoffFirstFrame()`.
+
+  One asymmetry falls out of the arm: a not-healthy tick (buffering) normally revokes the proof and
   restarts the window, but **inside the handoff window it doesn't**, because the proof is the
   preview's frames rather than an observation of this watch's own — and the claim is precisely when
   a buffering tick is most likely, so revoking there would put the freeze back out of reach. A
+  buffering tick likewise doesn't un-draw a frame the new surface already got, so the short
+  post-frame clock survives it; only a `reset()` forgets both. A
   `renderedFrameCount` of -1 (the mpv fallback arriving) still disarms completely: there is nothing
   left to be armed against.
 
@@ -1135,9 +1182,9 @@ different stacks:
   does for itself on a device it knows mishandles `setOutputSurface`**, just decided by evidence
   rather than by a device list this chipset isn't on. Demuxer, buffer, audio pipeline and HTTP
   connection all keep running; the cost is one wait for the next IDR. If the fresh decoder still
-  draws nothing, the re-arm means the next stall lands ~1.5 s later and escalates to the ordinary
-  reload — so the ladder is roughly *1.5 s rebuild → 3 s reload* against the 6.5 s reload (or the
-  never) it replaces. The rebuild is only ever reachable through an armed handoff: `reset()` (a
+  draws nothing, the re-arm starts it on the first-frame clock again (a rebuilt decoder has drawn
+  nothing yet), so the next stall lands ~1.5 s later and escalates to the ordinary
+  reload. The rebuild is only ever reachable through an armed handoff: `reset()` (a
   reload, an engine swap) drops the window, so a decoder built against the surface it will keep is
   never rebuilt on this path.
 - **iOS**, Swift-side and Kotlin-shaped: `IptvsPlayerViewController` runs its own progress
@@ -1198,6 +1245,21 @@ listens to its player's `completed` stream and auto-restarts the *same* channel 
 ended". It only ever restarts the channel the user already chose (the "preview is deliberate and
 locked" rule), and an app-initiated stop/pause (`_activeChannel` cleared / `_pausedByApp`) never
 triggers it.
+
+**It also stands down while fullscreen has adopted its player.** On the embedded seamless handoff
+(`decision.adoptsEmbeddedPreview` — Windows SDR, Linux SDR/X11, iOS mpv) the route is built with
+`existingPlayer: _preview.player`, so one engine carries *two* live-EOF watchdogs. A single clean
+server-side EOF ran both: `PlayerScreen._reconnectLive` re-resolved and reopened the player, and
+the preview's `_handleCompleted` re-resolved and reopened it again — finishing, as every
+`start()` does, with `setVolume(muted ? 0 : 100)` against the *preview's* remembered mute. Any
+hover-started (muted) preview therefore came back from a reconnect **silent, with the mute button
+lit**, and a single-connection provider saw two overlapping `create_link` calls where one
+reconnect was intended. `LivePreviewController.adoptedByFullscreen` is set by
+`_openLivePlayer` around the push (and cleared on the pop, including the failure path); the
+ownership decision itself is the pure `previewOwnsEofRecovery`, pinned in
+`test/fullscreen_handoff_test.dart` — the guard has to be testable without a libmpv engine,
+which a Windows dev box doesn't have. Fullscreen owns recovery for exactly as long as it owns the
+player; the preview takes it back the moment the route pops.
 
 The reconnect **timing policy** — stall threshold, attempt-scaled capped backoff — is shared
 Dart (`reconnectMinGapMs` in `player_screen.dart`, used by the embedded and Linux paths and the
