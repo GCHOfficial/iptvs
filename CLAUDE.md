@@ -435,7 +435,14 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   `search_path = ''`. Last-write-wins timestamp authority is server `now()` — clients send no
   timestamps. `profiles.updated_at` is the whole-snapshot revision: source and metadata child
   mutations advance it through `touch_profile_snapshot_revision`, so destructive device pushes
-  can detect intervening panel changes. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
+  can detect intervening panel changes. **A favorites-only update is exempt** — `profiles_touch`
+  preserves the revision when nothing but `favorites` moved, because favorites are device-owned
+  (the panel never touches them) and automatic pushing would otherwise fire the "panel changed"
+  overwrite warning constantly, training users to click through it. The child-revision path sets
+  a transaction-local `iptvs.force_profile_revision` flag so its `updated_at`-only write is *not*
+  exempt; both directions are pinned by `supabase/tests/15_profiles_favorites_revision.test.sql`,
+  and the "still advances" cases matter most — a revision that silently stops moving disarms the
+  guard. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
   render Postgres `details`/`hint` (CHECK-style "Failing row contains" leaks credentials).
 
 ## Database migrations

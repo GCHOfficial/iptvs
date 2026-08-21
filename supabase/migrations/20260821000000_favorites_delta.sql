@@ -203,23 +203,18 @@ begin
 
   perform public.assert_favorites_valid(merged);
 
-  -- `updated_at` advances, exactly as the legacy whole-set push_favorites makes
-  -- it advance. Note this is not optional: `profiles_touch` is a BEFORE UPDATE
-  -- trigger that sets it unconditionally, so omitting the column here would
-  -- change nothing.
+  -- `updated_at` is written here for symmetry with the legacy whole-set
+  -- push_favorites, but a **favorites-only update no longer advances the
+  -- profile's snapshot revision** — `20260821010000_profiles_favorites_revision`
+  -- makes `profiles_touch` exempt exactly this case, and preserves the old
+  -- value regardless of what the statement passes.
   --
-  -- KNOWN LIMITATION: `profiles.updated_at` is also the revision the *manual*
+  -- That matters because `profiles.updated_at` is the revision the *manual*
   -- push compares to warn "this profile changed on the panel — pushing will
-  -- replace those newer changes" before a destructive sources/metadata
-  -- overwrite. Favorites are device-owned (the panel never touches them), so a
-  -- favorites-only change can never be one of the panel edits that warning is
-  -- about — yet it advances the same timestamp, and automatic pushes make that
-  -- far more frequent than manual ones ever did. Fixing it properly means a
-  -- profiles-specific touch trigger that leaves the revision alone when only
-  -- `favorites` differs (comparing `to_jsonb(new) - 'favorites' - 'updated_at'`
-  -- against the same on OLD, so it stays correct as columns are added).
-  -- Deliberately not done here: it is surgery on the mechanism that guards
-  -- against overwriting panel edits, and wants its own reviewed change.
+  -- replace those newer changes". Favorites are device-owned, so a favorites
+  -- change is never one of the panel edits that warning is about; with
+  -- automatic pushing it would otherwise have fired constantly and trained the
+  -- user to click through the one prompt guarding against real data loss.
   update public.profiles
      set favorites = merged, updated_at = now()
    where id = p_profile_id and owner = o;

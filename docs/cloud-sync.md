@@ -95,6 +95,20 @@ authority is the **server** — `updated_at` is stamped by the `touch_updated_at
 trigger and explicit `now()` in the push RPCs; the snapshot-revision triggers also advance it for
 source and metadata inserts, updates, and deletes. Clients send no timestamps and none are
 compared.
+
+`profiles` is the one exception, and it has its own trigger
+(`profiles_touch_updated_at`): **a favorites-only update does not advance the revision**. Favorites
+are device-owned, so a favorites change is never one of the panel edits the manual push's
+"panel changed" warning is about — and once favorites sync automatically, every device's pushes
+would have moved the revision continuously, firing that dialog on a profile nobody had edited and
+teaching users to click through the only prompt standing between a device push and overwriting real
+panel edits. The exemption is computed as `to_jsonb(NEW) - 'favorites' - 'updated_at'` against the
+same on OLD, so a column added later joins the comparison automatically and the failure mode of
+forgetting this function is "the revision advances" — the safe direction. `updated_at` is projected
+out because the push RPCs set it explicitly. **`touch_profile_snapshot_revision` bumps the profile
+with an `updated_at`-only write, which is exactly the exempt shape**, so it sets a
+transaction-local `iptvs.force_profile_revision` flag the trigger honours; without that, source and
+metadata edits would silently stop being detectable and the guard would go quiet.
 Concurrent writers therefore resolve by write order, not clock, so clock skew and equal client
 timestamps are irrelevant. A pull always reflects whatever the last successful write left in the
 row.
