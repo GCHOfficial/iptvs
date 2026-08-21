@@ -171,7 +171,7 @@ dependencies {
 
     // Jetpack Compose for the native HDR player's control overlay. The BOM keeps
     // the androidx.compose.* artifacts on a single, mutually-compatible version.
-    val composeBom = platform("androidx.compose:compose-bom:2026.06.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
