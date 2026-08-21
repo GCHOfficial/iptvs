@@ -14,18 +14,16 @@ select plan(13);
 -- session's TimeZone — so the exact-string assertions below are only stable
 -- with it pinned. Not a property of the code under test, just of this file.
 set local timezone = 'UTC';
-set local role authenticated;
-
-select test.login_user() as owner_a \gset
-select gen_random_uuid() as profile_a_id \gset
-insert into public.profiles (id, owner, name)
-  values (:'profile_a_id'::uuid, :'owner_a'::uuid, 'Default');
-
-select gen_random_uuid() as source_a_id \gset
 
 -- ── merge_favorites: pure semantics ────────────────────────────────────────
--- Called directly as the table owner; the RPC's own guards are exercised
--- further down.
+--
+-- Run **before** dropping to `authenticated`, as the owning superuser.
+-- `merge_favorites` is revoked from public/anon/authenticated on purpose: it is
+-- an internal helper, reachable only through `push_favorites_delta`, which is
+-- SECURITY DEFINER and therefore runs as its owner. Calling it as
+-- `authenticated` here would fail with "permission denied for function" — and
+-- the right response to that is this ordering, not a grant that would widen the
+-- surface for the sake of a test.
 
 select is(
   public.merge_favorites(
@@ -148,6 +146,19 @@ select is(
   '[]'::jsonb,
   'a malformed tombstone is treated as expired and dropped'
 );
+
+-- ── everything below runs as a client ──────────────────────────────────────
+-- `assert_favorites_valid` is granted to authenticated (the validation triggers
+-- call it as the writing user), and the RPC guards need a real session.
+
+set local role authenticated;
+
+select test.login_user() as owner_a \gset
+select gen_random_uuid() as profile_a_id \gset
+insert into public.profiles (id, owner, name)
+  values (:'profile_a_id'::uuid, :'owner_a'::uuid, 'Default');
+
+select gen_random_uuid() as source_a_id \gset
 
 -- ── assert_favorites_valid: the new keys ───────────────────────────────────
 
