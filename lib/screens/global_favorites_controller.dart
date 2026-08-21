@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 
 import '../data/app_database.dart';
+import '../data/diagnostics_log.dart';
+import '../data/net.dart';
 import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
@@ -61,8 +63,28 @@ class GlobalFavoritesController extends ChangeNotifier {
   Future<void> load() async {
     final gen = ++_generation;
     _set(() => _loading = true);
-    final rows = await db.readFavoriteChannelsAcrossSources();
-    final configs = await store.list();
+    final List<({String sourceId, Channel channel})> rows;
+    final List<SourceConfig> configs;
+    try {
+      rows = await db.readFavoriteChannelsAcrossSources();
+      // Reads the OS keychain, which can fail outright (locked/unavailable
+      // backend, or no plugin at all under `flutter test`).
+      configs = await store.list();
+    } catch (error) {
+      // This view is additive: the per-source list must still load. Failing
+      // soft here keeps a broken keychain or cache read from taking the whole
+      // channel list down with it.
+      DiagnosticsLog.instance.add(
+        'library',
+        'cross-source favorites unavailable: ${redactText('$error')}',
+      );
+      if (_disposed || gen != _generation) return;
+      _set(() {
+        _items = const [];
+        _loading = false;
+      });
+      return;
+    }
     if (_disposed || gen != _generation) return;
     final byId = {for (final c in configs) c.id: c};
     _set(() {

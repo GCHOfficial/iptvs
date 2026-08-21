@@ -417,6 +417,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       key: ValueKey(_config!.id), // reset list state when the source changes
       repo: repo,
       config: _config!,
+      store: widget.store,
       onManageSources: _manageSources,
       profileName: _profileName,
       profileColorIndex: _profileColorIndex,

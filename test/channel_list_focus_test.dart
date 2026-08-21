@@ -28,11 +28,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/sources/demo_source.dart';
@@ -73,6 +75,9 @@ void main() {
   setUp(() async {
     tempDir = Directory.systemTemp.createTempSync('iptvs_focus_test');
     db = await AppDatabase.openAt('${tempDir.path}/iptv.db');
+    // The screen reads the source list (for the cross-source Favorites view)
+    // out of the keychain; without a mock the plugin channel is absent.
+    FlutterSecureStorage.setMockInitialValues({});
   });
 
   tearDown(() async {
@@ -86,6 +91,10 @@ void main() {
     label: 'Demo',
     fields: {},
   );
+
+  // Only the cross-source Favorites view reads this, and these tests configure
+  // a single source — so it stays empty and that view never appears.
+  final store = SourceStore();
 
   Future<void> pumpUntil(WidgetTester tester, Finder until) async {
     for (var i = 0; i < 60; i++) {
@@ -111,7 +120,7 @@ void main() {
     final repo = LibraryRepository(source: source, db: db);
     await tester.pumpWidget(
       MaterialApp(
-        home: ChannelListScreen(repo: repo, config: config),
+        home: ChannelListScreen(repo: repo, config: config, store: store),
       ),
     );
     // "Playlists" is the live category pane header — present once loaded.
@@ -130,7 +139,7 @@ void main() {
     final repo = LibraryRepository(source: source, db: db);
     await tester.pumpWidget(
       MaterialApp(
-        home: ChannelListScreen(repo: repo, config: config),
+        home: ChannelListScreen(repo: repo, config: config, store: store),
       ),
     );
     await pumpUntil(tester, find.text('Channel 0'));
@@ -919,7 +928,7 @@ void main() {
     final firstRepo = LibraryRepository(source: DemoSource(), db: db);
     await tester.pumpWidget(
       MaterialApp(
-        home: ChannelListScreen(repo: firstRepo, config: config),
+        home: ChannelListScreen(repo: firstRepo, config: config, store: store),
       ),
     );
     await pumpUntil(tester, find.text('Big Buck Bunny (H.264)'));
@@ -927,7 +936,7 @@ void main() {
     final replacementRepo = LibraryRepository(source: _ManySource(), db: db);
     await tester.pumpWidget(
       MaterialApp(
-        home: ChannelListScreen(repo: replacementRepo, config: config),
+        home: ChannelListScreen(repo: replacementRepo, config: config, store: store),
       ),
     );
     await pumpUntil(tester, find.text('Channel 0'));

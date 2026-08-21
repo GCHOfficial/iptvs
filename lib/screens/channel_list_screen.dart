@@ -9,6 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
+import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
@@ -21,6 +22,7 @@ import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
 import 'epg_grid_screen.dart';
 import 'favorites_controller.dart';
+import 'global_favorites_controller.dart';
 import 'legal_screen.dart';
 import 'live_controller.dart';
 import 'live_focus_coordinator.dart';
@@ -221,6 +223,11 @@ class ChannelListScreen extends StatefulWidget {
   /// The active source's config, carrying per-source preferences (e.g. hidden
   /// categories). Read for presentation only — browsing filters key off it.
   final SourceConfig config;
+
+  /// All configured sources. Needed by the cross-source Favorites view, which
+  /// labels each row with its owning source and builds that source's
+  /// repository on demand to play it — see [_ChannelListScreenState._repoFor].
+  final SourceStore store;
   final VoidCallback? onManageSources;
 
   /// The active profile's display name (used for the avatar initial) and its
@@ -237,6 +244,7 @@ class ChannelListScreen extends StatefulWidget {
     super.key,
     required this.repo,
     required this.config,
+    required this.store,
     this.onManageSources,
     this.profileName,
     this.profileColorIndex = 0,
@@ -264,6 +272,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // in a controller; the "last favorite removed → fall back to All" handling
   // stays here (it's tied to _categoryId / the media controllers).
   late FavoritesController _favorites;
+
+  /// The cross-source Favorites view's rows, and the per-source repositories
+  /// built on demand to play them (see [_repoFor]).
+  late GlobalFavoritesController _globalFavorites;
+  final Map<String, LibraryRepository> _foreignRepos = {};
   String? _categoryId;
   String _query = '';
 
@@ -384,17 +397,57 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           onEnrichError: _showSnack,
         ),
     };
+    _globalFavorites = GlobalFavoritesController(
+      db: widget.repo.db,
+      store: widget.store,
+    );
     _dataListenable = Listenable.merge([
       _live,
       _favorites,
+      _globalFavorites,
       ..._mediaControllers.values,
     ]);
+  }
+
+  /// The repository that owns [sourceId] — the active one where it matches,
+  /// otherwise a lightweight repository built on demand for a cross-source
+  /// favorite and cached for this screen's lifetime.
+  ///
+  /// No metadata providers: these exist only to resolve and play a live
+  /// channel, never to browse or enrich a catalog. Each one owns a [Source]
+  /// (its provider client), so [_disposeForeignRepos] must dispose them.
+  LibraryRepository _repoFor(String sourceId) {
+    if (sourceId == widget.repo.source.id) return widget.repo;
+    return _foreignRepos.putIfAbsent(sourceId, () {
+      final config = _globalFavorites.items
+          .firstWhere((item) => item.sourceId == sourceId)
+          .config;
+      return LibraryRepository(
+        source: config.build(),
+        db: widget.repo.db,
+        metadataProviders: const [],
+        autoEnrichMetadata: false,
+      );
+    });
+  }
+
+  Future<void> _disposeForeignRepos() async {
+    final repos = _foreignRepos.values.toList();
+    _foreignRepos.clear();
+    for (final repo in repos) {
+      await repo.source.dispose();
+    }
   }
 
   void _disposeRepositoryControllers() {
     _live.dispose();
     _preview.dispose();
     _favorites.dispose();
+    _globalFavorites.dispose();
+    // Fire-and-forget: each foreign repository owns a provider client whose
+    // dispose is async, and neither `dispose()` nor the source-change rebuild
+    // can await. Nothing reads them again — the map is cleared synchronously.
+    unawaited(_disposeForeignRepos());
     for (final controller in _mediaControllers.values) {
       controller.dispose();
     }
@@ -424,6 +477,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (!mounted) return;
     _focus.clampSelection();
     await _loadFavorites(ContentKind.live);
+    if (!mounted) return;
+    // Cross-source rows come from the cache, not from this source's load, so
+    // this neither waits on nor blocks the active catalog.
+    await _globalFavorites.load();
   }
 
   @override
@@ -641,6 +698,33 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     await _toggleFavorite(ContentKind.live, id);
   }
 
+  /// Unfavorite (or re-favorite) a channel belonging to a source other than the
+  /// active one, from the player's star.
+  ///
+  /// Writes straight to the cache: [FavoritesController] holds only the active
+  /// source's ids, so routing this through it would toggle the wrong source's
+  /// favorite — or, where the ids happen to collide, the wrong channel.
+  Future<void> _setForeignFavorite(
+    String sourceId,
+    String channelId,
+    bool favorite,
+  ) async {
+    await widget.repo.db.setFavorite(
+      sourceId,
+      ContentKind.live,
+      channelId,
+      favorite,
+    );
+    if (!mounted) return;
+    if (favorite) {
+      // Re-favorited from the player: re-read so the row comes back in order.
+      await _globalFavorites.load();
+    } else {
+      _globalFavorites.removeLocally(sourceId, channelId);
+    }
+    if (mounted) _focus.clampSelection();
+  }
+
   Future<void> _toggleFavorite(ContentKind kind, String id) async {
     final nowEmpty = await _favorites.toggle(kind, id);
     if (!mounted) return;
@@ -662,9 +746,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// something is favorited) followed by the enabled provider categories.
   List<Category> get _liveCategoriesForUi {
     final cats = _visibleCategories;
-    if (_favoriteIds(ContentKind.live).isEmpty) return cats;
+    final hasOwn = _favoriteIds(ContentKind.live).isNotEmpty;
+    // "All sources" only earns a row when it would actually show something the
+    // per-source view doesn't: favorites living in a *different* source. With
+    // one source configured (or favorites in only this one) the two lists are
+    // identical, and a duplicate entry is just noise on a remote.
+    final hasForeign = _globalFavorites.items.any(
+      (item) => item.sourceId != widget.repo.source.id,
+    );
+    if (!hasOwn && !hasForeign) return cats;
     return [
-      const Category(id: kFavoritesCategoryId, title: 'Favorites'),
+      if (hasOwn) const Category(id: kFavoritesCategoryId, title: 'Favorites'),
+      if (hasForeign)
+        const Category(
+          id: kAllSourcesFavoritesCategoryId,
+          title: 'Favorites · All sources',
+        ),
       ...cats,
     ];
   }
@@ -700,7 +797,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   // override ==): the controllers reassign fresh collections on change, and
   // the config is a fresh object per reload.
   List<Channel>? _visibleCache;
-  (String?, String, List<Channel>, Set<String>, SourceConfig)? _visibleKey;
+  (
+    String?,
+    String,
+    List<Channel>,
+    Set<String>,
+    SourceConfig,
+    List<GlobalFavoriteChannel>, // cross-source rows, reassigned on change
+  )?
+  _visibleKey;
 
   // Preview and last-played resolution look channels up by id on every body
   // rebuild — which is every D-pad press — and they search the *unfiltered*
@@ -724,6 +829,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _live.channels,
       _favoriteIds(ContentKind.live),
       widget.config,
+      _globalFavorites.items,
     );
     if (_visibleKey == key) return _visibleCache!;
     _visibleKey = key;
@@ -732,6 +838,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   List<Channel> _computeVisible() {
     final q = _query.trim().toLowerCase();
+    // The cross-source view is not a filter over the loaded catalog — its rows
+    // come from the cache across every source, so it replaces the list rather
+    // than narrowing it. Category hiding is per-source and deliberately not
+    // applied: a favorite is an explicit pick, exactly as in the per-source
+    // Favorites view.
+    if (_categoryId == kAllSourcesFavoritesCategoryId) {
+      return [
+        for (final item in _globalFavorites.items)
+          if (q.isEmpty || item.channel.name.toLowerCase().contains(q))
+            item.channel,
+      ];
+    }
     final favoritesView = _categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
@@ -814,51 +932,35 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }).toList();
   }
 
+  /// The cross-source favorite backing [channel], or null when this isn't the
+  /// "All sources" view.
+  ///
+  /// Matched by **identity**, not by id: the same provider channel id can exist
+  /// in several sources — the duplicate case this whole view has to handle —
+  /// and the visible list holds the controller's own [Channel] instances, so
+  /// identity is exact where an id would be ambiguous.
+  GlobalFavoriteChannel? _crossSourceFavoriteFor(Channel channel) {
+    if (_categoryId != kAllSourcesFavoritesCategoryId) return null;
+    for (final item in _globalFavorites.items) {
+      if (identical(item.channel, channel)) return item;
+    }
+    return null;
+  }
+
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
     final isWide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
-    if (!isWide) {
-      // On small screens, bypass preview and go fullscreen immediately
-      setState(() => _resolving = true);
-      try {
-        DiagnosticsLog.instance.add(
-          'library',
-          'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
-        );
-        final stream = await widget.repo.resolve(channel);
-        if (!mounted) return;
-        _notePlayedChannel(channel.id);
-        await Navigator.of(context).push(
-          PageRouteBuilder(
-            transitionDuration: Duration.zero,
-            reverseTransitionDuration: Duration.zero,
-            pageBuilder: (_, _, _) => PlayerScreen(
-              title: channel.name,
-              stream: stream,
-              sourceName: widget.repo.source.name,
-              epgNow: _live.now[channel.id],
-              epgNext: _live.next[channel.id],
-              favoriteInitial: _isFavorite(ContentKind.live, channel.id),
-              onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
-              // Live reloads (reconnect watchdog, "Go to live") re-resolve
-              // through the source: Stalker create_link tokens are
-              // single-use, so the originally resolved URL is dead after any
-              // portal-side kill.
-              resolveAgain: () => widget.repo.resolve(channel),
-              iosEngineKey: channel.id,
-            ),
-          ),
-        );
-        _restoreListFocusAfterPlayback();
-      } catch (e) {
-        if (mounted) {
-          _messenger.showSnackBar(
-            SnackBar(content: Text('Could not play: ${redactText('$e')}')),
-          );
-        }
-      } finally {
-        if (mounted) setState(() => _resolving = false);
-      }
+    // Cross-source rows always open fullscreen, never preview: the preview
+    // engine is bound to the active source's repository, so previewing a
+    // foreign channel would mean a second engine on a different provider. The
+    // whole view behaves alike, rather than previewing only the rows that
+    // happen to belong to the active source.
+    final crossSource = _crossSourceFavoriteFor(channel);
+    if (!isWide || crossSource != null) {
+      await _openFullscreenDirect(
+        channel,
+        crossSource == null ? widget.repo : _repoFor(crossSource.sourceId),
+      );
       return;
     }
 
@@ -876,6 +978,68 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // First OK starts the preview; on a TV remote it's deliberate, so
         // unmuted.
         await _preview.start(channel, muted: !_deliberatePreview);
+    }
+  }
+
+  /// Resolve and open fullscreen with no preview involved, through [repo] —
+  /// the active source's on a narrow screen, or the owning source's for a
+  /// cross-source favorite.
+  Future<void> _openFullscreenDirect(
+    Channel channel,
+    LibraryRepository repo,
+  ) async {
+    // A repository other than the active one means a cross-source favorite:
+    // its EPG and favorite state live under its own source id, not the active
+    // controllers' (which only ever hold the active source).
+    final foreign = !identical(repo, widget.repo);
+    {
+      setState(() => _resolving = true);
+      try {
+        DiagnosticsLog.instance.add(
+          'library',
+          'open live fullscreen source=${repo.source.name} channel=${channel.name} id=${channel.id}',
+        );
+        final stream = await repo.resolve(channel);
+        if (!mounted) return;
+        _notePlayedChannel(channel.id);
+        await Navigator.of(context).push(
+          PageRouteBuilder(
+            transitionDuration: Duration.zero,
+            reverseTransitionDuration: Duration.zero,
+            pageBuilder: (_, _, _) => PlayerScreen(
+              title: channel.name,
+              stream: stream,
+              sourceName: repo.source.name,
+              // EPG comes from the active source's controller, so a
+              // cross-source row shows none — its guide lives under its own
+              // source id and is only refreshed while that source is active.
+              epgNow: foreign ? null : _live.now[channel.id],
+              epgNext: foreign ? null : _live.next[channel.id],
+              favoriteInitial: foreign
+                  ? true
+                  : _isFavorite(ContentKind.live, channel.id),
+              onSetFavorite: (fav) => foreign
+                  ? _setForeignFavorite(repo.source.id, channel.id, fav)
+                  : _setLiveFavorite(channel.id, fav),
+              // Live reloads (reconnect watchdog, "Go to live") re-resolve
+              // through the source: Stalker create_link tokens are
+              // single-use, so the originally resolved URL is dead after any
+              // portal-side kill.
+              resolveAgain: () => repo.resolve(channel),
+              iosEngineKey: channel.id,
+            ),
+          ),
+        );
+        _restoreListFocusAfterPlayback();
+      } catch (e) {
+        if (mounted) {
+          _messenger.showSnackBar(
+            SnackBar(content: Text('Could not play: ${redactText('$e')}')),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _resolving = false);
+      }
     }
   }
 
@@ -2130,6 +2294,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       onRetry: () => _loadLive(forceRefresh: true),
       visible: visible,
       searchActive: _query.trim().length >= 2,
+      // Only the cross-source view labels its rows; elsewhere every row belongs
+      // to the active source and the chip would say the same thing on all of
+      // them.
+      sourceLabelFor: _categoryId == kAllSourcesFavoritesCategoryId
+          ? (channel) => _crossSourceFavoriteFor(channel)?.sourceLabel
+          : null,
       // Resolved inside the preview pane's own rebuild: on a TV remote the
       // panel follows the channel cursor, and the cursor now moves without
       // rebuilding this method.

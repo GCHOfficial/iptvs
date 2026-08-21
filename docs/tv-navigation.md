@@ -184,6 +184,16 @@ portrait no longer flips to a list while its own landscape shows a grid. Metric 
 both Android TV viewport forms, the ladder's reproduction of the old column counts, and the
 tile-width band.
 
+- **The cross-source Favorites view adds no navigation surface.** "Favorites · All sources" is an
+  ordinary entry in the category list, so it costs the Back ladder nothing — no new rung, no new
+  focus node, and the channel list stays the same selection model with the same `itemExtent`. That
+  was the reason for preferring it over a dedicated screen, which would have duplicated the list,
+  preview pane, EPG strip and D-pad model. Its rows carry a **source chip inline with the channel
+  name** rather than on a line of their own: index→offset math is `index * itemExtent`, so a row
+  that grows by a line breaks scrolling for the whole list. The chip's font stays below the title's
+  so the line height — and therefore the extent — is still set by the title alone, and
+  `layout_overflow_test.dart` sweeps it with real font metrics at text scales up to 2.0.
+
 - **Movement rules (deliberately asymmetric).** **Down wraps** at the end of the channel list and
   of the category list — the *only* infinite motion in the tab. **Up never wraps**: at the first
   row it **escapes upward** — categories → the search box; channels → the preview controls

@@ -174,6 +174,11 @@ void main() {
                     error: null,
                     onRetry: () {},
                     visible: channels,
+                    // Cross-source Favorites: the source chip shares the title
+                    // line, so it competes for width in the same fixed-extent
+                    // row. A long label is the worst case — with real font
+                    // metrics this is where a too-tight box shows up.
+                    sourceLabelFor: (_) => 'A Rather Long Panel Name pygjq',
                     resolvePreviewChannel: () => channels.first,
                     now: now,
                     next: next,

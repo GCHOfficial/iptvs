@@ -174,7 +174,17 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   (persisted on `SourceConfig.settings`). `SourceCapabilityReporter` owns the EPG/catch-up/
   resolution summary; the UI preserves `unknown` for playlist-dependent M3U behavior rather
   than guessing. Favorites are tagged from
-  the per-item surfaces and appear as a "Favorites" entry atop each category list. Live channels
+  the per-item surfaces and appear as a "Favorites" entry atop each category list. Live adds a
+  second **"Favorites · All sources"** entry when favorites exist in a source *other* than the
+  active one (`kAllSourcesFavoritesCategoryId`, `global_favorites_controller.dart`): it is **not**
+  a filter over the loaded catalog but a cache read across every `source_id`, so it lists channels
+  the active source has never heard of. It needs no schema or cloud change — the `favorites` key is
+  already `(source_id, kind, item_id)` and `SecretLocatorVault` is process-wide, not per-source —
+  and it plays a row through a repository built for its *owning* config (`_repoFor`), never the
+  active one. Deliberate limits: rows carry **no EPG** (guides are per-source and refreshed only
+  while that source is active) and **never preview** (the preview engine is bound to the active
+  repository), so OK opens fullscreen directly. The controller **fails soft** — a keychain or cache
+  error empties the view rather than taking the main channel list down with it. Live channels
   with an archive (`Channel.hasArchive`) get a catch-up button (`CatchupSheet`, played via
   `Source.resolveArchive`). `diagnostics_screen.dart` views/exports the in-memory log;
   `profile_pick_screen.dart` is the boot-time profile picker.
