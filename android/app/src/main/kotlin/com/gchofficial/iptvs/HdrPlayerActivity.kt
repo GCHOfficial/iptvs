@@ -212,10 +212,26 @@ class HdrPlayerActivity : ComponentActivity() {
         // in landscape, which is exactly the orientation a player is used in). The
         // Compose overlay insets itself via safeDrawingPadding, so only the video
         // extends under the cutout — no control is ever placed there.
+        // `ALWAYS` from API 30, `SHORT_EDGES` on 28–29. Android 15 deprecated
+        // DEFAULT/SHORT_EDGES/NEVER (Play Console flags the use): with
+        // edge-to-edge enforced from targetSdk 35 the window already extends
+        // into the cutout, so the three modes that describe *not* doing that no
+        // longer describe anything, and `ALWAYS` is the one that survives.
+        // `ALWAYS` is public API from 30 only, so the older constant stays for
+        // 28–29 — where it is not deprecated and is still the correct value.
+        // Behaviour is unchanged either way: the video reaches the physical edge
+        // instead of being letterboxed away from the cutout in landscape, and
+        // the Compose overlay still insets itself via `safeDrawingPadding`, so
+        // no control is ever placed under the cutout.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes = window.attributes.apply {
                 layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
             }
         }
         hideSystemUi()
