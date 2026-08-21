@@ -776,6 +776,12 @@ class CloudSync {
         await db.setFavorites(bySource.key, byKind.key, byKind.value);
       }
     }
+    // This rewrote favorites behind the UI's back — which now happens
+    // unattended, on launch and resume, not only when the user pressed Pull.
+    // Without this the on-screen stars and the Favorites category keep showing
+    // the pre-pull set until some unrelated reload, and the next toggle writes
+    // from that stale in-memory set.
+    db.notifyFavoritesReplaced();
   }
 
   /// Push this device's full source list (full `fields`, credentials included)
@@ -881,6 +887,8 @@ class CloudSync {
   Future<void> pushFavorites(SourceStore store, String profileId) async {
     final db = _db;
     if (db == null) return;
+    // Snapshot before building the payload — see the clear at the end.
+    final pendingAtStart = await db.readFavoritesOutbox();
     final managed = await _readCloudIds();
     final byUuid = {for (final c in await store.list()) c.id: c};
     final favorites = <Map<String, dynamic>>[];
@@ -903,6 +911,12 @@ class CloudSync {
       'push_favorites',
       params: {'p_favorites': favorites, 'p_profile_id': profileId},
     );
+    // The whole set just went up, so every queued delta is now redundant —
+    // and worse than redundant: a stale `remove X` left here would be re-sent
+    // later and delete an X that another device has since re-favorited. Clear
+    // exactly what was pending when the payload was built, so a toggle made
+    // during the round trip (not represented in it) still survives.
+    await db.clearFavoritesOutbox(pendingAtStart);
   }
 
   /// Push only what changed locally since the last successful push, as a
@@ -946,9 +960,12 @@ class CloudSync {
       sent.add(entry);
     }
     if (sent.isEmpty) {
-      // Everything pending belongs to sources the cloud doesn't manage; drop
-      // the rows so they don't sit in the outbox forever being re-examined.
-      await db.clearFavoritesOutbox(pending);
+      // Nothing here belongs to a cloud-managed source *right now*. Leave the
+      // rows alone rather than clearing them: "not managed" is also what a
+      // transient state looks like — mid-profile-switch, when the managed set
+      // has been reset but the new one isn't stored yet — and clearing on that
+      // reading silently loses real changes. Re-examining a handful of rows on
+      // the next push is far cheaper than being wrong here.
       return false;
     }
 

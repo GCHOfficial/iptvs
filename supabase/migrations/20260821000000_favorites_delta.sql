@@ -303,6 +303,24 @@ begin
 
   perform public.assert_favorites_valid(merged);
 
+  -- `updated_at` advances, exactly as the legacy whole-set push_favorites makes
+  -- it advance. Note this is not optional here: `profiles_touch` is a BEFORE
+  -- UPDATE trigger that sets `new.updated_at` unconditionally, so omitting the
+  -- column from this statement would change nothing.
+  --
+  -- KNOWN LIMITATION: `profiles.updated_at` is also the revision the *manual*
+  -- push compares to warn "this profile changed on the panel — pushing will
+  -- replace those newer changes" before a destructive sources/metadata
+  -- overwrite. Favorites are device-owned (the panel never touches them), so a
+  -- favorites-only change can never be one of the panel edits that warning is
+  -- about — yet it now advances the same timestamp, and automatic pushes make
+  -- that far more frequent than manual ones ever did. Fixing it properly means
+  -- a profiles-specific touch trigger that leaves the revision alone when only
+  -- `favorites` differs (comparing `to_jsonb(new) - 'favorites' - 'updated_at'`
+  -- against the same on OLD, so it stays correct as columns are added).
+  -- Deliberately not done in this migration: it is surgery on the mechanism
+  -- that guards against overwriting panel edits, and none of this SQL can be
+  -- executed locally to verify it.
   update public.profiles
      set favorites = merged, updated_at = now()
    where id = p_profile_id and owner = o;

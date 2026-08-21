@@ -291,6 +291,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// The cross-source Favorites view's rows, and the per-source repositories
   /// built on demand to play them (see [_repoFor]).
   late GlobalFavoritesController _globalFavorites;
+  StreamSubscription<void>? _favoritesReplacedSub;
   final Map<String, LibraryRepository> _foreignRepos = {};
   String? _categoryId;
   String _query = '';
@@ -416,6 +417,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       db: widget.repo.db,
       store: widget.store,
     );
+    // A cloud pull rewrites favorites without going through any controller, and
+    // now runs unattended (launch/resume). Re-read both sets when it does, or
+    // the stars on screen keep showing the pre-pull state.
+    _favoritesReplacedSub = widget.repo.db.favoritesReplaced.listen((_) {
+      if (!mounted) return;
+      unawaited(_loadFavorites(ContentKind.live));
+      unawaited(_globalFavorites.load());
+    });
     _dataListenable = Listenable.merge([
       _live,
       _favorites,
@@ -456,6 +465,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   void _disposeRepositoryControllers() {
+    unawaited(_favoritesReplacedSub?.cancel() ?? Future<void>.value());
+    _favoritesReplacedSub = null;
     _live.dispose();
     _preview.dispose();
     _favorites.dispose();
@@ -604,6 +615,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       return;
     }
 
+    // The cross-source view never previews — on any platform. The preview
+    // controller is bound to the *active* source's repository, so hovering a
+    // foreign row here would call `activeSource.resolve(foreignChannel)`:
+    // the wrong provider, a stream that fails or plays the wrong channel, and
+    // a single-use Stalker `create_link` spent for nothing. `_play` enforces
+    // the same rule for the OK path.
+    if (_categoryId == kAllSourcesFavoritesCategoryId) {
+      _previewTimer?.cancel();
+      return;
+    }
+
     _previewTimer?.cancel();
 
     // Debounce for 500ms (desktop mouse/keyboard).
@@ -741,6 +763,27 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
     if (mounted) _ensureCrossSourceCategoryStillOffered();
     if (mounted) _focus.clampSelection();
+  }
+
+  /// Star pressed on a row of the cross-source view.
+  ///
+  /// Every row there *is* a favorite, so the only meaningful action is removing
+  /// it — and it has to be removed from the source that owns it. Matching the
+  /// id against the visible rows keeps this correct when the same provider
+  /// channel id exists in several sources.
+  Future<void> _unfavoriteCrossSourceRow(String channelId) async {
+    for (final item in _globalFavorites.items) {
+      if (item.channel.id != channelId) continue;
+      // A row from the *active* source goes through the normal path so the
+      // per-source Favorites view's in-memory set stays in step; only a truly
+      // foreign row needs the direct write.
+      if (item.sourceId == widget.repo.source.id) {
+        await _toggleFavorite(ContentKind.live, channelId);
+      } else {
+        await _setForeignFavorite(item.sourceId, channelId, false);
+      }
+      return;
+    }
   }
 
   Future<void> _toggleFavorite(ContentKind kind, String id) async {
@@ -981,8 +1024,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// identity is exact where an id would be ambiguous.
   GlobalFavoriteChannel? _crossSourceFavoriteFor(Channel channel) {
     if (_categoryId != kAllSourcesFavoritesCategoryId) return null;
+    // Identity first — exact even when two sources carry the same channel id,
+    // which is the duplicate case this view exists to disambiguate.
     for (final item in _globalFavorites.items) {
       if (identical(item.channel, channel)) return item;
+    }
+    // Then by id. `load()` republishes fresh `Channel` instances (a re-favorite
+    // from the player, a `_loadLive` refresh), so a reload between the frame
+    // that built the row and this callback running would miss on identity
+    // alone — and falling through would play a *foreign* channel through the
+    // active source's repository. Ambiguous only when the same id exists in
+    // several sources and the instance is stale, which is strictly better than
+    // resolving against the wrong provider outright.
+    for (final item in _globalFavorites.items) {
+      if (item.channel.id == channel.id) return item;
     }
     return null;
   }
@@ -1032,6 +1087,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // its EPG and favorite state live under its own source id, not the active
     // controllers' (which only ever hold the active source).
     final foreign = !identical(repo, widget.repo);
+    // **Silence any running preview first.** This body used to be the
+    // narrow-screen path only, where no preview exists — it is now also the
+    // cross-source path on wide screens, where one may well be playing. A
+    // non-adopted fullscreen that leaves the preview running doubles the audio
+    // and holds a second provider connection open (CLAUDE.md, "any *non*-adopted
+    // fullscreen must silence the running preview"). Stopped, not paused: the
+    // channel is by definition a different one, so its connection must go.
+    if (_preview.channelId != null || _preview.nativeActive) {
+      await _preview.stop();
+    }
     {
       setState(() => _resolving = true);
       try {
@@ -1426,11 +1491,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// Open the TV-guide grid for the currently visible channels.
   void _openEpgGrid() {
     unawaited(_preview.stop());
+    // The grid is single-source by construction: it takes one repository and
+    // resolves every play through it, and its guide rows come from that
+    // source's `programmes`. Handing it the cross-source list would show an
+    // empty guide and then resolve a foreign channel against the wrong
+    // provider, so that view opens the grid over the active source's channels
+    // instead of its own rows.
+    final channels = _categoryId == kAllSourcesFavoritesCategoryId
+        ? _live.channels
+        : _visible;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
-          channels: _visible,
+          channels: channels,
           onPlayChannel: (channel) =>
               unawaited(_playChannelFullscreen(channel)),
           onPlayArchive: (channel, programme) =>
@@ -2328,6 +2402,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   Widget _buildLiveBody(List<Channel> visible) {
+    final crossSourceView = _categoryId == kAllSourcesFavoritesCategoryId;
     return LiveTabView(
       loading: _live.loading,
       error: _live.error,
@@ -2355,8 +2430,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       categoryRowExtent: _liveCategoryRowExtent(),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
-      isFavorite: (id) => _isFavorite(ContentKind.live, id),
-      onToggleFavorite: (id) => _toggleFavorite(ContentKind.live, id),
+      // In the cross-source view a row's favorite state belongs to *its* source,
+      // not the active one. Reading it from `FavoritesController` (keyed to the
+      // active source) drew every foreign row with an empty star, and toggling
+      // wrote a phantom favorite under the wrong source id — which the delta
+      // push would then have sent to the cloud.
+      isFavorite: crossSourceView
+          ? (id) => true
+          : (id) => _isFavorite(ContentKind.live, id),
+      onToggleFavorite: crossSourceView
+          ? (id) => unawaited(_unfavoriteCrossSourceRow(id))
+          : (id) => _toggleFavorite(ContentKind.live, id),
       onPlayChannel: _play,
       onPreviewChannel: (channel) => unawaited(_showPreviewSheet(channel)),
       onCatchup: _showCatchupSheet,

@@ -451,6 +451,70 @@ void main() {
       await db.close();
     });
 
+    test('upgrading seeds the outbox with existing favorites', () async {
+      // The data-loss guard. Favorites now sync automatically and the pull
+      // mirrors the profile, clearing cloud-managed sources before applying the
+      // cloud set. A device upgrading with favorites it never pushed would have
+      // an empty outbox — and every one of those would be deleted by a sync the
+      // user never asked for. Seeding says the true thing: they are local
+      // changes the cloud has not been told about.
+      final path = dbPath();
+      await createReleasedDatabaseFixture(path, 12);
+      final db = await AppDatabase.openAt(path);
+
+      final pending = await db.readFavoritesOutbox();
+      expect(
+        pending.map((e) => (e.sourceId, e.kind, e.itemId, e.add)),
+        contains(('released-source', ContentKind.live, 'channel-1', true)),
+      );
+      // The favorite itself is untouched by the seeding.
+      expect(
+        await db.readFavoriteIds('released-source', ContentKind.live),
+        contains('channel-1'),
+      );
+      await db.close();
+    });
+
+    test('a queued removal survives the upgrade branch re-running', () async {
+      // There is no onDowngrade: an older build re-stamps the version down and
+      // a newer one then re-runs every branch. The seed must not overwrite a
+      // pending *removal* with an add — that would resurrect what the user
+      // deleted.
+      final path = dbPath();
+      await createReleasedDatabaseFixture(path, 12);
+      final first = await AppDatabase.openAt(path);
+      await first.setFavorite(
+        'released-source',
+        ContentKind.live,
+        'channel-1',
+        false,
+      );
+      expect(
+        (await first.readFavoritesOutbox())
+            .where((e) => e.itemId == 'channel-1')
+            .single
+            .add,
+        isFalse,
+      );
+      await first.close();
+
+      // Re-stamp the version down, as an older build would, then reopen.
+      final raw = await databaseFactoryFfi.openDatabase(path);
+      await raw.setVersion(12);
+      await raw.close();
+
+      final second = await AppDatabase.openAt(path);
+      expect(
+        (await second.readFavoritesOutbox())
+            .where((e) => e.itemId == 'channel-1')
+            .single
+            .add,
+        isFalse,
+        reason: 'a re-run must not turn a pending removal back into an add',
+      );
+      await second.close();
+    });
+
     test('survives a library refresh (replaceLibrary)', () async {
       final db = await AppDatabase.openAt(dbPath());
       await db.replaceLibrary(
