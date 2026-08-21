@@ -219,6 +219,13 @@ class ExoPlayerEngine(
             player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
         }
 
+    override val droppedFrameCount: Int
+        get() = if (released) {
+            -1
+        } else {
+            player.videoDecoderCounters?.droppedBufferCount ?: -1
+        }
+
     /**
      * Sends [HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC] to this player's own
      * video renderer. Asynchronous by construction — the message is applied on
@@ -367,13 +374,27 @@ class ExoPlayerEngine(
             .setDefaultRequestProperties(headers)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
-        renderersFactory = HdrRenderersFactory(context) { label ->
-            // Reported on the playback thread; marshal to main for Compose state.
-            mainHandler.post {
-                decoderDynamicRange = label
-                state.dynamicRange = label
-            }
-        }
+        renderersFactory = HdrRenderersFactory(
+            context,
+            onDynamicRange = { label ->
+                // Reported on the playback thread; marshal to main for Compose state.
+                mainHandler.post {
+                    decoderDynamicRange = label
+                    state.dynamicRange = label
+                }
+            },
+            onCodecName = { name ->
+                // Which decoder actually got built. `enableDecoderFallback` is on
+                // below, so a hardware decoder that fails to configure lands
+                // silently on the platform's software one — which cannot sustain
+                // 4K50 and plays the stream in slow motion while every health flag
+                // still reads healthy. The name is the only place that shows.
+                mainHandler.post {
+                    val kind = if (isSoftwareDecoder(name)) "software" else "hardware"
+                    onDiagnostic?.invoke("video decoder=$name kind=$kind")
+                }
+            },
+        )
         renderersFactory.setEnableDecoderFallback(true)
 
         // Without this the media3 DefaultLoadControl defaults apply, which hold

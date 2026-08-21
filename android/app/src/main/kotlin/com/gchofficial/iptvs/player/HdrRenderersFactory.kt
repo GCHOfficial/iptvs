@@ -34,6 +34,7 @@ import androidx.media3.exoplayer.video.VideoRendererEventListener
 class HdrRenderersFactory(
     context: Context,
     private val onDynamicRange: (String) -> Unit,
+    private val onCodecName: (String) -> Unit = {},
 ) : DefaultRenderersFactory(context) {
 
     /**
@@ -69,6 +70,7 @@ class HdrRenderersFactory(
             eventListener,
             MAX_DROPPED_FRAMES_TO_NOTIFY,
             onDynamicRange,
+            onCodecName,
         )
         videoRenderer = renderer
         out.add(renderer)
@@ -91,6 +93,7 @@ class HdrMediaCodecVideoRenderer(
     eventListener: VideoRendererEventListener?,
     maxDroppedFramesToNotify: Int,
     private val onDynamicRange: (String) -> Unit,
+    private val onCodecName: (String) -> Unit = {},
 ) : MediaCodecVideoRenderer(
     context,
     codecAdapterFactory,
@@ -134,6 +137,33 @@ class HdrMediaCodecVideoRenderer(
             return
         }
         super.handleMessage(messageType, message)
+    }
+
+    /**
+     * Reports which `MediaCodec` actually got built.
+     *
+     * The engine sets `enableDecoderFallback`, so when the hardware decoder
+     * fails to configure media3 quietly moves to the next one in the list —
+     * which is the platform's *software* decoder. A software HEVC decoder
+     * cannot sustain 4K50: the stream plays, but crawls. Nothing else the
+     * engine exposes distinguishes that from healthy playback (it is not an
+     * error, not a stall, and `isPlaying` stays true), so the decoder's name is
+     * the only signal. Fires on every codec init, which is also how a repeated
+     * rebuild becomes visible.
+     */
+    override fun onCodecInitialized(
+        name: String,
+        configuration: MediaCodecAdapter.Configuration,
+        initializedTimestampMs: Long,
+        initializationDurationMs: Long,
+    ) {
+        super.onCodecInitialized(
+            name,
+            configuration,
+            initializedTimestampMs,
+            initializationDurationMs,
+        )
+        onCodecName(name)
     }
 
     override fun onOutputFormatChanged(format: Format, mediaFormat: MediaFormat?) {

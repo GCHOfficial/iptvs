@@ -27,6 +27,7 @@ import com.gchofficial.iptvs.player.FrameLivenessWatch
 import com.gchofficial.iptvs.player.LiveLocator
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
+import com.gchofficial.iptvs.player.PlaybackStatsSampler
 import com.gchofficial.iptvs.player.PlayerCallbacks
 import com.gchofficial.iptvs.player.PlayerBackAction
 import com.gchofficial.iptvs.player.PlayerBackGuard
@@ -156,6 +157,27 @@ class HdrPlayerActivity : ComponentActivity() {
      * that failed. Everything routed through here is chosen to be safe to
      * export verbatim — never a URL, header or provider reply.
      */
+    private val playbackStats = PlaybackStatsSampler()
+
+    /**
+     * Periodic frame-rate/drop line while playing.
+     *
+     * Rides the existing ticker rather than adding a timer, and only while the
+     * engine says it is playing: a paused or buffering player renders nothing,
+     * and reporting 0fps for it would bury the case this exists to catch.
+     */
+    private fun samplePlaybackStats() {
+        if (!uiState.isPlaying || uiState.isBuffering) {
+            return
+        }
+        val active = engine ?: return
+        playbackStats.sample(
+            nowMs = System.currentTimeMillis(),
+            rendered = active.renderedFrameCount,
+            dropped = active.droppedFrameCount,
+        )?.let { logNative("playback $it") }
+    }
+
     private fun logNative(note: String) {
         MainActivity.instance?.get()?.logPlaybackDiagnostic(
             "native $note ms=${SystemClock.elapsedRealtime() - startedAtMs}",
@@ -627,6 +649,7 @@ class HdrPlayerActivity : ComponentActivity() {
             while (isActive) {
                 engine?.syncProgress()
                 pollLiveReconnect()
+                samplePlaybackStats()
                 // Faster while a frozen renderer is still attributable to the
                 // fullscreen surface claim: that window is judged on
                 // HANDOFF_POST_FRAME_STALL_MS, which the base cadence cannot
