@@ -99,14 +99,32 @@ object SharedEngine {
         engine?.play()
     }
 
+    /**
+     * Routes the preview engine's own reports into the exportable log, tagged
+     * so they are not mistaken for the fullscreen Activity's. Credential-free
+     * by construction, like every other line on this channel.
+     */
+    private val previewDiagnostics: (String) -> Unit = { note ->
+        mainHandler.post {
+            com.gchofficial.iptvs.MainActivity.instance?.get()
+                ?.logPlaybackDiagnostic("preview $note")
+        }
+    }
+
     private fun bindPreviewCallbacks(target: ExoPlayerEngine) {
         target.onUnsupportedVideo = { handlePreviewUnsupported() }
         target.onRecoverableError = { onPreviewError?.invoke("stream error") }
         target.onVideoSizeChanged = { w, h -> applyPreviewAspect(w, h) }
-        // The preview has no diagnostics of its own to report, and this is the
-        // path a detaching fullscreen returns through — so it is also what
-        // drops the Activity closure `adoptForFullscreen` installed.
-        target.onDiagnostic = null
+        // This is the path a detaching fullscreen returns through, so it must
+        // drop the Activity closure `adoptForFullscreen` installed. A
+        // preview-owned sink does that just as well as null while keeping the
+        // one report the preview genuinely owns: **which video decoder it
+        // built**. The engine carries into fullscreen on adoption, so a
+        // software fallback that happened at preview start is still the decoder
+        // running fullscreen — and with this nulled, that case logged nothing
+        // at all and its absence was indistinguishable from a healthy
+        // hardware decode.
+        target.onDiagnostic = previewDiagnostics
         target.onClaimedSurfaceFirstFrame = null
     }
 
