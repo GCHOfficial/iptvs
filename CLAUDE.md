@@ -475,6 +475,14 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
   top-level window.
+- **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
+  mpv's `--wid` parent hook. mpv reaches `ResizeBuffers` only via a real `WM_SIZE` on its child HWND
+  (`VO_EVENT_RESIZE`), and its `EqualRect` early-out never revisits a size it missed: a dropped edge
+  left a `1920x1080` surface with mpv's child at the pre-fullscreen `1264x681`, painting the top-left
+  with black around it, permanently. The post-transition passes additionally **force** a `WM_SIZE`
+  (1px step) even when sizes agree, covering the sibling failure where `resize()` abandoned a
+  swapchain resize mid-frame — same symptom, and undetectable from Dart (`osd-dimensions` reads
+  `vo->dwidth/dheight`, already correct there). A repaint-level "VO refresh" fixes neither.
 - **Android preview and fullscreen share one engine** (`SharedEngine` adoption) — only one
   provider connection ever exists (single-connection accounts); the Activity never releases an
   adopted engine, and the preview is never paused around the *adopted* handoff. But **any

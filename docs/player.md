@@ -614,6 +614,40 @@ a silent black overlay (the pre-PR-9 behavior). An adopted player on this path l
 overlay (its audio keeps running, as it did before, but the failure is now visible and
 recoverable — a successful Retry reaches the normal hot-swap).
 
+**mpv's VO window is sized by the runner, not by mpv's own parent hook**
+(`ResyncNativeVideoRenderer`, called from `ResizeNativeVideoSurface` and re-checked a few times
+after a fullscreen/mini transition via `ScheduleNativeVideoRendererResync`). In `--wid` embedding
+mpv creates its own child HWND inside the surface and tracks the parent through a hook of its own
+(`resize_child_win` in mpv's `w32_common.c`), which reaches its D3D11 `IDXGISwapChain::ResizeBuffers`
+**only** when that hook produces a real `WM_SIZE` on the child: the VO re-checks the swapchain on
+`VO_EVENT_RESIZE` and nothing else, and `resize_child_win`'s own `EqualRect` early-out means a size
+mpv never learned about is never revisited. That edge goes missing in practice. Captured live on a
+fullscreen transition: the surface (and the Flutter view, and the top-level) were all `1920x1080`
+while mpv's child sat at the pre-fullscreen `1264x681`, drawing the old size into the **top-left with
+black filling the rest** — and permanently, because mpv only re-checks on a size *change*. Re-asserting
+the size is exactly the stimulus mpv applies to itself, at the one moment it may not fire; when the
+hook did fire it is a no-op, since matching sizes generate no `WM_SIZE` at all. The `SetWindowPos`
+uses `SWP_ASYNCWINDOWPOS` (mpv's flags) because that window belongs to mpv's VO thread — a
+synchronous call would block the UI thread on it.
+
+**The sibling failure — same symptom, sizes already agree — is covered by the same pass.** mpv's
+`resize()` also gives up when a frame is in flight (`"Attempt at resizing while a frame was in
+progress!"`) and never retries, leaving a stale swapchain behind a correctly-sized window: identical
+on screen, invisible to a size comparison. So the post-transition passes run with `force_event`,
+which steps the child through a 1px-shorter height when the sizes match, manufacturing the
+`VO_EVENT_RESIZE` that re-runs `ResizeBuffers`. All `kNativeVideoResyncPasses` passes force, giving
+several retries ~250 ms apart rather than one shot at a resize that may fail again for the same
+reason. It is deliberately scoped to the discrete transitions: `ResizeNativeVideoSurface`'s own call
+passes `force_event=false`, so live window dragging never pays for it.
+
+Two traps if this is ever revisited. **A repaint-level "VO refresh" cannot fix either case**:
+swapchain size is re-evaluated on `VO_EVENT_RESIZE` only, so forcing frames to re-render just
+repaints the same wrong-sized buffer; only a real size change (or a full `vo` re-init, which
+black-flashes and rebuilds the D3D11 device) reaches `ResizeBuffers`. And **`osd-dimensions` is not
+a valid health check** — it reports `vo->dwidth/dheight`, which is already correct in the sibling
+case, so a mismatch-gated fix would silently miss it. That is why the forcing pass is unconditional
+rather than gated on an observed mismatch: the failure it covers cannot be observed from Dart.
+
 A **mini-player** mode (`setMiniPlayer`, toggled with the `M` key) restyles the top-level window
 into a compact frameless always-on-top window docked bottom-right — draggable via the video area
 (manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,

@@ -38,6 +38,14 @@ constexpr UINT kNativeVideoSurfaceInputMessage = WM_APP + 0x4D;
 constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
+constexpr UINT_PTR kNativeVideoResyncTimer = 0x5032;
+// Verification passes after a discrete window transition (fullscreen /
+// mini-player). The immediate resync in ResizeNativeVideoSurface covers the
+// common case; these re-checks catch an mpv VO window that is (re)created
+// moments *after* the transition — chiefly the HDR embedded→native
+// escalation, which hot-swaps `wid`/`vo` on an already-playing player.
+constexpr UINT kNativeVideoResyncIntervalMs = 250;
+constexpr int kNativeVideoResyncPasses = 4;
 constexpr int kNativeTopControlsHeight = 64;
 // The bottom bar is a single row for live (no scrubber) and two rows for VOD
 // (scrubber row + control row).
@@ -2284,6 +2292,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     return result;
   }
   case WM_TIMER:
+    if (wparam == kNativeVideoResyncTimer) {
+      // force_event: these passes follow a discrete transition, so they also
+      // retry a swapchain resize that mpv abandoned mid-frame. Cheap here (a
+      // few per fullscreen toggle) and never reached while dragging a window.
+      ResyncNativeVideoRenderer(true);
+      if (--native_video_resync_passes_ <= 0) {
+        KillTimer(hwnd, kNativeVideoResyncTimer);
+      }
+      return 0;
+    }
     if (wparam == kNativeControlsHideTimer) {
       KillTimer(hwnd, kNativeControlsHideTimer);
       if (native_controls_pinned_) {
@@ -2381,6 +2399,8 @@ HWND FlutterWindow::CreateNativeVideoSurface() {
 }
 
 void FlutterWindow::DestroyNativeVideoSurface() {
+  KillTimer(GetHandle(), kNativeVideoResyncTimer);
+  native_video_resync_passes_ = 0;
   if (native_video_surface_) {
     DestroyWindow(native_video_surface_);
     native_video_surface_ = nullptr;
@@ -2408,7 +2428,86 @@ void FlutterWindow::ResizeNativeVideoSurface() {
              TRUE);
   SetWindowPos(native_video_surface_, HWND_TOP, 0, 0, 0, 0,
                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  ResyncNativeVideoRenderer();
   BringNativeControlsToFront();
+}
+
+// Size mpv's own VO window to the surface instead of trusting mpv to notice.
+//
+// In `--wid` embedding mpv tracks the parent through a hook of its own
+// (`resize_child_win` in w32_common.c) and reaches its D3D11 `ResizeBuffers`
+// *only* when that hook produces a real `WM_SIZE` on its child window — the VO
+// re-checks the swapchain on `VO_EVENT_RESIZE` and nothing else, and its own
+// `EqualRect` early-out means a size it never learned about is never revisited.
+// That hook edge goes missing in practice: captured live on a fullscreen
+// transition, the surface was 1920x1080 while mpv's child sat at the
+// pre-fullscreen 1264x681, painting the old size into the top-left with black
+// filling the rest — permanently, since mpv only re-checks on a size *change*.
+// Re-asserting the size here is exactly the stimulus mpv uses on itself, at the
+// one moment it may not fire. When the hook did fire this is a no-op: matching
+// sizes produce no `WM_SIZE` at all.
+//
+// |force_event| additionally covers the *sibling* failure, where the window
+// sizes already agree but the swapchain is still stale: mpv's `resize()` gives
+// up when a frame is in flight ("Attempt at resizing while a frame was in
+// progress!") and, exactly as above, never retries. That looks identical on
+// screen but is invisible to a size comparison — and to `osd-dimensions`, which
+// reports `vo->dwidth/dheight` and is already correct in that case. So when the
+// sizes match, step through a 1px-shorter height to manufacture the
+// `VO_EVENT_RESIZE` that re-runs `ResizeBuffers`. Used only on the discrete
+// post-transition passes, never on live window dragging.
+void FlutterWindow::ResyncNativeVideoRenderer(bool force_event) {
+  if (!native_video_surface_) {
+    return;
+  }
+  RECT client;
+  if (!GetClientRect(native_video_surface_, &client)) {
+    return;
+  }
+  const int width = client.right - client.left;
+  const int height = client.bottom - client.top;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  // Direct children only: the surface hosts nothing but mpv's VO window (the
+  // controls overlay is an owned WS_POPUP of the top-level, not a child here).
+  for (HWND child = GetWindow(native_video_surface_, GW_CHILD); child;
+       child = GetWindow(child, GW_HWNDNEXT)) {
+    RECT r;
+    if (!GetClientRect(child, &r)) {
+      continue;
+    }
+    const bool matches =
+        r.right - r.left == width && r.bottom - r.top == height;
+    if (matches && !force_event) {
+      continue;
+    }
+    // SWP_ASYNCWINDOWPOS because the window belongs to mpv's VO thread, not
+    // this one — a synchronous SetWindowPos would block the UI thread until
+    // mpv serviced it. mpv passes the same flags in resize_child_win, for the
+    // same reason.
+    constexpr UINT kFlags = SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOMOVE |
+                            SWP_NOZORDER | SWP_NOOWNERZORDER |
+                            SWP_NOSENDCHANGING;
+    if (matches) {
+      // Sizes already agree, so the call below would generate no `WM_SIZE` on
+      // its own. Land on a genuinely different size first (see |force_event|).
+      SetWindowPos(child, nullptr, 0, 0, width, std::max(1, height - 1),
+                   kFlags);
+    }
+    SetWindowPos(child, nullptr, 0, 0, width, height, kFlags);
+  }
+}
+
+// Re-check for a short while after a discrete window transition, so an mpv VO
+// window created just *after* the transition is caught too.
+void FlutterWindow::ScheduleNativeVideoRendererResync() {
+  if (!native_video_surface_) {
+    return;
+  }
+  native_video_resync_passes_ = kNativeVideoResyncPasses;
+  SetTimer(GetHandle(), kNativeVideoResyncTimer, kNativeVideoResyncIntervalMs,
+           nullptr);
 }
 
 void FlutterWindow::SetNativeVideoSurfaceInsets(int top, int bottom) {
@@ -2792,6 +2891,7 @@ void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
     native_window_fullscreen_ = false;
   }
   ResizeNativeVideoSurface();
+  ScheduleNativeVideoRendererResync();
   RecreateNativeControls();
   ShowNativeControls(true);
   if (native_controls_pinned_ || !g_native_control_state.playing) {
@@ -2853,6 +2953,7 @@ void FlutterWindow::SetNativeWindowMiniPlayer(bool mini) {
     g_native_window_mini = false;
   }
   ResizeNativeVideoSurface();
+  ScheduleNativeVideoRendererResync();
   RecreateNativeControls();
   ShowNativeControls(true);
   if (native_controls_pinned_ || !g_native_control_state.playing) {
