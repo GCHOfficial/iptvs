@@ -52,6 +52,15 @@ interface PlaybackEngine {
     val renderedFrameCount: Int get() = -1
 
     /**
+     * Frames the decoder threw away rather than rendered, or -1 when the engine
+     * doesn't count them. Paired with [renderedFrameCount] by
+     * [PlaybackStatsSampler]: a low frame rate *with* drops is a decoder that
+     * cannot keep up, and one *without* drops is frames arriving late — the
+     * same symptom on screen, opposite causes.
+     */
+    val droppedFrameCount: Int get() = -1
+
+    /**
      * Re-create the **video decoder** against the output surface it is already
      * pointed at, keeping everything else running: the demuxer, the loaded
      * buffer, the audio pipeline, and — the one that matters on

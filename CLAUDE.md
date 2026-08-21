@@ -174,7 +174,17 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   (persisted on `SourceConfig.settings`). `SourceCapabilityReporter` owns the EPG/catch-up/
   resolution summary; the UI preserves `unknown` for playlist-dependent M3U behavior rather
   than guessing. Favorites are tagged from
-  the per-item surfaces and appear as a "Favorites" entry atop each category list. Live channels
+  the per-item surfaces and appear as a "Favorites" entry atop each category list. Live adds a
+  second **"Favorites · All sources"** entry when favorites exist in a source *other* than the
+  active one (`kAllSourcesFavoritesCategoryId`, `global_favorites_controller.dart`): it is **not**
+  a filter over the loaded catalog but a cache read across every `source_id`, so it lists channels
+  the active source has never heard of. It needs no schema or cloud change — the `favorites` key is
+  already `(source_id, kind, item_id)` and `SecretLocatorVault` is process-wide, not per-source —
+  and it plays a row through a repository built for its *owning* config (`_repoFor`), never the
+  active one. Deliberate limits: rows carry **no EPG** (guides are per-source and refreshed only
+  while that source is active) and **never preview** (the preview engine is bound to the active
+  repository), so OK opens fullscreen directly. The controller **fails soft** — a keychain or cache
+  error empties the view rather than taking the main channel list down with it. Live channels
   with an archive (`Channel.hasArchive`) get a catch-up button (`CatchupSheet`, played via
   `Source.resolveArchive`). `diagnostics_screen.dart` views/exports the in-memory log;
   `profile_pick_screen.dart` is the boot-time profile picker.
@@ -334,6 +344,20 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.
+- **Favorites are the one collection that syncs automatically** (`cloud_auto_sync.dart`, started
+  from `HomeShell`; everything else stays manual Pull/Push). That works only because they push a
+  **delta**, not a set: `push_favorites_delta` merges adds/removes per row under the profile's row
+  lock, so same-row conflicts resolve by arrival order and **no `updated_at` revision guard is
+  needed**. The delta comes from `favorites_outbox` (schema v14), written only by `setFavorite`
+  (user intent) and never by the pull, which rebases the outbox onto the pulled state.
+- **No tombstones in `profiles.favorites`, deliberately — don't add keys to that element shape.**
+  A removal drops the element outright. Tombstones only pay off in a "changes since T" sync; this
+  pull **mirrors** the profile, so an absent favorite is already a deletion on every device. More
+  importantly the shipped `pullFavorites` reads only `source_id`/`kind`/`item_id`, so any new key
+  is invisible to it — a `deleted_at` entry looked like an ordinary favorite, meaning an old store
+  build would pull a deleted favorite back and push the resurrection to everyone. That is why the
+  legacy whole-set `push_favorites` stays forever and why the migration is safe to deploy ahead of
+  a store release: nothing changes what an old client reads or writes.
 - Devices are anonymous users with **no direct table writes**; the only device→cloud write path
   is the owner-scoped `push_*` RPCs. Push is row-level last-write-wins **refined by field-preserve**:
   broad fields merge through `merge_preserving_nonempty(stored, incoming)` so a device push can
@@ -411,12 +435,23 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   `search_path = ''`. Last-write-wins timestamp authority is server `now()` — clients send no
   timestamps. `profiles.updated_at` is the whole-snapshot revision: source and metadata child
   mutations advance it through `touch_profile_snapshot_revision`, so destructive device pushes
-  can detect intervening panel changes. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
+  can detect intervening panel changes. **A favorites-only update is exempt** — `profiles_touch`
+  preserves the revision when nothing but `favorites` moved, because favorites are device-owned
+  (the panel never touches them) and automatic pushing would otherwise fire the "panel changed"
+  overwrite warning constantly, training users to click through it. The child-revision path sets
+  a transaction-local `iptvs.force_profile_revision` flag so its `updated_at`-only write is *not*
+  exempt; both directions are pinned by `supabase/tests/15_profiles_favorites_revision.test.sql`,
+  and the "still advances" cases matter most — a revision that silently stops moving disarms the
+  guard. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
   render Postgres `details`/`hint` (CHECK-style "Failing row contains" leaks credentials).
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 13` (v9: `favorites` table, deliberately separate from
+`AppDatabase` is at `schemaVersion = 14` (v14: `favorites_outbox`, the pending local favorite
+changes a cloud *delta* push sends — a favorite in the cloud but not locally is either "deleted
+here" or "added there and not pulled yet", and `favorites` alone can't tell those apart; written
+only by `setFavorite` (user intent), never by the pull, which mirrors through
+`clearFavorites`/`setFavorites`; v9: `favorites` table, deliberately separate from
 `channels`/`media_items` so a refresh never drops favorites; v10: `channels.archive_days` →
 `Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching; v12:
 `idx_prog_source_start(source_id, start)` on `programmes` for the source+time now/next lookup —
@@ -475,6 +510,14 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
   top-level window.
+- **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
+  mpv's `--wid` parent hook. mpv reaches `ResizeBuffers` only via a real `WM_SIZE` on its child HWND
+  (`VO_EVENT_RESIZE`), and its `EqualRect` early-out never revisits a size it missed: a dropped edge
+  left a `1920x1080` surface with mpv's child at the pre-fullscreen `1264x681`, painting the top-left
+  with black around it, permanently. The post-transition passes additionally **force** a `WM_SIZE`
+  (1px step) even when sizes agree, covering the sibling failure where `resize()` abandoned a
+  swapchain resize mid-frame — same symptom, and undetectable from Dart (`osd-dimensions` reads
+  `vo->dwidth/dheight`, already correct there). A repaint-level "VO refresh" fixes neither.
 - **Android preview and fullscreen share one engine** (`SharedEngine` adoption) — only one
   provider connection ever exists (single-connection accounts); the Activity never releases an
   adopted engine, and the preview is never paused around the *adopted* handoff. But **any

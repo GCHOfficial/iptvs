@@ -322,6 +322,10 @@ class LiveTabView extends StatelessWidget {
   final Map<String, Programme> now;
   final Map<String, Programme> next;
 
+  /// Owning-source name for a row, or null to show no chip. Non-null only in
+  /// the cross-source Favorites view — see [_ChannelTile.sourceLabel].
+  final String? Function(Channel channel)? sourceLabelFor;
+
   final bool deliberate;
   final bool resolving;
   final ScrollController scrollController;
@@ -377,6 +381,7 @@ class LiveTabView extends StatelessWidget {
     required this.onRetry,
     required this.visible,
     this.searchActive = false,
+    this.sourceLabelFor,
     required this.resolvePreviewChannel,
     required this.now,
     required this.next,
@@ -444,6 +449,7 @@ class LiveTabView extends StatelessWidget {
                 index: i,
                 child: _ChannelTile(
                   channel: c,
+                  sourceLabel: sourceLabelFor?.call(c),
                   now: now[c.id],
                   next: next[c.id],
                   favorite: isFavorite(c.id),
@@ -1667,6 +1673,15 @@ class _ChannelTile extends StatefulWidget {
 
   /// This channel is the one currently being previewed.
   final bool previewing;
+
+  /// Owning source's name, shown as a subdued suffix after the channel name in
+  /// the cross-source Favorites view; null everywhere else (where every row
+  /// belongs to the active source and the chip would be noise).
+  ///
+  /// Deliberately *inline with the title* rather than on a line of its own: the
+  /// live list is a selection model whose scroll math is `index * itemExtent`,
+  /// so a row that grows by a line breaks index→offset for the whole list.
+  final String? sourceLabel;
   final VoidCallback onTap;
 
   /// Tap on the star cell (touch/mouse) — toggles this channel's favorite.
@@ -1688,6 +1703,7 @@ class _ChannelTile extends StatefulWidget {
     required this.previewing,
     required this.onTap,
     required this.onToggleFavorite,
+    this.sourceLabel,
     this.onLongPress,
   });
 
@@ -1742,6 +1758,7 @@ class _ChannelTileState extends State<_ChannelTile> {
     // One buffer instead of two intermediate lists and two joins — same text:
     // `name, Now · X, Next · Y, 3 of 12, Favorite`.
     final label = StringBuffer(channel.name);
+    if (widget.sourceLabel case final source?) label.write(', from $source');
     if (current != null) label.write(', ${nowProgrammeLabel(current)}');
     if (upcoming != null) label.write(', ${nextProgrammeLabel(upcoming)}');
     label.write(', ${widget.position} of ${widget.total}');
@@ -1841,18 +1858,51 @@ class _ChannelTileState extends State<_ChannelTile> {
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                channel.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                // Density-scaled, unlike the theme's fixed 16 px
-                                // titleMedium it used to take verbatim: the
-                                // extent around this line shrinks on
-                                // compact/short layouts, and a fixed title was
-                                // the biggest single consumer of the headroom
-                                // that left.
-                                style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(fontSize: metrics.rowTitleSize),
+                              // The title shares its line with the source chip
+                              // when there is one. `Flexible` (not `Expanded`)
+                              // so a short name doesn't push the chip to the
+                              // far edge, and the chip's font stays below the
+                              // title's so the line height — and therefore the
+                              // row extent — is still set by the title alone.
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.baseline,
+                                textBaseline: TextBaseline.alphabetic,
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      channel.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      // Density-scaled, unlike the theme's fixed
+                                      // 16 px titleMedium it used to take
+                                      // verbatim: the extent around this line
+                                      // shrinks on compact/short layouts, and a
+                                      // fixed title was the biggest single
+                                      // consumer of the headroom that left.
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontSize: metrics.rowTitleSize,
+                                          ),
+                                    ),
+                                  ),
+                                  if (widget.sourceLabel case final source?) ...[
+                                    const SizedBox(width: 8),
+                                    Flexible(
+                                      child: Text(
+                                        source,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: AppColors.textLo,
+                                          fontSize: metrics.rowTitleSize - 4,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                               if (current != null) ...[
                                 const SizedBox(height: _kRowLineGap),

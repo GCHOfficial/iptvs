@@ -95,6 +95,20 @@ authority is the **server** — `updated_at` is stamped by the `touch_updated_at
 trigger and explicit `now()` in the push RPCs; the snapshot-revision triggers also advance it for
 source and metadata inserts, updates, and deletes. Clients send no timestamps and none are
 compared.
+
+`profiles` is the one exception, and it has its own trigger
+(`profiles_touch_updated_at`): **a favorites-only update does not advance the revision**. Favorites
+are device-owned, so a favorites change is never one of the panel edits the manual push's
+"panel changed" warning is about — and once favorites sync automatically, every device's pushes
+would have moved the revision continuously, firing that dialog on a profile nobody had edited and
+teaching users to click through the only prompt standing between a device push and overwriting real
+panel edits. The exemption is computed as `to_jsonb(NEW) - 'favorites' - 'updated_at'` against the
+same on OLD, so a column added later joins the comparison automatically and the failure mode of
+forgetting this function is "the revision advances" — the safe direction. `updated_at` is projected
+out because the push RPCs set it explicitly. **`touch_profile_snapshot_revision` bumps the profile
+with an `updated_at`-only write, which is exactly the exempt shape**, so it sets a
+transaction-local `iptvs.force_profile_revision` flag the trigger honours; without that, source and
+metadata edits would silently stop being detectable and the guard would go quiet.
 Concurrent writers therefore resolve by write order, not clock, so clock skew and equal client
 timestamps are irrelevant. A pull always reflects whatever the last successful write left in the
 row.
@@ -533,6 +547,73 @@ zero-width Unicode is not caught by the control-character check.
 ## Flutter side
 
 [`cloud_config.dart`](../lib/data/cloud_config.dart) (build-time `--dart-define`
+## Favorites sync is a delta, and it runs on its own
+
+Favorites are the one collection that syncs **automatically** (`cloud_auto_sync.dart`,
+`CloudAutoSync`, started from `HomeShell`). Everything else still syncs only when the user presses
+Pull/Push on the cloud screen.
+
+That is possible only because favorites push *changes* rather than state. `push_favorites` replaces
+the whole `profiles.favorites` array, which is safe while pushing is deliberate but not on a timer:
+two devices pushing whole sets race, and the later push erases what the earlier one added. Unlike
+`sources`, favorites have no `merge_preserving_nonempty` equivalent to fall back on — **a missing
+element is indistinguishable from a deletion** when all you have is the final set.
+
+The delta removes that ambiguity at the source: the payload says `add` or `remove` outright, so the
+server never infers intent from an absence. `push_favorites_delta` merges the two halves per row
+under the profile's row lock, so concurrent pushes serialise and two devices can only conflict on
+the *same* favorite — where "whichever push the server saw last" is the answer a revision check
+would have given anyway. That is why `CloudAutoSync` has **no `profiles.updated_at` guard**: the row
+lock makes one unnecessary rather than merely cheaper.
+
+**There are deliberately no tombstones, and adding them would be a mistake.** An earlier draft
+carried soft-deleted entries (`deleted_at`) so other devices could learn about a deletion. They earn
+their keep in a "fetch changes since T" model, where a device that missed the delete would never
+hear about it otherwise — but this sync is not that. `pullFavorites` **mirrors** the profile
+(clearing the cloud-managed sources and re-applying the stored set), so a favorite the server no
+longer holds is already removed from every device that pulls. Deleting the element outright says the
+same thing with less machinery, and drops the tombstone pruning, the timestamp keys and their
+validation with it.
+
+It also keeps `profiles.favorites` in **exactly the shape every already-shipped client expects**.
+Shipped `pullFavorites` reads only `source_id`/`kind`/`item_id` and has no notion of `deleted_at`,
+so a tombstone looked like an ordinary favorite to it: an older build would have pulled a deleted
+favorite straight back and then pushed the resurrection to every other device. That mixed-version
+hazard is real whenever a store release is waiting on review while a direct build ships — and it is
+the reason the element shape must stay closed to new keys unless every shipped reader is known to
+tolerate them.
+
+Computing a delta needs local change tracking, because a favorite in the cloud but not locally is
+either "deleted here" or "added there and not pulled yet". That is `favorites_outbox` (schema v14):
+an outbox of pending toggles, not a snapshot of the last push, so it is bounded by what the user
+touched rather than by library size. It is written by `AppDatabase.setFavorite` — the single choke
+point for *user* intent — and never by the pull, which mirrors through
+`clearFavorites`/`setFavorites`; queueing the cloud's own state would push it straight back and
+resurrect whatever the pull just deleted. The pull **rebases the outbox onto the pulled state**,
+because mirroring the profile would otherwise visibly undo a favorite the user just toggled.
+
+`push_favorites` (whole-set) stays supported forever — installs are arbitrarily old, and a mixed
+fleet is normal while a store release waits on review. A legacy whole-set push still overwrites the
+set, which is today's last-write-wins behaviour and no worse than today. Nothing in the delta path
+changes what an old client reads or writes, which is what makes deploying the migration safe ahead
+of a store build.
+
+**The service is bound to a profile id, and must be re-bound when that changes.** It is started
+from `_loadActive`, not `initState`, precisely because `_loadActive` is what every profile switch
+and cloud-screen return already calls. Binding it once at startup left it pushing this device's
+favorite changes into the *previous* profile after a switch, and meant pairing for the first time
+did nothing until the next launch. Re-binding flushes the outgoing service first — the outbox is
+not profile-scoped, so anything still queued would otherwise be evaluated against the new profile's
+managed sources. It no-ops when the profile is unchanged (the common case: `_loadActive` also fires
+on every *source* change) and holds a re-entrancy guard, since two overlapping loads would
+otherwise build two services on the same stream and push every change twice.
+
+Pushes are debounced (5 s) and coalesced, so favoriting five channels is one round trip; a change
+made during an in-flight push is queued rather than dropped, a failed push retries and never
+throws at its caller, and `flush()` runs on app pause because a backgrounded Android process may
+never get another turn. Auto-sync shares the server's 30-per-minute `push` budget rather than
+getting one of its own.
+
 `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
 [`cloud_sync.dart`](../lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, profile
 selection (`listProfiles`/`activeProfileId`/`setProfile`), and profile-scoped

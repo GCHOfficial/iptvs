@@ -29,6 +29,8 @@ private:
   HWND CreateNativeVideoSurface();
   void DestroyNativeVideoSurface();
   void ResizeNativeVideoSurface();
+  void ScheduleNativeVideoRendererResync();
+  void ResyncNativeVideoRenderer(bool force_event = false);
   void SetNativeVideoSurfaceInsets(int top, int bottom);
   void CreateNativeControls();
   void DestroyNativeControls();
@@ -60,6 +62,9 @@ private:
   HWND native_controls_overlay_ = nullptr;
   int native_video_surface_top_inset_ = 0;
   int native_video_surface_bottom_inset_ = 0;
+  // Remaining post-transition re-checks that mpv's VO window still matches the
+  // surface (see ResyncNativeVideoRenderer).
+  int native_video_resync_passes_ = 0;
   bool native_controls_visible_ = true;
   bool native_controls_region_dirty_ = true;
   bool native_controls_pinned_ = false;

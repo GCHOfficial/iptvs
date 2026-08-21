@@ -614,6 +614,40 @@ a silent black overlay (the pre-PR-9 behavior). An adopted player on this path l
 overlay (its audio keeps running, as it did before, but the failure is now visible and
 recoverable — a successful Retry reaches the normal hot-swap).
 
+**mpv's VO window is sized by the runner, not by mpv's own parent hook**
+(`ResyncNativeVideoRenderer`, called from `ResizeNativeVideoSurface` and re-checked a few times
+after a fullscreen/mini transition via `ScheduleNativeVideoRendererResync`). In `--wid` embedding
+mpv creates its own child HWND inside the surface and tracks the parent through a hook of its own
+(`resize_child_win` in mpv's `w32_common.c`), which reaches its D3D11 `IDXGISwapChain::ResizeBuffers`
+**only** when that hook produces a real `WM_SIZE` on the child: the VO re-checks the swapchain on
+`VO_EVENT_RESIZE` and nothing else, and `resize_child_win`'s own `EqualRect` early-out means a size
+mpv never learned about is never revisited. That edge goes missing in practice. Captured live on a
+fullscreen transition: the surface (and the Flutter view, and the top-level) were all `1920x1080`
+while mpv's child sat at the pre-fullscreen `1264x681`, drawing the old size into the **top-left with
+black filling the rest** — and permanently, because mpv only re-checks on a size *change*. Re-asserting
+the size is exactly the stimulus mpv applies to itself, at the one moment it may not fire; when the
+hook did fire it is a no-op, since matching sizes generate no `WM_SIZE` at all. The `SetWindowPos`
+uses `SWP_ASYNCWINDOWPOS` (mpv's flags) because that window belongs to mpv's VO thread — a
+synchronous call would block the UI thread on it.
+
+**The sibling failure — same symptom, sizes already agree — is covered by the same pass.** mpv's
+`resize()` also gives up when a frame is in flight (`"Attempt at resizing while a frame was in
+progress!"`) and never retries, leaving a stale swapchain behind a correctly-sized window: identical
+on screen, invisible to a size comparison. So the post-transition passes run with `force_event`,
+which steps the child through a 1px-shorter height when the sizes match, manufacturing the
+`VO_EVENT_RESIZE` that re-runs `ResizeBuffers`. All `kNativeVideoResyncPasses` passes force, giving
+several retries ~250 ms apart rather than one shot at a resize that may fail again for the same
+reason. It is deliberately scoped to the discrete transitions: `ResizeNativeVideoSurface`'s own call
+passes `force_event=false`, so live window dragging never pays for it.
+
+Two traps if this is ever revisited. **A repaint-level "VO refresh" cannot fix either case**:
+swapchain size is re-evaluated on `VO_EVENT_RESIZE` only, so forcing frames to re-render just
+repaints the same wrong-sized buffer; only a real size change (or a full `vo` re-init, which
+black-flashes and rebuilds the D3D11 device) reaches `ResizeBuffers`. And **`osd-dimensions` is not
+a valid health check** — it reports `vo->dwidth/dheight`, which is already correct in the sibling
+case, so a mismatch-gated fix would silently miss it. That is why the forcing pass is unconditional
+rather than gated on an observed mismatch: the failure it covers cannot be observed from Dart.
+
 A **mini-player** mode (`setMiniPlayer`, toggled with the `M` key) restyles the top-level window
 into a compact frameless always-on-top window docked bottom-right — draggable via the video area
 (manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,
@@ -1056,6 +1090,8 @@ ever appeared. The Activity now stamps every note with ms since its own `onCreat
 | `native handoff frame watch armed=…` | whether the adopted engine could hand `FrameLivenessWatch` proof that its frame counter advances. `armed=false` means it reported no frames at all, so the inert rule still applies and a frozen handoff will only be caught by the buffering watchdog |
 | `native handoff decoder rebuild attempt=N phase=noFirstFrame\|afterFirstFrame rendered=… dropped=… toKeyframe=… skipped=… inits=…` | the local recovery fired (decoder rebuilt in place, stream untouched). `phase` is which of the two handoff failures it was — a picture that never arrived on the claimed surface, or one that arrived and stopped — which the tallies can't show, since a single rendered frame is lost in a preview's running total. The tallies are the **frozen** decoder's, sampled before the rebuild: `dropped`/`toKeyframe` climbing means frames were being decoded and thrown away to catch up, all-flat means the decoder had stopped emitting, and `inits` says how many times the codec had been instantiated — i.e. whether an output change was applied in place or re-created it |
 | `native live reconnect attempt=N force=… kind=buffering\|ended\|noframes\|error rendered=… dropped=… …` | why a reconnect fired, once per real attempt (the rate limit already gates it), with the same frame tallies at the moment of the decision |
+| `native video decoder=<name> kind=hardware\|software` | which `MediaCodec` was actually built, on every codec init. The engine sets `enableDecoderFallback`, so a hardware decoder that fails to configure lands silently on the platform's software one (`c2.android.*`/`OMX.google.*`) — and software HEVC cannot sustain 4K50, so the stream plays but crawls while every health flag still reads healthy. The name is the only place that shows. Repeated lines also make a decoder being rebuilt over and over visible |
+| `native playback fps=49.9 rendered=+250 dropped=+0 over 5008ms` | steady-state playback health, once every `PlaybackStatsSampler.DEFAULT_INTERVAL_MS` while playing. **This exists because the log had no frame data at all unless something failed** — the tallies below are written only on a reconnect or a handoff rebuild, so a stream that played *badly* produced a log indistinguishable from a healthy one. It separates three cases that look identical on screen: `fps` far under the stream's rate with `dropped` climbing (the decoder can't keep up — a software fallback, or thermal throttling); `fps` at the stream's rate while the picture still judders (the decoder is fine, the *display cadence* is not — e.g. 50fps content on a 60Hz output); and `fps` low with **no** drops (frames arriving late rather than being discarded) |
 | `native live re-resolve refreshed=… timedOut=…` | whether the portal handed back a new locator, or the round trip timed out and the spent one was retried |
 | `native engine fallback from=exo to=mpv adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching |
 

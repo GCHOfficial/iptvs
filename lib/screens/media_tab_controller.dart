@@ -14,6 +14,14 @@ import '../widgets/routed_focus_node.dart';
 /// category — it loads the full "All" set and is filtered client-side.
 const kFavoritesCategoryId = '__favorites__';
 
+/// Pseudo-category id for the cross-source ("All sources") live Favorites view.
+///
+/// Unlike [kFavoritesCategoryId] this is **not** a filter over the loaded
+/// catalog: its rows come from the cache across every configured source
+/// (`GlobalFavoritesController`), so it lists channels the active source has
+/// never heard of. Live only — movies/series stay per-source.
+const kAllSourcesFavoritesCategoryId = '__favorites_all__';
+
 /// Cap on how many items an automatic (post-load) metadata enrichment pass
 /// touches, so a large catalog doesn't fan out into a huge burst of API calls.
 const _autoEnrichLimit = 40;

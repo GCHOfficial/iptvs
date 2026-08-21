@@ -94,7 +94,7 @@ class AppDatabase {
   /// branch in between over a schema that may already have the change, so each
   /// branch must be idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`, the
   /// `_isDuplicateColumn` guard).
-  static const schemaVersion = 13;
+  static const schemaVersion = 14;
 
   static Future<AppDatabase> open() async {
     // Desktop platforms use the FFI implementation; mobile uses the plugin.
@@ -172,6 +172,7 @@ class AppDatabase {
           await _createMediaTables(db);
           await _createFavorites(db);
           await _createPlaybackPositions(db);
+          await _createFavoritesOutbox(db);
           await db.execute(
             'CREATE INDEX idx_channels_source ON channels(source_id)',
           );
@@ -260,6 +261,47 @@ class AppDatabase {
               'CREATE INDEX IF NOT EXISTS idx_prog_lookup '
               'ON programmes(source_id, channel_id, start)',
             );
+          }
+          if (oldV < 14) {
+            // Pending favorite changes awaiting a cloud push. Standalone table
+            // (like `favorites` and `playback_positions`, outside
+            // `_createMediaTables`), so this one branch covers every upgrade
+            // path including pre-v3 — which skips the v3+ media branches
+            // entirely. Idempotent.
+            await _createFavoritesOutbox(db);
+            // The seed below reads `favorites`, which an upgrade recorded at
+            // v9+ never re-creates — and a database that never had it (an old
+            // partial fixture, or any path where the v9 branch was skipped)
+            // would make this branch throw and take the whole open with it.
+            // `_createFavorites` is CREATE TABLE IF NOT EXISTS, so asserting it
+            // here costs one no-op DDL and removes that failure mode.
+            await _createFavorites(db);
+            // Seed it with everything already favorited, as pending adds.
+            //
+            // Favorites now sync automatically, and the pull mirrors the
+            // profile: it clears the cloud-managed sources and re-applies the
+            // cloud's set. On the first launch after this upgrade a paired
+            // device whose favorites were never pushed (the user only ever
+            // pressed Pull, or favorited things since the last Push) would have
+            // an empty outbox — and every one of those favorites would be
+            // deleted, unprompted, by a sync the user never asked for. Before
+            // this, that destruction at least required pressing Pull.
+            //
+            // Seeding says the true thing: these are local changes the cloud
+            // has not been told about. The pull then rebases them instead of
+            // erasing them, and the first push sends them up. Re-sending a
+            // favorite the cloud already has is a no-op there.
+            //
+            // OR IGNORE, not OR REPLACE: the branch must survive being re-run
+            // (there is no onDowngrade), and a re-run must not overwrite a
+            // pending *removal* with an add — that would resurrect exactly what
+            // the user deleted.
+            await db.execute('''
+              INSERT OR IGNORE INTO favorites_outbox
+                (source_id, kind, item_id, op, updated_at)
+              SELECT source_id, kind, item_id, 'add', ?
+                FROM favorites
+            ''', [DateTime.now().millisecondsSinceEpoch]);
           }
         },
       ),
@@ -607,6 +649,35 @@ class AppDatabase {
     );
   }
 
+  /// Favorite changes made locally that the cloud hasn't been told about yet.
+  ///
+  /// The cloud merge is a *delta* — devices push what changed, not the whole
+  /// set, so two devices editing different favorites can't clobber each other
+  /// (`push_favorites_delta`). Computing that delta needs local change
+  /// tracking: a favorite present in the cloud but absent locally is either
+  /// "deleted here" or "added there and not pulled yet", and nothing in
+  /// `favorites` alone can tell those apart.
+  ///
+  /// An outbox rather than a snapshot of the last push: it is bounded by what
+  /// the user actually toggled, not by the size of the library (tens of
+  /// thousands of favorites on a large portal).
+  ///
+  /// `op` is `'add'` or `'remove'`, and the key is the favorite's identity, so
+  /// toggling the same item repeatedly collapses to its latest state instead of
+  /// queueing a row per press.
+  static Future<void> _createFavoritesOutbox(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS favorites_outbox (
+        source_id  TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        item_id    TEXT NOT NULL,
+        op         TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (source_id, kind, item_id)
+      )
+    ''');
+  }
+
   static Future<void> _createPlaybackPositions(Database db) async {
     // VOD resume positions (movies/episodes), keyed like `favorites` by the
     // source-stable ids and deliberately separate from `media_items` so a
@@ -906,6 +977,12 @@ class AppDatabase {
   }
 
   /// Adds or removes a favorite. Returns the new favorited state.
+  ///
+  /// Also queues the change for the next cloud push
+  /// ([recordFavoriteChange]) — this is the single entry point for a *user*
+  /// favoriting something, while the cloud pull mirrors the profile through
+  /// [clearFavorites]/[setFavorites] instead, precisely so it doesn't queue the
+  /// cloud's own state straight back at it.
   Future<bool> setFavorite(
     String sourceId,
     ContentKind kind,
@@ -926,7 +1003,112 @@ class AppDatabase {
         whereArgs: [sourceId, kind.name, itemId],
       );
     }
+    // Queued **after** the favorite is written, and in its own statement: the
+    // outbox is a record of committed intent, so if the write above throws
+    // there must be nothing queued to push. The reverse order would let the
+    // cloud be told about a change that never happened locally.
+    await recordFavoriteChange(sourceId, kind, itemId, favorite);
     return favorite;
+  }
+
+  // ── favorites outbox (pending cloud delta) ────────────────────────────────
+
+  /// Records a local favorite change for the next cloud push.
+  ///
+  /// Keyed on the favorite's identity, so toggling one item repeatedly leaves a
+  /// single row carrying its latest state rather than a queue of presses. A
+  /// no-op when the row is already in that state.
+  ///
+  /// Deliberately **not** called by the cloud *pull*: applying the cloud's own
+  /// state is not a local change, and queueing it would push the cloud's data
+  /// straight back at it — and, worse, resurrect anything the pull had just
+  /// deleted.
+  /// Fires after a local favorite change is queued in the outbox.
+  ///
+  /// Lets the cloud auto-sync react without every favorite-toggling widget
+  /// having to know it exists — `setFavorite` is already the one choke point
+  /// for user intent, so the signal belongs here rather than threaded through
+  /// the UI.
+  Stream<void> get favoritesChanged => _favoritesChanged.stream;
+  final StreamController<void> _favoritesChanged =
+      StreamController<void>.broadcast();
+
+  /// Fires when favorites were rewritten by something other than the user —
+  /// today only the cloud pull, via [notifyFavoritesReplaced].
+  ///
+  /// Kept separate from [favoritesChanged] on purpose: that one means "the user
+  /// changed something, push it", and feeding a pull into it would push the
+  /// cloud's own state straight back. This one means "re-read, your in-memory
+  /// set is stale", which is what the favorites controllers need — otherwise a
+  /// background pull leaves the on-screen stars disagreeing with the database
+  /// until an unrelated reload, and the next toggle writes from a stale set.
+  Stream<void> get favoritesReplaced => _favoritesReplaced.stream;
+  final StreamController<void> _favoritesReplaced =
+      StreamController<void>.broadcast();
+
+  /// Announces that favorites were replaced wholesale (the cloud pull).
+  void notifyFavoritesReplaced() {
+    if (!_favoritesReplaced.isClosed) _favoritesReplaced.add(null);
+  }
+
+  Future<void> recordFavoriteChange(
+    String sourceId,
+    ContentKind kind,
+    String itemId,
+    bool favorite,
+  ) async {
+    await _db.insert('favorites_outbox', {
+      'source_id': sourceId,
+      'kind': kind.name,
+      'item_id': itemId,
+      'op': favorite ? 'add' : 'remove',
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    if (!_favoritesChanged.isClosed) _favoritesChanged.add(null);
+  }
+
+  /// Pending favorite changes, oldest first.
+  Future<List<({String sourceId, ContentKind kind, String itemId, bool add})>>
+  readFavoritesOutbox() async {
+    final rows = await _db.query('favorites_outbox', orderBy: 'updated_at');
+    return [
+      for (final row in rows)
+        if (ContentKind.values.asNameMap()[row['kind'] as String]
+            case final kind?)
+          (
+            sourceId: row['source_id'] as String,
+            kind: kind,
+            itemId: row['item_id'] as String,
+            add: row['op'] == 'add',
+          ),
+    ];
+  }
+
+  /// Clears outbox rows that a push has now delivered.
+  ///
+  /// Takes the exact entries that were pushed rather than truncating the table:
+  /// a toggle made *while* the push was in flight has already replaced its row,
+  /// and clearing wholesale would drop that change on the floor. Rows whose
+  /// `op` no longer matches what was pushed are therefore left alone.
+  Future<void> clearFavoritesOutbox(
+    List<({String sourceId, ContentKind kind, String itemId, bool add})>
+    delivered,
+  ) async {
+    if (delivered.isEmpty) return;
+    final batch = _db.batch();
+    for (final entry in delivered) {
+      batch.delete(
+        'favorites_outbox',
+        where: 'source_id = ? AND kind = ? AND item_id = ? AND op = ?',
+        whereArgs: [
+          entry.sourceId,
+          entry.kind.name,
+          entry.itemId,
+          entry.add ? 'add' : 'remove',
+        ],
+      );
+    }
+    await batch.commit(noResult: true);
   }
 
   /// Removes every favorite of [kind] for [sourceId] in one statement.
@@ -1034,6 +1216,43 @@ class AppDatabase {
     // playback locators".
     return [
       for (final row in rows) _channelFromRow(row, _decodeExtra(row['extra'])),
+    ];
+  }
+
+  /// Every favorited live channel across *all* sources, each paired with the
+  /// id of the source that owns it.
+  ///
+  /// Backs the cross-source ("all sources") Favorites view. Favorites are
+  /// already stored cross-source — the `favorites` primary key is
+  /// `(source_id, kind, item_id)` — so this needs no catalog to be loaded and
+  /// no source to be active: it reads the `channels` rows every source left
+  /// behind the last time it was opened.
+  ///
+  /// Rows whose channel is no longer cached are skipped by the inner join
+  /// rather than surfaced as ghosts: a favorite can outlive the catalog row it
+  /// points at (a refresh replaces `channels`, and `favorites` deliberately
+  /// survives that — see [_createFavorites]).
+  ///
+  /// Like [readChannels] this maps synchronously with no crypto, so the
+  /// channels come back with their locators **sealed**; the caller reveals the
+  /// one it is about to play through the owning source's repository. See
+  /// CLAUDE.md "Sealed playback locators".
+  Future<List<({String sourceId, Channel channel})>>
+  readFavoriteChannelsAcrossSources() async {
+    final rows = await _db.rawQuery('''
+      SELECT c.*, f.created_at AS favorited_at
+        FROM favorites f
+        JOIN channels c
+          ON c.source_id = f.source_id AND c.id = f.item_id
+       WHERE f.kind = ?
+       ORDER BY c.number, c.name
+    ''', [ContentKind.live.name]);
+    return [
+      for (final row in rows)
+        (
+          sourceId: row['source_id'] as String,
+          channel: _channelFromRow(row, _decodeExtra(row['extra'])),
+        ),
     ];
   }
 
@@ -2029,5 +2248,9 @@ class AppDatabase {
     description: r['description'] as String?,
   );
 
-  Future<void> close() => _db.close();
+  Future<void> close() async {
+    await _favoritesChanged.close();
+    await _favoritesReplaced.close();
+    await _db.close();
+  }
 }

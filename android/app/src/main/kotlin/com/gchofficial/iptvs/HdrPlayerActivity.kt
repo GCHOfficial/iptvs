@@ -27,6 +27,7 @@ import com.gchofficial.iptvs.player.FrameLivenessWatch
 import com.gchofficial.iptvs.player.LiveLocator
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
+import com.gchofficial.iptvs.player.PlaybackStatsSampler
 import com.gchofficial.iptvs.player.PlayerCallbacks
 import com.gchofficial.iptvs.player.PlayerBackAction
 import com.gchofficial.iptvs.player.PlayerBackGuard
@@ -145,6 +146,35 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
+    private val playbackStats = PlaybackStatsSampler()
+
+    /**
+     * Periodic frame-rate/drop line while playing.
+     *
+     * Rides the existing ticker rather than adding a timer, and only while the
+     * engine says it is playing: a paused or buffering player renders nothing,
+     * and reporting 0fps for it would bury the case this exists to catch.
+     */
+    private fun samplePlaybackStats() {
+        if (!uiState.isPlaying || uiState.isBuffering) {
+            // Drop the baseline rather than just skipping. The rate is
+            // frames-over-wall-clock, so carrying a baseline across a pause, a
+            // rebuffer or a trip through onStop/onStart would divide the frames
+            // by the *idle* time too: a 60s pause reports `fps=3.8 dropped=+0`
+            // on resume — which is precisely the "low rate, no drops" signature
+            // this exists to detect. A diagnostic that manufactures its own
+            // headline symptom is worse than none.
+            playbackStats.reset()
+            return
+        }
+        val active = engine ?: return
+        playbackStats.sample(
+            nowMs = System.currentTimeMillis(),
+            rendered = active.renderedFrameCount,
+            dropped = active.droppedFrameCount,
+        )?.let { logNative("playback $it") }
+    }
+
     /**
      * Relays one short, credential-free note into Dart's **exportable**
      * diagnostics log, stamped with ms since this Activity started.
@@ -190,10 +220,26 @@ class HdrPlayerActivity : ComponentActivity() {
         // in landscape, which is exactly the orientation a player is used in). The
         // Compose overlay insets itself via safeDrawingPadding, so only the video
         // extends under the cutout — no control is ever placed there.
+        // `ALWAYS` from API 30, `SHORT_EDGES` on 28–29. Android 15 deprecated
+        // DEFAULT/SHORT_EDGES/NEVER (Play Console flags the use): with
+        // edge-to-edge enforced from targetSdk 35 the window already extends
+        // into the cutout, so the three modes that describe *not* doing that no
+        // longer describe anything, and `ALWAYS` is the one that survives.
+        // `ALWAYS` is public API from 30 only, so the older constant stays for
+        // 28–29 — where it is not deprecated and is still the correct value.
+        // Behaviour is unchanged either way: the video reaches the physical edge
+        // instead of being letterboxed away from the cutout in landscape, and
+        // the Compose overlay still insets itself via `safeDrawingPadding`, so
+        // no control is ever placed under the cutout.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes = window.attributes.apply {
                 layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
             }
         }
         hideSystemUi()
@@ -627,6 +673,7 @@ class HdrPlayerActivity : ComponentActivity() {
             while (isActive) {
                 engine?.syncProgress()
                 pollLiveReconnect()
+                samplePlaybackStats()
                 // Faster while a frozen renderer is still attributable to the
                 // fullscreen surface claim: that window is judged on
                 // HANDOFF_POST_FRAME_STALL_MS, which the base cadence cannot
