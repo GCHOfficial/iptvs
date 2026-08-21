@@ -1037,6 +1037,43 @@ class AppDatabase {
     ];
   }
 
+  /// Every favorited live channel across *all* sources, each paired with the
+  /// id of the source that owns it.
+  ///
+  /// Backs the cross-source ("all sources") Favorites view. Favorites are
+  /// already stored cross-source — the `favorites` primary key is
+  /// `(source_id, kind, item_id)` — so this needs no catalog to be loaded and
+  /// no source to be active: it reads the `channels` rows every source left
+  /// behind the last time it was opened.
+  ///
+  /// Rows whose channel is no longer cached are skipped by the inner join
+  /// rather than surfaced as ghosts: a favorite can outlive the catalog row it
+  /// points at (a refresh replaces `channels`, and `favorites` deliberately
+  /// survives that — see [_createFavorites]).
+  ///
+  /// Like [readChannels] this maps synchronously with no crypto, so the
+  /// channels come back with their locators **sealed**; the caller reveals the
+  /// one it is about to play through the owning source's repository. See
+  /// CLAUDE.md "Sealed playback locators".
+  Future<List<({String sourceId, Channel channel})>>
+  readFavoriteChannelsAcrossSources() async {
+    final rows = await _db.rawQuery('''
+      SELECT c.*, f.created_at AS favorited_at
+        FROM favorites f
+        JOIN channels c
+          ON c.source_id = f.source_id AND c.id = f.item_id
+       WHERE f.kind = ?
+       ORDER BY c.number, c.name
+    ''', [ContentKind.live.name]);
+    return [
+      for (final row in rows)
+        (
+          sourceId: row['source_id'] as String,
+          channel: _channelFromRow(row, _decodeExtra(row['extra'])),
+        ),
+    ];
+  }
+
   /// Decrypts the sealed playback locator on a cached [channel] so it can be
   /// handed to the owning [Source]. A no-op for a channel that already carries
   /// plaintext locators (one straight off the provider), so it is always safe

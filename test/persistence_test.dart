@@ -10,6 +10,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
+import 'package:iptvs/data/secret_locator_vault.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_identity.dart';
 
@@ -381,6 +382,72 @@ void main() {
       await db.setFavorite('src1', ContentKind.live, 'ch1', false);
       await db.setFavorite('src1', ContentKind.live, 'ch2', true);
       expect(await db.readFavoriteIds('src1', ContentKind.live), {'ch2'});
+      await db.close();
+    });
+
+    test('reads favorited channels across every source', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'One', const [], const [
+        Channel(id: 'ch1', name: 'Alpha', number: 1),
+        Channel(id: 'ch2', name: 'Beta', number: 2),
+      ]);
+      await db.replaceLibrary('src2', 'Two', const [], const [
+        Channel(id: 'ch1', name: 'Gamma', number: 3),
+      ]);
+
+      // Favorited in two different sources, plus a non-live favorite and a
+      // plain unfavorited channel that must not appear.
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+      await db.setFavorite('src2', ContentKind.live, 'ch1', true);
+      await db.setFavorite('src1', ContentKind.movie, 'm1', true);
+
+      final all = await db.readFavoriteChannelsAcrossSources();
+      expect(all.map((e) => (e.sourceId, e.channel.id, e.channel.name)), [
+        ('src1', 'ch1', 'Alpha'),
+        ('src2', 'ch1', 'Gamma'),
+      ]);
+
+      // The same item id in two sources stays two distinct entries — the whole
+      // point of the source chip on the row.
+      expect(all.where((e) => e.channel.id == 'ch1').length, 2);
+      await db.close();
+    });
+
+    test('cross-source read skips favorites whose channel is uncached',
+        () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'One', const [], const [
+        Channel(id: 'ch1', name: 'Alpha'),
+      ]);
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+      // Favorited, but its catalog row is gone (favorites outlive a refresh).
+      await db.setFavorite('src1', ContentKind.live, 'ghost', true);
+
+      final all = await db.readFavoriteChannelsAcrossSources();
+      expect(all.map((e) => e.channel.id), ['ch1']);
+      await db.close();
+    });
+
+    test('cross-source read keeps locators sealed', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'One', const [], const [
+        Channel(
+          id: 'ch1',
+          name: 'Alpha',
+          extra: {'url': 'http://example.test/live/u/p/1.ts'},
+        ),
+      ]);
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+
+      final before = db.vault.decryptCount;
+      final all = await db.readFavoriteChannelsAcrossSources();
+      // Same contract as readChannels: a bulk read decrypts nothing, and the
+      // caller reveals the single channel it is about to play.
+      expect(db.vault.decryptCount, before);
+      expect(hasSealedLocator(all.single.channel.extra), isTrue);
+
+      final revealed = await db.revealChannel(all.single.channel);
+      expect(revealed.extra['url'], 'http://example.test/live/u/p/1.ts');
       await db.close();
     });
 
