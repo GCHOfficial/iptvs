@@ -70,8 +70,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _installKeyboardLogger();
       return true;
     }());
+    // The auto-sync is started from `_loadActive`, which also re-binds it when
+    // the profile changes — starting it here as well would race that.
     _loadActive();
-    unawaited(_startCloudAutoSync());
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _resumePendingThenCheck(),
     );
@@ -83,11 +84,53 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// device is paired to a profile, and every failure is logged rather than
   /// surfaced — the app is fully usable offline, and a sync that cannot reach
   /// the server is not an error the user needs to act on.
+  /// The profile [_cloudAutoSync] is bound to, so a re-check can tell whether
+  /// it still targets the right one.
+  String? _cloudAutoSyncProfileId;
+
+  bool _cloudAutoSyncStarting = false;
+
   Future<void> _startCloudAutoSync() async {
     if (!CloudConfig.isConfigured) return;
+    // Re-entrancy guard: this is fired unawaited from `_loadActive`, and two
+    // overlapping loads (a source change landing during a profile switch)
+    // would otherwise both get past the profile check and build two services
+    // listening to the same stream — every local change then pushed twice.
+    if (_cloudAutoSyncStarting) return;
+    _cloudAutoSyncStarting = true;
+    try {
+      await _bindCloudAutoSync();
+    } finally {
+      _cloudAutoSyncStarting = false;
+    }
+  }
+
+  Future<void> _bindCloudAutoSync() async {
     final sync = CloudSync(db: widget.db);
     final profileId = await sync.activeProfileId();
+    if (!mounted) return;
+
+    // Already bound to this profile — nothing to do. This runs from
+    // `_loadActive`, which also fires on every *source* change, so the common
+    // case must be free.
+    if (_cloudAutoSync != null && _cloudAutoSyncProfileId == profileId) return;
+
+    if (_cloudAutoSync case final previous?) {
+      // Send what the *previous* profile accumulated before letting go of it:
+      // the outbox is not profile-scoped, so anything still queued would
+      // otherwise be evaluated against the new profile's managed sources.
+      await previous.flush();
+      await previous.dispose();
+      _cloudAutoSync = null;
+      _cloudAutoSyncProfileId = null;
+    }
+
+    // Unpaired, or the device has no profile yet. Re-checked on every
+    // `_loadActive`, so pairing from the cloud screen starts the sync on return
+    // rather than at the next launch.
     if (profileId == null || !mounted) return;
+
+    _cloudAutoSyncProfileId = profileId;
     _cloudAutoSync = CloudAutoSync(
       pull: () => sync.pullFavorites(widget.store, profileId),
       push: () => sync.pushFavoritesDelta(widget.store, profileId),
@@ -150,6 +193,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     }
     unawaited(_cloudAutoSync?.dispose() ?? Future<void>.value());
     _cloudAutoSync = null;
+    _cloudAutoSyncProfileId = null;
     _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();
@@ -216,6 +260,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       _loading = false;
     });
     _loadProfileInfo();
+    // Re-binds the favorites auto-sync when the profile changed under us —
+    // `_loadActive` is what every profile-switch and cloud-screen return calls,
+    // and a service left bound to the old profile would push this device's
+    // changes into it. A no-op when the profile is unchanged.
+    unawaited(_startCloudAutoSync());
     if (cfg != null) unawaited(_maybeUpgradeM3uSource(cfg));
   }
 

@@ -10,7 +10,9 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/source_store.dart';
+import 'package:iptvs/screens/channel_list_screen.dart';
 import 'package:iptvs/screens/global_favorites_controller.dart';
+import 'package:iptvs/screens/media_tab_controller.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 
@@ -39,6 +41,45 @@ void main() {
     label: label,
     fields: const {'playlistUrl': 'http://example.test/list.m3u'},
   );
+
+  group('cross-source category fallback', () {
+    // Regression: the "fall back to All" guard originally covered only the
+    // per-source Favorites view, so unfavoriting the last foreign favorite left
+    // the selection on a category that had just vanished from the pane — an
+    // empty list the user could neither see selected nor move off.
+    test('leaves the view once no foreign favorite is left', () {
+      expect(
+        shouldLeaveCrossSourceFavoritesView(
+          categoryId: kAllSourcesFavoritesCategoryId,
+          hasForeignFavorites: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('stays while a foreign favorite remains', () {
+      expect(
+        shouldLeaveCrossSourceFavoritesView(
+          categoryId: kAllSourcesFavoritesCategoryId,
+          hasForeignFavorites: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('never disturbs another category', () {
+      for (final id in [null, kFavoritesCategoryId, 'news']) {
+        expect(
+          shouldLeaveCrossSourceFavoritesView(
+            categoryId: id,
+            hasForeignFavorites: false,
+          ),
+          isFalse,
+          reason: 'category $id must be left alone',
+        );
+      }
+    });
+  });
 
   test('aggregates favorites from every configured source', () async {
     final db = await openDb();

@@ -570,6 +570,16 @@ favorite — today's behaviour, no worse. And a malformed `deleted_at` from that
 poison later merges, so `assert_favorites_valid` bounds both new keys at every write boundary *and*
 `merge_favorites` guards its cast, treating junk as expired.
 
+**The service is bound to a profile id, and must be re-bound when that changes.** It is started
+from `_loadActive`, not `initState`, precisely because `_loadActive` is what every profile switch
+and cloud-screen return already calls. Binding it once at startup left it pushing this device's
+favorite changes into the *previous* profile after a switch, and meant pairing for the first time
+did nothing until the next launch. Re-binding flushes the outgoing service first — the outbox is
+not profile-scoped, so anything still queued would otherwise be evaluated against the new profile's
+managed sources. It no-ops when the profile is unchanged (the common case: `_loadActive` also fires
+on every *source* change) and holds a re-entrancy guard, since two overlapping loads would
+otherwise build two services on the same stream and push every change twice.
+
 Pushes are debounced (5 s) and coalesced, so favoriting five channels is one round trip; a change
 made during an in-flight push is queued rather than dropped, a failed push retries and never
 throws at its caller, and `flush()` runs on app pause because a backgrounded Android process may

@@ -149,6 +149,21 @@ enum ChannelPlayAction {
   startPreview,
 }
 
+/// Whether the live tab must fall back to "All" because the cross-source
+/// Favorites view is selected but no longer offered.
+///
+/// Its category entry only appears while a favorite exists in a source other
+/// than the active one, so unfavoriting the last foreign favorite — or
+/// switching to a source where every remaining favorite is local — removes the
+/// entry from the pane while the selection still points at it, leaving an empty
+/// list selected on a category the user can neither see nor move off. The
+/// per-source Favorites view has always had this fallback; this is the same
+/// rule for the cross-source one.
+bool shouldLeaveCrossSourceFavoritesView({
+  required String? categoryId,
+  required bool hasForeignFavorites,
+}) => categoryId == kAllSourcesFavoritesCategoryId && !hasForeignFavorites;
+
 ChannelPlayAction decideChannelPlayAction({
   required bool sameChannelPreview,
   required bool previewHasStream,
@@ -416,19 +431,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// No metadata providers: these exist only to resolve and play a live
   /// channel, never to browse or enrich a catalog. Each one owns a [Source]
   /// (its provider client), so [_disposeForeignRepos] must dispose them.
-  LibraryRepository _repoFor(String sourceId) {
-    if (sourceId == widget.repo.source.id) return widget.repo;
-    return _foreignRepos.putIfAbsent(sourceId, () {
-      final config = _globalFavorites.items
-          .firstWhere((item) => item.sourceId == sourceId)
-          .config;
-      return LibraryRepository(
+  /// Takes the [SourceConfig] rather than looking one up by id: the caller
+  /// already holds the row's own config, and a lookup here could throw if the
+  /// cross-source list were reloaded between choosing a row and playing it.
+  LibraryRepository _repoFor(SourceConfig config) {
+    if (config.id == widget.repo.source.id) return widget.repo;
+    return _foreignRepos.putIfAbsent(
+      config.id,
+      () => LibraryRepository(
         source: config.build(),
         db: widget.repo.db,
         metadataProviders: const [],
         autoEnrichMetadata: false,
-      );
-    });
+      ),
+    );
   }
 
   Future<void> _disposeForeignRepos() async {
@@ -481,6 +497,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // Cross-source rows come from the cache, not from this source's load, so
     // this neither waits on nor blocks the active catalog.
     await _globalFavorites.load();
+    if (mounted) _ensureCrossSourceCategoryStillOffered();
   }
 
   @override
@@ -722,6 +739,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     } else {
       _globalFavorites.removeLocally(sourceId, channelId);
     }
+    if (mounted) _ensureCrossSourceCategoryStillOffered();
     if (mounted) _focus.clampSelection();
   }
 
@@ -742,6 +760,30 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     });
   }
 
+  /// True when the cross-source view has something the per-source one doesn't.
+  /// Also decides whether its category entry is offered at all.
+  bool get _hasForeignFavorites => _globalFavorites.items.any(
+    (item) => item.sourceId != widget.repo.source.id,
+  );
+
+  /// Falls back to "All" when the cross-source view is selected but no longer
+  /// offered — unfavoriting the last foreign favorite, or switching to a source
+  /// where every remaining favorite is local.
+  ///
+  /// Same reason the per-source Favorites view has this: the entry vanishes
+  /// from the pane while `_categoryId` still points at it, leaving an empty
+  /// list selected on a category the user cannot see or move off.
+  void _ensureCrossSourceCategoryStillOffered() {
+    if (!shouldLeaveCrossSourceFavoritesView(
+      categoryId: _categoryId,
+      hasForeignFavorites: _hasForeignFavorites,
+    )) {
+      return;
+    }
+    setState(() => _categoryId = null);
+    _focus.clampSelection();
+  }
+
   /// Live categories shown in the pane/dropdown: the Favorites entry (only when
   /// something is favorited) followed by the enabled provider categories.
   List<Category> get _liveCategoriesForUi {
@@ -751,9 +793,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // per-source view doesn't: favorites living in a *different* source. With
     // one source configured (or favorites in only this one) the two lists are
     // identical, and a duplicate entry is just noise on a remote.
-    final hasForeign = _globalFavorites.items.any(
-      (item) => item.sourceId != widget.repo.source.id,
-    );
+    final hasForeign = _hasForeignFavorites;
     if (!hasOwn && !hasForeign) return cats;
     return [
       if (hasOwn) const Category(id: kFavoritesCategoryId, title: 'Favorites'),
@@ -959,7 +999,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (!isWide || crossSource != null) {
       await _openFullscreenDirect(
         channel,
-        crossSource == null ? widget.repo : _repoFor(crossSource.sourceId),
+        crossSource == null ? widget.repo : _repoFor(crossSource.config),
       );
       return;
     }
