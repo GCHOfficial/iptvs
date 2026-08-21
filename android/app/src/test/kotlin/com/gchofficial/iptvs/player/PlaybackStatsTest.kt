@@ -77,6 +77,23 @@ class PlaybackStatsSamplerTest {
     }
 
     @Test
+    fun `a paused interval cannot be counted as playback time`() {
+        // Regression: the caller skipped sampling while paused/buffering but
+        // kept the baseline, so the idle time went into the denominator. A 60s
+        // pause then reported ~3.8fps with zero drops on resume — precisely the
+        // "low rate, no drops" signature this feature exists to detect. The
+        // caller now resets; this pins what reset must then do.
+        val sampler = PlaybackStatsSampler()
+        sampler.sample(nowMs = 0, rendered = 0, dropped = 0)
+        sampler.reset() // what the caller does on the not-playing edge
+        // 60s of pause, then 5s of healthy 50fps playback.
+        assertNull(sampler.sample(nowMs = 60_000, rendered = 250, dropped = 0))
+        val line = sampler.sample(nowMs = 65_000, rendered = 500, dropped = 0)
+        assertNotNull(line)
+        assertTrue(line!!, line.contains("fps=50.0"))
+    }
+
+    @Test
     fun `reset forgets the baseline`() {
         val sampler = PlaybackStatsSampler()
         sampler.sample(nowMs = 0, rendered = 0, dropped = 0)

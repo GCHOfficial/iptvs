@@ -67,8 +67,23 @@ begin
     return new;
   end if;
 
-  -- Favorites (and the revision itself) projected out: if what remains is
-  -- unchanged, this was a favorites-only write.
+  -- Cheap short-circuit before the row comparison below: if `favorites` did not
+  -- change, this cannot be a favorites-only write, so there is nothing to
+  -- exempt. Worth its own branch because the comparison materialises
+  -- `to_jsonb(NEW)`/`to_jsonb(OLD)`, each of which embeds a full copy of the
+  -- favorites array (bounded at 16 MB, realistically ~2 MB) — and every panel
+  -- edit and every child-revision bump would otherwise pay to serialise it
+  -- twice only to discard it.
+  if new.favorites is not distinct from old.favorites then
+    new.updated_at = greatest(
+      old.updated_at + interval '1 microsecond',
+      clock_timestamp()
+    );
+    return new;
+  end if;
+
+  -- Favorites did change. Project them (and the revision itself) out: if what
+  -- remains is unchanged, this was a favorites-only write.
   if ((to_jsonb(new) - 'favorites') - 'updated_at')
      is not distinct from
      ((to_jsonb(old) - 'favorites') - 'updated_at')

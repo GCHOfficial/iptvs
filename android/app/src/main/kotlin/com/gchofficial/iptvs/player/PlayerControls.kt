@@ -216,8 +216,8 @@ fun PlayerScreen(
         // Menus + info panel sit above the bars; they imply controls are visible.
         // Inset as one group (same reasoning as ControlsOverlay) — their
         // BottomEnd/TopEnd alignment would otherwise put them in the cutout on a
-        // notched phone, which windowLayoutInDisplayCutoutMode=shortEdges now
-        // lets the window extend into.
+        // notched phone, which the Activity's layoutInDisplayCutoutMode
+        // (ALWAYS on API 30+, SHORT_EDGES on 28-29) lets the window extend into.
         if (state.controlsVisible && !state.inPip) {
             Box(Modifier.fillMaxSize().safeDrawingPadding()) {
                 PlayerMenusLayer(state, callbacks) { poke() }

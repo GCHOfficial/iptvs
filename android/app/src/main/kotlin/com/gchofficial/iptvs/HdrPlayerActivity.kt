@@ -146,17 +146,6 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Relays one short, credential-free note into Dart's **exportable**
-     * diagnostics log, stamped with ms since this Activity started.
-     *
-     * Past `adopted=…` the whole native player used to be silent in an exported
-     * log: no first frame, no stall, no reconnect, no engine swap. A user
-     * reporting "high-bitrate channels stay black after going fullscreen" could
-     * therefore send a complete, healthy-looking export of the exact session
-     * that failed. Everything routed through here is chosen to be safe to
-     * export verbatim — never a URL, header or provider reply.
-     */
     private val playbackStats = PlaybackStatsSampler()
 
     /**
@@ -168,6 +157,14 @@ class HdrPlayerActivity : ComponentActivity() {
      */
     private fun samplePlaybackStats() {
         if (!uiState.isPlaying || uiState.isBuffering) {
+            // Drop the baseline rather than just skipping. The rate is
+            // frames-over-wall-clock, so carrying a baseline across a pause, a
+            // rebuffer or a trip through onStop/onStart would divide the frames
+            // by the *idle* time too: a 60s pause reports `fps=3.8 dropped=+0`
+            // on resume — which is precisely the "low rate, no drops" signature
+            // this exists to detect. A diagnostic that manufactures its own
+            // headline symptom is worse than none.
+            playbackStats.reset()
             return
         }
         val active = engine ?: return
@@ -178,6 +175,17 @@ class HdrPlayerActivity : ComponentActivity() {
         )?.let { logNative("playback $it") }
     }
 
+    /**
+     * Relays one short, credential-free note into Dart's **exportable**
+     * diagnostics log, stamped with ms since this Activity started.
+     *
+     * Past `adopted=…` the whole native player used to be silent in an exported
+     * log: no first frame, no stall, no reconnect, no engine swap. A user
+     * reporting "high-bitrate channels stay black after going fullscreen" could
+     * therefore send a complete, healthy-looking export of the exact session
+     * that failed. Everything routed through here is chosen to be safe to
+     * export verbatim — never a URL, header or provider reply.
+     */
     private fun logNative(note: String) {
         MainActivity.instance?.get()?.logPlaybackDiagnostic(
             "native $note ms=${SystemClock.elapsedRealtime() - startedAtMs}",

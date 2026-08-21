@@ -105,19 +105,27 @@ as $$
       and (e ->> 'item_id') is not null
   ),
   merged as (
+    -- Plain `=`, not `is not distinct from`. Both give the same answer — a NULL
+    -- `kind`/`item_id` in `stored` can never match, and `added`/`removed`
+    -- already reject NULLs above — but only `=` is a hashable equality clause.
+    -- With `is not distinct from` the planner cannot hash these anti-joins and
+    -- falls back to a nested loop over the CTEs, which a near-`max_delta` push
+    -- against a comparable stored set turns into hundreds of millions of
+    -- comparisons *while holding the profile's `for update` lock*.
+    --
     -- Everything the delta does not mention...
     select s.source_id, s.kind, s.item_id
       from stored s
      where not exists (
        select 1 from added a
-        where a.source_id is not distinct from s.source_id
-          and a.kind is not distinct from s.kind
-          and a.item_id is not distinct from s.item_id)
+        where a.source_id = s.source_id
+          and a.kind = s.kind
+          and a.item_id = s.item_id)
        and not exists (
        select 1 from removed r
-        where r.source_id is not distinct from s.source_id
-          and r.kind is not distinct from s.kind
-          and r.item_id is not distinct from s.item_id)
+        where r.source_id = s.source_id
+          and r.kind = s.kind
+          and r.item_id = s.item_id)
     union all
     -- ...plus the additions that were not also removed. A removal is simply
     -- absent from the result: there is nothing left behind to represent it.
@@ -125,16 +133,23 @@ as $$
       from added a
      where not exists (
        select 1 from removed r
-        where r.source_id is not distinct from a.source_id
-          and r.kind is not distinct from a.kind
-          and r.item_id is not distinct from a.item_id)
+        where r.source_id = a.source_id
+          and r.kind = a.kind
+          and r.item_id = a.item_id)
   )
   select coalesce(
     jsonb_agg(
-      jsonb_build_object(
-        'source_id', source_id,
-        'kind', kind,
-        'item_id', item_id
+      -- strip_nulls so a legacy element that never had `kind`/`item_id` is
+      -- written back as it was found, rather than gaining explicit
+      -- `"kind": null` keys. Without it such a row grows on every merge and can
+      -- never be removed again: `added`/`removed` reject NULL key parts, so no
+      -- delta can ever name it.
+      jsonb_strip_nulls(
+        jsonb_build_object(
+          'source_id', source_id,
+          'kind', kind,
+          'item_id', item_id
+        )
       )
       order by source_id, kind, item_id
     ),

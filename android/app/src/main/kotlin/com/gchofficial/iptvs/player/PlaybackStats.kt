@@ -16,7 +16,9 @@ package com.gchofficial.iptvs.player
  *    is fine and the *display cadence* is not (50fps content on a 60Hz output).
  *  * `fps` low with **no** drops — frames are arriving late rather than being
  *    discarded: a clock or scheduling problem, the true "slow motion".
- *  * `inits` climbing — the decoder is being rebuilt repeatedly.
+ *
+ * (A decoder being rebuilt repeatedly shows up as `inits` on the reconnect and
+ * handoff lines, which carry the full `videoFrameCounters` — not here.)
  *
  * Pure and clock-injected so it is unit-testable without a player or a device.
  */
