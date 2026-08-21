@@ -347,12 +347,17 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - **Favorites are the one collection that syncs automatically** (`cloud_auto_sync.dart`, started
   from `HomeShell`; everything else stays manual Pull/Push). That works only because they push a
   **delta**, not a set: `push_favorites_delta` merges adds/removes per row under the profile's row
-  lock, and deletions are representable as `deleted_at` **tombstones** (pruned at 90 days; the pull
-  skips them). Client-supplied timestamps are discarded — server `now()` stays the only authority —
-  so same-row conflicts resolve by arrival order and **no `updated_at` revision guard is needed**.
-  The delta comes from `favorites_outbox` (schema v14), written only by `setFavorite` (user intent)
-  and never by the pull, which rebases the outbox onto the pulled state. The legacy whole-set
-  `push_favorites` stays forever and **drops tombstones** (can resurrect a deleted favorite).
+  lock, so same-row conflicts resolve by arrival order and **no `updated_at` revision guard is
+  needed**. The delta comes from `favorites_outbox` (schema v14), written only by `setFavorite`
+  (user intent) and never by the pull, which rebases the outbox onto the pulled state.
+- **No tombstones in `profiles.favorites`, deliberately — don't add keys to that element shape.**
+  A removal drops the element outright. Tombstones only pay off in a "changes since T" sync; this
+  pull **mirrors** the profile, so an absent favorite is already a deletion on every device. More
+  importantly the shipped `pullFavorites` reads only `source_id`/`kind`/`item_id`, so any new key
+  is invisible to it — a `deleted_at` entry looked like an ordinary favorite, meaning an old store
+  build would pull a deleted favorite back and push the resurrection to everyone. That is why the
+  legacy whole-set `push_favorites` stays forever and why the migration is safe to deploy ahead of
+  a store release: nothing changes what an old client reads or writes.
 - Devices are anonymous users with **no direct table writes**; the only device→cloud write path
   is the owner-scoped `push_*` RPCs. Push is row-level last-write-wins **refined by field-preserve**:
   broad fields merge through `merge_preserving_nonempty(stored, incoming)` so a device push can

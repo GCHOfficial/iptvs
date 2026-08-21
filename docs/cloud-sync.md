@@ -545,15 +545,29 @@ two devices pushing whole sets race, and the later push erases what the earlier 
 `sources`, favorites have no `merge_preserving_nonempty` equivalent to fall back on — **a missing
 element is indistinguishable from a deletion** when all you have is the final set.
 
-So deletions became representable. An element may carry `deleted_at`, making it a **tombstone**:
-still in the array so other devices learn the favorite is gone, but not a favorite (the pull skips
-it — applying one would resurrect exactly what it records the deletion of). `push_favorites_delta`
-merges adds/removes per row under the profile's row lock, prunes tombstones after 90 days, and
-**discards any client-supplied `deleted_at`/`updated_at`**, keeping the repo-wide rule that server
-`now()` is the only timestamp authority. Same-row conflicts therefore resolve to "whichever push the
-server saw last" — which is what a revision check would have answered anyway, so `CloudAutoSync`
-deliberately has **no `profiles.updated_at` guard**; the row lock makes one unnecessary rather than
-merely cheaper.
+The delta removes that ambiguity at the source: the payload says `add` or `remove` outright, so the
+server never infers intent from an absence. `push_favorites_delta` merges the two halves per row
+under the profile's row lock, so concurrent pushes serialise and two devices can only conflict on
+the *same* favorite — where "whichever push the server saw last" is the answer a revision check
+would have given anyway. That is why `CloudAutoSync` has **no `profiles.updated_at` guard**: the row
+lock makes one unnecessary rather than merely cheaper.
+
+**There are deliberately no tombstones, and adding them would be a mistake.** An earlier draft
+carried soft-deleted entries (`deleted_at`) so other devices could learn about a deletion. They earn
+their keep in a "fetch changes since T" model, where a device that missed the delete would never
+hear about it otherwise — but this sync is not that. `pullFavorites` **mirrors** the profile
+(clearing the cloud-managed sources and re-applying the stored set), so a favorite the server no
+longer holds is already removed from every device that pulls. Deleting the element outright says the
+same thing with less machinery, and drops the tombstone pruning, the timestamp keys and their
+validation with it.
+
+It also keeps `profiles.favorites` in **exactly the shape every already-shipped client expects**.
+Shipped `pullFavorites` reads only `source_id`/`kind`/`item_id` and has no notion of `deleted_at`,
+so a tombstone looked like an ordinary favorite to it: an older build would have pulled a deleted
+favorite straight back and then pushed the resurrection to every other device. That mixed-version
+hazard is real whenever a store release is waiting on review while a direct build ships — and it is
+the reason the element shape must stay closed to new keys unless every shipped reader is known to
+tolerate them.
 
 Computing a delta needs local change tracking, because a favorite in the cloud but not locally is
 either "deleted here" or "added there and not pulled yet". That is `favorites_outbox` (schema v14):
@@ -564,11 +578,11 @@ point for *user* intent — and never by the pull, which mirrors through
 resurrect whatever the pull just deleted. The pull **rebases the outbox onto the pulled state**,
 because mirroring the profile would otherwise visibly undo a favorite the user just toggled.
 
-Two edges that are easy to reintroduce: `push_favorites` stays supported forever (installs are
-arbitrarily old) and a legacy whole-set push **drops tombstones**, so it can resurrect a deleted
-favorite — today's behaviour, no worse. And a malformed `deleted_at` from that legacy path would
-poison later merges, so `assert_favorites_valid` bounds both new keys at every write boundary *and*
-`merge_favorites` guards its cast, treating junk as expired.
+`push_favorites` (whole-set) stays supported forever — installs are arbitrarily old, and a mixed
+fleet is normal while a store release waits on review. A legacy whole-set push still overwrites the
+set, which is today's last-write-wins behaviour and no worse than today. Nothing in the delta path
+changes what an old client reads or writes, which is what makes deploying the migration safe ahead
+of a store build.
 
 **The service is bound to a profile id, and must be re-bound when that changes.** It is started
 from `_loadActive`, not `initState`, precisely because `_loadActive` is what every profile switch

@@ -734,11 +734,6 @@ class CloudSync {
     final incoming = <String, Map<ContentKind, List<String>>>{};
     for (final entry in favorites) {
       final fav = Map<String, dynamic>.from(entry as Map);
-      // Tombstones (`deleted_at`) are carried in the array so a device that has
-      // been offline learns the favorite was removed elsewhere. They are not
-      // favorites — applying one would resurrect exactly what it records the
-      // deletion of. Absent on every row written before the delta merge.
-      if (fav['deleted_at'] != null) continue;
       final config = byUuid[fav['source_id']];
       if (config == null) continue;
       final kindName = fav['kind'] as String?;

@@ -1,4 +1,4 @@
--- Favorites: per-row delta merge with tombstones.
+-- Favorites: per-row delta push.
 --
 -- Why this exists
 -- ---------------
@@ -10,27 +10,38 @@
 -- equivalent to fall back on — a missing element is indistinguishable from a
 -- deletion when all you have is the final set.
 --
--- So deletions become representable. An element carries an optional
--- `deleted_at`, which makes it a tombstone: still present in the array (so the
--- other devices learn the favorite is gone) but not a favorite. Devices then
--- push *changes* rather than state, and two devices touching different rows can
--- no longer clobber each other.
+-- A delta removes that ambiguity at the source: the payload says `remove` or
+-- `add` outright, so the server never has to infer intent from an absence. Two
+-- devices touching different favorites cannot collide; two touching the same
+-- one resolve by which push the server saw last.
 --
--- Timestamp authority stays server-side
--- -------------------------------------
--- Clients still send no timestamps — the repo-wide rule, because device clocks
--- are not trustworthy. `deleted_at`/`updated_at` are stamped by this function
--- with `now()`, and any client-supplied value for either key is **discarded**,
--- not merged. Ordering between two devices touching the *same* row is therefore
--- "whichever push arrived last", decided by the server, which is exactly the
--- semantics wanted.
+-- Why there are no tombstones
+-- ---------------------------
+-- An earlier draft of this migration carried soft-deleted entries (`deleted_at`)
+-- so other devices could learn about a deletion. They are not needed, and were
+-- removed before this ever shipped.
+--
+-- Tombstones earn their keep in a "fetch changes since T" model, where a device
+-- that missed the delete would otherwise never hear about it. This sync is not
+-- that: `pullFavorites` mirrors the profile — it clears the cloud-managed
+-- sources and re-applies the stored set — so a favorite the server no longer
+-- holds is already, by construction, removed from every device that pulls.
+-- Deleting the element outright says the same thing with less machinery, and
+-- drops the tombstone pruning, the timestamp keys and their validation with it.
+--
+-- It also keeps `profiles.favorites` in exactly the shape every already-shipped
+-- client expects. Shipped `pullFavorites` reads only `source_id`/`kind`/
+-- `item_id` and has no notion of `deleted_at`, so a tombstone would have looked
+-- like an ordinary favorite to it — an older build would have pulled a deleted
+-- favorite straight back and then pushed the resurrection to everyone else.
+-- Nothing here changes what an old client reads or writes.
 --
 -- Compatibility
 -- -------------
 -- `push_favorites` (whole-set) stays, unchanged and supported forever: app
--- installs are arbitrarily old. A legacy client pushing a whole set drops
--- tombstones, which can resurrect a favorite another device deleted — that is
--- today's behaviour and is no worse than today. New clients use the delta RPC.
+-- installs are arbitrarily old, and a mixed fleet is normal while a store
+-- release waits on review. A legacy whole-set push still overwrites the set,
+-- which is today's last-write-wins behaviour and no worse than today.
 --
 -- This is a **new function name**, deliberately not an overload of
 -- `push_favorites`. PostgREST resolves overloads on the parameter-name set and
@@ -38,93 +49,7 @@
 -- with the existing 1- and 2-arg forms.
 --
 -- The panel never reads or writes `profiles.favorites` (it only mentions them
--- in copy), so no panel-side change is implied by the richer element shape.
-
--- ---------------------------------------------------------------------------
--- Validator: verbatim from harden_cloud, plus the two tombstone keys
--- ---------------------------------------------------------------------------
---
--- Re-declared rather than left alone because the element shape grew. Both new
--- keys are server-generated, so the only way a malformed one arrives is the
--- legacy whole-set `push_favorites` (or a direct panel write) — and a
--- `deleted_at` that is not a timestamp would otherwise sit in the array
--- poisoning later merges. Bounding it here closes every write path at once:
--- the RPCs call this, and so does the BEFORE INSERT/UPDATE trigger.
-create or replace function public.assert_favorites_valid(p_favorites jsonb)
-returns void
-language plpgsql
-immutable
-set search_path = ''
-as $$
-declare
-  -- A power user accumulates favorites one at a time over months; on a 250k
-  -- portal that realistically reaches tens of thousands. Tombstones share this
-  -- budget — they are pruned after 90 days, so they cannot accumulate forever.
-  max_favorites       constant int := 200000;    -- realistic <= 20000 favorites
-  max_favorites_bytes constant int := 16777216;  -- 16 MB; realistic ~2 MB
-  max_item_id_len     constant int := 512;        -- realistic <= 128 chars
-  max_kind_len        constant int := 16;         -- 'live'/'movie'/'series'
-  max_source_id_len   constant int := 64;         -- a UUID is 36 chars
-  max_stamp_len       constant int := 64;         -- a timestamptz renders ~29
-  fav jsonb := coalesce(p_favorites, '[]'::jsonb);
-begin
-  if jsonb_typeof(fav) <> 'array' then
-    raise exception 'iptvs: favorites must be a JSON array'
-      using errcode = 'check_violation';
-  end if;
-  if octet_length(fav::text) > max_favorites_bytes then
-    raise exception 'iptvs: favorites payload too large (max % bytes)', max_favorites_bytes
-      using errcode = 'check_violation';
-  end if;
-  if jsonb_array_length(fav) > max_favorites then
-    raise exception 'iptvs: too many favorites (max %)', max_favorites
-      using errcode = 'check_violation';
-  end if;
-  if exists (select 1 from jsonb_array_elements(fav) e where jsonb_typeof(e) <> 'object') then
-    raise exception 'iptvs: each favorite must be a JSON object'
-      using errcode = 'check_violation';
-  end if;
-  if exists (
-    select 1 from jsonb_array_elements(fav) e
-     where (e ->> 'source_id') is null
-        or length(e ->> 'source_id') > max_source_id_len
-  ) then
-    raise exception 'iptvs: favorite source id invalid'
-      using errcode = 'check_violation';
-  end if;
-  if exists (select 1 from jsonb_array_elements(fav) e where length(coalesce(e ->> 'kind', '')) > max_kind_len) then
-    raise exception 'iptvs: favorite kind too long (max % chars)', max_kind_len
-      using errcode = 'check_violation';
-  end if;
-  if exists (select 1 from jsonb_array_elements(fav) e where length(coalesce(e ->> 'item_id', '')) > max_item_id_len) then
-    raise exception 'iptvs: favorite item id too long (max % chars)', max_item_id_len
-      using errcode = 'check_violation';
-  end if;
-  -- New: the tombstone/versioning keys. Absent is fine (a plain favorite, and
-  -- every row written before this migration); present must be a plausible
-  -- timestamp string, so the merge's expiry comparison can never raise.
-  if exists (
-    select 1 from jsonb_array_elements(fav) e
-     where (e ? 'deleted_at' or e ? 'updated_at')
-       and (
-         (e ? 'deleted_at' and (
-            jsonb_typeof(e -> 'deleted_at') <> 'string'
-            or length(e ->> 'deleted_at') > max_stamp_len
-            or (e ->> 'deleted_at') !~ '^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}'))
-         or (e ? 'updated_at' and (
-            jsonb_typeof(e -> 'updated_at') <> 'string'
-            or length(e ->> 'updated_at') > max_stamp_len
-            or (e ->> 'updated_at') !~ '^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}'))
-       )
-  ) then
-    raise exception 'iptvs: favorite timestamp invalid'
-      using errcode = 'check_violation';
-  end if;
-end;
-$$;
-
-revoke all on function public.assert_favorites_valid(jsonb) from public, anon;
-grant execute on function public.assert_favorites_valid(jsonb) to authenticated;
+-- in copy), so nothing here implies a panel-side change.
 
 -- ---------------------------------------------------------------------------
 -- Pure merge helper
@@ -132,22 +57,16 @@ grant execute on function public.assert_favorites_valid(jsonb) to authenticated;
 
 -- Applies an add/remove delta to a stored favorites array.
 --
--- Keyed on (source_id, kind, item_id). Removals win over additions within a
--- single call only when the same key appears in both, which a well-behaved
--- client never sends; resolving it deterministically (remove) beats leaving it
--- to array order.
+-- Keyed on (source_id, kind, item_id). Elements keep the exact shape they have
+-- today — no extra keys are introduced or preserved.
 --
--- Tombstones older than `p_keep_tombstones` are dropped. They exist only so a
--- device that has been offline learns about a deletion; past that window the
--- blob would grow without bound for no benefit. A device offline longer than
--- the window can resurrect a deleted favorite — the same trade every
--- tombstone-GC scheme makes, and the reason the window is generous.
+-- A key appearing in both `added` and `removed` resolves to removed. A
+-- well-behaved client never sends that, but resolving it deterministically
+-- beats leaving it to array order.
 create or replace function public.merge_favorites(
   p_stored jsonb,
   p_added jsonb,
-  p_removed jsonb,
-  p_now timestamptz,
-  p_keep_tombstones interval default interval '90 days'
+  p_removed jsonb
 )
 returns jsonb
 language sql
@@ -155,17 +74,14 @@ immutable
 set search_path = ''
 as $$
   with stored as (
-    select
+    select distinct
       e ->> 'source_id' as source_id,
       e ->> 'kind'      as kind,
-      e ->> 'item_id'   as item_id,
-      e ->> 'deleted_at' as deleted_at,
-      e ->> 'updated_at' as updated_at
+      e ->> 'item_id'   as item_id
     from jsonb_array_elements(coalesce(p_stored, '[]'::jsonb)) e
     where jsonb_typeof(e) = 'object'
+      and (e ->> 'source_id') is not null
   ),
-  -- Client-supplied timestamps are ignored on the way in: only the identity
-  -- triple is read from the delta payloads.
   added as (
     select distinct
       e ->> 'source_id' as source_id,
@@ -188,53 +104,37 @@ as $$
       and (e ->> 'kind') is not null
       and (e ->> 'item_id') is not null
   ),
-  -- Everything the delta does not mention, minus expired tombstones.
-  untouched as (
-    select s.*
+  merged as (
+    -- Everything the delta does not mention...
+    select s.source_id, s.kind, s.item_id
       from stored s
      where not exists (
        select 1 from added a
-        where a.source_id = s.source_id and a.kind = s.kind and a.item_id = s.item_id)
+        where a.source_id is not distinct from s.source_id
+          and a.kind is not distinct from s.kind
+          and a.item_id is not distinct from s.item_id)
        and not exists (
        select 1 from removed r
-        where r.source_id = s.source_id and r.kind = s.kind and r.item_id = s.item_id)
-       and (
-         s.deleted_at is null
-         -- Guarded cast, not a bare one. `assert_favorites_valid` rejects a
-         -- malformed `deleted_at` at every write boundary, but the legacy
-         -- whole-set `push_favorites` can have stored one before this migration
-         -- existed — and an unguarded `::timestamptz` on that value would raise
-         -- here, wedging *every* later delta push on that profile. Junk is
-         -- treated as expired (dropped) instead.
-         or (
-           s.deleted_at ~ '^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}'
-           and (s.deleted_at)::timestamptz > p_now - p_keep_tombstones
-         )
-       )
-  ),
-  merged as (
-    select source_id, kind, item_id, deleted_at, updated_at from untouched
+        where r.source_id is not distinct from s.source_id
+          and r.kind is not distinct from s.kind
+          and r.item_id is not distinct from s.item_id)
     union all
-    -- A re-added favorite loses its tombstone.
-    select a.source_id, a.kind, a.item_id, null::text, (p_now)::text
+    -- ...plus the additions that were not also removed. A removal is simply
+    -- absent from the result: there is nothing left behind to represent it.
+    select a.source_id, a.kind, a.item_id
       from added a
      where not exists (
        select 1 from removed r
-        where r.source_id = a.source_id and r.kind = a.kind and r.item_id = a.item_id)
-    union all
-    select r.source_id, r.kind, r.item_id, (p_now)::text, (p_now)::text
-      from removed r
+        where r.source_id is not distinct from a.source_id
+          and r.kind is not distinct from a.kind
+          and r.item_id is not distinct from a.item_id)
   )
   select coalesce(
     jsonb_agg(
-      jsonb_strip_nulls(
-        jsonb_build_object(
-          'source_id', source_id,
-          'kind', kind,
-          'item_id', item_id,
-          'deleted_at', deleted_at,
-          'updated_at', updated_at
-        )
+      jsonb_build_object(
+        'source_id', source_id,
+        'kind', kind,
+        'item_id', item_id
       )
       order by source_id, kind, item_id
     ),
@@ -299,35 +199,34 @@ begin
     raise exception 'profile not found for this account';
   end if;
 
-  merged := public.merge_favorites(stored, p_added, p_removed, now());
+  merged := public.merge_favorites(stored, p_added, p_removed);
 
   perform public.assert_favorites_valid(merged);
 
   -- `updated_at` advances, exactly as the legacy whole-set push_favorites makes
-  -- it advance. Note this is not optional here: `profiles_touch` is a BEFORE
-  -- UPDATE trigger that sets `new.updated_at` unconditionally, so omitting the
-  -- column from this statement would change nothing.
+  -- it advance. Note this is not optional: `profiles_touch` is a BEFORE UPDATE
+  -- trigger that sets it unconditionally, so omitting the column here would
+  -- change nothing.
   --
   -- KNOWN LIMITATION: `profiles.updated_at` is also the revision the *manual*
   -- push compares to warn "this profile changed on the panel — pushing will
   -- replace those newer changes" before a destructive sources/metadata
   -- overwrite. Favorites are device-owned (the panel never touches them), so a
   -- favorites-only change can never be one of the panel edits that warning is
-  -- about — yet it now advances the same timestamp, and automatic pushes make
-  -- that far more frequent than manual ones ever did. Fixing it properly means
-  -- a profiles-specific touch trigger that leaves the revision alone when only
+  -- about — yet it advances the same timestamp, and automatic pushes make that
+  -- far more frequent than manual ones ever did. Fixing it properly means a
+  -- profiles-specific touch trigger that leaves the revision alone when only
   -- `favorites` differs (comparing `to_jsonb(new) - 'favorites' - 'updated_at'`
   -- against the same on OLD, so it stays correct as columns are added).
-  -- Deliberately not done in this migration: it is surgery on the mechanism
-  -- that guards against overwriting panel edits, and none of this SQL can be
-  -- executed locally to verify it.
+  -- Deliberately not done here: it is surgery on the mechanism that guards
+  -- against overwriting panel edits, and wants its own reviewed change.
   update public.profiles
      set favorites = merged, updated_at = now()
    where id = p_profile_id and owner = o;
 end;
 $$;
 
-revoke all on function public.merge_favorites(jsonb, jsonb, jsonb, timestamptz, interval)
+revoke all on function public.merge_favorites(jsonb, jsonb, jsonb)
   from public, anon, authenticated;
 revoke all on function public.push_favorites_delta(jsonb, jsonb, uuid) from public, anon;
 grant execute on function public.push_favorites_delta(jsonb, jsonb, uuid) to authenticated;

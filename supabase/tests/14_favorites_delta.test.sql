@@ -1,19 +1,18 @@
--- push_favorites_delta / merge_favorites: the per-row merge that makes
+-- push_favorites_delta / merge_favorites: the per-row delta that makes
 -- automatic favorite pushing safe.
 --
--- The property that matters is the last one: two devices pushing *different*
+-- The property that matters is the third one: two devices pushing *different*
 -- rows must both survive. That is the whole reason this exists — the legacy
 -- whole-set push_favorites cannot express it, because a missing element is
 -- indistinguishable from a deletion.
+--
+-- Note what is deliberately absent: tombstones. A removal drops the element
+-- outright, so `profiles.favorites` keeps exactly the shape every shipped
+-- client already reads (source_id/kind/item_id and nothing else).
 
 begin;
 
-select plan(13);
-
--- The merge stores timestamps as `timestamptz::text`, which renders in the
--- session's TimeZone — so the exact-string assertions below are only stable
--- with it pinned. Not a property of the code under test, just of this file.
-set local timezone = 'UTC';
+select plan(10);
 
 -- ── merge_favorites: pure semantics ────────────────────────────────────────
 --
@@ -29,127 +28,103 @@ select is(
   public.merge_favorites(
     '[]'::jsonb,
     jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-    '[]'::jsonb,
-    '2026-01-01 00:00:00+00'::timestamptz
-  ) -> 0 ->> 'item_id',
-  'ch1',
-  'an added favorite lands in the merged array'
-);
-
-select ok(
-  (public.merge_favorites(
-    '[]'::jsonb,
-    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-    '[]'::jsonb,
-    '2026-01-01 00:00:00+00'::timestamptz
-  ) -> 0 ? 'deleted_at') is false,
-  'a plain add carries no tombstone'
+    '[]'::jsonb
+  ),
+  jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+  'an added favorite lands in the merged array, carrying no extra keys'
 );
 
 select is(
   public.merge_favorites(
     jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
     '[]'::jsonb,
-    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-    '2026-01-01 00:00:00+00'::timestamptz
-  ) -> 0 ->> 'deleted_at',
-  '2026-01-01 00:00:00+00',
-  'a removal leaves a tombstone stamped with the server time'
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1'))
+  ),
+  '[]'::jsonb,
+  'a removal drops the element outright — no tombstone is left behind'
 );
 
 -- The core property: device A adds ch2 while device B removes ch1. Neither
 -- delta mentions the other's row, so both changes must survive.
 select is(
-  (
-    select jsonb_agg(e ->> 'item_id' order by e ->> 'item_id')
-      from jsonb_array_elements(
-        public.merge_favorites(
-          public.merge_favorites(
-            jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-            jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch2')),
-            '[]'::jsonb,
-            '2026-01-01 00:00:00+00'::timestamptz
-          ),
-          '[]'::jsonb,
-          jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-          '2026-01-01 00:00:01+00'::timestamptz
-        )
-      ) e
-     where (e ->> 'deleted_at') is null
+  public.merge_favorites(
+    public.merge_favorites(
+      jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+      jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch2')),
+      '[]'::jsonb
+    ),
+    '[]'::jsonb,
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1'))
   ),
-  '["ch2"]'::jsonb,
-  'concurrent deltas on different rows both survive (ch2 added, ch1 deleted)'
+  jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch2')),
+  'concurrent deltas on different rows both survive (ch2 added, ch1 removed)'
 );
 
-select ok(
-  (public.merge_favorites(
-    jsonb_build_array(jsonb_build_object(
-      'source_id', 'src', 'kind', 'live', 'item_id', 'ch1',
-      'deleted_at', '2026-01-01 00:00:00+00')),
+select is(
+  public.merge_favorites(
+    '[]'::jsonb,
     jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
-    '[]'::jsonb,
-    '2026-01-02 00:00:00+00'::timestamptz
-  ) -> 0 ? 'deleted_at') is false,
-  're-adding a tombstoned favorite clears the tombstone'
-);
-
--- Client-supplied timestamps are discarded: the merge reads only the identity
--- triple from the delta payloads.
-select is(
-  public.merge_favorites(
-    '[]'::jsonb,
-    jsonb_build_array(jsonb_build_object(
-      'source_id', 'src', 'kind', 'live', 'item_id', 'ch1',
-      'updated_at', '1999-01-01 00:00:00+00',
-      'deleted_at', '1999-01-01 00:00:00+00')),
-    '[]'::jsonb,
-    '2026-01-01 00:00:00+00'::timestamptz
-  ),
-  jsonb_build_array(jsonb_build_object(
-    'source_id', 'src', 'kind', 'live', 'item_id', 'ch1',
-    'updated_at', '2026-01-01 00:00:00+00')),
-  'a client-supplied deleted_at/updated_at is ignored, not merged'
-);
-
-select is(
-  public.merge_favorites(
-    jsonb_build_array(jsonb_build_object(
-      'source_id', 'src', 'kind', 'live', 'item_id', 'old',
-      'deleted_at', '2020-01-01 00:00:00+00')),
-    '[]'::jsonb,
-    '[]'::jsonb,
-    '2026-01-01 00:00:00+00'::timestamptz
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1'))
   ),
   '[]'::jsonb,
-  'a tombstone past the retention window is pruned'
-);
-
--- A malformed deleted_at can only arrive via the legacy whole-set push (or a
--- row stored before this migration). It must not raise — an unguarded cast
--- here would wedge every later delta push on that profile.
-select lives_ok(
-  $$select public.merge_favorites(
-      jsonb_build_array(jsonb_build_object(
-        'source_id', 'src', 'kind', 'live', 'item_id', 'junk',
-        'deleted_at', 'not-a-timestamp')),
-      '[]'::jsonb, '[]'::jsonb, '2026-01-01 00:00:00+00'::timestamptz)$$,
-  'a malformed deleted_at does not raise in the merge'
+  'a key in both halves resolves to removed, deterministically'
 );
 
 select is(
   public.merge_favorites(
-    jsonb_build_array(jsonb_build_object(
-      'source_id', 'src', 'kind', 'live', 'item_id', 'junk',
-      'deleted_at', 'not-a-timestamp')),
-    '[]'::jsonb, '[]'::jsonb, '2026-01-01 00:00:00+00'::timestamptz
+    '[]'::jsonb,
+    jsonb_build_array(
+      jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1'),
+      jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')
+    ),
+    '[]'::jsonb
   ),
-  '[]'::jsonb,
-  'a malformed tombstone is treated as expired and dropped'
+  jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+  'a repeated add does not duplicate the favorite'
+);
+
+-- Re-adding something the stored set already holds must not duplicate it
+-- either: the merge drops the stored copy before re-adding.
+select is(
+  public.merge_favorites(
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+    '[]'::jsonb
+  ),
+  jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'ch1')),
+  'adding an already-stored favorite is idempotent'
+);
+
+-- Kinds and sources are part of the key, not just the item id.
+select is(
+  public.merge_favorites(
+    jsonb_build_array(
+      jsonb_build_object('source_id', 'a', 'kind', 'live', 'item_id', 'x'),
+      jsonb_build_object('source_id', 'b', 'kind', 'live', 'item_id', 'x'),
+      jsonb_build_object('source_id', 'a', 'kind', 'movie', 'item_id', 'x')
+    ),
+    '[]'::jsonb,
+    jsonb_build_array(jsonb_build_object('source_id', 'a', 'kind', 'live', 'item_id', 'x'))
+  ),
+  jsonb_build_array(
+    jsonb_build_object('source_id', 'a', 'kind', 'movie', 'item_id', 'x'),
+    jsonb_build_object('source_id', 'b', 'kind', 'live', 'item_id', 'x')
+  ),
+  'removal keys on (source_id, kind, item_id), not the item id alone'
+);
+
+-- A stored array written by an older client is left exactly as it was found.
+select is(
+  public.merge_favorites(
+    jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'legacy')),
+    '[]'::jsonb,
+    '[]'::jsonb
+  ),
+  jsonb_build_array(jsonb_build_object('source_id', 'src', 'kind', 'live', 'item_id', 'legacy')),
+  'an empty delta leaves a legacy-written set untouched'
 );
 
 -- ── everything below runs as a client ──────────────────────────────────────
--- `assert_favorites_valid` is granted to authenticated (the validation triggers
--- call it as the writing user), and the RPC guards need a real session.
 
 set local role authenticated;
 
@@ -159,27 +134,6 @@ insert into public.profiles (id, owner, name)
   values (:'profile_a_id'::uuid, :'owner_a'::uuid, 'Default');
 
 select gen_random_uuid() as source_a_id \gset
-
--- ── assert_favorites_valid: the new keys ───────────────────────────────────
-
-select throws_ok(
-  $$select public.assert_favorites_valid(
-      jsonb_build_array(jsonb_build_object(
-        'source_id', 'src', 'kind', 'live', 'item_id', 'ch1',
-        'deleted_at', 'not-a-timestamp')))$$,
-  '23514',
-  null,
-  'a malformed deleted_at is rejected at the write boundary'
-);
-
-select lives_ok(
-  $$select public.assert_favorites_valid(
-      jsonb_build_array(jsonb_build_object(
-        'source_id', 'src', 'kind', 'live', 'item_id', 'ch1')))$$,
-  'a favorite with no timestamp keys stays valid (every pre-migration row)'
-);
-
--- ── push_favorites_delta: guards ───────────────────────────────────────────
 
 select throws_ok(
   format('select public.push_favorites_delta(%L::jsonb, %L::jsonb, %L::uuid)',
