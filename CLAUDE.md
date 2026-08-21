@@ -344,6 +344,15 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - The **anon key ships in clients by design**; access control is *only* RLS + `SECURITY DEFINER`
   RPCs (`supabase/migrations/`, deny-by-default — read the first migration's header before
   changing it). The `service_role` key must never appear in any client or this repo.
+- **Favorites are the one collection that syncs automatically** (`cloud_auto_sync.dart`, started
+  from `HomeShell`; everything else stays manual Pull/Push). That works only because they push a
+  **delta**, not a set: `push_favorites_delta` merges adds/removes per row under the profile's row
+  lock, and deletions are representable as `deleted_at` **tombstones** (pruned at 90 days; the pull
+  skips them). Client-supplied timestamps are discarded — server `now()` stays the only authority —
+  so same-row conflicts resolve by arrival order and **no `updated_at` revision guard is needed**.
+  The delta comes from `favorites_outbox` (schema v14), written only by `setFavorite` (user intent)
+  and never by the pull, which rebases the outbox onto the pulled state. The legacy whole-set
+  `push_favorites` stays forever and **drops tombstones** (can resurrect a deleted favorite).
 - Devices are anonymous users with **no direct table writes**; the only device→cloud write path
   is the owner-scoped `push_*` RPCs. Push is row-level last-write-wins **refined by field-preserve**:
   broad fields merge through `merge_preserving_nonempty(stored, incoming)` so a device push can
@@ -426,7 +435,11 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 
 ## Database migrations
 
-`AppDatabase` is at `schemaVersion = 13` (v9: `favorites` table, deliberately separate from
+`AppDatabase` is at `schemaVersion = 14` (v14: `favorites_outbox`, the pending local favorite
+changes a cloud *delta* push sends — a favorite in the cloud but not locally is either "deleted
+here" or "added there and not pulled yet", and `favorites` alone can't tell those apart; written
+only by `setFavorite` (user intent), never by the pull, which mirrors through
+`clearFavorites`/`setFavorites`; v9: `favorites` table, deliberately separate from
 `channels`/`media_items` so a refresh never drops favorites; v10: `channels.archive_days` →
 `Channel.hasArchive` / catch-up; v11: VOD playback positions / Continue Watching; v12:
 `idx_prog_source_start(source_id, start)` on `programmes` for the source+time now/next lookup —

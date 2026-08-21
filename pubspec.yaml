@@ -82,6 +82,10 @@ dependency_overrides:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # Virtual clock for test/cloud_auto_sync_test.dart — the auto-sync debounce
+  # and retry windows are seconds/minutes long, so real waits would make that
+  # suite the slowest thing in `flutter test` for no added confidence.
+  fake_async: ^1.3.1
   # Used by integration_test/player_soak_test.dart — a real-hardware soak run
   # (never CI / plain `flutter test`, see the file's doc comment).
   integration_test:

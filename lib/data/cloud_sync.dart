@@ -734,6 +734,11 @@ class CloudSync {
     final incoming = <String, Map<ContentKind, List<String>>>{};
     for (final entry in favorites) {
       final fav = Map<String, dynamic>.from(entry as Map);
+      // Tombstones (`deleted_at`) are carried in the array so a device that has
+      // been offline learns the favorite was removed elsewhere. They are not
+      // favorites — applying one would resurrect exactly what it records the
+      // deletion of. Absent on every row written before the delta merge.
+      if (fav['deleted_at'] != null) continue;
       final config = byUuid[fav['source_id']];
       if (config == null) continue;
       final kindName = fav['kind'] as String?;
@@ -749,6 +754,23 @@ class CloudSync {
           : itemId;
       ((incoming[config.id] ??= {})[kind] ??= []).add(stableItemId);
     }
+    // Rebase local changes that haven't been pushed yet on top of the pulled
+    // state. A pull mirrors the profile, so without this it would revert a
+    // favorite the user just toggled here — visibly undoing their action — and
+    // only put it back on the next push. The outbox is the record of exactly
+    // those changes; applying it here keeps the device consistent with what it
+    // is about to send. Done against the in-memory set rather than the
+    // database, so the pull still writes each (source, kind) once.
+    for (final entry in await db.readFavoritesOutbox()) {
+      if (!byUuid.containsKey(entry.sourceId)) continue;
+      final ids = (incoming[entry.sourceId] ??= {})[entry.kind] ??= [];
+      if (entry.add) {
+        if (!ids.contains(entry.itemId)) ids.add(entry.itemId);
+      } else {
+        ids.remove(entry.itemId);
+      }
+    }
+
     for (final bySource in incoming.entries) {
       for (final byKind in bySource.value.entries) {
         await db.setFavorites(bySource.key, byKind.key, byKind.value);
@@ -881,6 +903,65 @@ class CloudSync {
       'push_favorites',
       params: {'p_favorites': favorites, 'p_profile_id': profileId},
     );
+  }
+
+  /// Push only what changed locally since the last successful push, as a
+  /// delta the server merges per row (`push_favorites_delta`).
+  ///
+  /// This is what makes *automatic* pushing safe. [pushFavorites] replaces the
+  /// whole set, so two devices pushing on their own schedule race and the later
+  /// push erases what the earlier one added; a delta only touches the rows the
+  /// user actually toggled here, so the two can't collide unless they edited
+  /// the *same* favorite — where the server's arrival order is the answer.
+  ///
+  /// Returns true when there was something to send. Only entries belonging to
+  /// cloud-managed sources are pushed; a local-only source's favorites stay on
+  /// the device, exactly as with the whole-set push.
+  ///
+  /// Outbox rows are cleared **after** the RPC returns, and only the exact
+  /// entries that were sent: a toggle made while the push was in flight has
+  /// already replaced its row and must survive to be sent next time.
+  Future<bool> pushFavoritesDelta(SourceStore store, String profileId) async {
+    final db = _db;
+    if (db == null) return false;
+    final pending = await db.readFavoritesOutbox();
+    if (pending.isEmpty) return false;
+
+    final managed = await _readCloudIds();
+    final byUuid = {for (final c in await store.list()) c.id: c};
+    final added = <Map<String, dynamic>>[];
+    final removed = <Map<String, dynamic>>[];
+    final sent =
+        <({String sourceId, ContentKind kind, String itemId, bool add})>[];
+    for (final entry in pending) {
+      if (!managed.contains(entry.sourceId)) continue;
+      if (!byUuid.containsKey(entry.sourceId)) continue;
+      if (!_favoriteKinds.contains(entry.kind)) continue;
+      final payload = {
+        'source_id': entry.sourceId,
+        'kind': entry.kind.name,
+        'item_id': entry.itemId,
+      };
+      (entry.add ? added : removed).add(payload);
+      sent.add(entry);
+    }
+    if (sent.isEmpty) {
+      // Everything pending belongs to sources the cloud doesn't manage; drop
+      // the rows so they don't sit in the outbox forever being re-examined.
+      await db.clearFavoritesOutbox(pending);
+      return false;
+    }
+
+    await _client.rpc(
+      'push_favorites_delta',
+      params: {
+        'p_added': added,
+        'p_removed': removed,
+        'p_profile_id': profileId,
+      },
+    );
+    await db.clearFavoritesOutbox(sent);
+    return true;
   }
 
   /// Self-unpair: drop the cloud-managed sources locally and remove this

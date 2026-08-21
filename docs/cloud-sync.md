@@ -533,6 +533,49 @@ zero-width Unicode is not caught by the control-character check.
 ## Flutter side
 
 [`cloud_config.dart`](../lib/data/cloud_config.dart) (build-time `--dart-define`
+## Favorites sync is a delta, and it runs on its own
+
+Favorites are the one collection that syncs **automatically** (`cloud_auto_sync.dart`,
+`CloudAutoSync`, started from `HomeShell`). Everything else still syncs only when the user presses
+Pull/Push on the cloud screen.
+
+That is possible only because favorites push *changes* rather than state. `push_favorites` replaces
+the whole `profiles.favorites` array, which is safe while pushing is deliberate but not on a timer:
+two devices pushing whole sets race, and the later push erases what the earlier one added. Unlike
+`sources`, favorites have no `merge_preserving_nonempty` equivalent to fall back on — **a missing
+element is indistinguishable from a deletion** when all you have is the final set.
+
+So deletions became representable. An element may carry `deleted_at`, making it a **tombstone**:
+still in the array so other devices learn the favorite is gone, but not a favorite (the pull skips
+it — applying one would resurrect exactly what it records the deletion of). `push_favorites_delta`
+merges adds/removes per row under the profile's row lock, prunes tombstones after 90 days, and
+**discards any client-supplied `deleted_at`/`updated_at`**, keeping the repo-wide rule that server
+`now()` is the only timestamp authority. Same-row conflicts therefore resolve to "whichever push the
+server saw last" — which is what a revision check would have answered anyway, so `CloudAutoSync`
+deliberately has **no `profiles.updated_at` guard**; the row lock makes one unnecessary rather than
+merely cheaper.
+
+Computing a delta needs local change tracking, because a favorite in the cloud but not locally is
+either "deleted here" or "added there and not pulled yet". That is `favorites_outbox` (schema v14):
+an outbox of pending toggles, not a snapshot of the last push, so it is bounded by what the user
+touched rather than by library size. It is written by `AppDatabase.setFavorite` — the single choke
+point for *user* intent — and never by the pull, which mirrors through
+`clearFavorites`/`setFavorites`; queueing the cloud's own state would push it straight back and
+resurrect whatever the pull just deleted. The pull **rebases the outbox onto the pulled state**,
+because mirroring the profile would otherwise visibly undo a favorite the user just toggled.
+
+Two edges that are easy to reintroduce: `push_favorites` stays supported forever (installs are
+arbitrarily old) and a legacy whole-set push **drops tombstones**, so it can resurrect a deleted
+favorite — today's behaviour, no worse. And a malformed `deleted_at` from that legacy path would
+poison later merges, so `assert_favorites_valid` bounds both new keys at every write boundary *and*
+`merge_favorites` guards its cast, treating junk as expired.
+
+Pushes are debounced (5 s) and coalesced, so favoriting five channels is one round trip; a change
+made during an in-flight push is queued rather than dropped, a failed push retries and never
+throws at its caller, and `flush()` runs on app pause because a backgrounded Android process may
+never get another turn. Auto-sync shares the server's 30-per-minute `push` budget rather than
+getting one of its own.
+
 `SUPABASE_URL`/`SUPABASE_ANON_KEY`/`PANEL_URL`; `isConfigured` gates the whole feature),
 [`cloud_sync.dart`](../lib/data/cloud_sync.dart) (`CloudSync`: anon session, pairing, profile
 selection (`listProfiles`/`activeProfileId`/`setProfile`), and profile-scoped

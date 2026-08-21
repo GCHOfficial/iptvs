@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/app_database.dart';
+import '../data/cloud_auto_sync.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
 import '../data/distribution_channel.dart';
@@ -51,6 +52,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   bool Function(KeyEvent event)? _keyboardLogger;
   bool _updateResumeActive = false;
 
+  /// Background favorites sync; null when the build has no cloud config or
+  /// this device isn't paired to a profile.
+  CloudAutoSync? _cloudAutoSync;
+
   // Active profile info for the avatar — loaded after the main source load.
   // Local profile first (most-recently-selected), cloud profile as fallback.
   String? _profileName;
@@ -66,14 +71,44 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       return true;
     }());
     _loadActive();
+    unawaited(_startCloudAutoSync());
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _resumePendingThenCheck(),
     );
   }
 
+  /// Keeps favorites in step with the paired profile without a manual Push.
+  ///
+  /// Silent by design: it only runs when the build has cloud config *and* this
+  /// device is paired to a profile, and every failure is logged rather than
+  /// surfaced — the app is fully usable offline, and a sync that cannot reach
+  /// the server is not an error the user needs to act on.
+  Future<void> _startCloudAutoSync() async {
+    if (!CloudConfig.isConfigured) return;
+    final sync = CloudSync(db: widget.db);
+    final profileId = await sync.activeProfileId();
+    if (profileId == null || !mounted) return;
+    _cloudAutoSync = CloudAutoSync(
+      pull: () => sync.pullFavorites(widget.store, profileId),
+      push: () => sync.pushFavoritesDelta(widget.store, profileId),
+      changes: widget.db.favoritesChanged,
+    );
+    await _cloudAutoSync!.start();
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Send pending favorite changes before the process can be killed: on
+    // Android a backgrounded app may never get another turn, and a change
+    // sitting out its debounce would then wait for the next launch.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_cloudAutoSync?.flush() ?? Future<void>.value());
+      return;
+    }
     if (state != AppLifecycleState.resumed || !mounted) return;
+    // Another device may have changed favorites while this one was away.
+    unawaited(_cloudAutoSync?.pullNow() ?? Future<void>.value());
     WidgetsBinding.instance.addPostFrameCallback((_) => _resumePendingUpdate());
   }
 
@@ -113,6 +148,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       HardwareKeyboard.instance.removeHandler(logger);
       _keyboardLogger = null;
     }
+    unawaited(_cloudAutoSync?.dispose() ?? Future<void>.value());
+    _cloudAutoSync = null;
     _source?.dispose();
     for (final provider in _metadataProviders) {
       provider.close();
