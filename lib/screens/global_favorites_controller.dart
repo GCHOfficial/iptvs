@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../data/app_database.dart';
@@ -53,6 +55,15 @@ class GlobalFavoriteChannel {
 /// provider lands above a row numbered 5 in another, next to a source chip
 /// saying they are unrelated. See `favorites_order.dart` for why the order is
 /// derived rather than stored.
+///
+/// Rows carry an **EPG**, keyed by `(sourceId, channelId)` — see [epgFor]. That
+/// pair is the entire reason they can: a guide is per-source and the live tab's
+/// own now/next maps are keyed by channel id alone, which a foreign row can
+/// collide with, so handing those over would print another provider's programme
+/// against this channel. A foreign source's guide is only refreshed while that
+/// source is active and so can be stale, but staleness degrades to *nothing*
+/// rather than to something wrong: both halves of the query are bounded by the
+/// current instant, so an out-of-date guide simply stops matching.
 class GlobalFavoritesController extends ChangeNotifier {
   final AppDatabase db;
   final SourceStore store;
@@ -64,6 +75,44 @@ class GlobalFavoritesController extends ChangeNotifier {
 
   bool _loading = false;
   bool get loading => _loading;
+
+  /// The ranks the last [load] ordered by, kept so a favorite toggled on the
+  /// active source can be slotted into place without re-reading anything.
+  Map<String, int> _sourceRanks = const {};
+  final Map<String, Map<String, int>> _categoryRanksBySource = {};
+
+  /// Whether [load] has ever completed. Until it has there is no ordered list
+  /// to insert into, so [applyLocalChange] falls back to a full load.
+  bool _loadedOnce = false;
+
+  /// Now/next for these rows, keyed by **`(sourceId, channelId)`**.
+  ///
+  /// Never by channel id alone: this is the one view where two providers'
+  /// channels share a list, and provider ids are unique only within a provider.
+  Map<(String, String), Programme> _now = const {};
+  Map<(String, String), Programme> _next = const {};
+
+  /// Whether any row has a guide entry — the live tab reads this to choose the
+  /// row height, so it must describe what the rows will actually draw.
+  bool get hasEpg => _now.isNotEmpty || _next.isNotEmpty;
+
+  /// The guide for one row. Both halves are null for a source with no cached
+  /// guide, which is the ordinary case for a provider not yet browsed.
+  ({Programme? now, Programme? next}) epgFor(
+    String sourceId,
+    String channelId,
+  ) => (now: _now[(sourceId, channelId)], next: _next[(sourceId, channelId)]);
+
+  Timer? _epgTimer;
+
+  /// Start the periodic now/next refresh, on the same one-minute cadence as the
+  /// active source's guide. Call once, after the first load.
+  void startEpgRefresh() {
+    _epgTimer ??= Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => unawaited(refreshEpg()),
+    );
+  }
 
   bool _disposed = false;
   // Generation guard, as for every other async publish in this app: a reload
@@ -88,9 +137,7 @@ class GlobalFavoritesController extends ChangeNotifier {
       // serializing one query per configured source made a star press cost the
       // sum of them instead of the longest.
       final sourceIds = {for (final row in rows) row.sourceId}.toList();
-      final categoryLists = await Future.wait(
-        sourceIds.map(db.readCategories),
-      );
+      final categoryLists = await Future.wait(sourceIds.map(db.readCategories));
       for (var i = 0; i < sourceIds.length; i++) {
         categoryRanksBySource[sourceIds[i]] = catalogRanks(
           categoryLists[i].map((c) => c.id),
@@ -112,11 +159,16 @@ class GlobalFavoritesController extends ChangeNotifier {
       return;
     }
     if (_disposed || gen != _generation) return;
+    _categoryRanksBySource
+      ..clear()
+      ..addAll(categoryRanksBySource);
     final byId = {for (final c in configs) c.id: c};
     // The user's arrangement of the sources screen is the outer rank; the query
     // already returns each source's rows in that source's own channel order,
     // which `orderedByCatalog` keeps as the innermost tie-break.
     final sourceRanks = catalogRanks(configs.map((c) => c.id));
+    _sourceRanks = sourceRanks;
+    _loadedOnce = true;
     _set(() {
       _items = orderedByCatalog(
         [
@@ -132,6 +184,165 @@ class GlobalFavoritesController extends ChangeNotifier {
       );
       _loading = false;
     });
+    await refreshEpg();
+  }
+
+  /// Re-reads now/next for the rows currently listed.
+  ///
+  /// A **subordinate** op in the repo's async-publish sense: it reads the load
+  /// generation without bumping it, so a reload always beats a refresh in
+  /// flight and never the reverse.
+  ///
+  /// Uses the channel-constrained [AppDatabase.nowNextForChannels] rather than
+  /// the whole-source [AppDatabase.nowNext]: the row set here is a small,
+  /// fully-known list of favorites, which is exactly the case that query
+  /// exists for — the live tab can't use it because it reads arbitrary rows.
+  Future<void> refreshEpg() async {
+    final gen = _generation;
+    final idsBySource = <String, List<String>>{};
+    for (final item in _items) {
+      (idsBySource[item.sourceId] ??= <String>[]).add(item.channel.id);
+    }
+    if (idsBySource.isEmpty) {
+      if (_now.isEmpty && _next.isEmpty) return;
+      _set(() {
+        _now = const {};
+        _next = const {};
+      });
+      return;
+    }
+    final sourceIds = idsBySource.keys.toList();
+    final at = DateTime.now();
+    final List<({Map<String, Programme> now, Map<String, Programme> next})>
+    perSource;
+    try {
+      perSource = await Future.wait([
+        for (final sourceId in sourceIds)
+          db.nowNextForChannels(sourceId, idsBySource[sourceId]!, at),
+      ]);
+    } catch (error) {
+      // Fails soft for the same reason the load does: this view is additive,
+      // and a guide is the least of what it is for.
+      DiagnosticsLog.instance.add(
+        'library',
+        'cross-source favorites guide unavailable: ${redactText('$error')}',
+      );
+      return;
+    }
+    if (_disposed || gen != _generation) return;
+    final now = <(String, String), Programme>{};
+    final next = <(String, String), Programme>{};
+    for (var i = 0; i < sourceIds.length; i++) {
+      final sourceId = sourceIds[i];
+      perSource[i].now.forEach((id, p) => now[(sourceId, id)] = p);
+      perSource[i].next.forEach((id, p) => next[(sourceId, id)] = p);
+    }
+    _set(() {
+      _now = now;
+      _next = next;
+    });
+  }
+
+  /// Reflects a favorite toggled on the **active** source, which writes the
+  /// same `favorites` table this view reads through a controller that knows
+  /// nothing about this one.
+  ///
+  /// Without it the cross-source view only caught up on the next full reload,
+  /// so a channel starred from the ordinary list simply wasn't there until the
+  /// user refreshed — while the per-source Favorites view updated instantly.
+  ///
+  /// Incremental rather than a [load] because this runs on **every star
+  /// press**: a load re-reads the OS keychain ([SourceStore.list]) and requeries
+  /// every contributing source. The list is already in catalog order, so the
+  /// new row only has to be put in the right place.
+  Future<void> applyLocalChange({
+    required SourceConfig config,
+    required Channel channel,
+    required bool favorite,
+  }) async {
+    if (!favorite) {
+      removeLocally(config.id, channel.id);
+      return;
+    }
+    // Nothing ordered to insert into yet.
+    if (!_loadedOnce) return load();
+    final gen = _generation;
+    if (!_categoryRanksBySource.containsKey(config.id)) {
+      // The first favorite in this source: it contributed no row to the last
+      // load, so its category order was never read. One indexed query, not a
+      // whole reload.
+      Map<String, int> ranks;
+      try {
+        ranks = catalogRanks(
+          (await db.readCategories(config.id)).map((c) => c.id),
+        );
+      } catch (error) {
+        DiagnosticsLog.instance.add(
+          'library',
+          'cross-source favorites category order unavailable: '
+              '${redactText('$error')}',
+        );
+        ranks = const {};
+      }
+      if (_disposed || gen != _generation) return;
+      _categoryRanksBySource[config.id] = ranks;
+    }
+    if (_items.any(
+      (item) => item.sourceId == config.id && item.channel.id == channel.id,
+    )) {
+      return;
+    }
+    final added = GlobalFavoriteChannel(channel: channel, config: config);
+    final next = [..._items]..insert(_insertionIndex(added), added);
+    _set(() => _items = next);
+    // The row is on screen already; the guide catches up. This re-queries every
+    // contributing source rather than just this one — the queries are
+    // channel-constrained and bounded by the favorites count, not the catalog,
+    // so a merge path for one source would buy little and add a second way for
+    // these maps to be maintained.
+    await refreshEpg();
+  }
+
+  /// Where [candidate] belongs in [_items] to keep it in catalog order.
+  ///
+  /// An insertion, not a re-sort: the list is already ordered, so placing the
+  /// row costs nothing but a walk of the favorites. The comparison reproduces
+  /// the order [load] publishes — source rank, then category rank, then the
+  /// channel order `readFavoriteChannelsAcrossSources` sorts by
+  /// (`number`, `name`).
+  int _insertionIndex(GlobalFavoriteChannel candidate) {
+    for (var i = 0; i < _items.length; i++) {
+      if (_sortsAfter(_items[i], candidate)) return i;
+    }
+    return _items.length;
+  }
+
+  bool _sortsAfter(GlobalFavoriteChannel a, GlobalFavoriteChannel b) {
+    final bySource = rankOf(
+      _sourceRanks,
+      a.sourceId,
+    ).compareTo(rankOf(_sourceRanks, b.sourceId));
+    if (bySource != 0) return bySource > 0;
+    final byCategory =
+        rankOf(
+          _categoryRanksBySource[a.sourceId] ?? const {},
+          a.channel.categoryId,
+        ).compareTo(
+          rankOf(
+            _categoryRanksBySource[b.sourceId] ?? const {},
+            b.channel.categoryId,
+          ),
+        );
+    if (byCategory != 0) return byCategory > 0;
+    // `ORDER BY c.number, c.name`, and SQLite sorts NULL before any value.
+    final an = a.channel.number;
+    final bn = b.channel.number;
+    if (an != bn) {
+      if (an == null) return false;
+      if (bn == null) return true;
+      return an > bn;
+    }
+    return a.channel.name.compareTo(b.channel.name) > 0;
   }
 
   /// Drops [channel] from the in-memory list after it was unfavorited, without
@@ -155,6 +366,7 @@ class GlobalFavoritesController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _epgTimer?.cancel();
     super.dispose();
   }
 }

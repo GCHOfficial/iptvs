@@ -319,8 +319,30 @@ class LiveTabView extends StatelessWidget {
   /// callback, not a value: on a TV remote the panel follows the channel
   /// cursor, so it must be re-resolved inside the preview pane's own rebuild.
   final Channel? Function() resolvePreviewChannel;
+
+  /// The active source's guide, keyed by channel id. Empty when these rows
+  /// don't come from it — see [epgFor].
   final Map<String, Programme> now;
   final Map<String, Programme> next;
+
+  /// Per-row now/next, for rows whose guide **cannot** be addressed by channel
+  /// id alone: the cross-source Favorites view, where two providers' channels
+  /// share one list and provider ids are unique only within a provider. Takes
+  /// precedence over [now]/[next], which are the *active* source's and would
+  /// print its programme against a foreign row.
+  ///
+  /// Null everywhere else, where every row belongs to the active source and the
+  /// id is unambiguous.
+  final ({Programme? now, Programme? next}) Function(Channel channel)? epgFor;
+
+  /// Whether these rows draw an EPG strip — the input to the row height.
+  ///
+  /// **Not** derived from `now.isNotEmpty` any more: a view served by [epgFor]
+  /// has empty maps while its rows are the tall kind. It stays a single value
+  /// passed in from the screen, which computes [channelRowExtent] from the very
+  /// same predicate, so the assert below still catches drift rather than
+  /// comparing two things that merely happen to agree.
+  final bool showsEpg;
 
   /// Owning-source name for a row, or null to show no chip. Non-null only in
   /// the cross-source Favorites view — see [_ChannelTile.sourceLabel].
@@ -394,6 +416,8 @@ class LiveTabView extends StatelessWidget {
     required this.resolvePreviewChannel,
     required this.now,
     required this.next,
+    required this.showsEpg,
+    this.epgFor,
     required this.deliberate,
     required this.resolving,
     required this.scrollController,
@@ -455,13 +479,14 @@ class LiveTabView extends StatelessWidget {
             semanticChildCount: visible.length,
             itemBuilder: (context, i) {
               final c = visible[i];
+              final epg = epgFor?.call(c) ?? (now: now[c.id], next: next[c.id]);
               return IndexedSemantics(
                 index: i,
                 child: _ChannelTile(
                   channel: c,
                   sourceLabel: sourceLabelFor?.call(c),
-                  now: now[c.id],
-                  next: next[c.id],
+                  now: epg.now,
+                  next: epg.next,
                   favorite: isFavorite(c.id),
                   enabled: !resolving,
                   position: i + 1,
@@ -568,11 +593,11 @@ class LiveTabView extends StatelessWidget {
       textScale: MediaQuery.textScalerOf(context).scale(1),
     );
     assert(
-      channelRowExtent == metrics.channelRowExtent(now.isNotEmpty) &&
+      channelRowExtent == metrics.channelRowExtent(showsEpg) &&
           categoryRowExtent == metrics.categoryRowExtent,
       'live row extents disagree: itemExtent/coordinator got '
       '$channelRowExtent/$categoryRowExtent, the row layout computed '
-      '${metrics.channelRowExtent(now.isNotEmpty)}/${metrics.categoryRowExtent}. '
+      '${metrics.channelRowExtent(showsEpg)}/${metrics.categoryRowExtent}. '
       'The selection model scrolls by index * extent, so these must be one '
       'value — see LiveLayoutMetrics.forSize.',
     );
@@ -669,10 +694,12 @@ class LiveTabView extends StatelessWidget {
     if (preview == null) return SizedBox(height: metrics.previewHeight);
     final previewingPanelChannel =
         isPreviewingRow?.call(preview) ?? (previewChannelId == preview.id);
+    final epg =
+        epgFor?.call(preview) ?? (now: now[preview.id], next: next[preview.id]);
     return _LivePreviewPanel(
       channel: preview,
-      now: now[preview.id],
-      next: next[preview.id],
+      now: epg.now,
+      next: epg.next,
       previewVideo: previewVideoBuilder(),
       previewActive: previewingPanelChannel,
       previewLoading: previewLoading && previewingPanelChannel,
@@ -1900,7 +1927,8 @@ class _ChannelTileState extends State<_ChannelTile> {
                                           ),
                                     ),
                                   ),
-                                  if (widget.sourceLabel case final source?) ...[
+                                  if (widget.sourceLabel
+                                      case final source?) ...[
                                     const SizedBox(width: 8),
                                     Flexible(
                                       child: Text(

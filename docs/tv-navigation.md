@@ -186,7 +186,9 @@ tile-width band.
 
 - **The cross-source Favorites view adds no navigation surface.** "Favorites · All sources" is an
   ordinary entry in the category list, so it costs the Back ladder nothing — no new rung, no new
-  focus node, and the channel list stays the same selection model with the same `itemExtent`. That
+  focus node, and the channel list stays the same selection model under the same `itemExtent`
+  rules (its rows carry a guide of their own, so they take the EPG extent when one is loaded —
+  decided by `showsEpg`, the single value the extent and the row layout both read). That
   was the reason for preferring it over a dedicated screen, which would have duplicated the list,
   preview pane, EPG strip and D-pad model. It also behaves like one: OK previews and a second OK
   goes fullscreen, exactly as anywhere else — the preview simply resolves through the row's own

@@ -96,6 +96,7 @@ void main() {
               isPreviewingRow: (_) => true,
               now: const {},
               next: const {},
+              showsEpg: false,
               deliberate: true,
               resolving: false,
               scrollController: scroll,
