@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show Factory;
+import 'package:flutter/gestures.dart' show OneSequenceGestureRecognizer;
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
@@ -76,7 +79,9 @@ bool previewOwnsEofRecovery({
 ///   the running engine (only the video surface moves — audio, decoder and
 ///   buffer carry over) instead of reloading the stream, and it's also the
 ///   cheapest decode path for weak TV boxes (MediaCodec straight into a
-///   TextureView, no mpv → GL texture copy).
+///   `SurfaceView` the system compositor consumes directly — no mpv, and no GL
+///   texture copy; see [_NativePreviewView] for why that surface type is
+///   load-bearing rather than incidental).
 /// - **Fallback / other platforms**: the embedded media_kit [Player] +
 ///   [VideoController] texture. On Android this covers streams the native
 ///   engine can't decode (chiefly Dolby Vision P5 on non-DV hardware — mpv
@@ -138,7 +143,13 @@ class LivePreviewController extends ChangeNotifier {
 
   /// Channels whose video the native engine can't decode (e.g. Dolby Vision
   /// P5 on non-DV hardware) — they preview via media_kit for this session.
-  final Set<String> _nativeUnsupportedIds = <String>{};
+  ///
+  /// Keyed by `(sourceId, channelId)` rather than the channel id alone. The
+  /// cross-source Favorites view can preview two providers' channels that
+  /// happen to share an id — the very case `GlobalFavoriteChannel.globalId`
+  /// exists for — and an id-keyed memo would push a perfectly decodable channel
+  /// onto the fallback path because an unrelated one elsewhere failed.
+  final Set<(String, String)> _nativeUnsupportedIds = <(String, String)>{};
 
   /// True while the native shared engine (not media_kit) owns the preview.
   bool nativeActive = false;
@@ -271,7 +282,9 @@ class LivePreviewController extends ChangeNotifier {
       'preview eof restart channel=${active.name} '
           'attempt=$_eofRestartAttempts',
     );
-    unawaited(start(active, muted: muted));
+    // Through the same repository the preview was started with — an EOF on a
+    // cross-source favorite must re-resolve against its own provider.
+    unawaited(start(active, muted: muted, from: _activeRepo));
   }
 
   Future<void> _logPreviewHwdec(NativePlayer platform) async {
@@ -303,6 +316,29 @@ class LivePreviewController extends ChangeNotifier {
   /// deliberate and locked"). Cleared by [stop]/[discardPlayer] so an
   /// app-initiated stop never triggers a restart.
   Channel? _activeChannel;
+
+  /// The repository [start] most recently resolved through — the active
+  /// source's, or the owning source's for a cross-source favorite.
+  ///
+  /// Kept so an EOF restart re-resolves against the *same* provider, and so
+  /// [isPreviewing] can answer for a channel id that exists in more than one
+  /// list.
+  LibraryRepository? _activeRepo;
+
+  /// The source id the preview currently belongs to.
+  String get previewSourceId => (_activeRepo ?? repo).source.id;
+
+  /// Whether the preview is showing (or loading) this channel **of this
+  /// source**.
+  ///
+  /// Channel ids are unique only *within* a provider, so every "is this the
+  /// previewing channel?" question has to carry the source id. Asking by id
+  /// alone was sound while the preview was guaranteed to be the active
+  /// source's; the cross-source Favorites view breaks that guarantee, and the
+  /// failure it produces is the worst kind — going fullscreen on provider B's
+  /// channel using the stream resolved from provider A.
+  bool isPreviewing(String sourceId, String channelId) =>
+      this.channelId == channelId && previewSourceId == sourceId;
 
   /// True while the app (not a genuine EOF) has paused the preview around a
   /// fullscreen handoff — an EOF landing in this window is ignored.
@@ -343,8 +379,9 @@ class LivePreviewController extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool _useNative(Channel channel) =>
-      Platform.isAndroid && !_nativeUnsupportedIds.contains(channel.id);
+  bool _useNative(String sourceId, Channel channel) =>
+      Platform.isAndroid &&
+      !_nativeUnsupportedIds.contains((sourceId, channel.id));
 
   /// The most recent [start], so a caller that arrives mid-resolve can wait for
   /// it instead of starting a competing one. Already-completed (or never
@@ -364,25 +401,44 @@ class LivePreviewController extends ChangeNotifier {
   /// Resolve [channel] and open it in the preview player. [muted] is true for
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
-  Future<void> start(Channel channel, {bool muted = true}) {
-    final pending = _start(channel, muted: muted);
+  ///
+  /// [from] is the repository to resolve through, for a channel this controller
+  /// doesn't own: a cross-source favorite belongs to another provider, and
+  /// resolving it against [repo] would spend the *active* source's single-use
+  /// `create_link` on a channel id that means something else there. Null means
+  /// the active source, which is every ordinary preview.
+  Future<void> start(
+    Channel channel, {
+    bool muted = true,
+    LibraryRepository? from,
+  }) {
+    final pending = _start(channel, muted: muted, from: from);
     _pendingStart = pending;
     return pending;
   }
 
-  Future<void> _start(Channel channel, {bool muted = true}) async {
+  Future<void> _start(
+    Channel channel, {
+    bool muted = true,
+    LibraryRepository? from,
+  }) async {
+    final activeRepo = from ?? repo;
     // No guard on `loading`: a newer call must supersede an in-flight resolve
     // (a slow Stalker create_link would otherwise swallow the user's channel
     // change). The request id makes the stale attempt's completions no-ops.
     final requestId = ++_requestId;
     this.muted = muted;
-    if (_activeChannel?.id != channel.id) {
+    if (_activeChannel?.id != channel.id ||
+        !identical(_activeRepo, activeRepo)) {
       // A genuinely new selection, not an EOF-triggered restart of the same
-      // channel — forget any earlier incident's restart bookkeeping.
+      // channel — forget any earlier incident's restart bookkeeping. The source
+      // is part of "same channel": the identical id in another provider's list
+      // is a different channel, and inherits none of this one's incident.
       _eofRestartAttempts = 0;
       _lastEofRestartMs = 0;
     }
     _activeChannel = channel;
+    _activeRepo = activeRepo;
     _pausedByApp = false;
     _set(() {
       channelId = channel.id;
@@ -393,11 +449,11 @@ class LivePreviewController extends ChangeNotifier {
     try {
       DiagnosticsLog.instance.add(
         'library',
-        'preview live source=${repo.source.name} channel=${channel.name} id=${channel.id}',
+        'preview live source=${activeRepo.source.name} channel=${channel.name} id=${channel.id}',
       );
-      final resolved = await repo.resolve(channel);
+      final resolved = await activeRepo.resolve(channel);
       if (_disposed || requestId != _requestId) return;
-      if (_useNative(channel)) {
+      if (_useNative(activeRepo.source.id, channel)) {
         final opened = await _openNative(resolved, muted: muted);
         if (_disposed || requestId != _requestId) return;
         if (opened) {
@@ -412,7 +468,7 @@ class LivePreviewController extends ChangeNotifier {
           return;
         }
         // Native engine unavailable for this channel — embedded path instead.
-        _nativeUnsupportedIds.add(channel.id);
+        _nativeUnsupportedIds.add((activeRepo.source.id, channel.id));
       }
       if (nativeActive) {
         nativeActive = false;
@@ -483,7 +539,7 @@ class LivePreviewController extends ChangeNotifier {
         // and fall back to the embedded media_kit preview mid-flight.
         final id = channelId;
         final s = stream;
-        if (id != null) _nativeUnsupportedIds.add(id);
+        if (id != null) _nativeUnsupportedIds.add((previewSourceId, id));
         nativeActive = false;
         if (s == null) return null;
         DiagnosticsLog.instance.add(
@@ -502,7 +558,7 @@ class LivePreviewController extends ChangeNotifier {
         // video), so the native preview is gone. Clear the preview; the next
         // (re)focus starts a fresh one on the fallback path.
         final id = channelId;
-        if (id != null) _nativeUnsupportedIds.add(id);
+        if (id != null) _nativeUnsupportedIds.add((previewSourceId, id));
         _set(() {
           nativeActive = false;
           stream = null;
@@ -662,8 +718,67 @@ class PreviewVideo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (preview.nativeActive) {
-      return const AndroidView(viewType: 'iptvs/preview_view');
+      return const _NativePreviewView();
     }
     return Video(controller: preview.controller, controls: NoVideoControls);
   }
+}
+
+/// The native shared-engine preview, embedded with **hybrid composition**.
+///
+/// Deliberately not `AndroidView`. That path hands Flutter a *texture*, and the
+/// platform view behind this is a `SurfaceView` (`PreviewPlatformView`)
+/// precisely because a texture is what made a 4K50 HDR10 channel unwatchable:
+/// every frame leaves the decoder as an external GL texture the app's GPU has
+/// to draw, which Flutter then composites again — two extra full-frame passes
+/// at 3840x2160x10-bit, fifty times a second, on a set-top box. An exported log
+/// measured the same codec instance on the same stream holding 49.3 fps into
+/// the fullscreen Activity's SurfaceView while a mostly-preview window managed
+/// about 11.7 fps. `initExpensiveAndroidView` puts the real SurfaceView into
+/// the Activity's view hierarchy instead, so the decoder's buffers reach the
+/// system compositor untouched — usually on a hardware overlay plane, with the
+/// HDR metadata intact.
+///
+/// **"Expensive" is Flutter's own name for it, and it is not free:** any widget
+/// drawn *over* a hybrid-composition view is promoted onto its own overlay
+/// surface, composited separately every frame. Exactly one thing overlaps the
+/// live video today — the small static "Preview" chip in the panel's bottom-left
+/// corner — and that is a fine price. What must not appear is a *full-bleed*
+/// overlay: the panel's loading scrim and error scrim are alternatives to the
+/// video inside the same `Stack`, never layers on top of it, so a spinner over
+/// live 4K is unrepresentable rather than merely avoided. Pinned by
+/// `test/preview_overlay_test.dart`, because "we chose not to" is not a
+/// guarantee and a later "show a spinner while it rebuffers" would hand back a
+/// large share of what this surface switch just bought.
+///
+/// The Android view is non-focusable and blocks descendant focus on the Kotlin
+/// side: under hybrid composition it is a real view in the Activity's
+/// hierarchy, so an focusable SurfaceView would be a D-pad trap the Flutter
+/// focus model cannot see (docs/tv-navigation.md).
+class _NativePreviewView extends StatelessWidget {
+  const _NativePreviewView();
+
+  static const String _viewType = 'iptvs/preview_view';
+
+  @override
+  Widget build(BuildContext context) => PlatformViewLink(
+    viewType: _viewType,
+    surfaceFactory: (context, controller) => AndroidViewSurface(
+      controller: controller as AndroidViewController,
+      // The video is never an input target: the selection model owns the D-pad
+      // and the panel's controls are ordinary Flutter widgets beside it.
+      hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+      gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+    ),
+    onCreatePlatformView: (params) =>
+        PlatformViewsService.initExpensiveAndroidView(
+          id: params.id,
+          viewType: _viewType,
+          layoutDirection: TextDirection.ltr,
+          creationParamsCodec: const StandardMessageCodec(),
+          onFocus: () => params.onFocusChanged(true),
+        )
+          ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+          ..create(),
+  );
 }

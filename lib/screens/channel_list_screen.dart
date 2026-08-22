@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:media_kit/media_kit.dart';
 
+import '../data/device_class.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
@@ -22,6 +23,7 @@ import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
 import 'epg_grid_screen.dart';
 import 'favorites_controller.dart';
+import 'favorites_order.dart';
 import 'global_favorites_controller.dart';
 import 'legal_screen.dart';
 import 'live_controller.dart';
@@ -148,6 +150,27 @@ enum ChannelPlayAction {
   /// Nothing is previewing this channel (or its preview failed) — start one.
   startPreview,
 }
+
+/// Whether the live list draws EPG lines inside its rows.
+///
+/// **The one input the row extent and the row contents must agree on.** The
+/// extent drives the selection model's `index * extent` scroll maths and is
+/// handed to `LiveTabView` as its `itemExtent`, while `LiveTabView` re-derives
+/// the row layout from the same metrics — so a view that answers this
+/// differently on the two sides scrolls by a height its rows aren't drawn at.
+///
+/// [hasEpg] is whether the *active* source has a guide loaded. It is not enough
+/// on its own: the cross-source Favorites view carries no EPG by design and is
+/// handed empty `now`/`next` maps (a foreign row's channel id can collide with
+/// an active-source one, and printing that provider's programme against it
+/// would be worse than printing nothing). Reading only `hasEpg` there laid the
+/// rows out at 68.1 px inside an itemExtent of 105.9.
+///
+/// Pure and top-level for the same reason as
+/// [shouldLeaveCrossSourceFavoritesView]: the screen that uses it can only be
+/// widget-tested with libmpv present, which no Windows dev box has.
+bool liveRowsShowEpg({required String? categoryId, required bool hasEpg}) =>
+    categoryId != kAllSourcesFavoritesCategoryId && hasEpg;
 
 /// Whether the live tab must fall back to "All" because the cross-source
 /// Favorites view is selected but no longer offered.
@@ -456,6 +479,45 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     );
   }
 
+  /// The repository that owns [channel] *in the current view* — the active
+  /// source's, or a cross-source favorite's owning source.
+  ///
+  /// Cheap outside the cross-source view: [_crossSourceFavoriteFor] returns
+  /// null unless that category is selected.
+  LibraryRepository _repoForChannel(Channel channel) {
+    final cross = _crossSourceFavoriteFor(channel);
+    return cross == null ? widget.repo : _repoFor(cross.config);
+  }
+
+  /// Whether the preview is showing (or loading) [channel] — asked with the
+  /// owning source attached.
+  ///
+  /// Every one of these comparisons used to be `_preview.channelId ==
+  /// channel.id`, which was sound only while the preview was guaranteed to be
+  /// the active source's. Now that a cross-source favorite can preview, a bare
+  /// id match can be a *different provider's* channel that happens to share it
+  /// — and the consequences are all silent: going fullscreen on the wrong
+  /// stream, suppressing a hover re-arm that should have fired, locking the
+  /// panel to the wrong row.
+  /// The id of the source that owns [channel] in the current view — **without
+  /// building anything.**
+  ///
+  /// Deliberately not `_repoForChannel(channel).source.id`. That constructs a
+  /// `LibraryRepository` *and* a live provider client as a side effect, and
+  /// this is reached from `ListView.builder`'s item builder: scrolling the
+  /// cross-source list would instantiate a provider client for every source
+  /// whose row came into view, for channels the user never plays. Worse,
+  /// `SourceConfig.build()` null-asserts its credential fields, so a
+  /// credential-less source (an E2EE-locked device, or a cloud-pulled source
+  /// whose secrets haven't arrived) would throw *inside build* and take the
+  /// whole channel list down with it — where the play path catches the same
+  /// throw and shows a snackbar.
+  String _sourceIdForChannel(Channel channel) =>
+      _crossSourceFavoriteFor(channel)?.sourceId ?? widget.repo.source.id;
+
+  bool _isPreviewing(Channel channel) =>
+      _preview.isPreviewing(_sourceIdForChannel(channel), channel.id);
+
   Future<void> _disposeForeignRepos() async {
     final repos = _foreignRepos.values.toList();
     _foreignRepos.clear();
@@ -601,7 +663,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   void _onChannelSelectionChanged(Channel channel, bool hasFocus) {
     if (!hasFocus) {
-      if (!_deliberatePreview && _preview.channelId == channel.id) {
+      if (!_deliberatePreview && _isPreviewing(channel)) {
         _previewTimer?.cancel();
       }
       return;
@@ -612,17 +674,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // start and to switch channels. Focus alone never starts, stops, or
       // retargets a preview — it stays locked to the channel it was started on
       // until the user presses OK on a different one.
-      return;
-    }
-
-    // The cross-source view never previews — on any platform. The preview
-    // controller is bound to the *active* source's repository, so hovering a
-    // foreign row here would call `activeSource.resolve(foreignChannel)`:
-    // the wrong provider, a stream that fails or plays the wrong channel, and
-    // a single-use Stalker `create_link` spent for nothing. `_play` enforces
-    // the same rule for the OK path.
-    if (_categoryId == kAllSourcesFavoritesCategoryId) {
-      _previewTimer?.cancel();
       return;
     }
 
@@ -639,13 +690,13 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Already previewing (or resolving) this exact channel — a hover
       // re-arm would pointlessly burn another create_link (tokens are
       // single-use; portals may rate-limit).
-      if (_preview.channelId == channel.id &&
+      if (_isPreviewing(channel) &&
           (_preview.stream != null || _preview.loading)) {
         return;
       }
-      final isWide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
+      final isWide = isWideLayout(MediaQuery.sizeOf(context));
       if (isWide && _tab == ContentKind.live) {
-        _preview.start(channel);
+        _preview.start(channel, from: _repoForChannel(channel));
       }
     });
   }
@@ -765,6 +816,16 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     if (mounted) _focus.clampSelection();
   }
 
+  /// Flips a foreign channel's favorite state, in whichever direction it is
+  /// currently in. Used where the control is a true toggle (the phone preview
+  /// sheet) rather than the cross-source list's remove-only star.
+  Future<void> _toggleForeignFavorite(String sourceId, String channelId) async {
+    final favorited = _globalFavorites.items.any(
+      (item) => item.sourceId == sourceId && item.channel.id == channelId,
+    );
+    await _setForeignFavorite(sourceId, channelId, !favorited);
+  }
+
   /// Star pressed on a row of the cross-source view.
   ///
   /// Every row there *is* a favorite, so the only meaningful action is removing
@@ -824,7 +885,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       return;
     }
     setState(() => _categoryId = null);
+    _focus.resetChannelSelection();
     _focus.clampSelection();
+    // Leaving the cross-source view also changes the row extent (those rows
+    // carry no EPG, so they run on the shorter one — `liveRowsShowEpg`), which
+    // makes the retained pixel offset mean a different row than it did a frame
+    // ago. Every other category switch resets the cursor and the scroll for the
+    // same reason; this fallback is a category switch too, just one the user
+    // didn't press.
+    _scrollToTop();
   }
 
   /// Live categories shown in the pane/dropdown: the Favorites entry (only when
@@ -936,7 +1005,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final favoritesView = _categoryId == kFavoritesCategoryId;
     final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
     final hidden = _hiddenCategories(ContentKind.live);
-    return _live.channels.where((c) {
+    final matched = _live.channels.where((c) {
       if (favoritesView) {
         // Favorites are explicit picks, shown even from a disabled category.
         if (!favs!.contains(c.id)) return false;
@@ -947,6 +1016,18 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (q.isNotEmpty && !c.name.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
+    if (!favoritesView) return matched;
+    // Favorites read in catalog order: category order first, then the channel
+    // order inside it — which `matched` already carries, having been filtered
+    // straight out of the catalog. Every other category view is a single
+    // category, so only this one has any grouping to do. Ranked against the
+    // *full* category list rather than the visible one, because a favorite is
+    // deliberately still shown when its category is disabled.
+    final categoryRanks = catalogRanks(_live.categories.map((c) => c.id));
+    return orderedByCatalog(
+      matched,
+      categoryRank: (c) => rankOf(categoryRanks, c.categoryId),
+    );
   }
 
   // Memoized filtered media list, for the same reason as [_visible]: it is read
@@ -1004,7 +1085,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       }).toList();
     }
     final items = controller.snapshot?.items ?? const <MediaItem>[];
-    return items.where((item) {
+    final matched = items.where((item) {
       if (favoritesView) {
         if (!favs!.contains(item.id)) return false;
       } else {
@@ -1013,6 +1094,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       if (q.isNotEmpty && !item.title.toLowerCase().contains(q)) return false;
       return true;
     }).toList();
+    if (!favoritesView) return matched;
+    // Same rule as the live Favorites view — see `_computeVisible`.
+    final categoryRanks = catalogRanks(
+      (controller.snapshot?.categories ?? const <MediaCategory>[]).map(
+        (c) => c.id,
+      ),
+    );
+    return orderedByCatalog(
+      matched,
+      categoryRank: (item) => rankOf(categoryRanks, item.categoryId),
+    );
   }
 
   /// The cross-source favorite backing [channel], or null when this isn't the
@@ -1044,35 +1136,36 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
-    final isWide = MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
-    // Cross-source rows always open fullscreen, never preview: the preview
-    // engine is bound to the active source's repository, so previewing a
-    // foreign channel would mean a second engine on a different provider. The
-    // whole view behaves alike, rather than previewing only the rows that
-    // happen to belong to the active source.
-    final crossSource = _crossSourceFavoriteFor(channel);
-    if (!isWide || crossSource != null) {
-      await _openFullscreenDirect(
-        channel,
-        crossSource == null ? widget.repo : _repoFor(crossSource.config),
-      );
+    final isWide = isWideLayout(MediaQuery.sizeOf(context));
+    // A cross-source favorite plays through *its own* source's repository, on
+    // every path below — the preview, the resolve, the fullscreen route and
+    // that route's reconnect re-resolve. Resolving it against the active
+    // source would hand provider A a channel id that means something else
+    // there (or nothing), and spend a single-use create_link doing it.
+    final playRepo = _repoForChannel(channel);
+    if (!isWide) {
+      await _openFullscreenDirect(channel, playRepo);
       return;
     }
 
     // On wide screens, reconcile with whatever this channel's preview is doing.
     switch (decideChannelPlayAction(
-      sameChannelPreview: _preview.channelId == channel.id,
+      sameChannelPreview: _isPreviewing(channel),
       previewHasStream: _preview.stream != null,
       previewLoading: _preview.loading,
     )) {
       case ChannelPlayAction.openFullscreen:
-        await _openLivePlayer(channel, _preview.stream!);
+        await _openLivePlayer(channel, _preview.stream!, repo: playRepo);
       case ChannelPlayAction.awaitPreviewThenOpen:
-        await _openLivePlayerWhenPreviewReady(channel);
+        await _openLivePlayerWhenPreviewReady(channel, repo: playRepo);
       case ChannelPlayAction.startPreview:
         // First OK starts the preview; on a TV remote it's deliberate, so
         // unmuted.
-        await _preview.start(channel, muted: !_deliberatePreview);
+        await _preview.start(
+          channel,
+          muted: !_deliberatePreview,
+          from: playRepo,
+        );
     }
   }
 
@@ -1155,7 +1248,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// `_resolving` is held across the wait, which both shows the list's
   /// in-progress affordance and makes [_play]'s own re-entry guard swallow
   /// further presses — a remote user leaning on OK can't stack resolves.
-  Future<void> _openLivePlayerWhenPreviewReady(Channel channel) async {
+  Future<void> _openLivePlayerWhenPreviewReady(
+    Channel channel, {
+    LibraryRepository? repo,
+  }) async {
     setState(() => _resolving = true);
     try {
       await _preview.pendingStart;
@@ -1167,8 +1263,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // resolve failed, or a newer `start` superseded it. Open only what actually
     // came up, and never restart anything from here — a failed preview shows
     // its own error and the next OK retries it.
-    if (_preview.channelId != channel.id || _preview.stream == null) return;
-    await _openLivePlayer(channel, _preview.stream!);
+    if (!_isPreviewing(channel) || _preview.stream == null) return;
+    await _openLivePlayer(channel, _preview.stream!, repo: repo);
   }
 
   /// Opens fullscreen playback for [channel]/[stream]. When [reusePreview] and
@@ -1189,7 +1285,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     StreamInfo stream, {
     bool reusePreview = true,
     bool resumePreviewOnReturn = true,
+    LibraryRepository? repo,
   }) async {
+    // The owning source: the active one for an ordinary channel, another
+    // provider's for a cross-source favorite. Everything the route needs from
+    // "the source" comes from here — name, re-resolve, reconnect — and the
+    // things that live only under the *active* source (EPG, the favorites set)
+    // are answered differently when they disagree.
+    final playRepo = repo ?? widget.repo;
+    final foreign = !identical(playRepo, widget.repo);
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = _messenger;
@@ -1206,14 +1310,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     try {
       DiagnosticsLog.instance.add(
         'library',
-        'open live fullscreen source=${widget.repo.source.name} channel=${channel.name} id=${channel.id}',
+        'open live fullscreen source=${playRepo.source.name} channel=${channel.name} id=${channel.id}',
       );
       _notePlayedChannel(channel.id);
       // Native discovery can require an external mpv version probe on its
       // first call. The result only matters for a same-channel HDR preview;
       // probing for SDR or a non-adoptable preview added avoidable latency to
       // ordinary opens after the Linux native path was introduced.
-      final initialSameChannelPreview = _preview.channelId == channel.id;
+      final initialSameChannelPreview = _preview.isPreviewing(
+        playRepo.source.id,
+        channel.id,
+      );
       final initialPreviewHasStream = _preview.stream != null;
       final initialStreamLikelyHdr = _preview.hasEmbeddedPlayer
           ? isHdrColorimetry(
@@ -1244,12 +1351,22 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // active) — correctly decided as pausePreview — was nonetheless treated
       // as adoptable at the `existingPlayer`/restore-mute call sites below.
       final previewChannelId = _preview.channelId;
+      // Read here with the rest of the preview state, not via
+      // `_preview.isPreviewing` — the read-once discipline above is the whole
+      // point of this block, and a helper that re-reads the controller would
+      // reintroduce exactly the desync it exists to prevent.
+      final previewSourceId = _preview.previewSourceId;
       final previewNativeActive = _preview.nativeActive;
       final previewStreamUrl = _preview.stream?.url;
       final previewHasStream = previewStreamUrl != null;
       final previewMuted = _preview.isMuted;
       final previewPlaying = previewChannelId != null || previewNativeActive;
-      final sameChannelPreview = previewChannelId == channel.id;
+      // "Same channel" means same *source* too: the identical id in another
+      // provider's list is a different channel, and adopting its engine would
+      // put provider A's stream behind provider B's title.
+      final sameChannelPreview =
+          previewChannelId == channel.id &&
+          previewSourceId == playRepo.source.id;
       // Read the preview engine's current colorimetry: only a Wayland *HDR*
       // source justifies the native mpv path's non-seamless fresh-resolve cost
       // (SDR/X11 stay embedded/seamless). The embedded preview player carries
@@ -1328,16 +1445,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // would sit dead (channelId set, stream null) until an unrelated
         // selection change.
         restorePreviewOnFailure = true;
-        playbackStream = await widget.repo.resolve(channel);
+        playbackStream = await playRepo.resolve(channel);
       }
       // Context-independent on purpose — nothing in the player derives from
       // the route builder's element.
       Widget buildPlayer() => PlayerScreen(
         title: channel.name,
         stream: playbackStream,
-        sourceName: widget.repo.source.name,
-        epgNow: _live.now[channel.id],
-        epgNext: _live.next[channel.id],
+        sourceName: playRepo.source.name,
+        // EPG comes from the active source's controller, so a cross-source row
+        // shows none — its guide lives under its own source id and is only
+        // refreshed while that source is active. Reading `_live.now` by id
+        // would show a *different* provider's programme against this channel.
+        epgNow: foreign ? null : _live.now[channel.id],
+        epgNext: foreign ? null : _live.next[channel.id],
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
         existingController: decision.adoptsEmbeddedPreview
             ? _preview.controller
@@ -1360,12 +1481,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             decision.adoptsEmbeddedPreview &&
             Platform.isWindows &&
             !streamLikelyHdr,
-        favoriteInitial: _isFavorite(ContentKind.live, channel.id),
-        onSetFavorite: (fav) => _setLiveFavorite(channel.id, fav),
+        // `FavoritesController` holds only the active source's ids, so a
+        // foreign row's star has to be answered — and written — against its own
+        // source. A cross-source row is by definition favorited.
+        favoriteInitial: foreign
+            ? true
+            : _isFavorite(ContentKind.live, channel.id),
+        onSetFavorite: (fav) => foreign
+            ? _setForeignFavorite(playRepo.source.id, channel.id, fav)
+            : _setLiveFavorite(channel.id, fav),
         // Live reloads (reconnect watchdog, "Go to live") re-resolve through
         // the source: Stalker create_link tokens are single-use, so the
         // originally resolved URL is dead after any portal-side kill.
-        resolveAgain: () => widget.repo.resolve(channel),
+        resolveAgain: () => playRepo.resolve(channel),
       );
       // The adopted native handoff pushes a *transparent, non-animated* route:
       // PlayerScreen stays see-through while the native Activity launches, so
@@ -1414,7 +1542,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // preview was stopped only to free the connection/token for the other
         // engine (Linux native mpv / iOS AVPlayer), not because the user left
         // the channel.
-        await _preview.start(channel, muted: previewWasMuted);
+        await _preview.start(channel, muted: previewWasMuted, from: playRepo);
       } else if (decision.seamless && _preview.stream != null) {
         await _preview.play();
         if (previewWasMuted) await _preview.setMuted(true);
@@ -1440,7 +1568,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               'channel=${channel.id}',
         );
         try {
-          await _preview.start(channel, muted: previewWasMuted);
+          await _preview.start(channel, muted: previewWasMuted, from: playRepo);
         } catch (_) {}
       }
       messenger.showSnackBar(
@@ -1519,8 +1647,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// preview player; the sheet's Play button hands off to fullscreen.
   Future<void> _showPreviewSheet(Channel channel) async {
     if (_resolving) return;
+    // The owning source. This path used to resolve every row through the
+    // *active* repository, including a cross-source favorite — the "never
+    // preview a foreign row" rule was enforced on the OK and hover paths but
+    // not here, so a long-press in the cross-source view asked provider A for
+    // provider B's channel id.
+    final previewRepo = _repoForChannel(channel);
+    final foreign = !identical(previewRepo, widget.repo);
     final previousFocus = FocusManager.instance.primaryFocus;
-    unawaited(_preview.start(channel, muted: false));
+    unawaited(_preview.start(channel, muted: false, from: previewRepo));
     // Set when Play hands the preview to fullscreen — the handoff owns the
     // preview's lifecycle from there (stopped when fullscreen exits), so the
     // post-sheet cleanup below must leave it alone.
@@ -1535,15 +1670,28 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       builder: (sheetContext) => PhonePreviewSheet(
         preview: _preview,
         channel: channel,
-        now: _live.now[channel.id],
-        next: _live.next[channel.id],
-        favorite: _isFavorite(ContentKind.live, channel.id),
-        onToggleFavorite: () => _toggleFavorite(ContentKind.live, channel.id),
+        // A cross-source row's guide and favorite state live under its own
+        // source id, not the active controllers' — see `_openLivePlayer`.
+        now: foreign ? null : _live.now[channel.id],
+        next: foreign ? null : _live.next[channel.id],
+        // A cross-source row is favorited by definition when the sheet opens,
+        // so `true` is the right *initial* value — the sheet keeps its own
+        // optimistic state from there.
+        favorite: foreign ? true : _isFavorite(ContentKind.live, channel.id),
+        // A real toggle, not the list row's unfavorite-only action: the sheet
+        // flips its own star, so wiring the row's callback here left a second
+        // tap unable to put the favorite back — the star read "not favorited"
+        // and tapping it did nothing.
+        onToggleFavorite: () => foreign
+            ? unawaited(
+                _toggleForeignFavorite(previewRepo.source.id, channel.id),
+              )
+            : _toggleFavorite(ContentKind.live, channel.id),
         onCatchup: channel.hasArchive ? () => _showCatchupSheet(channel) : null,
         onPlay: () {
           final stream = _preview.stream;
           Navigator.of(sheetContext).pop();
-          if (stream != null && _preview.channelId == channel.id) {
+          if (stream != null && _isPreviewing(channel)) {
             handedOff = true;
             // A native preview hands off seamlessly (the fullscreen Activity
             // adopts its engine); the media_kit fallback still opens fresh.
@@ -1555,6 +1703,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                 stream,
                 reusePreview: _preview.nativeActive,
                 resumePreviewOnReturn: false,
+                repo: previewRepo,
               ),
             );
           } else {
@@ -1879,7 +2028,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// The two-column (TV/desktop) layout, which is the only one with a category
   /// sidebar and preview panel. The coordinator routes the D-pad off this.
   bool _isWide() =>
-      mounted && MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth;
+      mounted && isWideLayout(MediaQuery.sizeOf(context));
 
   /// The live tab's geometry, read from the **window** `MediaQuery`.
   ///
@@ -1896,10 +2045,54 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     textScale: mounted ? MediaQuery.textScalerOf(context).scale(1) : 1.0,
   );
 
+  bool get _liveRowsShowEpg =>
+      liveRowsShowEpg(categoryId: _categoryId, hasEpg: _live.now.isNotEmpty);
+
   double _liveChannelRowExtent() =>
-      _liveLayoutMetrics.channelRowExtent(_live.now.isNotEmpty);
+      _liveLayoutMetrics.channelRowExtent(_liveRowsShowEpg);
 
   double _liveCategoryRowExtent() => _liveLayoutMetrics.categoryRowExtent;
+
+  /// The last geometry line written, so an unchanged window logs once rather
+  /// than once per build.
+  String? _loggedLayout;
+
+  /// Deliberately **not** called from `build`. `DiagnosticsLog` is a
+  /// `ChangeNotifier` and the diagnostics screen listens to it, so writing a
+  /// line mid-build can `markNeedsBuild` a widget this frame has already
+  /// built — the classic "setState called during build" assertion, reachable
+  /// by resizing the window while the diagnostics screen is open. Dependency
+  /// changes are exactly when the geometry moves, and this hook runs outside
+  /// the build phase.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _logLayoutGeometry();
+  }
+
+  /// Records the window geometry the layout decisions are made from.
+  ///
+  /// Everything about which browsing UI appears turns on **logical** width
+  /// ([kWideLayoutMinWidth], 950): the category side-pane, the live preview
+  /// panel, and therefore whether the shared-engine preview path exists at all.
+  /// Logical width is physical pixels divided by the device pixel ratio, which
+  /// is exactly the quantity a screenshot cannot show — a 3840 px TV reports
+  /// 960 at dpr 4.0 and 873 at dpr 4.4, and only one of those gets the two-pane
+  /// layout. An export that says the app rendered the phone layout, without
+  /// saying what it measured to decide that, sends the reader looking for a
+  /// missing category list that was never missing.
+  void _logLayoutGeometry() {
+    final size = MediaQuery.sizeOf(context);
+    final line =
+        'layout window=${size.width.toStringAsFixed(0)}x'
+        '${size.height.toStringAsFixed(0)} '
+        'dpr=${MediaQuery.devicePixelRatioOf(context).toStringAsFixed(2)} '
+        'textScale=${MediaQuery.textScalerOf(context).scale(1).toStringAsFixed(2)} '
+        'wide=${isWideLayout(size)} tv=$isTelevision';
+    if (line == _loggedLayout) return;
+    _loggedLayout = line;
+    DiagnosticsLog.instance.addAndPrint('library', line);
+  }
 
   /// The content tabs — the top of the Back ladder and the D-pad's ceiling.
   void _focusTabs() => _tabFocusNodes[_tab]?.requestFocus();
@@ -2260,7 +2453,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           onSearchCellKeyEvent: _focus.handleSearchCellKey,
           categoryControl:
               (_tab == ContentKind.live &&
-                  MediaQuery.sizeOf(context).width >= kWideLayoutMinWidth)
+                  isWideLayout(MediaQuery.sizeOf(context)))
               ? null
               : (_tab == ContentKind.live
                     ? ChannelCategoryDropdown(
@@ -2419,8 +2612,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // panel follows the channel cursor, and the cursor now moves without
       // rebuilding this method.
       resolvePreviewChannel: () => _resolvePreviewChannel(visible),
-      now: _live.now,
-      next: _live.next,
+      // The cross-source view carries no EPG by design (a guide is per-source
+      // and only refreshed while that source is active), and these maps are the
+      // *active* source's — keyed by channel id, which a foreign row can
+      // collide with. Handing them over would print another provider's
+      // programme against this channel rather than nothing.
+      // Derived from the *same* predicate as the row extent, not a parallel
+      // `crossSourceView` test — `LiveTabView` asserts that its `itemExtent`
+      // matches the layout it computes from `now.isNotEmpty`, so these two must
+      // be incapable of drifting apart rather than merely agreeing today.
+      now: _liveRowsShowEpg ? _live.now : const {},
+      next: _liveRowsShowEpg ? _live.next : const {},
       deliberate: _deliberatePreview,
       resolving: _resolving,
       scrollController: _scrollController,
@@ -2430,6 +2632,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       categoryRowExtent: _liveCategoryRowExtent(),
       lastPlayedChannelId: _lastPlayedLiveChannelId,
       previewChannelId: _preview.channelId,
+      // Source-aware, for the cross-source view: two providers can both carry
+      // a channel with this id, and only one of them is previewing.
+      isPreviewingRow: _isPreviewing,
       // In the cross-source view a row's favorite state belongs to *its* source,
       // not the active one. Reading it from `FavoritesController` (keyed to the
       // active source) drew every foreign row with an empty star, and toggling
@@ -2474,18 +2679,41 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// back to the last-played channel and finally the first visible one.
   Channel? _resolvePreviewChannel(List<Channel> visible) {
     if (visible.isEmpty) return null;
-    Channel? byId(String? id) => id == null ? null : _channelsById[id];
+    final crossSourceView = _categoryId == kAllSourcesFavoritesCategoryId;
+    // In the cross-source view the rows are not the active source's catalog, so
+    // `_channelsById` cannot find them — it would miss every foreign row and
+    // fall through to `visible.first`, leaving the panel pointed at whatever
+    // happens to be at the top. The favorites list is small enough to scan, and
+    // [preferSourceId] breaks the tie when two providers share an id.
+    Channel? byId(String? id, {String? preferSourceId}) {
+      if (id == null) return null;
+      if (!crossSourceView) return _channelsById[id];
+      Channel? sameIdOtherSource;
+      for (final item in _globalFavorites.items) {
+        if (item.channel.id != id) continue;
+        if (preferSourceId == null || item.sourceId == preferSourceId) {
+          return item.channel;
+        }
+        sameIdOtherSource ??= item.channel;
+      }
+      return sameIdOtherSource;
+    }
+
+    final previewSourceId = _preview.previewSourceId;
     if (_deliberatePreview) {
       // When a preview is actively running (or loading), lock the panel to
       // that channel.  D-pad focus moves away without disrupting it.
       final previewActive = _preview.stream != null || _preview.loading;
-      return byId(previewActive ? _preview.channelId : null) ??
+      return byId(
+            previewActive ? _preview.channelId : null,
+            preferSourceId: previewSourceId,
+          ) ??
           byId(_focus.selectedChannelId) ??
-          byId(_preview.channelId) ??
+          byId(_preview.channelId, preferSourceId: previewSourceId) ??
           byId(_lastPlayedLiveChannelId) ??
           visible.first;
     }
-    return byId(_preview.channelId) ??
+    return byId(_preview.channelId, preferSourceId: previewSourceId) ??
         byId(_lastPlayedLiveChannelId) ??
         visible.first;
   }

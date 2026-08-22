@@ -181,10 +181,38 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   the active source has never heard of. It needs no schema or cloud change — the `favorites` key is
   already `(source_id, kind, item_id)` and `SecretLocatorVault` is process-wide, not per-source —
   and it plays a row through a repository built for its *owning* config (`_repoFor`), never the
-  active one. Deliberate limits: rows carry **no EPG** (guides are per-source and refreshed only
-  while that source is active) and **never preview** (the preview engine is bound to the active
-  repository), so OK opens fullscreen directly. The controller **fails soft** — a keychain or cache
-  error empties the view rather than taking the main channel list down with it. Live channels
+  active one. Deliberate limit: rows carry **no EPG** (guides are per-source and refreshed only
+  while that source is active), so both list rows and the player show none — never the *active*
+  source's guide, whose maps are keyed by a channel id a foreign row can collide with.
+  They **do preview**, on the owning source's repository
+  (`LivePreviewController.start(from:)`), and go fullscreen through the same seamless handoff as
+  any other row (`_openLivePlayer(repo:)`); the star and the reconnect re-resolve are likewise
+  routed to the owning source. The controller **fails soft** — a keychain or cache
+  error empties the view rather than taking the main channel list down with it.
+  **The preview's identity is `(sourceId, channelId)`, never the channel id alone**
+  (`LivePreviewController.isPreviewing`, the screen's `_isPreviewing`/`_repoForChannel`). Channel
+  ids are unique only *within* a provider, and this view is exactly where two of them meet — an id
+  match alone can be a different provider's channel, which silently means going fullscreen on the
+  wrong stream, suppressing a hover re-arm that should have fired, or locking the preview panel to
+  the wrong row. Every "is this the previewing channel?" comparison in `channel_list_screen` and
+  `live_tab_view` goes through that pair; the one inside `_openLivePlayer`'s read-once block reads
+  `previewSourceId` as a local beside `previewChannelId` rather than calling the helper, because
+  re-reading the controller mid-decision is the desync that block exists to prevent.
+  **Every Favorites view is ordered by the catalog, never by insertion**
+  (`favorites_order.dart`): source order (the sources screen's own arrangement) → category order
+  → the channel's order inside that category. Favorites are a *set* keyed by
+  `(source_id, kind, item_id)` synced as a delta, so there is deliberately nowhere to store a
+  sequence — two devices could not agree on one, which is the conflict class the delta exists to
+  avoid — and the order is therefore derived at display time. Callers pass rows **already filtered
+  out of the catalog in catalog order** and `orderedByCatalog` only regroups them, so there is no
+  index to build over a 250k-channel list and nothing that can drift out of step with it; the
+  incoming order survives as the innermost tie-break, which is **explicit because `List.sort` is
+  not stable**. An unranked row (category dropped by a refresh, null `categoryId`, deleted source)
+  sorts *last* — it is still a deliberate pick, and ranking it 0 would float the least
+  identifiable rows to the top. The live view ranks against the **full** category list, not the
+  visible one, because a favorite is shown even when its category is disabled. The category order
+  it ranks against is now stable in its own right — see "Category order" below.
+  Live channels
   with an archive (`Channel.hasArchive`) get a catch-up button (`CatchupSheet`, played via
   `Source.resolveArchive`). `diagnostics_screen.dart` views/exports the in-memory log;
   `profile_pick_screen.dart` is the boot-time profile picker.
@@ -212,6 +240,17 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   indistinguishable from one still loading — which is exactly why a real "no artwork until restart"
   report left nothing in the exported log.
 - **`lib/theme.dart` carries the design tokens, the breakpoints, and the motion helper.**
+  **The wide/narrow choice goes through `isWideLayout(size)`, never a bare width comparison** — a
+  television is the two-pane layout whatever its logical width says. Logical width is physical
+  pixels over the device pixel ratio, so one 4K panel reports 960 at dpr 4.0 and 873 at dpr 4.4:
+  a set-top box lands either side of `kWideLayoutMinWidth` on a density it picked, and the phone
+  layout it falls into is silent (no category pane, no preview panel, so no shared-engine preview
+  path at all). `isTelevision` (`data/device_class.dart`) is resolved **once, awaited in `main`
+  before the first frame** off the existing `iptvs/device` channel, and fails closed to false.
+  Kotlin answers it from `UiModeManager` **or** the leanback/television system features, because
+  boxes that report `UI_MODE_TYPE_NORMAL` while being televisions are common. Don't lower
+  `kWideLayoutMinWidth` to fix a TV — that band exists to keep large phones in landscape on the
+  handset layout.
   `AppColors` includes semantic `danger`/`warning`/`success` (they exist because six call sites had
   hand-rolled the same red) and `accentFill` — `accent` darkened just enough that white 14 px bold
   clears WCAG AA 4.5:1 on a filled button (measured 4.64:1; plain `accent` is 3.95:1), while
@@ -445,6 +484,26 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   guard. Client error surfaces (`friendlyCloudError`, panel `friendlyError`) must never
   render Postgres `details`/`hint` (CHECK-style "Failing row contains" leaks credentials).
 
+## Category order
+
+**`readCategories`/`readMediaCategories` order by `rowid`, which is the provider's own order —
+never by `title`.** A fresh load shows `Source.categories()` (the provider's arrangement, the one
+the user recognises) while the cached read used to re-sort alphabetically, so the pane silently
+reshuffled between a forced refresh and the next app start — and once Favorites derived their
+order from it (`favorites_order.dart`), the favorites list reshuffled too.
+
+The **invariant that makes an implicit rowid sound is that these tables are never patched in
+place**: `replaceLibrary`/`replaceMediaLibrary` delete the source's rows and re-insert the whole
+list, in list order, in one transaction, so SQLite hands out ascending rowids along it. A stored
+`position` column would be a second copy of a number the table already has, bought with a
+migration. **If a path is ever added that updates a category row in place, add the column
+instead.** (`replaceMediaLibrary`'s paged `parentId != null` branch re-inserts categories without
+deleting first, so `ConflictAlgorithm.replace` moves them all to fresh rowids — harmless, because
+it rewrites the whole list in order.) Two non-hazards, recorded so they aren't re-litigated:
+`VACUUM` renumbers rowids but rewrites rows *in rowid order*, so relative order survives (and
+nothing here vacuums); a duplicate category id inside one payload collapses to the *later*
+position, the same row the alphabetical read would have shown. Pinned by `persistence_test.dart`.
+
 ## Database migrations
 
 `AppDatabase` is at `schemaVersion = 14` (v14: `favorites_outbox`, the pending local favorite
@@ -562,22 +621,45 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   reporting `isPlaying` with nothing on screen, so every flag read healthy and the freeze was
   permanent *and* unlogged. `FrameLivenessWatch` (pure, in `ReconnectPolicy.kt`) samples
   `PlaybackEngine.renderedFrameCount` on the existing 500 ms tick; `-1` (mpv, audio-only channels),
-  any non-healthy state, and **a counter never seen to advance** are all **inert**, never a stall —
+  any non-healthy state, **a decoder whose `droppedBufferCount` is climbing *inside the handoff
+  window*** (dropping frames means decoding them — alive but behind, and the rebuild that window
+  arms cannot make a decoder faster; **outside** it, dropping every frame is a frozen picture that
+  a reload genuinely fixes, so it must still escalate), and **a counter never seen to advance** are
+  all **inert**, never a stall —
   that last one because a counter that never moved can't be told apart from a decode path that
   doesn't report one, and a stream rendering *nothing* is a buffering stall the older watchdog
   already owns. **The one exception is the adopted handoff, where the proof already exists:** the
   Activity calls `armHandoff(now, renderedFrameCount)` when it adopts, because those frames were
   drawn by that same renderer moments ago — without it, a handoff that freezes the decoder *before
   its first frame* stays inert forever (measured: 11.2 s of black ending in the user pressing Back).
-  **Inside the handoff window there are two clocks:** `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) until the
-  claimed surface draws a frame of its own — anything shorter judges first-frame latency, which
-  measured 251 ms on healthy hardware — and `HANDOFF_POST_FRAME_STALL_MS` (500 ms) once it has,
-  because a live stream that drew a frame half a second ago and claims to be
-  playing unbuffered has drawn twelve more. The ticker drops to `HANDOFF_POLL_MS` (125 ms) while
-  `inHandoffWindow` so 500 ms is four samples, not one gap. **"Has drawn" comes from the renderer
-  (`onClaimedSurfaceFirstFrame` → `markHandoffFirstFrame`), never from the frame counter** — the
+  **Inside the handoff window there are two clocks:** `HANDOFF_NO_FRAME_STALL_MS` (3 s) until the
+  claimed surface draws a frame of its own, and `HANDOFF_POST_FRAME_STALL_MS` (1 s) once it has,
+  because a live stream that drew a frame a second ago and claims to be playing unbuffered has
+  drawn twenty-five more. The ticker drops to `HANDOFF_POLL_MS` (125 ms) while `inHandoffWindow`
+  so 1 s is eight samples, not one gap. **Both clocks are deliberately generous, because the two
+  errors are not symmetric.** They were 1.5 s / 500 ms, sized from a single healthy claim that drew
+  in 251 ms — and an Amlogic set-top box then fired a *spurious* rebuild on two consecutive opens
+  of the same 1080p channel: one at 1576 ms against a first frame that legitimately landed at
+  `sinceClaimMs=1830` (first-frame latency after an output-surface switch is a wait for the next
+  IDR — a whole GOP on broadcast MPEG-TS), one at 502 ms against `dropped=0 skipped=0 toKeyframe=0`,
+  a decoder in no distress at all. Each false rebuild costs another codec release, another IDR wait
+  and a dropped-frame catch-up against a still-running audio clock — i.e. it *is* the "black screen
+  going fullscreen, then the picture runs behind the sound" report. A false **negative** costs only
+  latency: `armHandoff` leaves `sawProgress` set, so the ordinary 6 s `NO_FRAME_STALL_MS` clock
+  still catches the freeze once the window closes. Nothing goes undetected — it is decided later.
+  Keep `HANDOFF_WINDOW_MS` clear of both clocks summed, or the window closes before its own
+  recovery can run (`ReconnectPolicyTest` asserts it).
+  **The frame counter must be read through `ExoPlayerEngine.videoCounters()`**, which calls
+  `DecoderCounters.ensureUpdated()` — the fields are plain `int`s written on the playback thread and
+  the entire stall decision is "this number did not change between polls", so without that barrier a
+  stale read is indistinguishable from a wedged decoder. Never read `player.videoDecoderCounters`
+  directly. **"Has drawn" comes from the renderer
+  (`onClaimedSurfaceFirstFrame` → `markHandoffFirstFrame(now)`), never from the frame counter** — the
   counter is surface-agnostic and the claim is deferred, so preview frames would trip the short
-  clock on a healthy handoff and rebuild (then reload) a working decoder.
+  clock on a healthy handoff and rebuild (then reload) a working decoder. `markHandoffFirstFrame`
+  also restarts the progress clock at that frame, because the post-frame clock means "drew, then
+  stopped" and must be measured from the frame rather than from the last counter movement (which
+  during a deferred claim is preview frames on the old texture).
   `attachOwnSurface`'s `playerView.player = null; … = player` is **not** a spare output transition
   and must not be replaced with a direct `setVideoSurfaceView`: `attachPreviewTexture` already
   nulled it, so the first line no-ops — and dropping the second leaves PlayerView player-less with

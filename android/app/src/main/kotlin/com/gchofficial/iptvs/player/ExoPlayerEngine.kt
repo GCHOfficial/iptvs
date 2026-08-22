@@ -8,7 +8,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import android.view.View
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -22,6 +21,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DecoderCounters
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -145,7 +145,7 @@ class ExoPlayerEngine(
     private var volumeBeforeMute = 1f
     private var fellBack = false
     // Guards release() against a double-decrement of DebugCounters (and a
-    // clearPreviewTexture call landing after release, e.g. a disposing preview
+    // clearPreviewSurface call landing after release, e.g. a disposing preview
     // platform view racing the shared engine's own teardown).
     private var released = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -174,6 +174,10 @@ class ExoPlayerEngine(
     // timestamp. 0 = no claim yet (a cold open measures from load instead).
     private var claimedAtMs = 0L
     private var loadedAtMs = 0L
+
+    /// When the video output was handed **back** to the preview texture, so the
+    /// first frame after that swap can be measured the way a claim's is.
+    private var reattachedAtMs = 0L
     private var reportedFirstFrame = false
     private var reportedStreamShape = false
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
@@ -203,28 +207,43 @@ class ExoPlayerEngine(
 
     /**
      * Frames the video renderer has put on screen since the last load. Null
-     * counters (no video renderer — an audio-only channel) report -1, which
-     * [FrameLivenessWatch] treats as "can't judge" rather than "frozen".
+     * counters (no video renderer — an audio-only channel, or a released
+     * engine) report -1, which [FrameLivenessWatch] treats as "can't judge"
+     * rather than "frozen". Read through [videoCounters], for the cross-thread
+     * barrier this number's whole meaning depends on.
+     */
+    override val renderedFrameCount: Int
+        get() = videoCounters()?.renderedOutputBufferCount ?: -1
+
+    override val droppedFrameCount: Int
+        get() = videoCounters()?.droppedBufferCount ?: -1
+
+    /**
+     * The video renderer's counters, safe to read from **this** thread.
+     *
+     * `DecoderCounters`' fields are plain `int`s written on the playback
+     * thread, and `ensureUpdated()` is the volatile read media3 documents as
+     * the way to get a happens-before edge from there ("any other thread should
+     * call this method before reading the counters"). Skipping it is not a
+     * theoretical race here: [FrameLivenessWatch] decides a renderer is
+     * *frozen* purely from this number failing to change between polls, so a
+     * stale read is indistinguishable from a wedged decoder — and the recovery
+     * that arms rebuilds a decoder which was never broken, spending a fresh IDR
+     * wait and a dropped-frame catch-up that desyncs audio. An exported log
+     * caught exactly that shape: a rebuild fired against
+     * `dropped=0 skipped=0 toKeyframe=0 inits=1`, a decoder reporting no
+     * distress of any kind.
      *
      * The [released] guard is for the window where a poll can outlive the
-     * engine: the Activity's 500ms ticker holds `engine`, and an mpv fallback
+     * engine: the Activity's ticker holds `engine`, and an mpv fallback
      * releases this one mid-session. Reading a released ExoPlayer is not worth
      * finding out about the hard way for a number whose only job is a
      * heuristic.
      */
-    override val renderedFrameCount: Int
-        get() = if (released) {
-            -1
-        } else {
-            player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
-        }
-
-    override val droppedFrameCount: Int
-        get() = if (released) {
-            -1
-        } else {
-            player.videoDecoderCounters?.droppedBufferCount ?: -1
-        }
+    private fun videoCounters(): DecoderCounters? {
+        if (released) return null
+        return player.videoDecoderCounters?.also { it.ensureUpdated() }
+    }
 
     /**
      * Sends [HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC] to this player's own
@@ -248,8 +267,7 @@ class ExoPlayerEngine(
 
     override val videoFrameCounters: String?
         get() {
-            if (released) return null
-            val c = player.videoDecoderCounters ?: return null
+            val c = videoCounters() ?: return null
             return "rendered=${c.renderedOutputBufferCount} " +
                 "dropped=${c.droppedBufferCount} " +
                 "toKeyframe=${c.droppedToKeyframeCount} " +
@@ -283,6 +301,13 @@ class ExoPlayerEngine(
         lastFramePresentationUs = Long.MIN_VALUE
         fpsLocked = false
         loadedAtMs = SystemClock.elapsedRealtime()
+        // A reload builds a new decoder against whatever surface it already
+        // has, so neither the last claim nor the last re-attach describes its
+        // first frame any more — without clearing these, a reload after an
+        // adopted handoff reported `sinceClaimMs` measured from a claim that
+        // happened minutes and several surfaces ago.
+        claimedAtMs = 0L
+        reattachedAtMs = 0L
         reportedFirstFrame = false
         reportedStreamShape = false
         // Re-armed per load — locking unregisters it (see stopFrameMetadataMeasurement).
@@ -349,8 +374,17 @@ class ExoPlayerEngine(
             // changed — which is exactly the proof FrameLivenessWatch needs to
             // stop judging first-frame latency and start judging a freeze.
             if (claimedAtMs > 0L) onClaimedSurfaceFirstFrame?.invoke()
-            val since = if (claimedAtMs > 0L) "sinceClaimMs" else "sinceLoadMs"
-            val from = if (claimedAtMs > 0L) claimedAtMs else loadedAtMs
+            val (since, from) = when {
+                claimedAtMs > 0L -> "sinceClaimMs" to claimedAtMs
+                // The handoff's return leg. Measured because it is the same
+                // output-surface transition as the claim, on hardware that
+                // re-instantiates the codec for one — and until now it reported
+                // nothing at all, so a preview that came back frozen or drawing
+                // once a second was indistinguishable in an exported log from
+                // one that came back perfectly.
+                reattachedAtMs > 0L -> "sinceReattachMs" to reattachedAtMs
+                else -> "sinceLoadMs" to loadedAtMs
+            }
             if (from > 0L) {
                 onDiagnostic?.invoke(
                     "first frame $since=${SystemClock.elapsedRealtime() - from}",
@@ -679,7 +713,7 @@ class ExoPlayerEngine(
      */
     private fun measureFps() {
         if (fpsLocked) return
-        val rendered = player.videoDecoderCounters?.renderedOutputBufferCount ?: return
+        val rendered = videoCounters()?.renderedOutputBufferCount ?: return
         val now = System.nanoTime()
         if (lastFpsSampleNs == 0L) {
             lastFpsSampleNs = now
@@ -739,10 +773,21 @@ class ExoPlayerEngine(
      * the engine's own [view] first so the two never fight over the output; the
      * audio pipeline and buffer are untouched.
      */
-    fun attachPreviewTexture(texture: TextureView) {
+    fun attachPreviewSurface(view: SurfaceView) {
         cancelPendingClaim()
+        // This is an output-surface transition exactly like [claimViewSurface],
+        // just in the other direction, so it is measured the same way: the
+        // codec can be released and re-instantiated under it, and the next
+        // frame then waits for an IDR. `claimedAtMs` is cleared so an engine
+        // coming back from fullscreen stops reporting against its old claim.
+        claimedAtMs = 0L
+        reattachedAtMs = SystemClock.elapsedRealtime()
+        reportedFirstFrame = false
+        onDiagnostic?.invoke(
+            "reattach preview surface" + (videoFrameCounters?.let { " $it" } ?: ""),
+        )
         playerView.player = null
-        player.setVideoTextureView(texture)
+        player.setVideoSurfaceView(view)
     }
 
     /**
@@ -750,11 +795,11 @@ class ExoPlayerEngine(
      * (ExoPlayer verifies identity itself, so this is a no-op if the surface
      * already moved elsewhere — e.g. a newer preview texture, or fullscreen's
      * own [claimViewSurface]). Called when a preview `PlatformView` disposes,
-     * so the engine can't keep a reference to its destroyed `TextureView`.
+     * so the engine can't keep a reference to its destroyed `SurfaceView`.
      */
-    fun clearPreviewTexture(texture: TextureView) {
+    fun clearPreviewSurface(view: SurfaceView) {
         if (released) return
-        player.clearVideoTextureView(texture)
+        player.clearVideoSurfaceView(view)
     }
 
     /**
@@ -784,6 +829,7 @@ class ExoPlayerEngine(
      */
     fun claimViewSurface() {
         claimedAtMs = SystemClock.elapsedRealtime()
+        reattachedAtMs = 0L
         // An output-surface change makes MediaCodecVideoRenderer re-announce its
         // first frame, which on an *adopted* engine is the only first frame that
         // describes the handoff — the preview's own already fired seconds ago.
@@ -842,7 +888,7 @@ class ExoPlayerEngine(
      *
      * **Both lines are load-bearing, and it is not the "extra output
      * transition" it looks like.** By the time an adopted handoff gets here
-     * `playerView.player` is already `null`: [attachPreviewTexture] clears it
+     * `playerView.player` is already `null`: [attachPreviewSurface] clears it
      * on every preview so the PlayerView stops driving the output while the
      * texture owns it. `PlayerView.setPlayer(null)` therefore early-returns on
      * an unchanged (null) player, and only the second line does any work — one

@@ -32,15 +32,36 @@ object ReconnectPolicy {
      * The same judgement, inside the fullscreen-handoff window
      * ([HANDOFF_WINDOW_MS] after an adopted engine's surface claim).
      *
-     * Much shorter because the ambiguity [NO_FRAME_STALL_MS] is being generous
-     * about doesn't exist here: the preview was demonstrably rendering a moment
-     * ago, the only thing that changed is which surface the decoder outputs to,
-     * and the recovery this arms ([PlaybackEngine.rebuildVideoDecoder]) is a
-     * local decoder re-init — no provider round trip, no lost buffer, nothing
-     * to be careful about spending. At the 500 ms poll that is three
-     * consecutive identical samples.
+     * Shorter than [NO_FRAME_STALL_MS] because part of the ambiguity that one
+     * is being generous about doesn't exist here: the preview was demonstrably
+     * rendering a moment ago, the only thing that changed is which surface the
+     * decoder outputs to, and the recovery this arms
+     * ([PlaybackEngine.rebuildVideoDecoder]) is a local decoder re-init — no
+     * provider round trip, no lost buffer.
+     *
+     * **It was 1.5 s, and that was measured wrong.** The number came from one
+     * healthy first frame landing 251 ms after the claim; an exported log from
+     * an Amlogic set-top box then showed the *same channel*, on consecutive
+     * opens, taking 346 ms and **1830 ms** — the second one perfectly healthy,
+     * with its first frame arriving 148 ms after the rebuild this threshold had
+     * just fired (i.e. from the decoder that rebuild was throwing away).
+     * First-frame latency after an output-surface switch is a wait for the next
+     * IDR, and on broadcast MPEG-TS that is a whole GOP; 1.5 s does not clear
+     * one, so the watchdog was rebuilding a working decoder on essentially
+     * every handoff.
+     *
+     * The cost of being wrong is deeply asymmetric, which is why this is now
+     * generous rather than tight. A false positive is *guaranteed* damage on
+     * every handoff — another codec release, another IDR wait, and a
+     * dropped-frame catch-up against an audio clock that never stopped, which
+     * is exactly the "black screen going fullscreen, then the picture runs
+     * behind the sound" report. A false negative costs only latency:
+     * [FrameLivenessWatch.armHandoff] leaves `sawProgress` set, so once
+     * [HANDOFF_WINDOW_MS] closes the ordinary [NO_FRAME_STALL_MS] clock still
+     * catches the freeze and escalates to a reload. Nothing goes undetected —
+     * it is only decided later.
      */
-    const val HANDOFF_NO_FRAME_STALL_MS = 1_500L
+    const val HANDOFF_NO_FRAME_STALL_MS = 3_000L
 
     /**
      * The same judgement again, once the handoff has demonstrably drawn at
@@ -52,14 +73,25 @@ object ReconnectPolicy {
      * At that point every ambiguity [HANDOFF_NO_FRAME_STALL_MS] is being
      * generous about is gone. The first-frame latency it was covering has
      * already been paid, so the only question left is whether a live stream
-     * that drew a frame half a second ago and claims to be playing, unbuffered,
-     * has drawn another. At any broadcast frame rate it has drawn twelve.
+     * that drew a frame a second ago and claims to be playing, unbuffered, has
+     * drawn another. At any broadcast frame rate it has drawn twenty-five.
      *
-     * Half a second rather than "immediately" because the recovery is still a
-     * guess about a decoder, and [ReconnectPolicy.HANDOFF_POLL_MS] makes it
-     * four consecutive identical samples rather than one unlucky gap.
+     * **Was 500 ms, and a handoff in an exported log fired on it against a
+     * decoder reporting `dropped=0 skipped=0 toKeyframe=0 inits=1` — no
+     * distress of any kind.** The likeliest reading is the one since fixed at
+     * source: the counter was being read across threads without
+     * `DecoderCounters.ensureUpdated()`, so "unchanged for half a second" could
+     * mean a stale field rather than a stalled decoder (`ExoPlayerEngine`
+     * `videoCounters`). Doubling this is the belt to that fix's braces, and it
+     * is cheap for the same reason [HANDOFF_NO_FRAME_STALL_MS] is: a missed
+     * freeze is still caught by [NO_FRAME_STALL_MS] once the window closes,
+     * while a false rebuild is a visible glitch every single time.
+     *
+     * Not "immediately", because the recovery is still a guess about a decoder,
+     * and [ReconnectPolicy.HANDOFF_POLL_MS] makes this eight consecutive
+     * identical samples rather than one unlucky scheduling gap.
      */
-    const val HANDOFF_POST_FRAME_STALL_MS = 500L
+    const val HANDOFF_POST_FRAME_STALL_MS = 1_000L
 
     /** Base cadence of `HdrPlayerActivity`'s progress/liveness ticker. */
     const val PROGRESS_TICK_MS = 500L
@@ -81,6 +113,11 @@ object ReconnectPolicy {
      * arrives at all, or arrives and stops within a second (measured at ~250 ms
      * after the first frame). Past this the stream has visibly survived the
      * handoff and normal live rules apply again.
+     *
+     * Must stay comfortably clear of [HANDOFF_NO_FRAME_STALL_MS] plus
+     * [HANDOFF_POST_FRAME_STALL_MS]: a window that closed before its own clocks
+     * could run would silently disable the cheap rung and hand every handoff
+     * failure straight to the reload watchdog. Asserted in `ReconnectPolicyTest`.
      */
     const val HANDOFF_WINDOW_MS = 5_000L
 
@@ -128,6 +165,11 @@ object ReconnectPolicy {
  *    What this catches is the other shape — a stream that *was* rendering (the
  *    preview) and stopped (the fullscreen handoff) while still claiming to
  *    play.
+ * 4. **Inside the handoff window, a decoder that is dropping frames is
+ *    decoding.** `droppedBufferCount` moving is proof of life that
+ *    `renderedOutputBufferCount` alone doesn't carry — the pipeline is alive
+ *    and merely behind — and the rebuild that window arms cannot make a decoder
+ *    faster. Deliberately scoped to that window; see [sample].
  *
  * The "wait to see it move" rule had one hole, and it was in the exact case the
  * class was written for. When the handoff freezes the renderer *before it draws
@@ -156,9 +198,11 @@ class FrameLivenessWatch(
     private val handoffWindowMs: Long = ReconnectPolicy.HANDOFF_WINDOW_MS,
 ) {
     private var lastFrames = NO_SAMPLE
+    private var lastDropped = NO_SAMPLE
     private var lastProgressAtMs = 0L
     private var sawProgress = false
     private var handoffUntilMs = NO_HANDOFF
+    private var handoffArmedAtMs = 0L
 
     // Whether the counter has been seen to move since [armHandoff] — i.e.
     // whether the *new* surface has had a frame of its own, as opposed to the
@@ -183,9 +227,21 @@ class FrameLivenessWatch(
         lastProgressAtMs = nowMs
         sawProgress = true
         drewSinceHandoff = false
+        lastDropped = NO_SAMPLE
+        handoffArmedAtMs = nowMs
         handoffUntilMs = nowMs + handoffWindowMs
         return true
     }
+
+    /**
+     * Milliseconds since the [armHandoff] this watch is currently running on,
+     * or -1 if it isn't running on one. Reported alongside a recovery so an
+     * exported log says how much of the handoff budget had actually elapsed —
+     * the number that showed the previous thresholds were firing inside normal
+     * first-frame latency rather than after a freeze.
+     */
+    fun sinceArmMs(nowMs: Long): Long =
+        if (handoffUntilMs == NO_HANDOFF) -1L else nowMs - handoffArmedAtMs
 
     /**
      * True while a frozen renderer is still attributable to the surface claim
@@ -215,9 +271,22 @@ class FrameLivenessWatch(
      * The engine's own `onRenderedFirstFrame` after the claim is the honest
      * signal, and media3 only re-notifies it when the output surface actually
      * changed.
+     *
+     * Restarts the progress clock at [nowMs], because the clock this switches
+     * onto is documented as "drew, then stopped" and must therefore be measured
+     * *from the frame*. It previously kept measuring from whenever the counter
+     * last happened to move, which during a deferred claim is preview frames on
+     * the old texture — so a handoff could inherit a clock that was already
+     * part-spent and be judged frozen having barely drawn.
      */
-    fun markHandoffFirstFrame() {
-        if (handoffUntilMs != NO_HANDOFF) drewSinceHandoff = true
+    fun markHandoffFirstFrame(nowMs: Long) {
+        if (handoffUntilMs == NO_HANDOFF) return
+        drewSinceHandoff = true
+        // NO_SAMPLE rather than a value: the next poll re-seeds both the count
+        // and the timestamp together, which is the only pairing that can't
+        // disagree with itself.
+        lastFrames = NO_SAMPLE
+        lastProgressAtMs = nowMs
     }
 
     /**
@@ -237,8 +306,41 @@ class FrameLivenessWatch(
      * [playingNormally] must be the engine's *own* claim of health (playing,
      * not buffering, not ended) — the whole point is to catch the case where
      * that claim and the screen disagree.
+     *
+     * [droppedFrames] is `droppedBufferCount`, and **inside the handoff window**
+     * it is what separates a renderer that is **wedged** from one that is
+     * merely **behind**. A dropped frame was still decoded: the pipeline is
+     * alive, it just can't keep up. An Amlogic box on a 4K50 HDR HEVC channel
+     * produced exactly that — rendered static across the poll while dropped
+     * climbed by 127 — and judging it on `renderedFrames` alone called it
+     * frozen and rebuilt the codec. That made it strictly worse: the one open
+     * in that log which did *not* rebuild held 49.3 fps with 3 dropped frames,
+     * while the session after a rebuild fell to 28.8 fps with 50, and the
+     * shared engine carried the damage back into the preview at 11.7 fps.
+     *
+     * **Scoped to the handoff window on purpose.** The question that window
+     * asks is "did the surface swap wedge the decoder?", and frames being
+     * dropped answers *no* — so the local rebuild, which cannot make a decoder
+     * faster, must not fire. Outside it the question is the older and broader
+     * one, "is anything reaching the screen?", and there dropping every frame
+     * answers *no* just as a freeze does. A renderer discarding every output
+     * buffer as late while the audio clock runs on is a picture frozen
+     * indefinitely, and a reload — which restarts at the live edge — genuinely
+     * fixes it. Letting the dropped counter hold that clock open would have
+     * made this watchdog inert for the exact "sound fine, picture stuck" shape
+     * it exists to catch.
+     *
+     * -1 (an engine that can't report it) simply leaves the old
+     * rendered-only judgement in place. The failure this class was written for
+     * is untouched: a decoder wedged by a surface swap decodes *nothing*, so
+     * neither counter moves.
      */
-    fun sample(nowMs: Long, playingNormally: Boolean, renderedFrames: Int): Boolean {
+    fun sample(
+        nowMs: Long,
+        playingNormally: Boolean,
+        renderedFrames: Int,
+        droppedFrames: Int = NO_SAMPLE,
+    ): Boolean {
         // An engine that can't count at all is not one this watch can be armed
         // against either (it is also how an mpv fallback arrives here).
         if (renderedFrames < 0) {
@@ -256,12 +358,23 @@ class FrameLivenessWatch(
         }
         if (lastFrames == NO_SAMPLE) {
             lastFrames = renderedFrames
+            lastDropped = droppedFrames
             lastProgressAtMs = nowMs
             return false
         }
-        if (renderedFrames != lastFrames) {
+        // Seeded on first observation, so the seeding sample can't be mistaken
+        // for movement. A caller passing -1 throughout re-seeds to NO_SAMPLE
+        // every time and the dropped term stays inert.
+        if (lastDropped == NO_SAMPLE) lastDropped = droppedFrames
+        val decoderMoved =
+            renderedFrames != lastFrames ||
+                (inHandoffWindow(nowMs) &&
+                    droppedFrames >= 0 &&
+                    droppedFrames != lastDropped)
+        if (decoderMoved) {
             sawProgress = true
             lastFrames = renderedFrames
+            lastDropped = droppedFrames
             lastProgressAtMs = nowMs
             return false
         }
@@ -285,6 +398,7 @@ class FrameLivenessWatch(
 
     private fun clearFrameWindow(keepHandoff: Boolean) {
         lastFrames = NO_SAMPLE
+        lastDropped = NO_SAMPLE
         lastProgressAtMs = 0L
         sawProgress = keepHandoff
         // A buffering tick doesn't un-draw the frame the new surface already
@@ -292,6 +406,7 @@ class FrameLivenessWatch(
         // (reload / engine swap) forgets the whole handoff, and this with it.
         if (!keepHandoff) {
             handoffUntilMs = NO_HANDOFF
+            handoffArmedAtMs = 0L
             drewSinceHandoff = false
         }
     }

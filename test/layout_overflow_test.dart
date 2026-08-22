@@ -31,7 +31,7 @@ import 'package:iptvs/data/app_database.dart' show PlaybackPosition;
 import 'package:iptvs/screens/live_focus_coordinator.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/screens/media_tab_controller.dart'
-    show ContinueWatchingEntry;
+    show ContinueWatchingEntry, kAllSourcesFavoritesCategoryId;
 import 'package:iptvs/screens/media_tab_view.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
@@ -209,6 +209,119 @@ void main() {
           );
           // The overflow only ever showed on the row carrying the accent cursor
           // border, so the list has to actually own the D-pad.
+          focus.channelsFocusNode.requestFocus();
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        });
+      }
+    }
+  });
+
+  group('the cross-source favorites row fits its (shorter) extent', () {
+    // The cross-source view is the one live layout that draws a source chip and
+    // **no EPG**, so it runs on `channelRowExtent(false)` — a combination the
+    // sweep above never covers, because it always supplies a guide.
+    //
+    // Regression: the screen kept computing the extent from
+    // `_live.now.isNotEmpty` (the *active* source's guide) while handing this
+    // view empty `now`/`next` maps, so the row was laid out at 68.1 px inside an
+    // itemExtent of 105.9 — caught by `LiveTabView`'s own debug assert, which
+    // this test therefore also exercises. Both sides now read
+    // `_liveRowsShowEpg`.
+    for (final size in const [
+      Size(1256, 705),
+      Size(1280, 720),
+      Size(1000, 600),
+      Size(1920, 1080),
+    ]) {
+      for (final textScale in const [1.0, 1.3, 2.0]) {
+        testWidgets('at $size, text scale $textScale', (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+          useWindow(tester, size, textScale);
+
+          final channels = [
+            for (var i = 0; i < 8; i++)
+              Channel(
+                id: 'c$i',
+                name: 'Channel $i — Long Enough To Ellipsize pygjq',
+                number: i + 1,
+              ),
+          ];
+          final scroll = ScrollController();
+          final categoryScroll = ScrollController();
+          final metrics = LiveLayoutMetrics.forSize(size, textScale: textScale);
+          // The whole point: `false`, and empty guide maps to match it.
+          final rowExtent = metrics.channelRowExtent(false);
+          final focus = LiveFocusCoordinator(
+            scrollController: scroll,
+            categoryScrollController: categoryScroll,
+            visibleChannels: () => channels,
+            orderedCategoryIds: () => const [kAllSourcesFavoritesCategoryId],
+            channelRowExtent: () => rowExtent,
+            categoryRowExtent: () => metrics.categoryRowExtent,
+            isWide: () => size.width >= kWideLayoutMinWidth,
+            isMounted: () => true,
+            onChannelSelectionChanged: (_, _) {},
+            onCategoryActivated: (_) {},
+            onPlayChannel: (_) {},
+            onToggleFavorite: (_) {},
+            onFocusTabs: () {},
+          );
+          addTearDown(() {
+            focus.dispose();
+            scroll.dispose();
+            categoryScroll.dispose();
+          });
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: SafeArea(
+                  top: false,
+                  child: LiveTabView(
+                    loading: false,
+                    error: null,
+                    onRetry: () {},
+                    visible: channels,
+                    sourceLabelFor: (_) => 'A Rather Long Panel Name pygjq',
+                    isPreviewingRow: (_) => false,
+                    resolvePreviewChannel: () => channels.first,
+                    now: const {},
+                    next: const {},
+                    deliberate: true,
+                    resolving: false,
+                    scrollController: scroll,
+                    categoryScrollController: categoryScroll,
+                    focus: focus,
+                    channelRowExtent: rowExtent,
+                    categoryRowExtent: metrics.categoryRowExtent,
+                    lastPlayedChannelId: null,
+                    previewChannelId: null,
+                    isFavorite: (_) => true,
+                    onToggleFavorite: (_) {},
+                    onPlayChannel: (_) {},
+                    onPreviewChannel: (_) {},
+                    onCatchup: (_) {},
+                    categories: const [
+                      Category(
+                        id: kAllSourcesFavoritesCategoryId,
+                        title: 'Favorites · All sources',
+                      ),
+                    ],
+                    selectedCategoryId: kAllSourcesFavoritesCategoryId,
+                    onCategorySelected: (_) {},
+                    previewVideoBuilder: () => const SizedBox.shrink(),
+                    previewLoading: false,
+                    previewError: null,
+                  ),
+                ),
+              ),
+            ),
+          );
           focus.channelsFocusNode.requestFocus();
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 400));

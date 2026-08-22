@@ -538,6 +538,85 @@ void main() {
       await db.close();
     });
 
+    test('categories come back in the provider order, not alphabetical', () async {
+      // The pane shows `Source.categories()` on a fresh load and the cached
+      // read on every load after it. While the cached read sorted by title,
+      // those two disagreed: the category order — and, since Favorites derive
+      // their order from it, the favorites list — reshuffled between a forced
+      // refresh and the next app start.
+      final db = await AppDatabase.openAt(dbPath());
+      // Deliberately anti-alphabetical, so a title sort is distinguishable.
+      const provided = [
+        Category(id: 'z', title: 'Zulu'),
+        Category(id: 'a', title: 'Alpha'),
+        Category(id: 'm', title: 'Mike'),
+      ];
+      await db.replaceLibrary('src1', 'Src', provided, const [
+        Channel(id: 'ch1', name: 'One', categoryId: 'z'),
+      ]);
+
+      expect(
+        (await db.readCategories('src1')).map((c) => c.id),
+        ['z', 'a', 'm'],
+      );
+
+      // A refresh that reorders the provider's list is reflected, rather than
+      // the first write's order sticking around in freed rowids.
+      await db.replaceLibrary('src1', 'Src', const [
+        Category(id: 'm', title: 'Mike'),
+        Category(id: 'z', title: 'Zulu'),
+        Category(id: 'a', title: 'Alpha'),
+      ], const [Channel(id: 'ch1', name: 'One', categoryId: 'z')]);
+      expect(
+        (await db.readCategories('src1')).map((c) => c.id),
+        ['m', 'z', 'a'],
+      );
+      await db.close();
+    });
+
+    test('a second source cannot disturb the first ones order', () async {
+      // rowids are handed out across the whole table, so two sources interleave
+      // in it — the per-source filter is what keeps each one's order its own.
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'One', const [
+        Category(id: 'z', title: 'Zulu'),
+        Category(id: 'a', title: 'Alpha'),
+      ], const []);
+      await db.replaceLibrary('src2', 'Two', const [
+        Category(id: 'n', title: 'News'),
+      ], const []);
+      // Rewriting src1 gives it rowids above src2's; its own order still holds.
+      await db.replaceLibrary('src1', 'One', const [
+        Category(id: 'z', title: 'Zulu'),
+        Category(id: 'a', title: 'Alpha'),
+      ], const []);
+
+      expect((await db.readCategories('src1')).map((c) => c.id), ['z', 'a']);
+      expect((await db.readCategories('src2')).map((c) => c.id), ['n']);
+      await db.close();
+    });
+
+    test('media categories keep the provider order too', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceMediaLibrary(
+        'src1',
+        ContentKind.movie,
+        const [
+          MediaCategory(id: 'z', title: 'Zulu', kind: ContentKind.movie),
+          MediaCategory(id: 'a', title: 'Alpha', kind: ContentKind.movie),
+        ],
+        const [],
+      );
+
+      expect(
+        (await db.readMediaCategories('src1', ContentKind.movie)).map(
+          (c) => c.id,
+        ),
+        ['z', 'a'],
+      );
+      await db.close();
+    });
+
     test('fresh create exposes a usable favorites table', () async {
       // Regression guard mirroring the external_metadata fix: onCreate (not just
       // the v8->9 repair branch) must build favorites.

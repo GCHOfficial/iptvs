@@ -110,6 +110,113 @@ void main() {
     await db.close();
   });
 
+  group('catalog reading order', () {
+    // Built so the expected answer disagrees with *both* plausible wrong ones.
+    // src1's provider category order is Zulu then Alpha (anti-alphabetical, so
+    // a title sort is distinguishable) while its channel numbers run Alpha
+    // first (so a plain `number` sort is distinguishable too). Only "provider
+    // category order, then channel order inside it" yields z1, a1, a2.
+    Future<GlobalFavoritesController> seed(
+      AppDatabase db,
+      SourceStore store, {
+      required List<SourceConfig> configs,
+    }) async {
+      await db.replaceLibrary(
+        'src1',
+        'One',
+        const [
+          Category(id: 'zulu', title: 'Zulu'),
+          Category(id: 'alpha', title: 'Alpha'),
+        ],
+        const [
+          Channel(id: 'a1', name: 'Alpha One', number: 1, categoryId: 'alpha'),
+          Channel(id: 'a2', name: 'Alpha Two', number: 2, categoryId: 'alpha'),
+          Channel(id: 'z1', name: 'Zulu One', number: 3, categoryId: 'zulu'),
+        ],
+      );
+      await db.replaceLibrary(
+        'src2',
+        'Two',
+        const [Category(id: 'news', title: 'News')],
+        const [
+          Channel(id: 'n1', name: 'News One', number: 1, categoryId: 'news'),
+        ],
+      );
+      for (final id in ['z1', 'a1', 'a2']) {
+        await db.setFavorite('src1', ContentKind.live, id, true);
+      }
+      await db.setFavorite('src2', ContentKind.live, 'n1', true);
+      await store.setAll(configs);
+      return GlobalFavoritesController(db: db, store: store);
+    }
+
+    test('groups by source, then category, then channel order', () async {
+      final db = await openDb();
+      final controller = await seed(
+        db,
+        SourceStore(),
+        configs: [cfg('src1', 'Panel One'), cfg('src2', 'Panel Two')],
+      );
+      await controller.load();
+
+      // src1 first (it is first on the sources screen). Inside it the provider
+      // lists Zulu before Alpha, so z1 leads despite carrying the *highest*
+      // channel number; inside Alpha, channel order holds.
+      expect(controller.items.map((e) => e.channel.id), [
+        'z1',
+        'a1',
+        'a2',
+        'n1',
+      ]);
+      controller.dispose();
+      await db.close();
+    });
+
+    test('follows the user arrangement of the sources screen', () async {
+      final db = await openDb();
+      // Same data, sources the other way round.
+      final controller = await seed(
+        db,
+        SourceStore(),
+        configs: [cfg('src2', 'Panel Two'), cfg('src1', 'Panel One')],
+      );
+      await controller.load();
+
+      expect(controller.items.map((e) => e.channel.id), [
+        'n1',
+        'z1',
+        'a1',
+        'a2',
+      ]);
+      controller.dispose();
+      await db.close();
+    });
+
+    test('a favorite whose category is gone sorts last, not first', () async {
+      // The catalog can be refreshed out from under a favorite: the channel row
+      // survives with a category id the categories table no longer has. It is
+      // still a deliberate pick, so it stays — at the end of its source.
+      final db = await openDb();
+      await db.replaceLibrary('src1', 'One', const [
+        Category(id: 'news', title: 'News'),
+      ], const [
+        Channel(id: 'ghost', name: 'Ghost', number: 1, categoryId: 'dropped'),
+        Channel(id: 'n1', name: 'News One', number: 2, categoryId: 'news'),
+      ]);
+      await db.setFavorite('src1', ContentKind.live, 'ghost', true);
+      await db.setFavorite('src1', ContentKind.live, 'n1', true);
+
+      final store = SourceStore();
+      await store.setAll([cfg('src1', 'Panel One')]);
+      final controller = GlobalFavoritesController(db: db, store: store);
+      await controller.load();
+
+      expect(controller.items.map((e) => e.channel.id), ['n1', 'ghost']);
+      controller.dispose();
+      await db.close();
+    });
+  });
+
   test('drops favorites whose source has been deleted', () async {
     final db = await openDb();
     await db.replaceLibrary('src1', 'One', const [], const [
