@@ -895,9 +895,10 @@ Embedded `media_kit_video` controls, with mpv asked to tone-map HDR into SDR.
 
 The live preview and the fullscreen player share **one ExoPlayer engine** on Android.
 `SharedEngine` (`android/.../player/SharedEngine.kt`, a process-global holder) owns an
-`ExoPlayerEngine` the preview starts; the preview renders it through a **TextureView platform
-view** (`iptvs/preview_view`, `PreviewPlatformView.kt` — TextureView because SurfaceViews don't
-compose inside Flutter platform views), driven from Dart by `LivePreviewController` over the
+`ExoPlayerEngine` the preview starts; the preview renders it through a **SurfaceView platform
+view** (`iptvs/preview_view`, `PreviewPlatformView.kt`) embedded with **hybrid composition**
+(`PlatformViewsService.initExpensiveAndroidView`, Dart-side `_NativePreviewView`), driven from
+Dart by `LivePreviewController` over the
 `iptvs/native_preview` MethodChannel (open/play/pause/setVolume/stop + `previewEvent` callbacks).
 Going fullscreen on the previewed channel passes `adoptShared` → `HdrPlayerActivity` **adopts**
 the running engine (`SharedEngine.adoptForFullscreen`, keyed on the URL): only the video output
@@ -907,9 +908,28 @@ back (`fullscreenDetached`); the Activity never releases an adopted engine, and 
 usual pause when finishing-while-adopted. Engine callbacks (`onUnsupportedVideo` /
 `onRecoverableError`) are mutable vars for the same reason — each host rebinds them.
 
+**The surface type is load-bearing, and the original reasoning for it was wrong.** This was a
+TextureView, chosen because texture content composes cleanly inside Flutter's default
+platform-view path. It does — and on a 4K50 HDR10 channel it is also ruinous. A SurfaceView's
+buffers go straight to the system compositor, usually onto a hardware overlay plane, zero copy,
+HDR metadata intact. A TextureView's go through a `SurfaceTexture` into an external GL texture the
+app's GPU draws, which Flutter then composites again: two extra full-frame passes at
+3840x2160x10-bit, fifty times a second, on a set-top box. An exported log measured the same codec
+instance, on the same stream, holding `fps=49.3 dropped=+3` rendering into the fullscreen
+Activity's SurfaceView while a mostly-preview window managed about 11.7 fps. Hybrid composition is
+what makes a SurfaceView possible here: Flutter's default path returns a texture, and a SurfaceView
+has none to give — so `AndroidView` would render nothing at all. Its cost is at the other end:
+every Flutter widget painted *over* the platform view is promoted onto its own overlay surface,
+composited separately every frame. Exactly one small static chip ("Preview", bottom-left) overlaps
+the video, which is cheap; the expensive shape — a **full-bleed scrim** over live 4K — is
+structurally impossible rather than merely avoided, because the panel's loading and error scrims
+are alternatives to the video inside the same `Stack` rather than layers on it.
+`test/preview_overlay_test.dart` pins that, since it is the kind of property a later "show a
+spinner while it rebuffers" would silently undo.
+
 When the preview **platform view disposes**, `SharedEngine.unregisterPreviewView` also detaches
-the destroyed `TextureView` from the engine (`ExoPlayerEngine.clearPreviewTexture`, an
-identity-checked `clearVideoTextureView`) so ExoPlayer can't keep a reference to a dead view —
+the destroyed `SurfaceView` from the engine (`ExoPlayerEngine.clearPreviewSurface`, an
+identity-checked `clearVideoSurfaceView`) so ExoPlayer can't keep a reference to a dead view —
 but **only when not adopted**: during an adopted fullscreen handoff the Activity owns the video
 output (`claimViewSurface`/`fullscreenDetached`), and clearing there would fight the transparent
 handoff.
@@ -930,8 +950,12 @@ is **not paused** around the handoff.
 The Android handoff is made visually seamless twice over: `HdrPlayerTheme` sets
 `windowDisablePreview` + a null `windowAnimationStyle` (no system starting-window / transition
 black frame), and the adopted case pushes `PlayerScreen` as a **non-opaque zero-transition route**
-that stays transparent (`_transparentHandoff`) so the channel list — with the preview
-TextureView's frozen last frame — remains visible until the Activity's first frame.
+that stays transparent (`_transparentHandoff`) so the channel list — with the preview surface's
+frozen last frame — remains visible until the Activity's first frame. **That last frame is the
+one thing the SurfaceView switch could plausibly disturb** and it is device-only to verify: a
+SurfaceView holds its last buffer, but its z-order under a transparent route is decided by the
+platform compositor rather than by Flutter's layer tree. If the handoff ever flashes black, this
+is the first place to look.
 
 Non-adopted fullscreen routes also use an opaque zero-duration transition. The player
 starts resolving/opening as soon as the route is installed instead of spending the
@@ -1154,6 +1178,32 @@ different stacks:
   never work a second time — single-flight with "Go to live" (see "Android" above) and falling
   back to the held locator if the round trip times out or fails.
 
+  **A decoder that is dropping frames is behind, not wedged, and must never be rebuilt.**
+  `FrameLivenessWatch` originally judged liveness on `renderedOutputBufferCount` alone, which reads
+  as *frozen* for a renderer that is decoding every frame and throwing some away to catch up. An
+  Amlogic box on a 4K50 HDR10 HEVC channel produced exactly that, and the exported log makes the
+  cost unambiguous: across three consecutive opens of one channel, the **only** one that did not
+  fire a rebuild held `fps=49.3 dropped=+3`, while the session after a rebuild fell to
+  `fps=28.8 dropped=+50` — and because the rebuilt codec belongs to the **shared preview engine**,
+  the damage outlived fullscreen: between two rebuilds 14.8 s apart the engine rendered 174 frames
+  and dropped 127 (11.7 fps against a 50 fps stream) through a window that was mostly the preview
+  panel. That is one mechanism behind both Android TV reports — "the stream runs in slow motion"
+  and "backing out leaves the preview crawling". So `sample` also takes `droppedFrames`, and
+  **inside the handoff window** movement in *either* counter is progress.
+
+  **That scope is load-bearing.** The handoff window asks "did the surface swap wedge the
+  decoder?", and frames being dropped answers *no* — so the local rebuild, which cannot make a
+  decoder faster, must not fire. Outside it the question is the older, broader one, "is anything
+  reaching the screen?", and there a renderer discarding every output buffer as late while the
+  audio clock runs on is a picture frozen indefinitely — the "sound fine, picture stuck" shape this
+  class was written for — which a reload *does* fix by restarting at the live edge. Letting the
+  dropped counter hold that longer clock open would have made the watchdog inert for its own
+  founding case. Pinned both ways in `ReconnectPolicyTest`.
+
+  The failure the class exists for is untouched: a renderer wedged by a surface swap decodes
+  nothing, so neither counter moves. `-1` (an engine that can't report drops) leaves the old
+  rendered-only judgement exactly as it was.
+
   **The proof rule had a hole, and it was in the exact case the class was written for.** When the
   handoff freezes the renderer *before it draws a single frame on the new surface* — three of the
   five frozen handoffs in the export above, one of them 11.2 s of black ending in the user pressing
@@ -1164,27 +1214,65 @@ different stacks:
   count as the proof (a zero/-1 count is refused and reported as `armed=false` — inert rule 3 is
   unchanged for a cold open, an mpv engine, or an audio-only channel). Arming is also what
   justifies a shorter clock: for `HANDOFF_WINDOW_MS` (5 s) after the claim a frozen renderer stalls
-  at `HANDOFF_NO_FRAME_STALL_MS` (1.5 s) instead of 6 s,
+  at `HANDOFF_NO_FRAME_STALL_MS` (3 s) instead of 6 s,
   because the ambiguity the long window is generous about doesn't exist here — the preview was
   demonstrably rendering, and the only thing that changed is which surface the decoder writes to.
 
   **Inside that window there are two clocks, not one, because the handoff fails in two shapes.**
-  1.5 s is the right patience for a picture that hasn't arrived yet: a healthy claim measured
-  251 ms to first frame and a deferred surface claim adds its own wait, so anything shorter would
-  be judging first-frame latency rather than a freeze. But once the *new* surface has drawn a frame
-  of its own, that latency has already been paid and the only question left is whether a live
-  stream which drew a frame half a second ago and claims to be playing, unbuffered, has drawn
-  another — at any broadcast frame rate it has drawn twelve. So `FrameLivenessWatch` switches to
-  `HANDOFF_POST_FRAME_STALL_MS` (500 ms) once the claimed surface has drawn
-  (`markHandoffFirstFrame()`/`drewSinceArm()`). This is the shape hardware actually produced:
-  armed at `ms=6`, one frame at `sinceClaimMs=251`, and the counter frozen at 64 from there on,
-  with the rebuild not firing until `ms=2014`. The same session now resolves in roughly a third of
-  that. Because 500 ms cannot be told from a single scheduling gap at the base 500 ms cadence, the
-  Activity's progress ticker drops to `HANDOFF_POLL_MS` (125 ms) while `inHandoffWindow` — bounded
-  by the 5 s window, so it costs five seconds per handoff and nothing for the rest of the session.
-  Which clock decided a recovery is reported as `phase=noFirstFrame` / `phase=afterFirstFrame`,
-  because a single rendered frame is invisible in a preview's running counter total and the two
-  shapes want to be told apart in a report.
+  The longer one is the patience for a picture that hasn't arrived yet; once the *new* surface has
+  drawn a frame of its own that latency has already been paid, and the only question left is
+  whether a live stream which drew a frame a second ago and claims to be playing, unbuffered, has
+  drawn another — at any broadcast frame rate it has drawn twenty-five. So `FrameLivenessWatch`
+  switches to `HANDOFF_POST_FRAME_STALL_MS` (1 s) once the claimed surface has drawn
+  (`markHandoffFirstFrame(now)`/`drewSinceArm()`). The post-frame shape is one hardware actually
+  produced: armed at `ms=6`, one frame at `sinceClaimMs=251`, and the counter frozen at 64 from
+  there on, with the old reload not firing until `ms=2014`. Because 1 s cannot be told from a
+  single scheduling gap at the base 500 ms cadence, the Activity's progress ticker drops to
+  `HANDOFF_POLL_MS` (125 ms) while `inHandoffWindow` — bounded by the 5 s window, so it costs five
+  seconds per handoff and nothing for the rest of the session. Which clock decided a recovery is
+  reported as `phase=noFirstFrame` / `phase=afterFirstFrame` alongside `sinceArmMs=`, because a
+  single rendered frame is invisible in a preview's running counter total and the two shapes want
+  to be told apart in a report.
+
+  **Both clocks were originally too tight, and the watchdog became the bug.** They were 1.5 s and
+  500 ms, sized from one healthy claim that reached its first frame in 251 ms. An exported log from
+  an Amlogic set-top box (`c2.amlogic.avc.decoder`, 1080p H.264 SDR) then showed the *same channel*
+  on two consecutive opens firing a rebuild on **both**, and both spuriously:
+
+  - `phase=noFirstFrame` at 1576 ms after the claim — and the first frame landed at
+    `sinceClaimMs=1830`, i.e. 148 ms later, far too soon to have come from the codec the rebuild
+    had just released. The picture was already on its way; first-frame latency after an
+    output-surface switch is a wait for the next IDR, and on broadcast MPEG-TS that is a whole GOP.
+  - `phase=afterFirstFrame` at 502 ms after a first frame that arrived in 346 ms — against
+    `dropped=0 toKeyframe=0 skipped=0 inits=1`, a decoder reporting no distress of any kind.
+
+  Each spurious rebuild costs a second codec release, a second IDR wait (~1.3 s of black, visible
+  in the following window's `fps=36.0` against a 50 fps stream) and then a dropped-frame catch-up
+  against an audio clock that never stopped (`dropped=+58`). That is precisely the user report —
+  *"black screen from preview to fullscreen, and after the transition the picture stays behind the
+  sound"* — produced by the watchdog meant to prevent it. Both steady states recovered to ~50 fps
+  with zero drops, so neither the stream nor the device was ever at fault.
+
+  The fix is three-part, and the reasoning behind the new numbers is the **asymmetry**, not a
+  retune. A false positive is guaranteed, visible damage on *every* handoff; a false negative costs
+  only latency, because `armHandoff` leaves `sawProgress` set and the ordinary 6 s
+  `NO_FRAME_STALL_MS` clock still catches the freeze once the window closes. Nothing goes
+  undetected — it is only decided later. So:
+
+  1. **The counter is now read with a memory barrier.** `ExoPlayerEngine.videoCounters()` calls
+     `DecoderCounters.ensureUpdated()`, the volatile read media3 documents for exactly this
+     ("any other thread should call this method before reading the counters"). The fields are plain
+     `int`s written on the playback thread, and the whole stall decision is "this number did not
+     change between polls" — so without the barrier a *stale read* is indistinguishable from a
+     wedged decoder. It is the likeliest explanation for the `afterFirstFrame` misfire above.
+  2. **`HANDOFF_NO_FRAME_STALL_MS` 1.5 s → 3 s**, which clears the measured 1830 ms healthy
+     first frame with margin while still deciding the 11.2 s black-screen case at 3 s.
+  3. **`HANDOFF_POST_FRAME_STALL_MS` 500 ms → 1 s**, belt to (1)'s braces.
+
+  `HANDOFF_WINDOW_MS` must stay clear of both clocks summed, or the window would close before its
+  own recovery could run and every handoff failure would fall through to the reload watchdog;
+  `ReconnectPolicyTest` asserts it, along with the measured-1830 ms case and the post-frame clock
+  starting *at the frame* rather than at the last counter movement.
 
   **That "has drawn" signal must come from the renderer, never from the frame counter.**
   `renderedFrameCount` is `renderedOutputBufferCount`, which is surface-agnostic, and `armHandoff`
@@ -1197,7 +1285,13 @@ different stacks:
   reload threshold entirely (`threshold = 0L`), reload the stream right behind it. So
   `ExoPlayerEngine.onClaimedSurfaceFirstFrame` — fired from `onRenderedFirstFrame` only when
   `claimedAtMs > 0`, which media3 re-notifies only when the output surface actually changed — is
-  bound by `adoptForFullscreen` *before* the claim and calls `markHandoffFirstFrame()`.
+  bound by `adoptForFullscreen` *before* the claim and calls `markHandoffFirstFrame(now)`.
+
+  `markHandoffFirstFrame` also **restarts the progress clock at that frame**, because the clock it
+  switches onto means "drew, then stopped" and so has to be measured from the frame. It used to
+  keep measuring from whenever the counter last happened to move — which during a deferred claim is
+  preview frames on the old texture — so a handoff could inherit a clock already part-spent and be
+  judged frozen having barely drawn.
 
   One asymmetry falls out of the arm: a not-healthy tick (buffering) normally revokes the proof and
   restarts the window, but **inside the handoff window it doesn't**, because the proof is the
@@ -1219,10 +1313,33 @@ different stacks:
   rather than by a device list this chipset isn't on. Demuxer, buffer, audio pipeline and HTTP
   connection all keep running; the cost is one wait for the next IDR. If the fresh decoder still
   draws nothing, the re-arm starts it on the first-frame clock again (a rebuilt decoder has drawn
-  nothing yet), so the next stall lands ~1.5 s later and escalates to the ordinary
+  nothing yet), so the next stall lands ~3 s later and escalates to the ordinary
   reload. The rebuild is only ever reachable through an armed handoff: `reset()` (a
   reload, an engine swap) drops the window, so a decoder built against the surface it will keep is
   never rebuilt on this path.
+
+  **The return leg is instrumented but deliberately has no recovery.** Going back from fullscreen
+  runs the same output-surface transition in reverse — `SharedEngine.fullscreenDetached()` →
+  `ExoPlayerEngine.attachPreviewTexture` → `setVideoTextureView` — on hardware that re-instantiates
+  the codec for one, after which the next frame waits for an IDR. Until a report of *"going back
+  from a live stream can leave the preview flickering on one frame"*, that leg reported nothing at
+  all: `reportedFirstFrame` was reset only by `load` and `claimViewSurface`, so no first-frame
+  latency was measured, and the preview has no `FrameLivenessWatch` of its own (the watchdog lives
+  in `HdrPlayerActivity`, which by then has finished). A preview that came back frozen and one that
+  came back perfectly were identical in an exported log. Now `attachPreviewTexture` stamps
+  `reattachedAtMs`, clears `claimedAtMs` and re-arms the first-frame report — so the next frame
+  lands as `preview first frame sinceReattachMs=…` — and `fullscreenDetached` logs
+  `preview fullscreen detached texture=…` plus one delayed
+  `preview reattach sample renderedDelta=… over 3000ms` (`REATTACH_SAMPLE_MS`), abandoned if a new
+  adoption, channel change or engine release has moved the output on since. ~150 frames means the
+  decoder came back; a handful or zero means it re-initialised under the swap and is emitting a
+  frame at a time — the two candidates the report can't distinguish by eye.
+
+  It stops at measuring **on purpose**. The forward leg's history is that a recovery added on a
+  plausible-sounding theory *was* the bug: it fired against healthy decoders and spent a codec
+  re-init, an IDR wait and a dropped-frame catch-up every single handoff. `load` also now clears
+  both stamps, fixing an older reporting bug in passing — a reload after an adopted handoff was
+  reporting `sinceClaimMs` measured from a claim several surfaces earlier.
 - **iOS**, Swift-side and Kotlin-shaped: `IptvsPlayerViewController` runs its own progress
   watchdog (`LiveReconnectWatchdog`,
   `packages/iptvs_ios_player/ios/Core/Sources/IptvsPlayerCore/LiveReconnectWatchdog.swift`) —

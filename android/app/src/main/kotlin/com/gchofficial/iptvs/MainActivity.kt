@@ -11,6 +11,7 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.DebugCounters
+import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -27,12 +28,17 @@ class MainActivity : FlutterActivity() {
     private lateinit var deviceChannel: MethodChannel
     private var pendingInstallPermissionResult: MethodChannel.Result? = null
 
-    /** Same check HdrPlayerActivity uses to pick its TV-sized player chrome. */
-    private fun isTelevision(): Boolean {
-        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager
-        return uiModeManager?.currentModeType ==
-            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-    }
+    /**
+     * Answers the `iptvs/device` channel's `isTelevision`, which two Dart
+     * callers use: the pairing screen's suggested device label, and — since it
+     * decides the *layout* — the wide/narrow choice resolved at boot
+     * (`device_class.dart`, `isWideLayout`).
+     *
+     * Shared with `HdrPlayerActivity`'s ten-foot player chrome via
+     * [isTelevisionDevice], deliberately: the two must never disagree about
+     * what kind of device this is.
+     */
+    private fun isTelevision(): Boolean = isTelevisionDevice(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

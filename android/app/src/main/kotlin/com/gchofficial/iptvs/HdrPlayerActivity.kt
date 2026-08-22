@@ -21,6 +21,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
+import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
@@ -265,7 +266,9 @@ class HdrPlayerActivity : ComponentActivity() {
                 // FrameLivenessWatch off the first-frame clock, and inferring
                 // it from the frame counter would fire during the deferred
                 // claim, while the preview texture is still the output.
-                onClaimedSurfaceFirstFrame = { frameLiveness.markHandoffFirstFrame() },
+                onClaimedSurfaceFirstFrame = {
+                    frameLiveness.markHandoffFirstFrame(System.currentTimeMillis())
+                },
             )
         } else {
             null
@@ -439,6 +442,10 @@ class HdrPlayerActivity : ComponentActivity() {
             nowMs = now,
             playingNormally = claimsHealthy,
             renderedFrames = engine?.renderedFrameCount ?: -1,
+            // Proof of life the rendered count alone doesn't carry: a decoder
+            // dropping frames is behind, not wedged, and no recovery this
+            // watchdog can order makes a decoder faster.
+            droppedFrames = engine?.droppedFrameCount ?: -1,
         )
         val stalled = uiState.isBuffering || uiState.ended || frameStalled
         if (!stalled) {
@@ -506,11 +513,16 @@ class HdrPlayerActivity : ComponentActivity() {
         // in a preview's running total) and they are the two shapes the reports
         // keep alternating between, so the watch's own answer is worth a word.
         val phase = if (frameLiveness.drewSinceArm()) "afterFirstFrame" else "noFirstFrame"
+        // How far into the handoff budget this fired. Without it a rebuild line
+        // cannot be told apart from a rebuild that fired inside normal
+        // first-frame latency — which is how two thresholds stayed wrong
+        // through several exported logs.
+        val sinceArm = frameLiveness.sinceArmMs(nowMs)
         if (!active.rebuildVideoDecoder()) return false
         handoffRebuilds++
         logNative(
-            "handoff decoder rebuild attempt=$handoffRebuilds phase=$phase" +
-                (counters?.let { " $it" } ?: ""),
+            "handoff decoder rebuild attempt=$handoffRebuilds phase=$phase " +
+                "sinceArmMs=$sinceArm" + (counters?.let { " $it" } ?: ""),
         )
         stalledSinceMs = 0L
         stallKind = "none"
@@ -884,11 +896,13 @@ class HdrPlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun isTelevision(): Boolean {
-        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? android.app.UiModeManager
-        return uiModeManager?.currentModeType ==
-            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-    }
+    /**
+     * Ten-foot player chrome. Shares [isTelevisionDevice] with `MainActivity`'s
+     * `iptvs/device` answer so the player and the browsing layout can't
+     * disagree — they did once, and the result was a set-top box with a
+     * two-pane channel list and handset-sized player controls.
+     */
+    private fun isTelevision(): Boolean = isTelevisionDevice(this)
 
     /** Builds an [com.gchofficial.iptvs.player.EpgEntry] from intent extras, or null if absent/invalid. */
     private fun epgEntry(
