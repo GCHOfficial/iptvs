@@ -1188,12 +1188,38 @@ class AppDatabase {
     return v == null ? null : DateTime.fromMillisecondsSinceEpoch(v as int);
   }
 
+  /// Cached categories for a source, **in the provider's own order**.
+  ///
+  /// This used to be `ORDER BY title`, and that made the category pane change
+  /// order depending on where the snapshot came from: a fresh load shows
+  /// `Source.categories()` — the provider's arrangement, which is the one the
+  /// user recognises — while every subsequent cached load re-sorted it
+  /// alphabetically. So the pane silently reshuffled between a forced refresh
+  /// and the next app start, and once Favorites started deriving their order
+  /// from the category order (`favorites_order.dart`), the favorites list
+  /// reshuffled with it.
+  ///
+  /// **`rowid` is the provider's position, because this table is never patched
+  /// in place.** [replaceLibrary] deletes the source's rows and re-inserts the
+  /// whole list, in list order, inside one transaction; sqflite's batch keeps
+  /// that order, so SQLite hands out ascending rowids along it. That full
+  /// rewrite is what makes an implicit rowid sound here rather than a stored
+  /// `position` column — the column would be a second copy of a number the
+  /// table already has, bought with a schema migration. **If a path is ever
+  /// added that updates categories in place, add the column instead.**
+  ///
+  /// Two things that look like hazards and aren't: `VACUUM` renumbers rowids on
+  /// a table with no `INTEGER PRIMARY KEY`, but it rewrites rows *in rowid
+  /// order*, so relative order survives — and nothing in this app vacuums
+  /// anyway. A duplicate category id inside one provider payload is collapsed
+  /// by `ConflictAlgorithm.replace` and takes the *later* position, which is
+  /// the same row the old alphabetical read would have shown.
   Future<List<Category>> readCategories(String sourceId) async {
     final rows = await _db.query(
       'categories',
       where: 'source_id = ?',
       whereArgs: [sourceId],
-      orderBy: 'title',
+      orderBy: 'rowid',
     );
     return rows
         .map(
@@ -1323,6 +1349,14 @@ class AppDatabase {
     );
   }
 
+  /// Cached media categories for a source/kind, in the provider's own order —
+  /// same reasoning as [readCategories], including why `rowid` is the position.
+  ///
+  /// `replaceMediaLibrary`'s one asymmetry is harmless here: the paged
+  /// (`parentId != null`) path re-inserts the categories without deleting them
+  /// first, so `ConflictAlgorithm.replace` moves every one of them to fresh
+  /// rowids — but it re-inserts the *whole* list in list order, so their order
+  /// relative to each other is unchanged.
   Future<List<MediaCategory>> readMediaCategories(
     String sourceId,
     ContentKind kind,
@@ -1331,7 +1365,7 @@ class AppDatabase {
       'media_categories',
       where: 'source_id = ? AND kind = ?',
       whereArgs: [sourceId, kind.name],
-      orderBy: 'title',
+      orderBy: 'rowid',
     );
     return rows
         .map(
