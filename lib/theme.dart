@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'data/device_class.dart';
+
 /// Design tokens.
 class AppColors {
   static const ink = Color(0xFF0E0F13); // app background
@@ -61,7 +63,29 @@ class AppRadius {
 /// Width at or above which the browsing UI uses the wide layout (category
 /// side-pane + live preview panel). Shared by the channel list screen and the
 /// live tab view so the breakpoint can't drift between them.
+///
+/// Compare through [isWideLayout], not directly — a television is wide
+/// regardless of what this measures.
 const double kWideLayoutMinWidth = 950;
+
+/// Whether the browsing UI should use the wide (two-pane) layout.
+///
+/// **A television is always wide, whatever its logical width says.** Logical
+/// width is physical pixels divided by the device pixel ratio, and on a 4K TV
+/// that division is brutal: 3840 px reports 960 at dpr 4.0 and 873 at dpr 4.4,
+/// so a set-top box lands either side of [kWideLayoutMinWidth] depending on a
+/// density it chose, not on how much screen the viewer is looking at. A 4K
+/// television rendering the phone layout — no category side-pane, no live
+/// preview panel, and therefore no shared-engine preview path at all — was
+/// exactly that, and it is silent: every branch agrees, it is just measuring
+/// the wrong thing.
+///
+/// Lowering [kWideLayoutMinWidth] instead would hand the two-pane layout to
+/// large phones in landscape, which is the band the number exists to exclude.
+/// Ten-foot devices are a different question from narrow ones, so they are
+/// asked separately ([isTelevision], resolved once at boot).
+bool isWideLayout(Size size) =>
+    isTelevision || size.width >= kWideLayoutMinWidth;
 
 /// Width below which the channel-list toolbar stacks into two rows instead of
 /// one. Purely a reflow — no focus target appears or disappears across it, so

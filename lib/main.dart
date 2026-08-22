@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/app_database.dart';
 import 'data/cloud_config.dart';
+import 'data/device_class.dart';
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
@@ -40,9 +41,16 @@ Future<void> main() async {
   // keychain/disk round trips instead of their sum, all of which is on the path
   // to the first frame. A failure here still aborts boot; it arrives wrapped in
   // a ParallelWaitError rather than on its own.
-  final (db, sources, _) = await (
+  // `detectDeviceClass` joins the tuple for the same reason as the rest: it is
+  // one platform round trip with no dependency on the others, and it must
+  // settle before the first frame because it decides the *layout* (a television
+  // is the wide two-pane UI regardless of the logical width its density
+  // reports — `isWideLayout`). Awaiting it ahead of this group added its
+  // latency to time-to-first-frame for nothing.
+  final (db, sources, _, _) = await (
     AppDatabase.open(),
     store.list(),
+    detectDeviceClass(),
     _initialiseCloud(),
   ).wait;
   await migrateAllSourceIdentities(db, sources);

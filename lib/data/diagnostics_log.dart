@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 
@@ -38,6 +39,30 @@ class DiagnosticsLog extends ChangeNotifier {
       _entries.removeFirst();
     }
     notifyListeners();
+  }
+
+  /// [add], **and** mirror to the debug console.
+  ///
+  /// Two different audiences: the exportable log is what a user sends back, the
+  /// console is what a developer watches during `flutter run`. Most call sites
+  /// want one of the two — but a few facts are wanted by both, and they are the
+  /// ones that describe what the app decided *before there is anything on
+  /// screen to look at*. For those, "nothing in the console" and "the code
+  /// never ran" are indistinguishable, and that ambiguity has already cost one
+  /// debugging round trip: the device-class and layout-geometry lines went to
+  /// the export only, so an attached `flutter run` showed no trace of a
+  /// decision that had in fact been made.
+  ///
+  /// Same redaction as [add] — this is the same content, so it carries the same
+  /// rule — and the same `iptvs.<scope>` naming the rest of the app prints
+  /// under. Debug-only: release builds keep the exportable half and drop the
+  /// console noise.
+  void addAndPrint(String scope, String message) {
+    add(scope, message);
+    if (!kDebugMode) return;
+    final redacted = redactText(message);
+    developer.log(redacted, name: 'iptvs.${redactText(scope)}');
+    debugPrint('[iptvs.${redactText(scope)}] $redacted');
   }
 
   /// Records the bounded, non-sensitive summary of one ingestion operation.

@@ -193,7 +193,7 @@ class LiveLayoutMetrics {
     bool compactWideLayout = false,
     double textScale = 1.0,
   }) {
-    final isWide = size.width >= kWideLayoutMinWidth;
+    final isWide = isWideLayout(size);
     final short = size.height < kShortViewportMaxHeight;
     // Height compression is not a wide-layout privilege: an 800x360 landscape
     // phone is short for exactly the same reason a 1280x600 desktop window is,
@@ -347,6 +347,15 @@ class LiveTabView extends StatelessWidget {
   final String? lastPlayedChannelId;
   final String? previewChannelId;
 
+  /// Whether a given row is the one the preview is showing.
+  ///
+  /// [previewChannelId] alone can't answer this in the cross-source Favorites
+  /// view: channel ids are unique only within a provider, so two favorited rows
+  /// from different providers can share one and both would light up. Optional —
+  /// callers without a cross-source list can leave it null and get the plain id
+  /// comparison.
+  final bool Function(Channel channel)? isPreviewingRow;
+
   final bool Function(String id) isFavorite;
   final ValueChanged<String> onToggleFavorite;
   final ValueChanged<Channel> onPlayChannel;
@@ -394,6 +403,7 @@ class LiveTabView extends StatelessWidget {
     required this.categoryRowExtent,
     required this.lastPlayedChannelId,
     required this.previewChannelId,
+    this.isPreviewingRow,
     required this.isFavorite,
     required this.onToggleFavorite,
     required this.onPlayChannel,
@@ -464,7 +474,8 @@ class LiveTabView extends StatelessWidget {
                   cursor: i == selected,
                   favoriteCursor: i == selected && onFavoriteColumn,
                   listFocused: listFocused,
-                  previewing: c.id == previewChannelId,
+                  previewing:
+                      isPreviewingRow?.call(c) ?? (c.id == previewChannelId),
                   onTap: () {
                     _selectChannelIndex(i);
                     onPlayChannel(c);
@@ -582,7 +593,7 @@ class LiveTabView extends StatelessWidget {
     // `focusCategories()` requested focus on a sidebar node that was never built.
     // A body narrower than the window now simply renders the two-pane layout a
     // little tighter, which is what the rest of the screen already assumes.
-    if (size.width < kWideLayoutMinWidth) {
+    if (!isWideLayout(size)) {
       // Narrow keeps the old behaviour: the toolbar dropdown is still mounted
       // here, so the category remains changeable with the list gone.
       return emptyBody ?? _buildChannelList(context, metrics, wide: false);
@@ -656,14 +667,16 @@ class LiveTabView extends StatelessWidget {
     // an empty category reaches here with nothing to resolve.
     final preview = resolvePreviewChannel();
     if (preview == null) return SizedBox(height: metrics.previewHeight);
+    final previewingPanelChannel =
+        isPreviewingRow?.call(preview) ?? (previewChannelId == preview.id);
     return _LivePreviewPanel(
       channel: preview,
       now: now[preview.id],
       next: next[preview.id],
       previewVideo: previewVideoBuilder(),
-      previewActive: previewChannelId == preview.id,
-      previewLoading: previewLoading && previewChannelId == preview.id,
-      previewError: previewChannelId == preview.id ? previewError : null,
+      previewActive: previewingPanelChannel,
+      previewLoading: previewLoading && previewingPanelChannel,
+      previewError: previewingPanelChannel ? previewError : null,
       deliberate: deliberate,
       favorite: isFavorite(preview.id),
       onToggleFavorite: () => onToggleFavorite(preview.id),

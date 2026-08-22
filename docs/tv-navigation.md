@@ -188,7 +188,12 @@ tile-width band.
   ordinary entry in the category list, so it costs the Back ladder nothing — no new rung, no new
   focus node, and the channel list stays the same selection model with the same `itemExtent`. That
   was the reason for preferring it over a dedicated screen, which would have duplicated the list,
-  preview pane, EPG strip and D-pad model. Its rows carry a **source chip inline with the channel
+  preview pane, EPG strip and D-pad model. It also behaves like one: OK previews and a second OK
+  goes fullscreen, exactly as anywhere else — the preview simply resolves through the row's own
+  source (CLAUDE.md, cross-source favorites). What makes that safe is that the preview is
+  identified by `(sourceId, channelId)`, never the id alone; on a remote the symptom of getting
+  that wrong would be a second OK opening a different channel than the one on screen.
+  Its rows carry a **source chip inline with the channel
   name** rather than on a line of their own: index→offset math is `index * itemExtent`, so a row
   that grows by a line breaks scrolling for the whole list. The chip's font stays below the title's
   so the line height — and therefore the extent — is still set by the title alone, and

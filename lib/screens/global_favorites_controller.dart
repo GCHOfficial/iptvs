@@ -6,6 +6,7 @@ import '../data/net.dart';
 import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
+import 'favorites_order.dart';
 
 /// A favorited live channel together with the source that owns it.
 ///
@@ -43,6 +44,15 @@ class GlobalFavoriteChannel {
 /// Favorites whose source has since been deleted are dropped: the cache row can
 /// outlive the [SourceConfig], and a row with no source can neither be labelled
 /// nor played.
+///
+/// Rows come back in **catalog reading order** — the user's own source order
+/// first (as arranged on the sources screen), then category order inside each
+/// source, then channel order inside each category. Without the source level
+/// this list interleaves every provider by raw channel number, which reads as
+/// no order at all once two lists are configured: a row numbered 2 in one
+/// provider lands above a row numbered 5 in another, next to a source chip
+/// saying they are unrelated. See `favorites_order.dart` for why the order is
+/// derived rather than stored.
 class GlobalFavoritesController extends ChangeNotifier {
   final AppDatabase db;
   final SourceStore store;
@@ -65,11 +75,27 @@ class GlobalFavoritesController extends ChangeNotifier {
     _set(() => _loading = true);
     final List<({String sourceId, Channel channel})> rows;
     final List<SourceConfig> configs;
+    final categoryRanksBySource = <String, Map<String, int>>{};
     try {
       rows = await db.readFavoriteChannelsAcrossSources();
       // Reads the OS keychain, which can fail outright (locked/unavailable
       // backend, or no plugin at all under `flutter test`).
       configs = await store.list();
+      // Category order per source, for the middle rank. Only for sources that
+      // actually contributed a row — a configured-but-unfavorited provider
+      // would be a query for nothing. Concurrent rather than sequential
+      // because this whole load re-runs on **every favorite toggle**, and
+      // serializing one query per configured source made a star press cost the
+      // sum of them instead of the longest.
+      final sourceIds = {for (final row in rows) row.sourceId}.toList();
+      final categoryLists = await Future.wait(
+        sourceIds.map(db.readCategories),
+      );
+      for (var i = 0; i < sourceIds.length; i++) {
+        categoryRanksBySource[sourceIds[i]] = catalogRanks(
+          categoryLists[i].map((c) => c.id),
+        );
+      }
     } catch (error) {
       // This view is additive: the per-source list must still load. Failing
       // soft here keeps a broken keychain or cache read from taking the whole
@@ -87,12 +113,23 @@ class GlobalFavoritesController extends ChangeNotifier {
     }
     if (_disposed || gen != _generation) return;
     final byId = {for (final c in configs) c.id: c};
+    // The user's arrangement of the sources screen is the outer rank; the query
+    // already returns each source's rows in that source's own channel order,
+    // which `orderedByCatalog` keeps as the innermost tie-break.
+    final sourceRanks = catalogRanks(configs.map((c) => c.id));
     _set(() {
-      _items = [
-        for (final row in rows)
-          if (byId[row.sourceId] case final config?)
-            GlobalFavoriteChannel(channel: row.channel, config: config),
-      ];
+      _items = orderedByCatalog(
+        [
+          for (final row in rows)
+            if (byId[row.sourceId] case final config?)
+              GlobalFavoriteChannel(channel: row.channel, config: config),
+        ],
+        sourceRank: (item) => rankOf(sourceRanks, item.sourceId),
+        categoryRank: (item) => rankOf(
+          categoryRanksBySource[item.sourceId] ?? const {},
+          item.channel.categoryId,
+        ),
+      );
       _loading = false;
     });
   }
