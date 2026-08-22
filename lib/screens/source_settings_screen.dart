@@ -10,6 +10,11 @@ import '../theme.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 
+/// A category as this screen renders it, regardless of which kind it came
+/// from — the three provider lists have different element types but identical
+/// needs here.
+typedef CategoryEntry = ({String id, String title});
+
 /// The next hidden-category set when bulk-toggling [affected]: [hide] true adds
 /// them all (union), false reveals them (difference). Pure so the bulk Show
 /// all / Hide all controls — which operate on the *filtered* subset and must
@@ -63,9 +68,14 @@ class SourceSettingsScreen extends StatefulWidget {
 class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
   late SourceConfig _config = widget.config;
 
-  List<Category> _live = const [];
-  List<MediaCategory> _movies = const [];
-  List<MediaCategory> _series = const [];
+  /// Every category, per kind, as a uniform (id, title) list.
+  ///
+  /// Materialised once per [_load] rather than derived per call. It used to be
+  /// three typed lists mapped and copied inside [_all] on every invocation,
+  /// and [_filtered], [_hasAnyMatch] and each section header all called that —
+  /// so a provider's whole category list was copied roughly eight times per
+  /// build, and a build happens on every keystroke and every toggle.
+  Map<ContentKind, List<CategoryEntry>> _allByKind = const {};
   bool _loading = true;
 
   final TextEditingController _searchController = TextEditingController();
@@ -117,34 +127,49 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     );
     if (!mounted) return;
     setState(() {
-      _live = live;
-      _movies = movies;
-      _series = series;
+      _allByKind = {
+        ContentKind.live: [for (final c in live) (id: c.id, title: c.title)],
+        ContentKind.movie: [for (final c in movies) (id: c.id, title: c.title)],
+        ContentKind.series: [
+          for (final c in series) (id: c.id, title: c.title),
+        ],
+      };
+      // The filtered lists are derived from what just changed.
+      _filteredCacheQuery = null;
       _loading = false;
     });
   }
 
   /// All categories for [kind] as a uniform (id, title) list.
-  List<({String id, String title})> _all(ContentKind kind) {
-    switch (kind) {
-      case ContentKind.live:
-        return _live.map((c) => (id: c.id, title: c.title)).toList();
-      case ContentKind.movie:
-        return _movies.map((c) => (id: c.id, title: c.title)).toList();
-      case ContentKind.series:
-        return _series.map((c) => (id: c.id, title: c.title)).toList();
-      case ContentKind.season:
-      case ContentKind.episode:
-        return const [];
-    }
-  }
+  List<CategoryEntry> _all(ContentKind kind) => _allByKind[kind] ?? const [];
+
+  /// The query the cached filter results below were computed for, or null when
+  /// they must be recomputed ([_load] replaced the categories).
+  String? _filteredCacheQuery;
+  Map<ContentKind, List<CategoryEntry>> _filteredCache = const {};
 
   /// [kind]'s categories matching the current search query.
-  List<({String id, String title})> _filtered(ContentKind kind) {
+  ///
+  /// Cached on the query, so a *toggle* — which rebuilds but changes no
+  /// filtering input — doesn't re-scan every category title of every kind.
+  List<CategoryEntry> _filtered(ContentKind kind) {
     final q = _query.trim().toLowerCase();
-    final all = _all(kind);
-    if (q.isEmpty) return all;
-    return all.where((c) => c.title.toLowerCase().contains(q)).toList();
+    if (_filteredCacheQuery != q) {
+      _filteredCacheQuery = q;
+      _filteredCache = {
+        for (final k in const [
+          ContentKind.live,
+          ContentKind.movie,
+          ContentKind.series,
+        ])
+          k: q.isEmpty
+              ? _all(k)
+              : _all(
+                  k,
+                ).where((c) => c.title.toLowerCase().contains(q)).toList(),
+      };
+    }
+    return _filteredCache[kind] ?? const [];
   }
 
   Future<void> _save(SourceConfig next) async {
@@ -307,176 +332,195 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                   constraints: const BoxConstraints(
                     maxWidth: kSettingsMaxContentWidth,
                   ),
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 32),
-                    children: [
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(6, 8, 6, 12),
-                        child: Text(
-                          'Turn categories off to hide them — and everything in them '
-                          '— from browsing for this source.',
-                          style: TextStyle(color: AppColors.textLo),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
-                        child: TvTextField(
-                          controller: _searchController,
-                          hintText: 'Search categories',
-                          autofocus: true,
-                          textInputAction: TextInputAction.search,
-                          prefixIcon: const Icon(Icons.search, size: 20),
-                          // The built-in clear button is a real D-pad stop (a
-                          // suffixIcon sits behind the edit barrier) — TvTextField.
-                          showClear: _query.isNotEmpty,
-                          onClear: () {
-                            _searchController.clear();
-                            setState(() => _query = '');
-                          },
-                          onChanged: (v) => setState(() => _query = v),
-                        ),
-                      ),
-                      if (_hasAnyMatch)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: _BulkButton(
-                                  label: 'Show all',
-                                  icon: Icons.visibility,
-                                  onTap: () => _bulkAll(hide: false),
+                  // Slivers, not `ListView(children: [...])`. That form is
+                  // **not lazy**: it builds every child up front, so a provider
+                  // with thousands of categories built thousands of
+                  // `FocusableCard`s on the first frame — and again on every
+                  // keystroke and every toggle, since each one rebuilds this
+                  // screen. That is the "press scroll and it moves the day
+                  // after tomorrow" report. The category rows are the only
+                  // unbounded part of this screen, so they are the part that
+                  // has to be built on demand; everything above them is a fixed
+                  // handful of widgets and stays eager.
+                  child: CustomScrollView(
+                    slivers: [
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                        sliver: SliverList.list(
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 8, 6, 12),
+                              child: Text(
+                                'Turn categories off to hide them — and everything in them '
+                                '— from browsing for this source.',
+                                style: TextStyle(color: AppColors.textLo),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
+                              child: TvTextField(
+                                controller: _searchController,
+                                hintText: 'Search categories',
+                                autofocus: true,
+                                textInputAction: TextInputAction.search,
+                                prefixIcon: const Icon(Icons.search, size: 20),
+                                // The built-in clear button is a real D-pad stop (a
+                                // suffixIcon sits behind the edit barrier) — TvTextField.
+                                showClear: _query.isNotEmpty,
+                                onClear: () {
+                                  _searchController.clear();
+                                  setState(() => _query = '');
+                                },
+                                onChanged: (v) => setState(() => _query = v),
+                              ),
+                            ),
+                            if (_hasAnyMatch)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(2, 8, 2, 0),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: _BulkButton(
+                                        label: 'Show all',
+                                        icon: Icons.visibility,
+                                        onTap: () => _bulkAll(hide: false),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _BulkButton(
+                                        label: 'Hide all',
+                                        icon: Icons.visibility_off_outlined,
+                                        onTap: () => _bulkAll(hide: true),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _BulkButton(
-                                  label: 'Hide all',
-                                  icon: Icons.visibility_off_outlined,
-                                  onTap: () => _bulkAll(hide: true),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'Advanced catch-up',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                              child: Text(
+                                'Leave these empty to use provider values. A fixed offset '
+                                'takes precedence over the timezone.',
+                                style: TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 12,
                                 ),
+                              ),
+                            ),
+                            TvTextField(
+                              controller: _catchupTimezoneController,
+                              hintText: 'Europe/London or UTC',
+                              label: 'Provider timezone',
+                              textInputAction: TextInputAction.next,
+                            ),
+                            const SizedBox(height: 8),
+                            TvTextField(
+                              controller: _catchupOffsetController,
+                              hintText: 'e.g. 120',
+                              label: 'Fixed offset in minutes',
+                              textInputAction: TextInputAction.next,
+                            ),
+                            const SizedBox(height: 8),
+                            TvTextField(
+                              controller: _catchupDaysController,
+                              hintText: 'e.g. 7',
+                              label: 'Maximum archive days',
+                              textInputAction: TextInputAction.done,
+                              onSubmitted: (_) => _saveCatchupOverrides(),
+                            ),
+                            if (_catchupError != null)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
+                                child: Text(
+                                  _catchupError!,
+                                  style: const TextStyle(
+                                    color: AppColors.danger,
+                                  ),
+                                ),
+                              ),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 10),
+                                child: FilledButton.icon(
+                                  onPressed: _saveCatchupOverrides,
+                                  icon: const Icon(Icons.save_outlined),
+                                  label: const Text('Save catch-up overrides'),
+                                ),
+                              ),
+                            ),
+                            // Only for an M3U source whose URL carries Xtream
+                            // credentials. The load-time upgrade already converts
+                            // local sources silently; this is how a **cloud-managed**
+                            // one gets there, since that path deliberately leaves
+                            // panel-owned sources alone (a pull would revert it) —
+                            // and it is the one place the user can ask for it
+                            // explicitly and then push.
+                            if (couldBeXtreamPanel(_config)) ...[
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                                child: Text(
+                                  'Source type',
+                                  style: TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                                child: Text(
+                                  'This playlist URL looks like an Xtream panel. As '
+                                  'an Xtream source it also gives Movies, Series and '
+                                  'the subscription expiry, which a playlist can’t '
+                                  'carry.',
+                                  style: TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              _UpgradeToXtreamTile(
+                                busy: _upgrading,
+                                onTap: _upgradeToXtream,
                               ),
                             ],
-                          ),
-                        ),
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
-                        child: Text(
-                          'Advanced catch-up',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                      const Padding(
-                        padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
-                        child: Text(
-                          'Leave these empty to use provider values. A fixed offset '
-                          'takes precedence over the timezone.',
-                          style: TextStyle(
-                            color: AppColors.textLo,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      TvTextField(
-                        controller: _catchupTimezoneController,
-                        hintText: 'Europe/London or UTC',
-                        label: 'Provider timezone',
-                        textInputAction: TextInputAction.next,
-                      ),
-                      const SizedBox(height: 8),
-                      TvTextField(
-                        controller: _catchupOffsetController,
-                        hintText: 'e.g. 120',
-                        label: 'Fixed offset in minutes',
-                        textInputAction: TextInputAction.next,
-                      ),
-                      const SizedBox(height: 8),
-                      TvTextField(
-                        controller: _catchupDaysController,
-                        hintText: 'e.g. 7',
-                        label: 'Maximum archive days',
-                        textInputAction: TextInputAction.done,
-                        onSubmitted: (_) => _saveCatchupOverrides(),
-                      ),
-                      if (_catchupError != null)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
-                          child: Text(
-                            _catchupError!,
-                            style: const TextStyle(color: AppColors.danger),
-                          ),
-                        ),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 10),
-                          child: FilledButton.icon(
-                            onPressed: _saveCatchupOverrides,
-                            icon: const Icon(Icons.save_outlined),
-                            label: const Text('Save catch-up overrides'),
-                          ),
+                            if (_config.kind == SourceKind.xtream) ...[
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                                child: Text(
+                                  'Live stream format',
+                                  style: TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                                child: Text(
+                                  'Some providers only serve one stream format — '
+                                  'switch this if channels fail to load.',
+                                  style: TextStyle(
+                                    color: AppColors.textLo,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                              _StreamFormatTile(
+                                value: _streamExtension,
+                                onTap: _cycleStreamExtension,
+                              ),
+                            ],
+                          ],
                         ),
                       ),
-                      // Only for an M3U source whose URL carries Xtream
-                      // credentials. The load-time upgrade already converts
-                      // local sources silently; this is how a **cloud-managed**
-                      // one gets there, since that path deliberately leaves
-                      // panel-owned sources alone (a pull would revert it) —
-                      // and it is the one place the user can ask for it
-                      // explicitly and then push.
-                      if (couldBeXtreamPanel(_config)) ...[
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
-                          child: Text(
-                            'Source type',
-                            style: TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
-                          child: Text(
-                            'This playlist URL looks like an Xtream panel. As '
-                            'an Xtream source it also gives Movies, Series and '
-                            'the subscription expiry, which a playlist can’t '
-                            'carry.',
-                            style: TextStyle(
-                              color: AppColors.textLo,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                        _UpgradeToXtreamTile(
-                          busy: _upgrading,
-                          onTap: _upgradeToXtream,
-                        ),
-                      ],
-                      if (_config.kind == SourceKind.xtream) ...[
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
-                          child: Text(
-                            'Live stream format',
-                            style: TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                        const Padding(
-                          padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
-                          child: Text(
-                            'Some providers only serve one stream format — '
-                            'switch this if channels fail to load.',
-                            style: TextStyle(
-                              color: AppColors.textLo,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                        _StreamFormatTile(
-                          value: _streamExtension,
-                          onTap: _cycleStreamExtension,
-                        ),
-                      ],
-                      _section('Live TV', ContentKind.live),
-                      _section('Movies', ContentKind.movie),
-                      _section('Series', ContentKind.series),
+                      ..._sectionSlivers('Live TV', ContentKind.live),
+                      ..._sectionSlivers('Movies', ContentKind.movie),
+                      ..._sectionSlivers('Series', ContentKind.series),
+                      const SliverToBoxAdapter(child: SizedBox(height: 32)),
                     ],
                   ),
                 ),
@@ -485,63 +529,83 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     );
   }
 
-  Widget _section(String title, ContentKind kind) {
+  /// One kind's section: an eager header plus the rows, built on demand.
+  ///
+  /// The hidden set is resolved **once here**, not per row —
+  /// [SourceConfig.hiddenCategoryIds] rebuilds a `Set` from the stored settings
+  /// on every call, and the row builder runs per visible row per frame.
+  List<Widget> _sectionSlivers(String title, ContentKind kind) {
     final items = _filtered(kind);
     final total = _all(kind).length;
     final hidden = _config.hiddenCategoryIds(kind);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(6, 16, 6, 6),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    color: AppColors.textLo,
-                    fontWeight: FontWeight.w700,
+    const horizontal = EdgeInsets.symmetric(horizontal: 12);
+    return [
+      SliverPadding(
+        padding: horizontal,
+        sliver: SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(6, 16, 6, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
-              ),
-              if (items.isNotEmpty) ...[
-                _BulkButton(
-                  label: 'Show all',
-                  icon: Icons.visibility,
-                  dense: true,
-                  onTap: () => _bulkSection(kind, hide: false),
-                ),
-                const SizedBox(width: 6),
-                _BulkButton(
-                  label: 'Hide all',
-                  icon: Icons.visibility_off_outlined,
-                  dense: true,
-                  onTap: () => _bulkSection(kind, hide: true),
-                ),
+                if (items.isNotEmpty) ...[
+                  _BulkButton(
+                    label: 'Show all',
+                    icon: Icons.visibility,
+                    dense: true,
+                    onTap: () => _bulkSection(kind, hide: false),
+                  ),
+                  const SizedBox(width: 6),
+                  _BulkButton(
+                    label: 'Hide all',
+                    icon: Icons.visibility_off_outlined,
+                    dense: true,
+                    onTap: () => _bulkSection(kind, hide: true),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
-        if (items.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(6, 0, 6, 8),
-            child: Text(
-              total == 0
-                  ? 'Browse this source once to load its categories.'
-                  : 'No categories match your search.',
-              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
-            ),
-          )
-        else
-          for (final item in items)
-            _CategoryToggleRow(
-              title: item.title,
-              enabled: !hidden.contains(item.id),
-              onToggle: () => _toggle(kind, item.id),
-            ),
-      ],
-    );
+      ),
+      SliverPadding(
+        padding: horizontal,
+        sliver: items.isEmpty
+            ? SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 0, 6, 8),
+                  child: Text(
+                    total == 0
+                        ? 'Browse this source once to load its categories.'
+                        : 'No categories match your search.',
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              )
+            : SliverList.builder(
+                itemCount: items.length,
+                itemBuilder: (context, i) {
+                  final item = items[i];
+                  return _CategoryToggleRow(
+                    title: item.title,
+                    enabled: !hidden.contains(item.id),
+                    onToggle: () => _toggle(kind, item.id),
+                  );
+                },
+              ),
+      ),
+    ];
   }
 }
 
@@ -611,7 +675,8 @@ class _UpgradeToXtreamTile extends StatelessWidget {
       onTap: busy ? () {} : onTap,
       scrollOnFocus: false,
       debugLabel: 'sourceSettings.upgradeXtream',
-      semanticsLabel: 'Upgrade to Xtream, unlocks Movies, Series and the '
+      semanticsLabel:
+          'Upgrade to Xtream, unlocks Movies, Series and the '
           'subscription expiry',
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),

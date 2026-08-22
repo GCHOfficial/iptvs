@@ -127,6 +127,7 @@ void main() {
                 resolvePreviewChannel: () => list.isEmpty ? null : list.first,
                 now: const {},
                 next: const {},
+                showsEpg: false,
                 deliberate: deliberate,
                 resolving: false,
                 scrollController: scroll,

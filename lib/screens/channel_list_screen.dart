@@ -159,18 +159,27 @@ enum ChannelPlayAction {
 /// the row layout from the same metrics — so a view that answers this
 /// differently on the two sides scrolls by a height its rows aren't drawn at.
 ///
-/// [hasEpg] is whether the *active* source has a guide loaded. It is not enough
-/// on its own: the cross-source Favorites view carries no EPG by design and is
-/// handed empty `now`/`next` maps (a foreign row's channel id can collide with
-/// an active-source one, and printing that provider's programme against it
-/// would be worse than printing nothing). Reading only `hasEpg` there laid the
-/// rows out at 68.1 px inside an itemExtent of 105.9.
+/// The two views are asked **different questions**, which is the whole point of
+/// this being one function rather than a bare `hasEpg` read. [hasEpg] is
+/// whether the *active* source has a guide; [hasCrossSourceEpg] is whether the
+/// cross-source Favorites view has one of its own. Reading `hasEpg` in the
+/// cross-source view laid its rows out at 68.1 px inside an itemExtent of
+/// 105.9 — the active source having a guide says nothing about whether a
+/// foreign row will draw one.
+///
+/// The cross-source view's guide is keyed by `(sourceId, channelId)` and
+/// reaches the rows through `LiveTabView.epgFor`; it is deliberately *not* the
+/// active source's maps, which are keyed by channel id alone and would print
+/// another provider's programme against a foreign row.
 ///
 /// Pure and top-level for the same reason as
 /// [shouldLeaveCrossSourceFavoritesView]: the screen that uses it can only be
 /// widget-tested with libmpv present, which no Windows dev box has.
-bool liveRowsShowEpg({required String? categoryId, required bool hasEpg}) =>
-    categoryId != kAllSourcesFavoritesCategoryId && hasEpg;
+bool liveRowsShowEpg({
+  required String? categoryId,
+  required bool hasEpg,
+  required bool hasCrossSourceEpg,
+}) => categoryId == kAllSourcesFavoritesCategoryId ? hasCrossSourceEpg : hasEpg;
 
 /// Whether the live tab must fall back to "All" because the cross-source
 /// Favorites view is selected but no longer offered.
@@ -422,6 +431,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     WidgetsBinding.instance.addObserver(this);
     _loadLive();
     _live.startEpgRefresh();
+    _globalFavorites.startEpgRefresh();
   }
 
   void _createRepositoryControllers() {
@@ -588,9 +598,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _visibleMediaCache = null;
       _channelsByIdKey = null;
       _channelsByIdCache = null;
+      _crossSourceIndexKey = null;
+      _crossSourceIndexCache = null;
       _focus.resetChannelSelection();
       _loadLive();
       _live.startEpgRefresh();
+      _globalFavorites.startEpgRefresh();
       if (_tab != ContentKind.live) {
         _loadMediaTab(_tab);
       }
@@ -851,6 +864,25 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final nowEmpty = await _favorites.toggle(kind, id);
     if (!mounted) return;
     if (kind == ContentKind.live) {
+      // The cross-source view reads the same `favorites` table through its own
+      // controller, which this write goes nowhere near — so without this it only
+      // caught up on the next full reload, and a channel starred from the
+      // ordinary list simply wasn't in "Favorites · All sources" until the user
+      // refreshed, while the per-source Favorites view updated instantly.
+      //
+      // Incremental (see `applyLocalChange`), because this is a star press: a
+      // full reload would re-read the OS keychain and requery every contributing
+      // source on every one.
+      final channel = _channelsById[id];
+      if (channel != null) {
+        unawaited(
+          _globalFavorites.applyLocalChange(
+            config: widget.config,
+            channel: channel,
+            favorite: _isFavorite(ContentKind.live, id),
+          ),
+        );
+      }
       _focus.clampSelection();
     }
     if (!nowEmpty) return;
@@ -1114,13 +1146,50 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// in several sources — the duplicate case this whole view has to handle —
   /// and the visible list holds the controller's own [Channel] instances, so
   /// identity is exact where an id would be ambiguous.
+  /// Lookup tables for [_crossSourceFavoriteFor], rebuilt only when the
+  /// controller republishes its list.
+  ///
+  /// That resolver runs for **every visible row on every rebuild** — now twice
+  /// per row, once for the source chip and once for the guide — and the live
+  /// list rebuilds on every D-pad press. Two linear scans of the whole
+  /// favorites list per call is precisely the shape that makes a remote feel
+  /// unresponsive, so it is a pair of maps instead. Keyed on the list's
+  /// identity, like [_channelsById]: the controller assigns a fresh list on
+  /// every change.
+  ({
+    Map<Channel, GlobalFavoriteChannel> byInstance,
+    Map<String, GlobalFavoriteChannel> byId,
+  })?
+  _crossSourceIndexCache;
+  List<GlobalFavoriteChannel>? _crossSourceIndexKey;
+
+  ({
+    Map<Channel, GlobalFavoriteChannel> byInstance,
+    Map<String, GlobalFavoriteChannel> byId,
+  })
+  get _crossSourceIndex {
+    final items = _globalFavorites.items;
+    if (identical(_crossSourceIndexKey, items)) return _crossSourceIndexCache!;
+    _crossSourceIndexKey = items;
+    // Explicitly identity-keyed: `Channel` has no `==` override today, and this
+    // must not silently become a value lookup if one is ever added — the whole
+    // point of the first probe is that it beats an ambiguous id.
+    final byInstance = Map<Channel, GlobalFavoriteChannel>.identity();
+    final byId = <String, GlobalFavoriteChannel>{};
+    for (final item in items) {
+      byInstance[item.channel] = item;
+      // First match wins, as the scan it replaces did.
+      byId.putIfAbsent(item.channel.id, () => item);
+    }
+    return _crossSourceIndexCache = (byInstance: byInstance, byId: byId);
+  }
+
   GlobalFavoriteChannel? _crossSourceFavoriteFor(Channel channel) {
     if (_categoryId != kAllSourcesFavoritesCategoryId) return null;
+    final index = _crossSourceIndex;
     // Identity first — exact even when two sources carry the same channel id,
     // which is the duplicate case this view exists to disambiguate.
-    for (final item in _globalFavorites.items) {
-      if (identical(item.channel, channel)) return item;
-    }
+    //
     // Then by id. `load()` republishes fresh `Channel` instances (a re-favorite
     // from the player, a `_loadLive` refresh), so a reload between the frame
     // that built the row and this callback running would miss on identity
@@ -1128,10 +1197,44 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // active source's repository. Ambiguous only when the same id exists in
     // several sources and the instance is stale, which is strictly better than
     // resolving against the wrong provider outright.
-    for (final item in _globalFavorites.items) {
-      if (item.channel.id == channel.id) return item;
-    }
-    return null;
+    return index.byInstance[channel] ?? index.byId[channel.id];
+  }
+
+  /// Now/next for [channel], resolved through whichever source owns it.
+  ///
+  /// A [foreign] row's guide lives under **its own** source id. Reading the
+  /// active source's maps by channel id would show a *different* provider's
+  /// programme against this channel, because provider ids are unique only
+  /// within a provider — which is exactly the collision this view puts two of
+  /// in one list.
+  ///
+  /// Every surface that prints a programme goes through here: the row, the
+  /// preview panel, the phone preview sheet and the fullscreen player. They
+  /// used to hand a foreign row `null` on all four, so a cross-source favorite
+  /// showed no guide anywhere.
+  ({Programme? now, Programme? next}) _epgFor(
+    Channel channel, {
+    required bool foreign,
+    required String sourceId,
+  }) => foreign
+      ? _globalFavorites.epgFor(sourceId, channel.id)
+      : (now: _live.now[channel.id], next: _live.next[channel.id]);
+
+  /// Now/next for a row of the cross-source Favorites view.
+  ///
+  /// Resolved through the row's **owning** source, which is the entire reason
+  /// this view can carry a guide at all: the active source's maps are keyed by
+  /// channel id, and a foreign row's id can mean a different channel there — so
+  /// reading them would print that provider's programme against this one.
+  ///
+  /// A foreign source's guide is only refreshed while that source is active, so
+  /// it can be stale. That degrades to *nothing* rather than to something
+  /// wrong: both halves of the query are bounded by the current instant, so an
+  /// out-of-date guide simply stops matching and the row draws plain.
+  ({Programme? now, Programme? next}) _crossSourceEpgFor(Channel channel) {
+    final item = _crossSourceFavoriteFor(channel);
+    if (item == null) return (now: null, next: null);
+    return _globalFavorites.epgFor(item.sourceId, item.channel.id);
   }
 
   Future<void> _play(Channel channel) async {
@@ -1200,6 +1303,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         final stream = await repo.resolve(channel);
         if (!mounted) return;
         _notePlayedChannel(channel.id);
+        final epg = _epgFor(
+          channel,
+          foreign: foreign,
+          sourceId: repo.source.id,
+        );
         await Navigator.of(context).push(
           PageRouteBuilder(
             transitionDuration: Duration.zero,
@@ -1208,11 +1316,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               title: channel.name,
               stream: stream,
               sourceName: repo.source.name,
-              // EPG comes from the active source's controller, so a
-              // cross-source row shows none — its guide lives under its own
-              // source id and is only refreshed while that source is active.
-              epgNow: foreign ? null : _live.now[channel.id],
-              epgNext: foreign ? null : _live.next[channel.id],
+              epgNow: epg.now,
+              epgNext: epg.next,
               favoriteInitial: foreign
                   ? true
                   : _isFavorite(ContentKind.live, channel.id),
@@ -1447,18 +1552,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         restorePreviewOnFailure = true;
         playbackStream = await playRepo.resolve(channel);
       }
+      final epg = _epgFor(
+        channel,
+        foreign: foreign,
+        sourceId: playRepo.source.id,
+      );
       // Context-independent on purpose — nothing in the player derives from
       // the route builder's element.
       Widget buildPlayer() => PlayerScreen(
         title: channel.name,
         stream: playbackStream,
         sourceName: playRepo.source.name,
-        // EPG comes from the active source's controller, so a cross-source row
-        // shows none — its guide lives under its own source id and is only
-        // refreshed while that source is active. Reading `_live.now` by id
-        // would show a *different* provider's programme against this channel.
-        epgNow: foreign ? null : _live.now[channel.id],
-        epgNext: foreign ? null : _live.next[channel.id],
+        epgNow: epg.now,
+        epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
         existingController: decision.adoptsEmbeddedPreview
             ? _preview.controller
@@ -1660,6 +1766,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // preview's lifecycle from there (stopped when fullscreen exits), so the
     // post-sheet cleanup below must leave it alone.
     var handedOff = false;
+    final epg = _epgFor(
+      channel,
+      foreign: foreign,
+      sourceId: previewRepo.source.id,
+    );
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1671,9 +1782,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         preview: _preview,
         channel: channel,
         // A cross-source row's guide and favorite state live under its own
-        // source id, not the active controllers' — see `_openLivePlayer`.
-        now: foreign ? null : _live.now[channel.id],
-        next: foreign ? null : _live.next[channel.id],
+        // source id, not the active controllers' — see `_epgFor`.
+        now: epg.now,
+        next: epg.next,
         // A cross-source row is favorited by definition when the sheet opens,
         // so `true` is the right *initial* value — the sheet keeps its own
         // optimistic state from there.
@@ -2027,8 +2138,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   /// The two-column (TV/desktop) layout, which is the only one with a category
   /// sidebar and preview panel. The coordinator routes the D-pad off this.
-  bool _isWide() =>
-      mounted && isWideLayout(MediaQuery.sizeOf(context));
+  bool _isWide() => mounted && isWideLayout(MediaQuery.sizeOf(context));
 
   /// The live tab's geometry, read from the **window** `MediaQuery`.
   ///
@@ -2045,8 +2155,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     textScale: mounted ? MediaQuery.textScalerOf(context).scale(1) : 1.0,
   );
 
-  bool get _liveRowsShowEpg =>
-      liveRowsShowEpg(categoryId: _categoryId, hasEpg: _live.now.isNotEmpty);
+  bool get _liveRowsShowEpg => liveRowsShowEpg(
+    categoryId: _categoryId,
+    hasEpg: _live.now.isNotEmpty,
+    hasCrossSourceEpg: _globalFavorites.hasEpg,
+  );
 
   double _liveChannelRowExtent() =>
       _liveLayoutMetrics.channelRowExtent(_liveRowsShowEpg);
@@ -2612,17 +2725,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // panel follows the channel cursor, and the cursor now moves without
       // rebuilding this method.
       resolvePreviewChannel: () => _resolvePreviewChannel(visible),
-      // The cross-source view carries no EPG by design (a guide is per-source
-      // and only refreshed while that source is active), and these maps are the
-      // *active* source's — keyed by channel id, which a foreign row can
-      // collide with. Handing them over would print another provider's
-      // programme against this channel rather than nothing.
-      // Derived from the *same* predicate as the row extent, not a parallel
-      // `crossSourceView` test — `LiveTabView` asserts that its `itemExtent`
-      // matches the layout it computes from `now.isNotEmpty`, so these two must
-      // be incapable of drifting apart rather than merely agreeing today.
-      now: _liveRowsShowEpg ? _live.now : const {},
-      next: _liveRowsShowEpg ? _live.next : const {},
+      // These maps are the *active* source's, keyed by channel id — which a
+      // foreign row can collide with, so the cross-source view must never be
+      // handed them. Its own guide arrives through `epgFor` below, keyed by
+      // (source, channel), where there is no collision to have.
+      //
+      // Gated on the *same* predicate as the row extent, not a parallel test —
+      // `LiveTabView` asserts that its `itemExtent` matches the layout it
+      // computes from `showsEpg`, so these must be incapable of drifting apart
+      // rather than merely agreeing today.
+      now: crossSourceView || !_liveRowsShowEpg ? const {} : _live.now,
+      next: crossSourceView || !_liveRowsShowEpg ? const {} : _live.next,
+      showsEpg: _liveRowsShowEpg,
+      epgFor: crossSourceView ? _crossSourceEpgFor : null,
       deliberate: _deliberatePreview,
       resolving: _resolving,
       scrollController: _scrollController,

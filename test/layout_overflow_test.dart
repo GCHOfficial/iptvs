@@ -180,8 +180,14 @@ void main() {
                     // metrics this is where a too-tight box shows up.
                     sourceLabelFor: (_) => 'A Rather Long Panel Name pygjq',
                     resolvePreviewChannel: () => channels.first,
-                    now: now,
-                    next: next,
+                    // Production hands the cross-source view its guide
+                    // through `epgFor`, keyed by (source, channel) — the maps
+                    // stay empty there. Wiring it the same way here keeps this
+                    // sweep over the *real* path.
+                    now: const {},
+                    next: const {},
+                    showsEpg: true,
+                    epgFor: (c) => (now: now[c.id], next: next[c.id]),
                     deliberate: true,
                     resolving: false,
                     scrollController: scroll,
@@ -229,8 +235,10 @@ void main() {
     // `_live.now.isNotEmpty` (the *active* source's guide) while handing this
     // view empty `now`/`next` maps, so the row was laid out at 68.1 px inside an
     // itemExtent of 105.9 — caught by `LiveTabView`'s own debug assert, which
-    // this test therefore also exercises. Both sides now read
-    // `_liveRowsShowEpg`.
+    // this test therefore also exercises. Both sides now read `showsEpg`, one
+    // value the screen derives once from `liveRowsShowEpg`; this case is the
+    // cross-source view before any guide has loaded, which is still the short
+    // row.
     for (final size in const [
       Size(1256, 705),
       Size(1280, 720),
@@ -292,6 +300,7 @@ void main() {
                     resolvePreviewChannel: () => channels.first,
                     now: const {},
                     next: const {},
+                    showsEpg: false,
                     deliberate: true,
                     resolving: false,
                     scrollController: scroll,

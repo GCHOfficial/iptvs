@@ -171,7 +171,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
   (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`
   toggles a source's categories and edits advanced catch-up timezone/offset/window overrides
-  (persisted on `SourceConfig.settings`). `SourceCapabilityReporter` owns the EPG/catch-up/
+  (persisted on `SourceConfig.settings`); its category rows are **lazy slivers**, because
+  `ListView(children: [...])` builds every child up front and a portal with thousands of
+  categories rebuilt all of them on every keystroke and every toggle — the D-pad took seconds to
+  answer. The filtered lists are cached on the query and the hidden-id set is resolved once per
+  section, since `hiddenCategoryIds` rebuilds a `Set` per call. `SourceCapabilityReporter` owns the EPG/catch-up/
   resolution summary; the UI preserves `unknown` for playlist-dependent M3U behavior rather
   than guessing. Favorites are tagged from
   the per-item surfaces and appear as a "Favorites" entry atop each category list. Live adds a
@@ -181,9 +185,23 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   the active source has never heard of. It needs no schema or cloud change — the `favorites` key is
   already `(source_id, kind, item_id)` and `SecretLocatorVault` is process-wide, not per-source —
   and it plays a row through a repository built for its *owning* config (`_repoFor`), never the
-  active one. Deliberate limit: rows carry **no EPG** (guides are per-source and refreshed only
-  while that source is active), so both list rows and the player show none — never the *active*
-  source's guide, whose maps are keyed by a channel id a foreign row can collide with.
+  active one. Rows carry an **EPG keyed by `(sourceId, channelId)`**
+  (`GlobalFavoritesController.epgFor`, refreshed on the same one-minute cadence as the active
+  guide) — never the *active* source's maps, which are keyed by a channel id a foreign row can
+  collide with, so reading them would print another provider's programme against this channel.
+  Every surface that prints a programme resolves through the owning source (`_epgFor`): the row,
+  the preview panel, the phone sheet and the fullscreen player. `LiveTabView.epgFor` is that
+  pair-keyed path, and `showsEpg` — not `now.isNotEmpty` — is now the row-height input, because a
+  view served by `epgFor` has empty maps while its rows are the tall kind. A foreign source's
+  guide is only refreshed while that source is active and so can be stale; that degrades to
+  *nothing* rather than to something wrong, since both halves of the query are bounded by the
+  current instant. The refresh uses the channel-constrained `nowNextForChannels` (the row set is a
+  small known list — the case that query exists for), not the whole-source `nowNext`.
+  A favorite starred on the **active** source reaches this view immediately through
+  `applyLocalChange`, which inserts the row in catalog order with no I/O: the write goes through
+  `FavoritesController`, which knows nothing about this controller, so without it the view only
+  caught up on the next full reload. It is an insertion rather than a reload because it runs on
+  every star press, and a reload re-reads the OS keychain and requeries every contributing source.
   They **do preview**, on the owning source's repository
   (`LivePreviewController.start(from:)`), and go fullscreen through the same seamless handoff as
   any other row (`_openLivePlayer(repo:)`); the star and the reconnect re-resolve are likewise
