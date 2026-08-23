@@ -10,7 +10,7 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
 - [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
-- [docs/sources.md](docs/sources.md) — the provider layer's two intricate corners: how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
+- [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (implemented, on-device validation pending), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -160,6 +160,14 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   per-entry size cap; Android likewise).
 - **`lib/data/local_profile_store.dart`** — device profiles: keychain-persisted `LocalProfile`s,
   per-cloud-profile `ProfileSnapshot`s, the picker's startup mode. See docs/cloud-sync.md.
+- **A form that rebuilds `fields`/`settings` from its own controllers must carry forward the
+  keys it doesn't render.** `EditSourceScreen._save` and the panel's source form both do this:
+  the Dart side keeps unrendered `fields` entries, the panel re-merges unrendered *secret* keys
+  (`carryUnrenderedSecrets`) because `set_source_secret` replaces the payload wholesale. Both are
+  gated on the kind being unchanged, since field keys are provider-specific. Without it an
+  unrelated edit — fixing a label typo, renaming a source in the panel — silently destroys
+  `epgUrls` on every paired device. This has now bitten twice (hidden categories and catch-up
+  overrides via `settings`, then EPG guides via `fields`); write new keys to be safe by default.
 - **`lib/screens/`** — UI. `home_shell.dart` resolves the active source and builds its
   repository. The main browsing UI: `channel_list_screen.dart` (screen state, routes, dialogs,
   and controller/focus ownership), `channel_list_chrome.dart` (tabs, toolbar, dropdowns —
@@ -343,6 +351,32 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   so a *forced* reload actually re-hits the provider: `LibraryRepository.load`/`loadMedia` call
   `invalidate()` (via `is RefreshableSource`) only when `forceRefresh` is true — never on a
   non-forced load or on `loadMoreMedia` pagination.
+- **A source can carry several XMLTV guides, and they merge per *channel*, never per
+  row.** `fields['epgUrls']` (newline-separated, **additional** guides only — the primary stays
+  `epgUrl`/`url-tvg`, `xmltv.php` or `get_epg_info`, so an older build pulling this source still
+  reads guide 1)
+  feeds `mergeEpgGuides` (`sources/epg_guides.dart`), capped at `kMaxEpgGuides`. A channel is
+  claimed by the first guide that carries it and later guides are filtered against those claims,
+  because `nowNext`'s "now" half has no `GROUP BY` and folds rows into a map by channel id — two
+  guides covering one channel would make its now-playing programme *nondeterministic* and draw
+  overlapping cells in the EPG grid. **Failure policy turns on whether the failing guide had
+  already yielded:** a guide that fails *before* yielding (refused, 404, bad gzip) wrote nothing
+  and is skipped — the provider's own guide being the broken one is exactly why a user adds a
+  top-up — while one that fails **mid-feed rethrows**, because its batches are already in the
+  caller's transaction and completing normally would commit a *truncated* guide as a whole one,
+  dropping the previous guide and advancing `epg_synced_at`. All failing likewise rethrows, since
+  `replaceEpgStream` reads a normally-completed empty stream as a successful *empty* guide.
+  Matching is `tvg-id` first, then normalised display names for whatever the ids missed
+  (`sources/epg_matching.dart`), and **names are for user-added guides only** (`epgNameIndexFor`)
+  — a provider's guide and its playlist share ids by construction, so enabling names there would
+  change every existing install's EPG on upgrade and put a 250k-channel index build on the main
+  isolate for users who added nothing. On **Stalker**, whose channels carry no `tvg-id` at all,
+  names are the only path; its own guide is not XMLTV, so it joins the merge as a plain feed, and
+  its third-party downloads deliberately bypass the portal transport, which would otherwise send
+  the MAC cookie and Bearer token to an arbitrary user-supplied host. Saving the guide list calls
+  `AppDatabase.invalidateEpg` (clears `epg_synced_at`, **keeps** the programmes), or the change
+  would be invisible until the guide aged out. Read
+  [docs/sources.md](docs/sources.md) before touching the claim rules.
 - **Liveness is provider metadata, not inferred.** `StreamInfo.isLive` is set by the `Source`.
   Don't guess from stream duration (an HLS live window looks finite). Live = no seek bar.
 - **Secrets must never reach logs, on-screen errors, or exported diagnostics.** Provider URLs and
@@ -383,6 +417,12 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   `ChannelRowColumn`; OK there toggles the favorite in place) and Left peels it back before
   crossing panes; beyond that Left/Right cross panes, and every arrow is consumed (geometry
   traversal never runs in the live body).
+- **A body with no focusable rows must put focus on its own action.** The live tab is a
+  selection model, so when a load fails there are no rows *and* no focus targets: the "Try again"
+  button rendered, was the only thing on screen, and could not be pressed from a remote. Both
+  tabs' error bodies are now `SourceErrorView` (`widgets/source_error_view.dart`), whose retry
+  autofocuses — safe because that body only mounts on a failed load, which replaces the list
+  wholesale. Pinned by `test/source_error_view_test.dart`.
 - **The Back ladder** (`channel_list_screen` `_handleRootBack`): Back never changes data or
   filters — it peels exactly one rung per press toward the exit (rung list in
   docs/tv-navigation.md); chrome (AppBar/toolbar buttons, route key `''`) sits above the ladder;
@@ -437,7 +477,7 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - **Secrets are isolated + optionally E2EE (Phase 2/3 — implemented; docs/cloud-sync.md).** The
   cloud `sources.fields`/`metadata_configs.config` rows carry only **broad** keys (a server strip
   trigger enforces it); secret keys (`secret_keys.dart`: mac/username/password/playlistUrl/epgUrl/
-  userAgent; tmdb/tvdb/tvdbPin/mdblist keys) travel through dedicated RPCs (`get_secrets`, a
+  epgUrls/userAgent; tmdb/tvdb/tvdbPin/mdblist keys) travel through dedicated RPCs (`get_secrets`, a
   per-source `secret` element on `push_sources`, `p_secret` on the 3-arg `push_metadata`) as
   `{format:0|1,payload}`. **Absent secret = server preserves** (never blanks). When a profile opts
   into E2EE the secret is `format` 1 — AES-256-GCM under a per-profile content key the device
@@ -610,6 +650,20 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   never pause** — a paused media_kit engine still holds its provider connection, and accounts are
   single-connection, so pausing across a Dart↔Swift handoff would double-connect exactly like an
   unpaused different-channel preview would.
+- **The preview→fullscreen handoff's *return* leg has its own liveness watch, in the engine.**
+  `ExoPlayerEngine.attachPreviewSurface` arms `previewFrameWatch`: no frame within
+  `PREVIEW_NO_FRAME_REBUILD_MS` (3 s, sized like the forward leg's `HANDOFF_NO_FRAME_STALL_MS`
+  and for the same IDR-wait reason) triggers **one** `rebuildVideoDecoder`, then a log-only
+  verify pass. It lives in the engine rather than in `HdrPlayerActivity` because the Activity —
+  which owns the forward leg's `FrameLivenessWatch` and its ticker — is finishing by the time the
+  return leg runs, so the return leg had no watchdog and no recovery at all. Coming back is the
+  same output-surface transition as the claim, on the same hardware that re-instantiates a codec
+  for one, and a `setOutputSurface` that produced no frames left the preview black
+  **permanently**, with nothing in the log but silence where a `first frame sinceReattachMs=`
+  should be. Found on a stream that changed codec mid-session (HEVC→H.264 across a `kind=ended`
+  reconnect), so the codec handed back to the preview was one created against the *Activity's*
+  SurfaceView — nothing channel-specific, and any reconnect during a long fullscreen session
+  reaches it.
 - On a TV remote the preview is **deliberate and locked**: only OK (or a pointer tap on the row)
   starts/switches it; D-pad focus movement never does. The preview engine is stopped when the app
   backgrounds or exits. A second OK **while that same channel's preview is still resolving waits

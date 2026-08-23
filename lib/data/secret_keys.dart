@@ -22,6 +22,8 @@ library;
 /// - `playlistUrl` — the M3U locator, which typically embeds credentials in a
 ///   query string or path.
 /// - `epgUrl` — an optional M3U EPG locator, likewise credential-bearing.
+/// - `epgUrls` — additional XMLTV guide locators (newline-separated), for the
+///   same reason: a guide URL carries credentials as often as a playlist does.
 /// - `userAgent` — an optional M3U request header some providers key access on.
 ///
 /// `portal`/`host` are deliberately **broad**: they identify the provider but
@@ -33,6 +35,7 @@ const Set<String> kSourceSecretKeys = {
   'password',
   'playlistUrl',
   'epgUrl',
+  'epgUrls',
   'userAgent',
 };
 

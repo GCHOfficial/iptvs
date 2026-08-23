@@ -248,6 +248,27 @@ tile-width band.
   `kChannelRowExtentWithEpg`, or it overflows. Every source in the tests except `_EpgSource`
   returns an empty EPG, so that one test is the only thing guarding it — keep it.
 
+## When the body has no rows
+
+A selection model's rows are not focus targets, which is the whole point — but it means a body
+that renders *instead* of the rows has no focus targets either, and Flutter has nothing to give
+focus to. That is fine for an empty-category message, which is text. It is not fine for the
+**load-error body**, which carries the only control that can recover the screen.
+
+The symptom on a television: "Try again" drawn, plainly the only action available, and
+unpressable. The first OK went nowhere and there was nothing to arrow towards, because
+`handleChannelsKey` correctly returns `ignored` when there are no visible channels — so no key
+was being *stolen*; there was simply no focusable widget in the subtree. A source that fails to
+load is exactly the moment the user cannot route around the problem.
+
+Both tabs' error bodies are now `SourceErrorView` (`lib/widgets/source_error_view.dart`) and its
+retry **autofocuses**, the same rule the delete-confirmation dialog follows. Autofocus is safe
+here specifically because this body only mounts on a failed load, which replaces the list
+wholesale: whatever focus the body held is already gone, so there is nothing to steal it from.
+
+Pinned by `test/source_error_view_test.dart`, which asserts the button holds focus on arrival and
+that a single `select` press with no navigation first runs the retry.
+
 ## Per-row favorite button + intra-row action cursor
 
 Every channel row carries an **always-visible star cell** (`_ChannelTile` in `live_tab_view.dart`):

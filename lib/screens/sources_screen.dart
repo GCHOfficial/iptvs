@@ -898,24 +898,6 @@ class _FieldSpec {
 /// playback time.
 const _urlFieldKeys = {'portal', 'host', 'playlistUrl'};
 
-bool _looksLikeValidUrl(String value) {
-  // **Normalise exactly the way the sources do before judging.** Both
-  // `XtreamSource._base` and `StalkerSource._base()` prepend `http://` when the
-  // user omitted a scheme, so `panel.example.com:8080` and `1.2.3.4:8080` are
-  // supported input, not mistakes. Validating the raw string rejected both:
-  // `Uri.tryParse` reads `panel.example.com` as the *scheme* (dots are legal
-  // there) and gives `1.2.3.4:8080` an empty host. That turned every
-  // scheme-less source into one the owner could no longer save an edit to —
-  // change the password, press Save, and the Host field they never touched
-  // errors out while the source itself still plays fine.
-  final normalised = value.startsWith('http://') || value.startsWith('https://')
-      ? value
-      : 'http://$value';
-  final uri = Uri.tryParse(normalised);
-  if (uri == null) return false;
-  return (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty;
-}
-
 /// Same visual chrome as `channel_list_chrome.dart`'s `_DropdownFrame`
 /// (accent-ring-on-focus, `KeyRepeatEvent` swallowed so D-pad auto-repeat
 /// can't misbehave against the popup menu) reimplemented here rather than
@@ -1075,7 +1057,7 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       }
       if (value.isNotEmpty &&
           _urlFieldKeys.contains(s.key) &&
-          !_looksLikeValidUrl(value)) {
+          !looksLikeValidUrl(value)) {
         errors[s.key] = 'Enter a valid URL starting with http:// or https://';
       }
     }
@@ -1095,7 +1077,26 @@ class _EditSourceScreenState extends State<EditSourceScreen> {
       _saving = true;
     });
     try {
+      // Carry forward any stored field this form does not render, then let
+      // the rendered ones win.
+      //
+      // The form rebuilds `fields` from its own controllers, so a key with no
+      // `_FieldSpec` is destroyed by an unrelated edit — change the label,
+      // press Save, and it is gone. That is the same bug the `settings`
+      // comment below records, arriving through the other map: `epgUrls` (the
+      // extra EPG guides, edited in `SourceSettingsScreen`) lives in `fields`
+      // rather than `settings` because it is credential-bearing and has to
+      // travel as a *secret* to the cloud. Written generally so the next such
+      // key is safe by default rather than by remembering this.
+      //
+      // Kind-guarded for the same reason the settings carry-over is: field
+      // keys are provider specific, so carrying them onto a different provider
+      // would leave stale locators behind.
+      final specKeys = {for (final s in specs) s.key};
       final fields = <String, String>{
+        if (widget.existing?.kind == _kind)
+          for (final entry in widget.existing!.fields.entries)
+            if (!specKeys.contains(entry.key)) entry.key: entry.value,
         for (final s in specs) s.key: _controller(s.key).text.trim(),
       };
       final label = _label.text.trim().isEmpty

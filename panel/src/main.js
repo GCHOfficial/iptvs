@@ -2,23 +2,7 @@
 // panel is framed (the meta CSP cannot enforce `frame-ancestors`).
 import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
-import {
-  validateSource,
-  friendlyError,
-  scrubUrls,
-  splitFields,
-  kindHasSecret,
-  deviceProvisionState,
-  deviceNeedsKey,
-  xtreamCredentialsFromPlaylistUrl,
-  pairingCodeFromUrl,
-  urlWithoutPairingCode,
-  stashPairingCode,
-  readStashedPairingCode,
-  clearStashedPairingCode,
-  SOURCE_SECRET_KEYS,
-  METADATA_SECRET_KEYS,
-} from './validate.js';
+import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, splitFields, stashPairingCode, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
 import {
@@ -449,6 +433,21 @@ function editSource(existing, nextPos = 0, decoded = null) {
 
     // Broad fields ride the sources row; secret fields go to set_source_secret.
     const { broad, secret } = splitFields(fields, SOURCE_SECRET_KEYS);
+    // Carry forward secret keys this form does not render — today `epgUrls`,
+    // the extra EPG guides, which only the app can edit. `set_source_secret`
+    // REPLACES the payload wholesale (`payload = excluded.payload`), so a key
+    // omitted here is destroyed for every paired device on its next pull:
+    // renaming a source in the panel would silently delete guides added on a
+    // TV. Kind-guarded, so switching a source's kind still drops the previous
+    // kind's stale locators.
+    const outgoingSecret =
+      !isLocked && existing && existing.kind === kind
+        ? carryUnrenderedSecrets(
+            secret,
+            secretMap,
+            KIND_FIELDS[kind].map((f) => f.key),
+          )
+        : secret;
     const row = { owner: session.user.id, profile_id: currentProfileId, kind, label, fields: broad };
     let sourceId = existing?.id;
     if (existing) {
@@ -463,7 +462,12 @@ function editSource(existing, nextPos = 0, decoded = null) {
 
     if (needsSecret && !locked) {
       try {
-        await secrets.setSourceSecret(currentProfileId, sourceId, secret, cryptoState);
+        await secrets.setSourceSecret(
+          currentProfileId,
+          sourceId,
+          outgoingSecret,
+          cryptoState,
+        );
       } catch (err) {
         logError(err);
         return toast(

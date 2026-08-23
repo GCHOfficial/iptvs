@@ -67,6 +67,7 @@ class SourceConfig {
           sourceId: id,
           portal: fields['portal']!,
           mac: fields['mac']!,
+          extraEpgUrls: extraEpgUrls,
           catchupTimezone: catchupTimezone,
           catchupOffsetMinutes: catchupOffsetMinutes,
           catchupMaxDays: catchupMaxDays,
@@ -85,6 +86,7 @@ class SourceConfig {
           // 404, which is a dead channel rather than a degraded one; an
           // unrecognised value falls back to the platform default.
           streamExtension: settings['streamExtension']?.toString(),
+          extraEpgUrls: extraEpgUrls,
           playlistExpiryHint: fields['playlistExpiryHint'],
           catchupTimezone: catchupTimezone,
           catchupOffsetMinutes: catchupOffsetMinutes,
@@ -96,6 +98,7 @@ class SourceConfig {
           sourceId: id,
           playlistUrl: fields['playlistUrl']!,
           epgUrl: _opt('epgUrl'),
+          extraEpgUrls: extraEpgUrls,
           userAgent: _opt('userAgent'),
           catchupTimezone: catchupTimezone,
           catchupOffsetMinutes: catchupOffsetMinutes,
@@ -120,6 +123,28 @@ class SourceConfig {
   String? _opt(String key) {
     final v = fields[key];
     return (v == null || v.isEmpty) ? null : v;
+  }
+
+  /// Extra XMLTV guide URLs, one per line in `fields['epgUrls']`.
+  ///
+  /// A newline-separated blob rather than JSON because [fields] is
+  /// `Map<String, String>` and a URL cannot contain a newline, so the encoding
+  /// is unambiguous without an escaping layer the panel would have to mirror.
+  ///
+  /// A **new** key rather than a list-shaped `epgUrl`: `epgUrl` is read as a
+  /// single URL by every already-published build, and those builds pull this
+  /// source from the cloud. Widening it in place would hand them a blob they'd
+  /// fetch as one URL and lose their guide over; leaving `epgUrl` alone means
+  /// an older build keeps working on the first guide and simply doesn't see the
+  /// rest. It is a **secret** key (see `secret_keys.dart`) — these URLs carry
+  /// provider credentials as often as the playlist does.
+  List<String> get extraEpgUrls {
+    final raw = fields['epgUrls'];
+    if (raw == null || raw.isEmpty) return const [];
+    return [
+      for (final line in raw.split('\n'))
+        if (line.trim().isNotEmpty) line.trim(),
+    ];
   }
 
   SourceConfig copyWith({

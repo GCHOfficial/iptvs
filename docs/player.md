@@ -447,6 +447,36 @@ Read docs/ios.md before touching anything under `packages/iptvs_ios_player/` or
 engine's capability research (codec floor, the two open media_kit constraints), and the
 on-device test protocol.
 
+## The handoff's return leg
+
+Going *back* — fullscreen to preview — is the same output-surface transition as the claim, and it
+used to be the unguarded one. The forward leg's `FrameLivenessWatch` lives in `HdrPlayerActivity`
+and is driven by that Activity's ticker; by the time the return leg runs the Activity is
+finishing, so there was no watchdog and, more importantly, no recovery. A `setOutputSurface` that
+failed to produce frames left the preview black **permanently**, and the exported log said
+nothing at all — just silence where a `first frame sinceReattachMs=` should have been, which is
+what made a report of it look like a healthy session.
+
+`ExoPlayerEngine.attachPreviewSurface` now arms `previewFrameWatch`. No frame within
+`PREVIEW_NO_FRAME_REBUILD_MS` (3 s) triggers exactly one `rebuildVideoDecoder` — the same cheap
+local recovery the forward leg's `tryHandoffDecoderRebuild` uses, and for the same reason: the
+evidence says the decoder is what breaks, not the connection. `PREVIEW_REBUILD_VERIFY_MS` later a
+log-only pass records whether that worked, so a preview that stays black leaves evidence instead
+of silence. The watch is cancelled by a real first frame, by `claimViewSurface` (fullscreen owns
+the output again, and the forward leg makes its own armed decision), and by `release`.
+
+Both budgets are generous on purpose, the same asymmetry the forward leg records: a false rebuild
+costs another codec release, another IDR wait and a catch-up against a running audio clock, while
+a late one costs only latency.
+
+**The case it was found on.** A live channel played fullscreen for ~36 minutes. Partway through,
+a clean `kind=ended` reconnect re-resolved to the same URL and the stream came back as a
+*different codec* — HEVC 25fps in, H.264 50fps out — so a new decoder (`c2.amlogic.avc.decoder`)
+was built **while in fullscreen**, against the Activity's SurfaceView. The codec handed back to
+the preview was therefore never one the preview had created and lent out. Nothing about that is
+specific to a channel or a provider, and live IPTV reconnects routinely, so the same state is
+reachable after any long fullscreen session that reconnects.
+
 ## Windows
 
 **Surface policy mirrors Linux: embedded for SDR, the native HWND only for HDR.** HDR playback

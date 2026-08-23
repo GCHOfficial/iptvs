@@ -179,6 +179,63 @@ class ExoPlayerEngine(
     /// first frame after that swap can be measured the way a claim's is.
     private var reattachedAtMs = 0L
     private var reportedFirstFrame = false
+
+    /// One decoder rebuild per return leg — see [previewFrameWatch].
+    private var previewRebuildAttempted = false
+
+    /**
+     * The **return** leg's liveness watch: the mirror of the forward leg's
+     * `FrameLivenessWatch.armHandoff` / `tryHandoffDecoderRebuild`.
+     *
+     * Coming back from fullscreen is the same output-surface transition as the
+     * claim, on the same hardware that re-instantiates the codec for one — but
+     * it had no watchdog and no recovery, because the forward leg's lives in
+     * `HdrPlayerActivity` and that Activity is finishing by the time this runs.
+     * So a `setOutputSurface` that failed to produce frames left the preview
+     * black *permanently*, with nothing in the log but silence where a
+     * `first frame sinceReattachMs=` should be.
+     *
+     * The case it was found on: a live stream that changed codec mid-session
+     * (HEVC -> H.264 across a `kind=ended` reconnect) had its decoder rebuilt
+     * **while in fullscreen**, so the codec instance handed back to the preview
+     * was one created against the Activity's SurfaceView rather than one the
+     * preview had created and lent out. Nothing about that is specific to a
+     * channel or a provider — any reconnect during a long fullscreen session
+     * reaches the same state, and live IPTV reconnects routinely.
+     *
+     * Deliberately a one-shot rebuild, matching the forward leg: a rebuild is
+     * the cheap local recovery, and the evidence there says a decoder is what
+     * breaks, not the connection. If it does not take, [previewRebuildVerify]
+     * says so in the exported log rather than the failure being silent again.
+     */
+    private val previewFrameWatch = Runnable {
+        if (released || reportedFirstFrame || previewRebuildAttempted) {
+            return@Runnable
+        }
+        previewRebuildAttempted = true
+        onDiagnostic?.invoke(
+            "preview no frame ${PREVIEW_NO_FRAME_REBUILD_MS}ms after reattach; " +
+                "rebuilding decoder" + (videoFrameCounters?.let { " $it" } ?: ""),
+        )
+        rebuildVideoDecoder()
+        mainHandler.postDelayed(previewRebuildVerify, PREVIEW_REBUILD_VERIFY_MS)
+    }
+
+    /// Log-only: did the [previewFrameWatch] rebuild actually produce a frame?
+    private val previewRebuildVerify = Runnable {
+        if (released || reportedFirstFrame) return@Runnable
+        onDiagnostic?.invoke(
+            "preview still blank ${PREVIEW_REBUILD_VERIFY_MS}ms after decoder " +
+                "rebuild" + (videoFrameCounters?.let { " $it" } ?: ""),
+        )
+    }
+
+    /// Stops the return-leg watch (a frame arrived, fullscreen re-claimed, or
+    /// the engine is going away).
+    private fun cancelPreviewFrameWatch() {
+        mainHandler.removeCallbacks(previewFrameWatch)
+        mainHandler.removeCallbacks(previewRebuildVerify)
+    }
     private var reportedStreamShape = false
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
@@ -369,6 +426,8 @@ class ExoPlayerEngine(
         override fun onRenderedFirstFrame() {
             if (reportedFirstFrame) return
             reportedFirstFrame = true
+            // The picture is up, whichever leg produced it.
+            cancelPreviewFrameWatch()
             // Only a *claim's* first frame says anything about the handoff, and
             // media3 re-notifies this only when the output surface really
             // changed — which is exactly the proof FrameLivenessWatch needs to
@@ -788,6 +847,11 @@ class ExoPlayerEngine(
         )
         playerView.player = null
         player.setVideoSurfaceView(view)
+        // Arm the return-leg watch *after* the transition is requested, so its
+        // window measures the surface swap rather than the work above it.
+        previewRebuildAttempted = false
+        cancelPreviewFrameWatch()
+        mainHandler.postDelayed(previewFrameWatch, PREVIEW_NO_FRAME_REBUILD_MS)
     }
 
     /**
@@ -828,6 +892,10 @@ class ExoPlayerEngine(
      * finished under us) nothing else would ever claim the output back.
      */
     fun claimViewSurface() {
+        // Fullscreen owns the output now; the return-leg watch would otherwise
+        // rebuild a decoder mid-claim, which is the forward leg's job and its
+        // own (armed, instrumented) decision.
+        cancelPreviewFrameWatch()
         claimedAtMs = SystemClock.elapsedRealtime()
         reattachedAtMs = 0L
         // An output-surface change makes MediaCodecVideoRenderer re-announce its
@@ -920,6 +988,7 @@ class ExoPlayerEngine(
     override fun release() {
         if (released) return
         released = true
+        cancelPreviewFrameWatch()
         cancelPendingClaim()
         playerView.player = null
         player.removeListener(playerListener)
@@ -963,5 +1032,20 @@ class ExoPlayerEngine(
         // surface, short enough that a view which never attaches doesn't leave
         // the adopted engine rendering nowhere. See claimViewSurface.
         private const val CLAIM_FALLBACK_MS = 1_000L
+
+        // The return leg's no-frame budget. Matches the forward leg's
+        // HANDOFF_NO_FRAME_STALL_MS (3 s) and for the same reason: a first
+        // frame after an output-surface transition waits for the next IDR,
+        // which on broadcast MPEG-TS is a whole GOP. Measured healthy returns
+        // land at tens of milliseconds to under a second, so 3 s is generous
+        // on purpose — a false rebuild costs another codec release, another
+        // IDR wait and a catch-up against a running audio clock, while a late
+        // one costs only latency.
+        private const val PREVIEW_NO_FRAME_REBUILD_MS = 3_000L
+
+        // How long after the rebuild to check whether it worked. Log-only:
+        // the point is that a preview which stays black leaves evidence
+        // instead of silence.
+        private const val PREVIEW_REBUILD_VERIFY_MS = 3_000L
     }
 }

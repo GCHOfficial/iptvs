@@ -150,4 +150,38 @@ void main() {
       expect(fieldFor('Password').obscureText, isTrue);
     });
   });
+
+  group('editing a source preserves fields the form does not render', () {
+    testWidgets('an unrendered field survives an unrelated edit', (
+      tester,
+    ) async {
+      // `EditSourceScreen._save` rebuilds `fields` from its own controllers, so
+      // a key with no `_FieldSpec` is destroyed by any edit — change the label,
+      // press Save, and it is gone. `epgUrls` (extra EPG guides, edited in
+      // SourceSettingsScreen) is exactly such a key: it lives in `fields`
+      // rather than `settings` because it is credential-bearing and travels to
+      // the cloud as a secret.
+      final store = SourceStore();
+      final existing = xtream('one').copyWith(
+        fields: {
+          ...xtream('one').fields,
+          'epgUrls': 'http://a/g.xml\nhttp://b/g.xml',
+        },
+      );
+      await store.setAll([existing]);
+
+      await tester.pumpWidget(
+        MaterialApp(home: EditSourceScreen(store: store, existing: existing)),
+      );
+      await settle(tester);
+
+      await tester.tap(find.text('Save source'));
+      await settle(tester);
+
+      final saved = (await store.list()).single;
+      expect(saved.extraEpgUrls, ['http://a/g.xml', 'http://b/g.xml']);
+      // The rendered fields still come from the form.
+      expect(saved.fields['username'], 'someone');
+    });
+  });
 }

@@ -10,6 +10,7 @@ import '../theme.dart';
 import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
+import '../widgets/source_error_view.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 
@@ -531,22 +532,9 @@ class LiveTabView extends StatelessWidget {
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Couldn\'t load this source.\n$error',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: AppColors.textLo),
-              ),
-              const SizedBox(height: 16),
-              FilledButton(onPressed: onRetry, child: const Text('Try again')),
-            ],
-          ),
-        ),
+      return SourceErrorView(
+        message: 'Couldn\'t load this source.\n$error',
+        onRetry: onRetry,
       );
     }
     // **Not an early return.** On a wide layout the only UI that can change

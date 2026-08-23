@@ -109,4 +109,48 @@ void main() {
       expect(redacted, isNot(contains('<redacted>')));
     });
   });
+
+  group('looksLikeValidUrl', () {
+    test('accepts a full http(s) URL in both modes', () {
+      for (final url in [
+        'http://a.example/guide.xml',
+        'https://a.example:8080/guide.xml.gz?token=1',
+      ]) {
+        expect(looksLikeValidUrl(url), isTrue);
+        expect(looksLikeValidUrl(url, requireScheme: true), isTrue);
+      }
+    });
+
+    test('lenient mode accepts scheme-less input, by design', () {
+      // Both XtreamSource._base and StalkerSource._base() prepend `http://`,
+      // so this is supported syntax for a host/portal field — rejecting it
+      // locked owners out of saving edits to sources that played fine.
+      expect(looksLikeValidUrl('panel.example.com:8080'), isTrue);
+      expect(looksLikeValidUrl('1.2.3.4:8080'), isTrue);
+    });
+
+    test('lenient mode is lenient enough to accept near-anything', () {
+      // Documenting the cost of the trade above: prepending a scheme means
+      // `Uri` reads almost any token as a host. This is exactly why a pasted
+      // guide URL uses requireScheme instead.
+      expect(looksLikeValidUrl('nonsense'), isTrue);
+      expect(looksLikeValidUrl('not a url'), isTrue);
+    });
+
+    test('requireScheme rejects anything without an explicit http(s):// ', () {
+      for (final value in [
+        'nonsense',
+        'not a url',
+        'ftp://a.example/guide.xml',
+        'panel.example.com:8080',
+        '',
+      ]) {
+        expect(
+          looksLikeValidUrl(value, requireScheme: true),
+          isFalse,
+          reason: value,
+        );
+      }
+    });
+  });
 }

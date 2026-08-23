@@ -1160,6 +1160,27 @@ class AppDatabase {
   Future<DateTime?> lastEpgSynced(String sourceId) =>
       _readTime('epg_synced_at', sourceId);
 
+  /// Forgets when [sourceId]'s guide was last fetched, so the next load
+  /// refetches it instead of serving the cache.
+  ///
+  /// `LibraryRepository._ensureEpg` skips the fetch entirely while the guide is
+  /// younger than its max age, which is the right default for a background
+  /// refresh but wrong after the *set of guides* changes: adding an EPG guide
+  /// would otherwise do nothing visible for hours, reading as a broken feature.
+  ///
+  /// Deliberately leaves the cached `programmes` in place. Clearing them would
+  /// blank every channel's EPG for however long the refetch takes — and if it
+  /// fails, for the whole retry interval — where keeping them means the worst
+  /// case is the guide the user already had.
+  Future<void> invalidateEpg(String sourceId) async {
+    await _db.update(
+      'sources',
+      {'epg_synced_at': null},
+      where: 'id = ?',
+      whereArgs: [sourceId],
+    );
+  }
+
   /// Returns aggregate cache size and last-successful-refresh values without
   /// exposing any provider URLs, credentials, or row contents.
   Future<CacheStats> cacheStats(String sourceId) async {

@@ -8,8 +8,11 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import '../data/diagnostics_log.dart';
+import '../data/load_token.dart';
 import '../data/net.dart';
 import '../data/secret_locator_vault.dart' show hasSealedLocator;
+import 'epg_guides.dart';
+import 'epg_matching.dart';
 import 'expiry.dart';
 import 'source.dart';
 
@@ -146,6 +149,7 @@ class _OrderedListPage {
 class StalkerSource
     implements
         Source,
+        BatchedEpgSource,
         CatchupSource,
         SourceCapabilityReporter,
         RefreshableSource {
@@ -158,6 +162,17 @@ class StalkerSource
   final String? catchupTimezone;
   final int? catchupOffsetMinutes;
   final int? catchupMaxDays;
+
+  /// Extra XMLTV guides layered *under* the portal's own `get_epg_info`, in
+  /// priority order. See [mergeEpgGuides]: a channel is served by the first
+  /// guide that carries it, never by two at once.
+  ///
+  /// These matter more here than elsewhere. Stalker channels carry no
+  /// `tvg-id` at all, so an extra guide reaches them purely through
+  /// [buildChannelNameIndex] — the name-matching path is not a fallback on this
+  /// provider, it is the only path.
+  final List<String> extraEpgUrls;
+
   final bool diagnostics;
   @visibleForTesting
   final Future<Map<String, dynamic>> Function(Map<String, String> params)?
@@ -186,6 +201,7 @@ class StalkerSource
     required this.sourceId,
     required this.portal,
     required this.mac,
+    this.extraEpgUrls = const [],
     this.profile = MagProfile.mag250,
     this.lang = 'en',
     this.timezone = 'Europe/Bucharest',
@@ -329,6 +345,82 @@ class StalkerSource
 
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
+    final out = <Programme>[];
+    await for (final batch in mergeEpgGuides(_guideFeeds(channels, null))) {
+      out.addAll(batch);
+    }
+    return out;
+  }
+
+  @override
+  Stream<List<Programme>>? epgBatched(
+    List<Channel> channels, {
+    LoadToken? token,
+  }) {
+    final feeds = _guideFeeds(channels, token);
+    // Portal-only is exactly what [epg] already does, and the plain path is a
+    // single list either way — returning null keeps a Stalker source with no
+    // extra guides on the code path it has always taken.
+    if (feeds.length <= 1) return null;
+    return mergeEpgGuides(feeds, token: token);
+  }
+
+  /// The portal's own guide first, then any user-added XMLTV top-ups.
+  List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    final feeds = <EpgGuideFeed>[
+      EpgGuideFeed(
+        open: () async* {
+          yield await _portalEpg();
+        },
+      ),
+    ];
+    if (extraEpgUrls.isEmpty) return feeds;
+    final tvgIds = buildTvgIdIndex(channels);
+    final names = epgNameIndexFor(channels, extraCount: extraEpgUrls.length);
+    if (tvgIds.isEmpty && names.isEmpty) return feeds;
+    for (final url in extraEpgUrls.take(kMaxEpgGuides - 1)) {
+      if (url.isEmpty) continue;
+      feeds.add(
+        xmltvGuideFeed(
+          url: url,
+          download: _downloadGuide,
+          tvgIdToChannelId: tvgIds,
+          nameToChannelIds: names,
+          token: token,
+        ),
+      );
+    }
+    return feeds;
+  }
+
+  /// Fetches a third-party guide URL.
+  ///
+  /// Deliberately **not** [_requestBytes], which is the portal transport: it
+  /// appends `JsHttpRequest`, and sends the MAC cookie and the portal Bearer
+  /// token. Those are the portal's credentials, and an arbitrary user-supplied
+  /// host must never receive them. Only the profile's `User-Agent` carries
+  /// over, since some guide hosts reject a default one.
+  Future<Uint8List> _downloadGuide(Uri uri) async {
+    final operation = HttpOperation(
+      kEpgWorkload,
+      onReadMetrics: (m) => DiagnosticsLog.instance.add(
+        'http:${kEpgWorkload.name}',
+        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
+      ),
+    );
+    final req = await operation.wait(_http.getUrl(uri));
+    req.headers.set(HttpHeaders.userAgentHeader, profile.userAgent);
+    final resp = await operation.wait(req.close());
+    if (resp.statusCode != 200) {
+      // Drain before throwing: an unread body never returns its socket to the
+      // pool, so a guide URL that 404s leaks one per EPG refresh.
+      await resp.drain<void>();
+      throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
+    }
+    return operation.readBytes(resp);
+  }
+
+  Future<List<Programme>> _portalEpg() async {
     // Stalker keys EPG by channel id directly, so `channels` isn't needed.
     // Bulk EPG for all channels for the next few hours, keyed by channel id.
     final r = await _call({
