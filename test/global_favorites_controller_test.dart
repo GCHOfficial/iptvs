@@ -625,6 +625,7 @@ void main() {
           categoryId: null,
           hasEpg: true,
           hasCrossSourceEpg: false,
+          expectsEpg: false,
         ),
         isTrue,
       );
@@ -633,6 +634,36 @@ void main() {
           categoryId: 'news',
           hasEpg: false,
           hasCrossSourceEpg: true,
+          expectsEpg: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('an ordinary category also follows a guide that is on its way', () {
+      // The rows are laid out before the guide lands now, so a source that says
+      // it carries one is taken at its word — otherwise its first load draws
+      // 72 px rows and jumps to 112 px when the guide arrives.
+      expect(
+        liveRowsShowEpg(
+          categoryId: null,
+          hasEpg: false,
+          hasCrossSourceEpg: false,
+          expectsEpg: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('the cross-source view ignores what the active source expects', () {
+      // Same reason it ignores the active source's `hasEpg`: its rows are
+      // foreign, fed by another controller's guide.
+      expect(
+        liveRowsShowEpg(
+          categoryId: kAllSourcesFavoritesCategoryId,
+          hasEpg: false,
+          hasCrossSourceEpg: false,
+          expectsEpg: true,
         ),
         isFalse,
       );
@@ -644,6 +675,7 @@ void main() {
           categoryId: kAllSourcesFavoritesCategoryId,
           hasEpg: true,
           hasCrossSourceEpg: false,
+          expectsEpg: false,
         ),
         isFalse,
         reason:
@@ -655,6 +687,7 @@ void main() {
           categoryId: kAllSourcesFavoritesCategoryId,
           hasEpg: false,
           hasCrossSourceEpg: true,
+          expectsEpg: false,
         ),
         isTrue,
       );

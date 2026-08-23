@@ -295,7 +295,10 @@ public struct PlayerChromeState: Equatable, Sendable {
   public var durationMs: Int64 = 0
   public var muted: Bool = false
   public var speed: Double = 1.0
-  public var aspect: PlayerAspectMode = .fit
+  /// Fill, matching every other surface (Dart `_aspectModeIndex`, Kotlin
+  /// `AspectMode.Fill`). Crops to fill rather than letterboxing — identical to
+  /// fit whenever the picture and the screen share a shape.
+  public var aspect: PlayerAspectMode = .fill
 
   /// True while at the live edge; false once the viewer has paused and fallen
   /// behind. Greys the LIVE badge and reveals the go-to-live button, exactly as
