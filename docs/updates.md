@@ -7,6 +7,19 @@ Ed25519-signed manifest to a `v<ver>` tag).
 The compact rules live in CLAUDE.md; read this before changing the update flow, the release
 pipeline, or the update dialog.
 
+## Cutting one
+
+Two routes, and **the tag is what the release is addressed by either way**. Pushing a `v<ver>` tag
+runs the pipeline directly. A manual `workflow_dispatch` (the only way to reach the `beta` track)
+takes the version as an input and **creates the tag itself** at the dispatched commit, because the
+publish step runs `gh release create --verify-tag` and refuses a tag that does not exist — a
+dispatch without that step builds all three platforms and then aborts at the last one.
+
+That step never *moves* an existing tag. A published release is addressed by it, users may already
+hold the artifacts it named, and the signed manifest authenticates a specific build — re-pointing
+it would invalidate all three, so a tag that exists at a different commit is a hard failure asking
+for a new version instead.
+
 ## Release changelog
 
 The release body opens with a short **AI-generated changelog** (release.yml's "Generate AI
