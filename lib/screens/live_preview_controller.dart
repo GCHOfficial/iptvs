@@ -13,6 +13,7 @@ import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
 import '../player/channel_owner.dart';
+import '../player/buffer_preset.dart';
 import '../player/mpv_options.dart';
 import '../player/player_screen.dart'
     show
@@ -208,6 +209,7 @@ class LivePreviewController extends ChangeNotifier {
       unawaited(
         applyMpvOptions(platform, {
           ...kLiveMpvOptions,
+          ...mpvBufferOptions(_bufferPreset),
           ...embeddedVideoOptionsForPlatform(),
         }),
       );
@@ -284,7 +286,34 @@ class LivePreviewController extends ChangeNotifier {
     );
     // Through the same repository the preview was started with — an EOF on a
     // cross-source favorite must re-resolve against its own provider.
-    unawaited(start(active, muted: muted, from: _activeRepo));
+    // …and on the same buffering. A restart that fell back to the default
+    // would quietly undo the user's choice on exactly the unstable stream they
+    // chose it for.
+    unawaited(
+      start(
+        active,
+        muted: muted,
+        from: _activeRepo,
+        bufferPreset: _bufferPreset,
+      ),
+    );
+  }
+
+  /// Pushes the current preset's mpv properties onto an already-built player.
+  ///
+  /// A no-op before the player exists — [_createPlayer] applies them itself for
+  /// the first one — and non-fatal, since a rejected property is a degraded
+  /// buffer rather than a reason to lose the preview.
+  Future<void> _applyBufferOptions() async {
+    final existing = _player;
+    if (existing == null) return;
+    final platform = existing.platform;
+    if (platform is! NativePlayer) return;
+    await applyMpvOptions(
+      platform,
+      mpvBufferOptions(_bufferPreset),
+      onWarn: (message) => DiagnosticsLog.instance.add('player', message),
+    );
   }
 
   Future<void> _logPreviewHwdec(NativePlayer platform) async {
@@ -398,6 +427,16 @@ class LivePreviewController extends ChangeNotifier {
   Future<void> get pendingStart => _pendingStart ?? Future<void>.value();
   Future<void>? _pendingStart;
 
+
+  /// Buffering preset of the source that owns the previewing channel.
+  ///
+  /// Set per [start] rather than at construction because a cross-source
+  /// favorite previews through its *owning* source's repository, and must
+  /// preview with that source's buffering too. Read by both preview paths: the
+  /// media_kit player's mpv options, and the Android native engine's
+  /// `LoadControl`.
+  BufferPreset _bufferPreset = BufferPreset.normal;
+
   /// Resolve [channel] and open it in the preview player. [muted] is true for
   /// desktop auto-previews (mouse-hover style) and false for deliberate ones
   /// (OK / long-press). Superseded by a newer call via a request id.
@@ -411,7 +450,25 @@ class LivePreviewController extends ChangeNotifier {
     Channel channel, {
     bool muted = true,
     LibraryRepository? from,
+    // **Required on purpose.** A default would silently reset the source's
+    // choice to normal at any call site that forgot it — and the ones that
+    // matter most are the restarts (returning from fullscreen, an EOF
+    // re-arm), where a preview that came back on the wrong buffering would be
+    // invisible until someone read a diagnostics export. Making it required
+    // moves that from a runtime surprise to a compile error.
+    required BufferPreset bufferPreset,
   }) {
+    // Re-applied on every start, not just at player creation. `_createPlayer`
+    // runs once behind `_player ??=`, and an ordinary `stop()` keeps that
+    // player alive — so without this the preview kept whichever preset it was
+    // first built with: changing the setting and coming back did nothing until
+    // an app restart, and previewing a cross-source favorite owned by a
+    // different source ran on the previous source's buffering. These are plain
+    // mpv properties, settable at runtime, so unlike ExoPlayer's `LoadControl`
+    // this needs no engine rebuild.
+    final changed = bufferPreset != _bufferPreset;
+    _bufferPreset = bufferPreset;
+    if (changed) unawaited(_applyBufferOptions());
     final pending = _start(channel, muted: muted, from: from);
     _pendingStart = pending;
     return pending;
@@ -506,6 +563,10 @@ class LivePreviewController extends ChangeNotifier {
         'url': resolved.url,
         'headers': resolved.headers,
         'muted': muted,
+        // A changed preset makes SharedEngine build a fresh engine, the same
+        // way changed headers do — ExoPlayer's LoadControl is fixed at
+        // construction.
+        'bufferPreset': _bufferPreset.storageName,
       });
       if (opened == true) {
         DiagnosticsLog.instance.add('library', 'preview native engine open');

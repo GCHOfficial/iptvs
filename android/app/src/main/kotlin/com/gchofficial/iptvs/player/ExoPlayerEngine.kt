@@ -31,6 +31,51 @@ import androidx.media3.ui.PlayerView
 import java.util.Locale
 
 /**
+ * How much media to hold ahead of playback — a user-facing, per-source choice.
+ *
+ * Exists because the right answer is a property of the *link*, not of the app:
+ * a clean wired connection wants short buffers and instant zapping, a flaky or
+ * throttled one wants depth, and no single default serves both. It is a
+ * three-way preset rather than raw millisecond fields on purpose — four
+ * interacting durations are a knob people copy from forum posts, and an invalid
+ * combination (a resume threshold above the stall watchdog's patience) is a
+ * reconnect loop we would then have to explain.
+ *
+ * Note what it cannot do: a deeper buffer converts frequent short stalls into
+ * rarer long ones. It does not add bandwidth, so it is not a fix for a
+ * saturated or throttled link.
+ */
+enum class BufferPreset {
+    LOW,
+    NORMAL,
+    HIGH;
+
+    /**
+     * `cache-secs` for the libmpv fallback, or null to leave mpv's own default.
+     *
+     * Mirrors Dart's `mpvBufferOptions`, including `NORMAL` meaning "change
+     * nothing": mpv's default is what this surface has always run, and writing
+     * a number that merely resembles it would change the default install while
+     * claiming to preserve it.
+     */
+    val mpvCacheSecs: Int?
+        get() = when (this) {
+            LOW -> 3
+            NORMAL -> null
+            HIGH -> 30
+        }
+
+    companion object {
+        /** Parses the name Dart sends; anything unrecognised is [NORMAL]. */
+        fun fromName(name: String?): BufferPreset = when (name?.lowercase(Locale.US)) {
+            "low" -> LOW
+            "high" -> HIGH
+            else -> NORMAL
+        }
+    }
+}
+
+/**
  * Buffering policy for [ExoPlayerEngine] — the numbers media3's
  * `DefaultLoadControl` would otherwise default to are tuned for on-demand video,
  * not for zapping around live IPTV.
@@ -52,17 +97,69 @@ import java.util.Locale
  * variance once playing. Pinned by `ExoBufferPolicyTest`.
  */
 object ExoBufferPolicy {
-    /** Below this much buffered media the loader resumes filling. */
-    const val MIN_BUFFER_MS = 15_000
+    /**
+     * The four `DefaultLoadControl` durations, as one value.
+     *
+     * @param minBufferMs below this much buffered media the loader resumes filling
+     * @param maxBufferMs ceiling on how far ahead the loader buffers
+     * @param forPlaybackMs buffered media required before playback *starts*
+     *   (media3 default: 2500)
+     * @param afterRebufferMs buffered media required to resume after an underrun
+     *   (media3 default: 5000)
+     */
+    data class Durations(
+        val minBufferMs: Int,
+        val maxBufferMs: Int,
+        val forPlaybackMs: Int,
+        val afterRebufferMs: Int,
+    )
 
-    /** Ceiling on how far ahead the loader buffers. */
-    const val MAX_BUFFER_MS = 50_000
-
-    /** Buffered media required before playback *starts* (media3 default: 2500). */
-    const val BUFFER_FOR_PLAYBACK_MS = 1_000
-
-    /** Buffered media required to resume after an underrun (media3 default: 5000). */
-    const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_000
+    /**
+     * The user-selectable buffering presets.
+     *
+     * **Only the sustained cushion moves between them, not the start gates**,
+     * and that is the whole design rather than an oversight. What absorbs
+     * network variance once playing is [Durations.minBufferMs] /
+     * [Durations.maxBufferMs]; the start gates decide how long a zap stares at
+     * black. Raising the gates to "buffer more" would therefore cost the thing
+     * users actually notice while barely helping the thing they are trying to
+     * fix — and it cannot go far anyway, because a stream stuck below the
+     * resume threshold sits in `STATE_BUFFERING`, and
+     * [ReconnectPolicy.STALL_RECONNECT_MS] (8 s) of that reloads the source.
+     * The 4x margin that guards against turning an ordinary underrun into a
+     * reconnect loop caps the resume threshold at 2 s, which `HIGH` already
+     * sits on.
+     *
+     * `NORMAL` is exactly the previously hardcoded tuning, so an install that
+     * never touches the setting plays identically to before.
+     */
+    fun forPreset(preset: BufferPreset): Durations = when (preset) {
+        // Zapping-first: a shallower cushion refills sooner after a channel
+        // change and starts fractionally faster, at the cost of riding out
+        // less jitter.
+        BufferPreset.LOW -> Durations(
+            minBufferMs = 8_000,
+            maxBufferMs = 25_000,
+            forPlaybackMs = 750,
+            afterRebufferMs = 1_500,
+        )
+        BufferPreset.NORMAL -> Durations(
+            minBufferMs = 15_000,
+            maxBufferMs = 50_000,
+            forPlaybackMs = 1_000,
+            afterRebufferMs = 2_000,
+        )
+        // A deep cushion for a link that stutters. Same start gates as NORMAL
+        // on purpose — see above; this buys stall resistance, not latency, and
+        // it costs memory, which is why the ceiling is not higher still on
+        // hardware that is routinely a 2 GiB TV box.
+        BufferPreset.HIGH -> Durations(
+            minBufferMs = 40_000,
+            maxBufferMs = 90_000,
+            forPlaybackMs = 1_000,
+            afterRebufferMs = 2_000,
+        )
+    }
 
     /**
      * Judge the buffer by duration rather than by allocated bytes: IPTV bitrates
@@ -91,6 +188,14 @@ class ExoPlayerEngine(
     context: Context,
     private val state: PlayerUiState,
     private val headers: Map<String, String>,
+    /**
+     * Chosen per source and fixed at construction: `LoadControl` is a
+     * build-time argument to `ExoPlayer.Builder`, so a preset change reaches
+     * playback on the next engine, not the current one. [SharedEngine] treats
+     * a changed preset the way it treats changed headers — by building a fresh
+     * engine — so returning to a source applies its own setting.
+     */
+    private val bufferPreset: BufferPreset = BufferPreset.NORMAL,
 ) : PlaybackEngine {
 
     // Rebindable callbacks (not constructor params) because the engine can outlive
@@ -332,7 +437,30 @@ class ExoPlayerEngine(
                 "inits=${c.decoderInitCount}"
         }
 
+    /// Reported once per engine, from [load] rather than from `init`.
+    ///
+    /// `onDiagnostic` is a rebindable `var` the *host* assigns after
+    /// construction — `HdrPlayerActivity.startWithExoPlayer` two lines later,
+    /// `SharedEngine` in `bindPreviewCallbacks` — so anything logged in the
+    /// constructor goes to a null callback and never reaches the exportable
+    /// log. This line is the only evidence a user's export carries that the
+    /// preset arrived at all, which is exactly what would have surfaced the
+    /// missing Intent extra without a code read.
+    private var reportedBuffers = false
+
+    private fun reportBufferPolicy() {
+        if (reportedBuffers) return
+        reportedBuffers = true
+        val buffers = ExoBufferPolicy.forPreset(bufferPreset)
+        onDiagnostic?.invoke(
+            "buffer preset=${bufferPreset.name.lowercase(Locale.US)} " +
+                "min=${buffers.minBufferMs} max=${buffers.maxBufferMs} " +
+                "start=${buffers.forPlaybackMs} resume=${buffers.afterRebufferMs}",
+        )
+    }
+
     override fun load(url: String, subtitles: List<SubtitleSpec>) {
+        reportBufferPolicy()
         val item = MediaItem.Builder()
             .setUri(url)
             .setSubtitleConfigurations(
@@ -492,12 +620,13 @@ class ExoPlayerEngine(
 
         // Without this the media3 DefaultLoadControl defaults apply, which hold
         // the first frame back by 2.5s on every open — see [ExoBufferPolicy].
+        val buffers = ExoBufferPolicy.forPreset(bufferPreset)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                ExoBufferPolicy.MIN_BUFFER_MS,
-                ExoBufferPolicy.MAX_BUFFER_MS,
-                ExoBufferPolicy.BUFFER_FOR_PLAYBACK_MS,
-                ExoBufferPolicy.BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                buffers.minBufferMs,
+                buffers.maxBufferMs,
+                buffers.forPlaybackMs,
+                buffers.afterRebufferMs,
             )
             .setPrioritizeTimeOverSizeThresholds(ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE)
             .build()

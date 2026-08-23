@@ -20,6 +20,8 @@ class MpvController(
     private val context: Context,
     private val state: PlayerUiState,
     private val post: (() -> Unit) -> Unit,
+    /** `cache-secs` for this session, or null for mpv's own default. */
+    private val cacheSecs: Int? = null,
     private val onHdrChanged: (Boolean) -> Unit = {},
 ) : MPVLib.EventObserver, SurfaceHolder.Callback {
 
@@ -33,6 +35,10 @@ class MpvController(
         }
         mpv = instance
         with(instance) {
+            // Per-source buffering, when the user moved off the default.
+            // Set with the other options so it is in effect for the first
+            // load rather than applied to an already-running demuxer.
+            cacheSecs?.let { setOptionString("cache-secs", it.toString()) }
             setOptionString("config", "no")
             setOptionString("idle", "yes")
             setOptionString("force-window", "no")

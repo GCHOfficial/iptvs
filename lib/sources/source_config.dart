@@ -125,6 +125,20 @@ class SourceConfig {
     return (v == null || v.isEmpty) ? null : v;
   }
 
+  /// How much media the players hold ahead of playback for this source, as
+  /// the stored preset name (`low`/`normal`/`high`; anything else, including a
+  /// value a newer build wrote, reads as `normal`).
+  ///
+  /// Lives in `settings` rather than `fields` because it is a plain preference,
+  /// not a credential — so it rides the source row into the cloud like the
+  /// catch-up overrides and `streamExtension` do. Kept as the raw name here so
+  /// this layer needs no dependency on `lib/player/`; callers parse it with
+  /// `bufferPresetFromName`.
+  String get bufferPresetName {
+    final value = settings['bufferPreset']?.toString().toLowerCase();
+    return const {'low', 'normal', 'high'}.contains(value) ? value! : 'normal';
+  }
+
   /// Extra XMLTV guide URLs, one per line in `fields['epgUrls']`.
   ///
   /// A newline-separated blob rather than JSON because [fields] is

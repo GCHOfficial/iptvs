@@ -23,6 +23,7 @@ import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.AspectMode
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.DebugCounters
+import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
 import com.gchofficial.iptvs.player.LiveLocator
@@ -380,6 +381,9 @@ class HdrPlayerActivity : ComponentActivity() {
             context = this,
             state = uiState,
             headers = headers,
+            bufferPreset = BufferPreset.fromName(
+                intent.getStringExtra(EXTRA_BUFFER_PRESET),
+            ),
         )
         exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
@@ -413,6 +417,9 @@ class HdrPlayerActivity : ComponentActivity() {
             state = uiState,
             headers = headers,
             post = { action -> if (!isFinishing) runOnUiThread(action) },
+            bufferPreset = BufferPreset.fromName(
+                intent.getStringExtra(EXTRA_BUFFER_PRESET),
+            ),
         )
         setEngine(mpv)
         mpv.load(url, subtitles)
@@ -966,6 +973,7 @@ class HdrPlayerActivity : ComponentActivity() {
 
         /** Adopt the shared preview engine instead of loading fresh (see [SharedEngine]). */
         const val EXTRA_ADOPT_SHARED = "adopt_shared"
+        const val EXTRA_BUFFER_PRESET = "buffer_preset"
 
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
