@@ -296,12 +296,15 @@ class AppDatabase {
             // (there is no onDowngrade), and a re-run must not overwrite a
             // pending *removal* with an add — that would resurrect exactly what
             // the user deleted.
-            await db.execute('''
+            await db.execute(
+              '''
               INSERT OR IGNORE INTO favorites_outbox
                 (source_id, kind, item_id, op, updated_at)
               SELECT source_id, kind, item_id, 'add', ?
                 FROM favorites
-            ''', [DateTime.now().millisecondsSinceEpoch]);
+            ''',
+              [DateTime.now().millisecondsSinceEpoch],
+            );
           }
         },
       ),
@@ -1265,14 +1268,17 @@ class AppDatabase {
   /// CLAUDE.md "Sealed playback locators".
   Future<List<({String sourceId, Channel channel})>>
   readFavoriteChannelsAcrossSources() async {
-    final rows = await _db.rawQuery('''
+    final rows = await _db.rawQuery(
+      '''
       SELECT c.*, f.created_at AS favorited_at
         FROM favorites f
         JOIN channels c
           ON c.source_id = f.source_id AND c.id = f.item_id
        WHERE f.kind = ?
        ORDER BY c.number, c.name
-    ''', [ContentKind.live.name]);
+    ''',
+      [ContentKind.live.name],
+    );
     return [
       for (final row in rows)
         (
@@ -2186,6 +2192,63 @@ class AppDatabase {
   /// Bound-variable budget per `IN (...)` query. SQLite's default
   /// `SQLITE_MAX_VARIABLE_NUMBER` is 999 on older builds; 500 leaves room for
   /// the surrounding `source_id`/time parameters everywhere this is used.
+  /// Series title per episode id, resolved **episode → season → series**.
+  ///
+  /// The "Continue watching" rail on the series tab is built from episode rows,
+  /// and an episode's `title` is the *episode* name — "Gran Dillama", not
+  /// "Caminandes". A rail of those alone reads as a list of unrelated titles,
+  /// which is what it was reported as.
+  ///
+  /// The series is two hops up, and the shape is uniform across providers:
+  /// every source builds an episode with its **season** as `parent_id` and the
+  /// season with the **series** (`xtream_source`, `stalker_source` and
+  /// `demo_source` all do). Both hops are inner joins, so an episode whose
+  /// season or series row was never cached is simply absent from the result and
+  /// the caller falls back to the episode title — better than a blank line.
+  ///
+  /// Chunked like [nowNextForChannels] to stay under SQLite's bound-variable
+  /// limit; unknown ids contribute nothing.
+  Future<Map<String, String>> readSeriesTitlesForEpisodes(
+    String sourceId,
+    List<String> episodeIds,
+  ) async {
+    final out = <String, String>{};
+    if (episodeIds.isEmpty) return out;
+    for (var offset = 0; offset < episodeIds.length; offset += _idChunk) {
+      final chunk = episodeIds.sublist(
+        offset,
+        (offset + _idChunk).clamp(0, episodeIds.length),
+      );
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+      final rows = await _db.rawQuery(
+        'SELECT e.id AS episode_id, series.title AS series_title '
+        'FROM media_items e '
+        'JOIN media_items season '
+        '  ON season.source_id = e.source_id '
+        ' AND season.kind = ? AND season.id = e.parent_id '
+        'JOIN media_items series '
+        '  ON series.source_id = e.source_id '
+        ' AND series.kind = ? AND series.id = season.parent_id '
+        'WHERE e.source_id = ? AND e.kind = ? '
+        '  AND e.id IN ($placeholders)',
+        [
+          ContentKind.season.name,
+          ContentKind.series.name,
+          sourceId,
+          ContentKind.episode.name,
+          ...chunk,
+        ],
+      );
+      for (final row in rows) {
+        final title = row['series_title'] as String?;
+        if (title != null && title.isNotEmpty) {
+          out[row['episode_id'] as String] = title;
+        }
+      }
+    }
+    return out;
+  }
+
   static const _idChunk = 500;
 
   /// Test seam: runs `EXPLAIN QUERY PLAN` for the `nowNext` "now" query with

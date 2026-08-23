@@ -546,8 +546,7 @@ local function render()
     add_text_badge(fps_badge(fps))
     add_text_badge(clock_badge())
 
-    local favorite_w = state.canFavorite and (px(44) + px(8)) or 0
-    local bx = w - pad - favorite_w
+    local bx = w - pad
     for i = #badge_items, 1, -1 do
         local item = badge_items[i]
         if item.live then
@@ -557,11 +556,6 @@ local function render()
         end
     end
     local badges_left_x = bx
-
-    if state.canFavorite then
-        local glyph = state.favorite and ICON.star or ICON.star_border
-        icon_button(ass, w - pad - px(44), icon_cy, glyph, 'favorite', state.favorite)
-    end
 
     local title_x1 = pad + px(44) + px(14)
     local title_max_w = math.max(px(40), badges_left_x - px(12) - title_x1)
@@ -722,6 +716,18 @@ local function render()
     if audio_count > 1 then
         right = right - px(8) - px(44)
         icon_button(ass, right, row2_cy, ICON.audiotrack, 'audio')
+    end
+
+    -- The favorite star, immediately right of "Go to live" — the slot Kotlin's
+    -- `RightCluster` and the iOS `clusterStack` put it in, and where the
+    -- Windows GDI and shared Flutter overlays now put it too. It used to sit in
+    -- the *top* bar beside the badges, which made this OSD disagree with the
+    -- embedded Flutter overlay that Linux uses for every non-HDR stream.
+    if state.canFavorite then
+        right = right - px(8) - px(44)
+        icon_button(ass, right, row2_cy,
+            state.favorite and ICON.star or ICON.star_border,
+            'favorite', state.favorite)
     end
 
     if state.isLive and not state.liveSynced then

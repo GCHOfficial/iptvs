@@ -30,7 +30,24 @@ const _autoEnrichLimit = 40;
 class ContinueWatchingEntry {
   final MediaItem item;
   final PlaybackPosition position;
-  const ContinueWatchingEntry({required this.item, required this.position});
+
+  /// For an episode, the series it belongs to — the name the rail actually
+  /// leads with, because [item]'s own title is the *episode* name and a rail of
+  /// those reads as a list of unrelated titles.
+  ///
+  /// Null for movies (where the item title is already the right one) and for an
+  /// episode whose season or series row isn't cached, which the view falls back
+  /// from rather than showing a blank.
+  final String? seriesTitle;
+
+  const ContinueWatchingEntry({
+    required this.item,
+    required this.position,
+    this.seriesTitle,
+  });
+
+  /// The name to lead with: the series for an episode, the item otherwise.
+  String get displayTitle => seriesTitle ?? item.title;
 }
 
 /// Owns one media tab's (movies *or* series) browsing state and the async
@@ -119,20 +136,49 @@ class MediaTabController extends ChangeNotifier {
       }
       return;
     }
-    final items = await repo.db.readMediaItemsByIds(
-      repo.source.id,
-      _resumeKind,
-      [for (final p in wanted) p.itemId],
-    );
+    final ids = [for (final p in wanted) p.itemId];
+    // Concurrent, not sequential: two independent reads of the same cache, and
+    // this runs on every return from the player.
+    final (items, seriesTitles) = await (
+      repo.db.readMediaItemsByIds(repo.source.id, _resumeKind, ids),
+      _seriesTitles(ids),
+    ).wait;
     if (_disposed) return;
     final byId = {for (final item in items) item.id: item};
     _set(() {
       continueWatching = [
         for (final position in wanted)
           if (byId[position.itemId] case final item?)
-            ContinueWatchingEntry(item: item, position: position),
+            ContinueWatchingEntry(
+              item: item,
+              position: position,
+              seriesTitle: seriesTitles[position.itemId],
+            ),
       ];
     });
+  }
+
+  /// Series names for the rail's episodes, or an empty map.
+  ///
+  /// Only the series tab has ancestors to resolve; the movie tab's item title
+  /// is already the one to show.
+  ///
+  /// **Fails soft**, and separately from the item read it runs beside: this is
+  /// a display nicety, and losing it degrades to the episode title — which is
+  /// what the rail showed before the lookup existed. Letting it throw would
+  /// take the whole rail down (and, through `.wait`, as a `ParallelWaitError`
+  /// that says nothing about which half failed) for a missing label.
+  Future<Map<String, String>> _seriesTitles(List<String> ids) async {
+    if (_resumeKind != ContentKind.episode) return const {};
+    try {
+      return await repo.db.readSeriesTitlesForEpisodes(repo.source.id, ids);
+    } catch (error) {
+      DiagnosticsLog.instance.add(
+        'library',
+        'continue-watching series titles unavailable: ${redactText('$error')}',
+      );
+      return const {};
+    }
   }
 
   /// Drops one entry from "Continue watching" — clears its saved resume

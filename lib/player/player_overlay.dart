@@ -1146,18 +1146,6 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                     children: _badges(),
                   ),
                 ),
-              if (widget.canFavorite) ...[
-                const SizedBox(width: 10),
-                _button(
-                  widget.favorite
-                      ? Icons.star_rounded
-                      : Icons.star_outline_rounded,
-                  widget.favorite ? 'Remove favorite' : 'Add favorite',
-                  widget.onToggleFavorite,
-                  color: widget.favorite ? AppColors.accent : Colors.white,
-                  compact: true,
-                ),
-              ],
             ],
           );
           if (!stackBadges) return titleRow;
@@ -1328,6 +1316,23 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                           'Go to live',
                           () => unawaited(widget.onGoLive()),
                         ),
+                // The favorite star, immediately after "Go to live" — the
+                // slot the Android overlay puts it in
+                // (`RightCluster`). It used to sit in the top bar among the
+                // badges at *compact* size, which made it a different size from
+                // every other control on two of the three surfaces and a
+                // different size again from Android's. Here it is an ordinary
+                // member of this row and takes the row's geometry, so all three
+                // overlays draw one star in one place at one size.
+                if (widget.canFavorite)
+                  _button(
+                    widget.favorite
+                        ? Icons.star_rounded
+                        : Icons.star_outline_rounded,
+                    widget.favorite ? 'Remove favorite' : 'Add favorite',
+                    widget.onToggleFavorite,
+                    color: widget.favorite ? AppColors.accent : Colors.white,
+                  ),
                 if (_audioTracks().length > 1) _audioMenu(),
                 // Only when the stream actually carries a subtitle track:
                 // media_kit always reports the synthetic `auto`/`no` pair, so

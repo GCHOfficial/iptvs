@@ -110,6 +110,28 @@ int g_native_menu_scroll_offset = 0;
 int g_native_focus_index = 0;
 bool g_native_keyboard_focus_visible = false;
 
+// Which slider the pointer is currently dragging, if any.
+//
+// The overlay used to act on `WM_LBUTTONDOWN` alone, so both sliders answered a
+// *click* and ignored a drag outright — press-and-move did nothing, and because
+// nothing captured the mouse the gesture also swallowed the button-up that
+// would have ended it. Grabbing them behaves like a slider now: capture on
+// press, track on move, release on up.
+enum class NativeSliderDrag { kNone, kVolume, kSeek };
+NativeSliderDrag g_native_slider_drag = NativeSliderDrag::kNone;
+
+// While the seek bar is being dragged, the ratio the thumb is drawn at.
+//
+// Volume is applied continuously (it is cheap, and hearing the change is the
+// point), but a seek is not: dragging across a full-width scrubber would ask
+// the player for a thousand seeks. So the drag paints a preview and commits
+// once, on release — which is also what the Flutter scrubber does. Negative
+// means "not dragging"; the painter falls back to the real position.
+double g_native_seek_preview = -1.0;
+
+// Last ratio a live drag posted, so a move within the same pixel stays silent.
+double g_native_slider_last_sent = -1.0;
+
 enum class NativeFocusItem {
   kBack,
   kFavorite,
@@ -470,9 +492,18 @@ HFONT UiFont(int size, int weight = FW_NORMAL, const wchar_t *family = nullptr) 
       face = L"Inter";
     }
   }
+  // **Grayscale AA, not ClearType.** This overlay is a per-pixel-alpha layered
+  // window (`UpdateLayeredWindowIndirect` over a premultiplied ARGB DIB), and
+  // GDI's ClearType is a subpixel filter that writes RGB without ever touching
+  // the alpha channel it is being blended through. The result is coloured
+  // fringing along every glyph edge, worst on the thinnest strokes — which is
+  // why button labels read as rough while the heavier badges looked fine, and
+  // why it stands out most on an HDR surface, where the compositor lifts SDR
+  // content into a higher-luminance space and lifts the fringes with it.
+  // `ANTIALIASED_QUALITY` is the correct choice for a layered surface.
   return CreateFont(size, 0, 0, 0, lf_weight, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
+                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
 }
 
 void FillRectColor(HDC hdc, const RECT &rect, COLORREF color) {
@@ -665,6 +696,80 @@ std::vector<RECT> MergeDirtyRects(std::vector<RECT> rects) {
   return rects;
 }
 
+// How much of the pixel centred on ([px], [py]) a rounded rect covers, in
+// [0, 1]. Only the four corners ever return a fraction; everywhere else inside
+// the rect the nearest corner-circle centre clamps onto the pixel itself.
+double RoundRectCoverage(double px, double py, const RECT &rect,
+                         double radius) {
+  const double cx = std::clamp(px, static_cast<double>(rect.left) + radius,
+                               static_cast<double>(rect.right) - radius);
+  const double cy = std::clamp(py, static_cast<double>(rect.top) + radius,
+                               static_cast<double>(rect.bottom) - radius);
+  const double dx = px - cx;
+  const double dy = py - cy;
+  return std::clamp(radius + 0.5 - std::sqrt(dx * dx + dy * dy), 0.0, 1.0);
+}
+
+// Rounds the corners of an already-composited region by scaling its
+// premultiplied pixels down to the shape's coverage.
+//
+// It has to be a post-pass because nothing in GDI can say "transparent here":
+// `RoundRect` leaves the pixels outside its curve untouched, and
+// [NormalizeNativeControlBitmapAlpha] then reads an untouched pixel's zero
+// alpha as "GDI drew this" and forces it **fully opaque**. So a rounded panel
+// floating over the video came back as a hard black square with the rounded
+// fill invisible inside it — which is what the stream-info panel looked like.
+// Only shapes that sit *outside* the control bars need this; a button's corner
+// falls on the bars' gradient backdrop, which already carries a non-zero alpha
+// and is left alone.
+//
+// Coverage is fractional at the curve, so the corners come out smooth — GDI's
+// own `RoundRect` is not antialiased.
+void ApplyRoundRectAlphaMask(uint32_t *pixels, int width, int height,
+                             const RECT &rect, int radius) {
+  if (pixels == nullptr) {
+    return;
+  }
+  const double r = std::min(
+      {static_cast<double>(radius), RectWidth(rect) / 2.0,
+       RectHeight(rect) / 2.0});
+  if (r <= 0.0) {
+    return;
+  }
+  const int left = std::max(0, static_cast<int>(rect.left));
+  const int top = std::max(0, static_cast<int>(rect.top));
+  const int right = std::min(width, static_cast<int>(rect.right));
+  const int bottom = std::min(height, static_cast<int>(rect.bottom));
+  for (int y = top; y < bottom; ++y) {
+    uint32_t *row = pixels + (static_cast<size_t>(y) * width);
+    for (int x = left; x < right; ++x) {
+      const double coverage =
+          RoundRectCoverage(x + 0.5, y + 0.5, rect, r);
+      if (coverage >= 1.0) {
+        continue;
+      }
+      uint32_t &pixel = row[x];
+      if (coverage <= 0.0) {
+        pixel = 0;
+        continue;
+      }
+      // Premultiplied, so every channel scales with the alpha. Written by bit
+      // position rather than by name: this DIB's channel order is whatever
+      // [NormalizeNativeControlBitmapAlpha] wrote, and the operation is the
+      // same for all four either way.
+      const uint32_t a =
+          static_cast<uint32_t>(((pixel >> 24) & 0xFF) * coverage + 0.5);
+      const uint32_t c2 =
+          static_cast<uint32_t>(((pixel >> 16) & 0xFF) * coverage + 0.5);
+      const uint32_t c1 =
+          static_cast<uint32_t>(((pixel >> 8) & 0xFF) * coverage + 0.5);
+      const uint32_t c0 =
+          static_cast<uint32_t>((pixel & 0xFF) * coverage + 0.5);
+      pixel = (a << 24) | (c2 << 16) | (c1 << 8) | c0;
+    }
+  }
+}
+
 void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
                                        int width,
                                        int height,
@@ -693,17 +798,145 @@ void NormalizeNativeControlBitmapAlpha(uint32_t *pixels,
   }
 }
 
+// The DIB the overlay is currently painting into.
+//
+// A file-scope target rather than a parameter threaded through every draw
+// helper: there is exactly one overlay, painting is synchronous, and the
+// alternative is changing the signature of every `Draw*` in this file plus each
+// of their call sites. [FillRoundRectAA] falls back to GDI when no target is
+// set, so nothing depends on it having been established.
+struct OverlayPaintTarget {
+  uint32_t *pixels = nullptr;
+  int width = 0;
+  int height = 0;
+};
+OverlayPaintTarget g_overlay_paint_target;
+
+// Scopes [g_overlay_paint_target] to one paint, including the early returns.
+class ScopedOverlayPaintTarget {
+public:
+  ScopedOverlayPaintTarget(uint32_t *pixels, int width, int height) {
+    g_overlay_paint_target = OverlayPaintTarget{pixels, width, height};
+  }
+  ~ScopedOverlayPaintTarget() { g_overlay_paint_target = OverlayPaintTarget{}; }
+  ScopedOverlayPaintTarget(const ScopedOverlayPaintTarget &) = delete;
+  ScopedOverlayPaintTarget &
+  operator=(const ScopedOverlayPaintTarget &) = delete;
+};
+
+// [radius] is a **corner radius**, as everywhere else in this app.
+//
+// GDI's `RoundRect` does not take one: its last two arguments are the width and
+// height of the ellipse the corner is a quarter of, i.e. twice the radius. Every
+// call here used to pass the radius straight through, so a shape asking for 12
+// was drawn with a 6px corner — half of what the same constant means in the
+// Flutter and Compose overlays, and half of what [FillRoundRectAA] and
+// [ApplyRoundRectAlphaMask] produce from the same number.
 void FillRoundRect(HDC hdc, const RECT &rect, int radius, COLORREF color) {
   HBRUSH brush = CreateSolidBrush(color);
   HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, brush));
   HPEN pen = CreatePen(PS_SOLID, 1, color);
   HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, pen));
-  RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+  RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius * 2,
+            radius * 2);
   SelectObject(hdc, old_pen);
   SelectObject(hdc, old_brush);
   DeleteObject(pen);
   DeleteObject(brush);
 }
+
+// An **antialiased** rounded fill, composited straight into the overlay's DIB.
+//
+// GDI's `RoundRect` has no antialiasing, so every corner in the control bars
+// was a visible staircase — obvious on a button sitting over a bright frame,
+// and worst on the volume thumb, which is a circle drawn as a round rect. There
+// is no GDI quality flag for this; the shape has to be rasterized with coverage.
+//
+// **Only safe over pixels whose alpha is already correct**, which in this
+// overlay means the control bars' gradient backdrop (written directly by
+// [FillVerticalScrim]) and anything already composited by this function. It
+// must *not* be used over a surface GDI drew, because GDI leaves the alpha byte
+// at 0 until [NormalizeNativeControlBitmapAlpha] runs at the very end of the
+// paint — blending against that reads the destination as transparent. That is
+// why the floating panels and the menu's own rows stay on plain [FillRoundRect]
+// plus [ApplyRoundRectAlphaMask], and everything inside the bars uses this.
+void FillRoundRectAA(HDC hdc, const RECT &rect, int radius, COLORREF color) {
+  const OverlayPaintTarget target = g_overlay_paint_target;
+  if (target.pixels == nullptr) {
+    FillRoundRect(hdc, rect, radius, color);
+    return;
+  }
+  // GDI batches drawing per thread; anything still queued for this DC has to
+  // land before the CPU touches the same bits.
+  GdiFlush();
+  const double r =
+      std::min({static_cast<double>(radius), RectWidth(rect) / 2.0,
+                RectHeight(rect) / 2.0});
+  // A COLORREF is 0x00BBGGRR; a 32bpp BI_RGB DIB is B,G,R,A in memory, i.e.
+  // blue in the low bits. (`NormalizeNativeControlBitmapAlpha` names its
+  // channels the other way round, which is harmless there because it only ever
+  // scales each one in place.)
+  const uint32_t src_b = GetBValue(color);
+  const uint32_t src_g = GetGValue(color);
+  const uint32_t src_r = GetRValue(color);
+  const int left = std::max(0, static_cast<int>(rect.left));
+  const int top = std::max(0, static_cast<int>(rect.top));
+  const int right = std::min(target.width, static_cast<int>(rect.right));
+  const int bottom = std::min(target.height, static_cast<int>(rect.bottom));
+  for (int y = top; y < bottom; ++y) {
+    uint32_t *row = target.pixels + (static_cast<size_t>(y) * target.width);
+    for (int x = left; x < right; ++x) {
+      const double coverage =
+          r <= 0.0 ? 1.0 : RoundRectCoverage(x + 0.5, y + 0.5, rect, r);
+      if (coverage <= 0.0) {
+        continue;
+      }
+      uint32_t &pixel = row[x];
+      if (coverage >= 1.0) {
+        pixel = (0xFFu << 24) | (src_r << 16) | (src_g << 8) | src_b;
+        continue;
+      }
+      // Source-over, both sides premultiplied; the source is opaque, so its
+      // premultiplied contribution is simply `channel * coverage`.
+      const double inv = 1.0 - coverage;
+      const uint32_t a = static_cast<uint32_t>(
+          255.0 * coverage + ((pixel >> 24) & 0xFF) * inv + 0.5);
+      if (a == 0) {
+        // Leaving it untouched matters: a zero-alpha pixel is what
+        // [NormalizeNativeControlBitmapAlpha] reads as "GDI drew here" and
+        // forces opaque, so writing one would plant a black dot.
+        continue;
+      }
+      const uint32_t nr = static_cast<uint32_t>(
+          src_r * coverage + ((pixel >> 16) & 0xFF) * inv + 0.5);
+      const uint32_t ng = static_cast<uint32_t>(
+          src_g * coverage + ((pixel >> 8) & 0xFF) * inv + 0.5);
+      const uint32_t nb =
+          static_cast<uint32_t>(src_b * coverage + (pixel & 0xFF) * inv + 0.5);
+      pixel = (std::min(a, 255u) << 24) | (std::min(nr, 255u) << 16) |
+              (std::min(ng, 255u) << 8) | std::min(nb, 255u);
+    }
+  }
+}
+
+// One size for every control-bar button, shared with the other two overlays.
+//
+// The Flutter overlay's pointer metrics are 44x40 with a 12px radius
+// (`EmbeddedOverlayMetrics`, `_chrome`), and Android's Compose overlay is 44dp
+// (`PlayerDimens.ButtonSize`). This surface had grown four different sizes —
+// play 42x42, the seek buttons 44x36, the icon buttons 36x36 and the aspect
+// button 52x36 — so the row stepped up and down across its own length while the
+// other two players stayed uniform. Text buttons still set their own width;
+// nothing sets its own height.
+constexpr int kNativeButtonWidth = 44;
+constexpr int kNativeButtonHeight = 40;
+constexpr int kNativeButtonRadius = 12;
+
+// The two floating surfaces. Named because their corners are rounded twice —
+// once by GDI's fill, once by [ApplyRoundRectAlphaMask] cutting the alpha —
+// and the two radii have to agree.
+constexpr int kNativeInfoPanelRadius = 12;
+constexpr int kNativeMenuRadius = 16;
 
 void DrawTextWithFont(HDC hdc, const std::wstring &text, RECT rect, UINT format,
                       HFONT font, COLORREF color) {
@@ -713,12 +946,20 @@ void DrawTextWithFont(HDC hdc, const std::wstring &text, RECT rect, UINT format,
   SelectObject(hdc, old_font);
 }
 
+// [active] is the *focused/engaged* chrome (accent fill). [fg_override] tints
+// only the glyph, which is a different thing: the favorite star is accent when
+// favourited but keeps a neutral background unless it is also focused — the
+// same split the Flutter overlay draws, where `_button` takes an icon `color`
+// independently of its `active` flag.
 void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
-                    bool active = false) {
+                    bool active = false,
+                    std::optional<COLORREF> fg_override = std::nullopt,
+                    int radius = kNativeButtonRadius, int icon_size = 20) {
   const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
-  const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
-  FillRoundRect(hdc, rect, 12, bg);
-  HFONT icon_font = UiFont(20, FW_NORMAL, L"Segoe MDL2 Assets");
+  const COLORREF fg = fg_override.value_or(active ? RGB(255, 255, 255)
+                                                  : RGB(232, 235, 244));
+  FillRoundRectAA(hdc, rect, radius, bg);
+  HFONT icon_font = UiFont(icon_size, FW_NORMAL, L"Segoe MDL2 Assets");
   DrawTextWithFont(hdc, icon, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    icon_font, fg);
   DeleteObject(icon_font);
@@ -728,8 +969,11 @@ void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label,
                     bool active = false) {
   const COLORREF bg = active ? RGB(38, 34, 78) : RGB(18, 20, 28);
   const COLORREF fg = active ? RGB(255, 255, 255) : RGB(232, 235, 244);
-  FillRoundRect(hdc, rect, 12, bg);
-  HFONT font = UiFont(13, FW_SEMIBOLD);
+  FillRoundRectAA(hdc, rect, kNativeButtonRadius, bg);
+  // Bold, matching the badges — a button label is a handful of short words at
+  // 13px on top of moving video, and SemiBold left them looking thin next to
+  // the badge row drawn a few pixels above.
+  HFONT font = UiFont(13, FW_BOLD);
   DrawTextWithFont(hdc, label, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    font, fg);
   DeleteObject(font);
@@ -807,6 +1051,8 @@ struct BottomLayout {
   RECT fullscreen;
   bool has_go_live = false;
   RECT go_live; // live-only "jump to live edge" button
+  bool has_favorite = false;
+  RECT favorite;
 };
 
 BottomLayout ComputeBottomLayout(const RECT &rect) {
@@ -819,19 +1065,19 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   // (VOD = scrubber above; live-EPG = programme row above; bare live = single row).
   const int cy = by + (BottomControlsHeight() - 40);
   l.control_center_y = cy;
-  const int kBtn = 36;
-  const int top = cy - kBtn / 2;
-  const int bot = cy + kBtn / 2;
+  const int kBtn = kNativeButtonWidth;
+  const int top = cy - kNativeButtonHeight / 2;
+  const int bot = top + kNativeButtonHeight;
 
   int x = 16;
-  l.play = RectFrom(x, cy - 21, x + 42, cy + 21);
-  x += 42 + 12;
+  l.play = RectFrom(x, top, x + kBtn, bot);
+  x += kBtn + 8;
   l.has_seek = !live;
   if (l.has_seek) {
-    l.seek_back = RectFrom(x, top, x + 44, bot);
-    x += 44 + 6;
-    l.seek_forward = RectFrom(x, top, x + 44, bot);
-    x += 44 + 14;
+    l.seek_back = RectFrom(x, top, x + kBtn, bot);
+    x += kBtn + 8;
+    l.seek_forward = RectFrom(x, top, x + kBtn, bot);
+    x += kBtn + 14;
   }
   l.mute = RectFrom(x, top, x + kBtn, bot);
   x += kBtn + 8;
@@ -844,7 +1090,9 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   };
   place(l.fullscreen, kBtn);
   place(l.info, kBtn);
-  place(l.aspect, 52);
+  // Wider than an icon button because it holds a word ("Fit"/"Fill"), the same
+  // height as everything else.
+  place(l.aspect, 56);
   l.has_subtitles = !g_native_control_state.subtitle_tracks.empty();
   if (l.has_subtitles) {
     place(l.subtitles, kBtn);
@@ -856,6 +1104,14 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   l.has_speed = !g_native_control_state.speed_options.empty();
   if (l.has_speed) {
     place(l.speed, 54);
+  }
+  // The favorite star, between "Go to live" and speed — the slot Android's
+  // `RightCluster` puts it in. It used to live in the *top* bar among the
+  // badges at compact size; here it is an ordinary member of this row and takes
+  // the row's geometry, so all three overlays agree on place and size.
+  l.has_favorite = g_native_control_state.can_favorite;
+  if (l.has_favorite) {
+    place(l.favorite, kBtn);
   }
   // "Go to live" button, shown only once behind the live edge; left end of the
   // right cluster. 92px carries the full label at 13px semibold (the old 54
@@ -905,25 +1161,15 @@ int MenuAnchorX(const BottomLayout &l) {
 
 // The overlay is two rows, and arrow-key navigation treats them differently:
 // Left/Right cycles within a row, Up returns to Back, Down drops into the
-// transport. Only these two live in the top row.
+// transport. Back is the only control in the top row — the favorite star used
+// to sit beside it and now lives in the control row with everything else.
 bool IsTopBarFocusItem(NativeFocusItem item) {
-  return item == NativeFocusItem::kBack ||
-         item == NativeFocusItem::kFavorite;
+  return item == NativeFocusItem::kBack;
 }
 
 std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   std::vector<NativeFocusItem> out;
   out.push_back(NativeFocusItem::kBack);
-  // The favorite star sits in the *top* bar beside Back, and was drawn (with a
-  // focused state computed for it) but never pushed here — so it was reachable
-  // by mouse only, on the one platform whose native surface is also the
-  // keyboard/remote surface. `CommandForFocusedItem` already maps it to
-  // "favorite"; it only ever needed to join the ring. It goes right after
-  // kBack because [IsTopBarFocusItem] makes the two of them one row that
-  // Left/Right walks before stepping down into the bottom bar.
-  if (g_native_control_state.can_favorite) {
-    out.push_back(NativeFocusItem::kFavorite);
-  }
   out.push_back(NativeFocusItem::kPlay);
   if (l.has_seek) {
     out.push_back(NativeFocusItem::kSeekBack);
@@ -933,6 +1179,7 @@ std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
   // Match visual order: LIVE is leftmost in the right cluster, before CC/audio,
   // aspect, info, and fullscreen.
   if (l.has_go_live) out.push_back(NativeFocusItem::kGoLive);
+  if (l.has_favorite) out.push_back(NativeFocusItem::kFavorite);
   if (l.has_speed) out.push_back(NativeFocusItem::kSpeed);
   if (l.has_audio) out.push_back(NativeFocusItem::kAudio);
   if (l.has_subtitles) out.push_back(NativeFocusItem::kSubtitles);
@@ -1273,17 +1520,18 @@ RECT InfoPanelRect(const RECT &rect) {
 
 void DrawSlider(HDC hdc, const RECT &track, double ratio, int thumb_radius) {
   const int cy = (track.top + track.bottom) / 2;
-  FillRoundRect(hdc, RectFrom(track.left, cy - 3, track.right, cy + 3), 6,
-                RGB(39, 43, 58));
+  FillRoundRectAA(hdc, RectFrom(track.left, cy - 3, track.right, cy + 3), 6,
+                  RGB(39, 43, 58));
   const int fill_x =
       track.left + static_cast<int>(RectWidth(track) * std::clamp(ratio, 0.0,
                                                                   1.0));
-  FillRoundRect(hdc, RectFrom(track.left, cy - 3, fill_x, cy + 3), 6,
-                RGB(123, 108, 246));
-  FillRoundRect(hdc,
-                RectFrom(fill_x - thumb_radius, cy - thumb_radius,
-                         fill_x + thumb_radius, cy + thumb_radius),
-                thumb_radius * 2, RGB(154, 141, 255));
+  FillRoundRectAA(hdc, RectFrom(track.left, cy - 3, fill_x, cy + 3), 6,
+                  RGB(123, 108, 246));
+  // A square of side 2r at radius r is a circle — and now a smooth one.
+  FillRoundRectAA(hdc,
+                  RectFrom(fill_x - thumb_radius, cy - thumb_radius,
+                           fill_x + thumb_radius, cy + thumb_radius),
+                  thumb_radius, RGB(154, 141, 255));
 }
 
 // Draws a pill badge ending at [right_edge]; returns the horizontal space it
@@ -1299,7 +1547,7 @@ int DrawBadge(HDC hdc, int right_edge, int center_y, const std::wstring &text,
   const int width = size.cx + 18;
   const RECT badge =
       RectFrom(right_edge - width, center_y - 11, right_edge, center_y + 11);
-  FillRoundRect(hdc, badge, 7, bg);
+  FillRoundRectAA(hdc, badge, 7, bg);
   DrawTextWithFont(hdc, text, badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    font, fg);
   DeleteObject(font);
@@ -1335,14 +1583,12 @@ void PaintInfoPanel(HDC hdc, const RECT &rect) {
     return;
   }
   const RECT panel = InfoPanelRect(rect);
-  FillRoundRect(hdc, panel, 12, RGB(10, 11, 16));
-  HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(123, 108, 246));
-  HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, border_pen));
-  HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
-  RoundRect(hdc, panel.left, panel.top, panel.right, panel.bottom, 12, 12);
-  SelectObject(hdc, old_brush);
-  SelectObject(hdc, old_pen);
-  DeleteObject(border_pen);
+  // A plain filled surface, no outline — the Android Compose `InfoPanel` and
+  // the shared Flutter `_infoPanel` are both a rounded fill with no border, and
+  // the accent stroke this used to draw was the only thing of its kind on any
+  // of the three. Its corners are rounded for real by
+  // [ApplyRoundRectAlphaMask], run after the alpha normalizer.
+  FillRoundRect(hdc, panel, kNativeInfoPanelRadius, RGB(10, 11, 16));
   HFONT header_font = UiFont(11, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, L"STREAM INFO",
@@ -1383,7 +1629,7 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
   const std::string &selected_id = MenuSelectedId(kind);
   const RECT menu = CurrentMenuRect(rect);
   const RECT menu_local = OffsetRectToLocal(menu, menu.left, menu.top);
-  FillRoundRect(hdc, menu, 16, RGB(8, 9, 14));
+  FillRoundRect(hdc, menu, kNativeMenuRadius, RGB(8, 9, 14));
   HFONT label_font = UiFont(13, FW_SEMIBOLD);
   DrawTextWithFont(
       hdc, MenuHeader(kind),
@@ -1463,6 +1709,10 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   OverlayBackBuffer &buffer = EnsureOverlayBackBuffer(hdc, width, height);
   HDC paint_hdc = buffer.dc;
   uint32_t *pixels = static_cast<uint32_t *>(buffer.bits);
+  // Lets the shape helpers rasterize with coverage instead of calling GDI's
+  // aliased `RoundRect`. Scoped, so an early return below cannot leave a
+  // dangling buffer pointer behind for the next paint.
+  const ScopedOverlayPaintTarget paint_target(pixels, width, height);
 
   const RECT top = TopControlsRect(rect);
   const RECT bottom = BottomControlsRect(rect);
@@ -1530,19 +1780,6 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   const COLORREF kNeutralBg = RGB(30, 33, 45);
   const COLORREF kNeutralFg = RGB(206, 210, 224);
   int badge_right = rect.right - 16;
-  // Favorite star (live channels that expose a favorites store) — rightmost in
-  // the top bar, mirroring the embedded/Android overlays; badges stack to its
-  // left. Filled + accent-tinted when favourited. Dart owns the store: a click
-  // sends "favorite" back and Dart pushes the new state via setControlState.
-  if (g_native_control_state.can_favorite) {
-    const RECT fav_rect =
-        RectFrom(badge_right - 38, top_cy - 19, badge_right, top_cy + 19);
-    DrawIconButton(paint_hdc, fav_rect,
-                   g_native_control_state.is_favorite ? L"\xE735" : L"\xE734",
-                   g_native_control_state.is_favorite ||
-                       is_focused(NativeFocusItem::kFavorite));
-    badge_right -= 38 + 8;
-  }
   if (g_native_control_state.reconnecting) {
     badge_right -= DrawBadge(paint_hdc, badge_right, top_cy, L"\x21BB Reconnecting\x2026",
                              RGB(150, 102, 24), RGB(255, 236, 196));
@@ -1616,8 +1853,13 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE, time_font,
                      RGB(184, 190, 204));
     const double duration = std::max(1.0, g_native_control_state.duration_ms);
+    // While the scrubber is being dragged the thumb follows the pointer; the
+    // seek itself is committed on release.
     DrawSlider(paint_hdc, l.progress,
-               g_native_control_state.position_ms / duration, 6);
+               g_native_seek_preview >= 0.0
+                   ? g_native_seek_preview
+                   : g_native_control_state.position_ms / duration,
+               6);
     DrawTextWithFont(paint_hdc, FormatTime(g_native_control_state.duration_ms),
                      l.duration_text,
                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE, time_font,
@@ -1642,15 +1884,15 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     const double prog = std::clamp(
         (static_cast<double>(NowMs()) - s.epg_now_start_ms) / span, 0.0, 1.0);
     const int ecy = (l.epg_progress.top + l.epg_progress.bottom) / 2;
-    FillRoundRect(paint_hdc,
-                  RectFrom(l.epg_progress.left, ecy - 3, l.epg_progress.right,
-                           ecy + 3),
-                  6, RGB(39, 43, 58));
+    FillRoundRectAA(paint_hdc,
+                    RectFrom(l.epg_progress.left, ecy - 3,
+                             l.epg_progress.right, ecy + 3),
+                    6, RGB(39, 43, 58));
     const int fill_x =
         l.epg_progress.left + static_cast<int>(RectWidth(l.epg_progress) * prog);
-    FillRoundRect(paint_hdc,
-                  RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
-                  RGB(123, 108, 246));
+    FillRoundRectAA(paint_hdc,
+                    RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
+                    RGB(123, 108, 246));
     if (!s.epg_next_title.empty()) {
       // "Next · HH:mm – HH:mm · title" — the one next-programme format the app
       // uses (Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
@@ -1695,6 +1937,17 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   DrawIconButton(paint_hdc, l.fullscreen,
                  g_native_control_state.fullscreen ? L"\xE73F" : L"\xE740",
                  is_focused(NativeFocusItem::kFullscreen));
+  if (l.has_favorite) {
+    // Dart owns the store: a click sends "favorite" back and Dart pushes the
+    // new state via setControlState. The accent tints the **glyph**, not the
+    // button — the filled background means keyboard focus, which is what
+    // `active` is for, and the Flutter overlay draws the same split.
+    const bool favorited = g_native_control_state.is_favorite;
+    DrawIconButton(paint_hdc, l.favorite, favorited ? L"\xE735" : L"\xE734",
+                   is_focused(NativeFocusItem::kFavorite),
+                   favorited ? std::optional<COLORREF>(RGB(123, 108, 246))
+                             : std::nullopt);
+  }
   if (l.has_go_live) {
     // The label is the action, not the state: this button used to read "LIVE",
     // duplicating the LIVE *status* badge in the top bar (which greys at the
@@ -1735,11 +1988,15 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
             : 0xFF;
     NormalizeNativeControlBitmapAlpha(pixels, width, height, menu_rect,
                                        RGB(8, 9, 14), menu_alpha);
+    ApplyRoundRectAlphaMask(pixels, width, height, menu_rect,
+                            kNativeMenuRadius);
   }
   if (info_panel_rect.right > info_panel_rect.left &&
       info_panel_rect.bottom > info_panel_rect.top) {
     NormalizeNativeControlBitmapAlpha(pixels, width, height, info_panel_rect,
                                        RGB(10, 11, 16), 0xFF);
+    ApplyRoundRectAlphaMask(pixels, width, height, info_panel_rect,
+                            kNativeInfoPanelRadius);
   }
 
   // Composite only the dirty bands (current + previously-touched control rects,
@@ -1794,14 +2051,6 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
       return "back";
     }
     // Favorite star, drawn rightmost in the top bar (see PaintNativeControlBar).
-    if (g_native_control_state.can_favorite) {
-      const int top_cy = (top.top + top.bottom) / 2;
-      if (PointInRect(x, y,
-                      RectFrom(rect.right - 54, top_cy - 19, rect.right - 16,
-                               top_cy + 19))) {
-        return "favorite";
-      }
-    }
     return "show";
   }
 
@@ -1885,7 +2134,60 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   if (l.has_go_live && PointInRect(x, y, l.go_live)) {
     return "goLive";
   }
+  if (l.has_favorite && PointInRect(x, y, l.favorite)) {
+    return "favorite";
+  }
   return "show";
+}
+
+// Where along its track the pointer is, for the slider currently being dragged.
+//
+// Deliberately recomputed from the *track* rather than hit-tested from the
+// point: a drag is expected to keep working when the pointer wanders off the
+// 6px-tall groove, or past either end of it. [RatioFromX] clamps, so dragging
+// beyond the track pins to 0 or 1.
+double SliderRatioFromX(HWND hwnd, NativeSliderDrag drag, int x) {
+  RECT rect;
+  GetClientRect(hwnd, &rect);
+  const BottomLayout l = ComputeBottomLayout(rect);
+  return RatioFromX(x, drag == NativeSliderDrag::kVolume ? l.volume
+                                                         : l.progress);
+}
+
+// Finishes a slider drag, optionally committing the value under [x].
+//
+// The state is cleared *before* `ReleaseCapture`, because that call sends
+// `WM_CAPTURECHANGED` straight back into this window — and that handler's job
+// is to abandon a drag it finds still live, which would otherwise wipe the very
+// values this function is about to use.
+void EndNativeSliderDrag(HWND hwnd, bool commit, int x) {
+  const NativeSliderDrag drag = g_native_slider_drag;
+  if (drag == NativeSliderDrag::kNone) {
+    return;
+  }
+  g_native_slider_drag = NativeSliderDrag::kNone;
+  g_native_slider_last_sent = -1.0;
+  const bool had_preview = g_native_seek_preview >= 0.0;
+  g_native_seek_preview = -1.0;
+  if (GetCapture() == hwnd) {
+    ReleaseCapture();
+  }
+  if (had_preview) {
+    InvalidateRect(hwnd, nullptr, FALSE);
+  }
+  if (!commit) {
+    return;
+  }
+  HWND parent = NativeControlsOwner(hwnd);
+  if (parent == nullptr) {
+    return;
+  }
+  const std::string command =
+      (drag == NativeSliderDrag::kSeek ? std::string("seekPercent:")
+                                       : std::string("volumePercent:")) +
+      std::to_string(SliderRatioFromX(hwnd, drag, x));
+  PostMessage(parent, kNativeControlCommandMessage,
+              reinterpret_cast<WPARAM>(new std::string(command)), 0);
 }
 
 LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
@@ -1917,10 +2219,42 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
       return 0;
     }
     break;
-  case WM_MOUSEMOVE:
+  case WM_MOUSEMOVE: {
     // Mouse interaction takes over from keyboard navigation, so hide the
     // keyboard focus ring until arrows/OK are used again.
     g_native_keyboard_focus_visible = false;
+    if (g_native_slider_drag != NativeSliderDrag::kNone) {
+      // A capture can outlive the button (an Alt-Tab away and back, a system
+      // dialog stealing input); the button state in `wparam` is the reliable
+      // signal that the gesture is over.
+      if ((wparam & MK_LBUTTON) == 0) {
+        EndNativeSliderDrag(hwnd, false, GET_X_LPARAM(lparam));
+        return 0;
+      }
+      const int x = GET_X_LPARAM(lparam);
+      const double ratio = SliderRatioFromX(hwnd, g_native_slider_drag, x);
+      if (g_native_slider_drag == NativeSliderDrag::kSeek) {
+        if (ratio != g_native_seek_preview) {
+          g_native_seek_preview = ratio;
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+      } else if (ratio != g_native_slider_last_sent) {
+        g_native_slider_last_sent = ratio;
+        if (HWND parent = NativeControlsOwner(hwnd)) {
+          PostMessage(
+              parent, kNativeControlCommandMessage,
+              reinterpret_cast<WPARAM>(
+                  new std::string("volumePercent:" + std::to_string(ratio))),
+              0);
+        }
+      }
+      // The bar must not auto-hide out from under the thumb mid-gesture.
+      if (HWND parent = NativeControlsOwner(hwnd)) {
+        KillTimer(parent, kNativeControlsHideTimer);
+        SetTimer(parent, kNativeControlsHideTimer, 3500, nullptr);
+      }
+      return 0;
+    }
     if (!HasPointerMoved(lparam, &g_last_controls_mouse)) {
       return 0;
     }
@@ -1931,12 +2265,45 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
       }
     }
     break;
+  }
+  case WM_LBUTTONUP:
+    if (g_native_slider_drag != NativeSliderDrag::kNone) {
+      EndNativeSliderDrag(hwnd, true, GET_X_LPARAM(lparam));
+      return 0;
+    }
+    break;
+  case WM_CAPTURECHANGED:
+    // Something else took the mouse — abandon rather than commit a value the
+    // user never released on.
+    EndNativeSliderDrag(hwnd, false, 0);
+    return 0;
   case WM_LBUTTONDOWN: {
     g_native_keyboard_focus_visible = false;
     const int control_kind =
         static_cast<int>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     const std::string command = NativeControlCommandFromPoint(
         hwnd, control_kind, GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+    // Both sliders become drags from here. Capture is what makes the gesture
+    // survive the pointer leaving the track — without it the window stops
+    // seeing moves, and never sees the button-up either.
+    if (command.rfind("volumePercent:", 0) == 0) {
+      g_native_slider_drag = NativeSliderDrag::kVolume;
+      g_native_slider_last_sent =
+          SliderRatioFromX(hwnd, NativeSliderDrag::kVolume,
+                           GET_X_LPARAM(lparam));
+      SetCapture(hwnd);
+      // Falls through: volume applies immediately, on press and on every move.
+    } else if (command.rfind("seekPercent:", 0) == 0) {
+      g_native_slider_drag = NativeSliderDrag::kSeek;
+      g_native_seek_preview = SliderRatioFromX(
+          hwnd, NativeSliderDrag::kSeek, GET_X_LPARAM(lparam));
+      SetCapture(hwnd);
+      InvalidateRect(hwnd, nullptr, FALSE);
+      // Committed on release instead — a drag across a full-width scrubber
+      // would otherwise ask the player for a seek per pixel. A plain click
+      // still seeks: it is a press and a release with nothing in between.
+      return 0;
+    }
     // Menu open/close and the info panel are owned entirely by the overlay; they
     // don't round-trip to Dart (the option lists arrive via setControlState).
     ApplyOverlayOwnedCommand(hwnd, NativeControlsOwner(hwnd), command);
@@ -2171,11 +2538,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
               if (play_index >= 0) g_native_focus_index = play_index;
             }
           } else {
-            // The top bar is Back plus, when shown, the favorite star;
-            // everything else is the bottom bar. Left/Right walks the row you
-            // are on and steps off its end into the other row. With no star
-            // the top row is just Back, so this reduces to exactly the
-            // previous behaviour (Right -> first bottom item, Left -> last).
+            // The top bar is Back; everything else is the bottom bar.
+            // Left/Right walks the row you are on and steps off its end into
+            // the other row — so from Back, Right lands on the first bottom
+            // item and Left on the last. The general two-row form is kept
+            // rather than special-cased back to a single control, since the
+            // top row has held more than one before and may again.
             std::vector<int> top_indices;
             std::vector<int> bottom_indices;
             for (int i = 0; i < static_cast<int>(focusables.size()); ++i) {
@@ -2543,6 +2911,12 @@ void FlutterWindow::CreateNativeControls() {
 
 void FlutterWindow::DestroyNativeControls() {
   KillTimer(GetHandle(), kNativeControlsHideTimer);
+  // The drag globals outlive the window they belong to. A seek preview left
+  // set would pin the *next* player's scrubber to a ratio the user chose for a
+  // stream that has since closed.
+  g_native_slider_drag = NativeSliderDrag::kNone;
+  g_native_slider_last_sent = -1.0;
+  g_native_seek_preview = -1.0;
   if (native_controls_overlay_) {
     SetWindowRgn(native_controls_overlay_, nullptr, TRUE);
     DestroyWindow(native_controls_overlay_);

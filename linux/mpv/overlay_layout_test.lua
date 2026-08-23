@@ -240,6 +240,37 @@ if title_item and now_title then
     'the title is in the top bar and the programme in the bottom bar')
 end
 
+-- ===== 2b. the favorite star lives in the control row ========================
+--
+-- It used to be drawn in the *top* bar beside the badges, which put this OSD
+-- (Linux's HDR-on-Wayland surface) somewhere different from the embedded
+-- Flutter overlay Linux uses for every other stream -- and from Android and
+-- iOS, which have always had it in the bottom cluster. Lua 5.1 has no
+-- hex string escape, so the Material glyphs are spelled in decimal:
+-- U+E5FA star_border, U+E5F9 star.
+local STAR_BORDER = '\238\151\186'
+local STAR_FILLED = '\238\151\185'
+
+local star = find_text(events, STAR_BORDER)
+local aspect_chip = find_text(events, 'Fill')
+check(star ~= nil, 'the favorite star renders when the channel can be favorited')
+if star and aspect_chip then
+  check(math.abs(star.y - aspect_chip.y) < 1,
+    'the favorite star shares the control row with the aspect chip')
+end
+if star and title_item then
+  check(star.y > title_item.y + 100,
+    'the favorite star is not in the top bar')
+end
+check(find_text(events, STAR_FILLED) == nil,
+  'an unfavorited channel draws the outline star')
+
+local favorited_state = {}
+for k, v in pairs(live_state) do favorited_state[k] = v end
+favorited_state.favorite = true
+check(find_text(render_with(favorited_state), STAR_FILLED) ~= nil,
+  'a favorited channel draws the filled star')
+
 -- ===== 3. SDR shows no dynamic-range badge ===================================
 
 local sdr = render_with(live_state, {

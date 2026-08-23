@@ -478,6 +478,22 @@ String? _continueWatchingSubtitle(ContinueWatchingEntry entry) {
   return parts.isEmpty ? null : parts.join(' · ');
 }
 
+/// Everything the tile knows, for a screen reader: the series, the episode by
+/// name, where it sits, and how much is left. The visible tile has room for a
+/// series line and one meta line, so the episode title only survives here.
+String _continueWatchingSemantics(ContinueWatchingEntry entry) {
+  final item = entry.item;
+  final parts = <String>[
+    entry.displayTitle,
+    // Only when it isn't already the line above — a movie would repeat itself.
+    if (entry.seriesTitle != null) item.title,
+    if (item.seasonNumber != null && item.episodeNumber != null)
+      'season ${item.seasonNumber} episode ${item.episodeNumber}',
+    ?_remainingLabel(entry.position),
+  ];
+  return parts.join(', ');
+}
+
 /// Horizontal "Continue watching" strip: poster tiles with a progress bar,
 /// newest first. One `FocusTraversalGroup` so the D-pad walks the rail as a
 /// row between the toolbar and the grid. Sized noticeably larger than the
@@ -600,6 +616,12 @@ class _ContinueWatchingTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final item = entry.item;
     final subtitle = _continueWatchingSubtitle(entry);
+    // The series name for an episode, the item's own title otherwise. The
+    // episode name is not lost — it moves into the semantics label below,
+    // because the tile has exactly two single-line text runs and its rail
+    // height is derived from that (see [height]); a third line would have to be
+    // paid for by every tile including the movie tab's.
+    final title = entry.displayTitle;
     return SizedBox(
       width: _width,
       // **Laid out unconstrained, then clipped.** The rail's `ListView` hands
@@ -623,6 +645,11 @@ class _ContinueWatchingTile extends StatelessWidget {
               FocusableCard(
                 onTap: onTap,
                 debugLabel: 'media.continue.${item.id}',
+                // Spells out what the two visible runs compress: the series,
+                // then the episode by name, then position and time left. This
+                // is where the episode title stays readable once the visible
+                // title leads with the series.
+                semanticsLabel: _continueWatchingSemantics(entry),
                 child: SizedBox(
                   width: _width,
                   child: Column(
@@ -705,7 +732,7 @@ class _ContinueWatchingTile extends StatelessWidget {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 6),
                         child: Text(
-                          item.title,
+                          title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -750,7 +777,8 @@ class _ContinueWatchingTile extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4, left: 2),
                 child: _RemoveButton(
                   onPressed: onRemove,
-                  itemTitle: item.title,
+                  // Names what leaves the rail — the series, as displayed.
+                  itemTitle: title,
                 ),
               ),
             ],

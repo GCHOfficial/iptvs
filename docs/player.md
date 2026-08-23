@@ -120,8 +120,12 @@ the Dart host owns the favorites store, so it seeds the initial state via an Int
 (`RESULT_FAVORITE`, relayed by `MainActivity` in the `nativeClosed` args) — the Activity toggles
 its own `uiState.isFavorite` locally, since it has no live method channel to Dart. Dart applies the
 returned value through the same `FavoritesController.toggle` the channel list uses, so an in-player
-toggle shows up in the list on return. The embedded media_kit overlay carries the same star in its
-top bar, toggling the store directly.
+toggle shows up in the list on return. The embedded media_kit overlay carries the same star,
+toggling the store directly. **Every surface draws it in the same slot** — the control row,
+immediately right of "Go to live" — at that row's ordinary button size: Kotlin `RightCluster`,
+iOS `clusterStack`, the Windows GDI `BottomLayout::favorite`, the shared Flutter `cluster`, and the
+Linux Lua OSD (pinned by `overlay_layout_test.lua`, which asserts the star shares a row with the
+aspect chip and is nowhere near the top bar).
 Top-right **badges**: resolution, HDR, FPS, source name, and a clock (clock on TV only —
 `UiModeManager`). **Live extras**: an EPG now/next + programme-progress strip where the VOD
 scrubber sits, and a **"Go to live"** control (shown once behind the edge) that reloads the source
@@ -493,10 +497,21 @@ way Android and iOS do, so `ControlsPinnedByOverlay()` counts `reconnecting` alo
 menu/info panel — otherwise the hide timer took the badge away mid-stall and the platform's
 primary live path showed a frozen picture with no explanation. (The Linux Lua OSD both draws it
 ungated *and* pins; pinning alone is the smaller change and covers the auto-hide case, which is
-the one that actually bites.) The favorite star (live channels with a favorites store) sits
-rightmost in the top bar; Dart owns the store, so the click sends a `favorite` command and Dart
-pushes the new `canFavorite`/`isFavorite` back via `setControlState`. It is in the keyboard-focus
-ring — pushed right after `kBack` to match the top bar's visual order, gated on `can_favorite`.
+the one that actually bites.) **The favorite star is an ordinary member of the control row**, sitting immediately right of
+"Go to live" (`BottomLayout::favorite`, placed between `speed` and `go_live` in the right-to-left
+cluster). Dart owns the store, so the click sends a `favorite` command and Dart pushes the new
+`canFavorite`/`isFavorite` back via `setControlState`; it is in the keyboard-focus ring at the
+matching position, and `IsTopBarFocusItem` now covers only `kBack`.
+
+That slot is the one Kotlin's `RightCluster` and the iOS `clusterStack` have always used. This
+overlay drew it in the **top bar** among the badges instead, at a size (38x38) that matched neither
+its own control row nor the shared Flutter overlay's compact 34x32 — so the star was in a different
+place and a different size depending on which surface you were looking at, and Windows swaps between
+its native and embedded surfaces on the same machine purely on whether the stream is HDR. The
+Flutter overlay and the Linux Lua OSD moved with it; **Android and iOS were already right and are
+untouched**. The accent tints **the glyph, not the button**: the filled background means keyboard
+focus, which is what `active` is for. The hit rect reads `l.favorite` rather than repeating the
+geometry, so drawing and hit-testing cannot drift apart again.
 The controls
 overlay is a layered window clipped to a region covering only the top+bottom bars (+ open
 menu/info), so anything drawn must fall inside it — `UpdateNativeControlState` rebuilds the region
@@ -584,6 +599,80 @@ path's own two-row reflow
 narrower constant (`kTouchReflowWidth`, 560) — the two used to be the same number, which is exactly
 the bug the iOS fix above corrects, so don't assume one constant governs both layouts when reading
 either overlay's code.
+
+**The sliders are drags, not clicks, and the button row is one size.** The overlay used to act on
+`WM_LBUTTONDOWN` alone, so both the volume track and the scrubber answered a *click* and ignored a
+grab outright: press-and-move did nothing, and with nothing capturing the mouse the gesture also
+swallowed the button-up that should have ended it, which is what made it read as a lock-up.
+`NativeSliderDrag` + `SetCapture` on press / `WM_MOUSEMOVE` while `MK_LBUTTON` / `WM_LBUTTONUP`
+fixes both, with the ratio recomputed from the **track rect** rather than hit-tested from the point
+so the drag survives the pointer wandering off a 6px groove (`RatioFromX` clamps, so overshooting
+either end pins). The two commit differently on purpose: **volume applies continuously**, because
+it is cheap and hearing it is the point, while **a seek paints a preview (`g_native_seek_preview`)
+and commits once on release** — dragging across a full-width scrubber would otherwise ask the
+player for a seek per pixel, and a plain click still seeks because it is a press and a release with
+nothing between them. `EndNativeSliderDrag` clears its state *before* `ReleaseCapture`, since that
+call re-enters this window through `WM_CAPTURECHANGED`, whose job is to abandon a drag it finds
+still live.
+
+Button geometry is `kNativeButtonWidth`/`kNativeButtonHeight`/`kNativeButtonRadius` (44 x 40, r12),
+matching the shared Flutter overlay's *pointer* metrics (`EmbeddedOverlayMetrics`) and sitting
+beside Android's 44dp `PlayerDimens.ButtonSize`. This surface had grown four sizes — play 42x42,
+the seek buttons 44x36, the icon buttons 36x36, the aspect button 52x36 — so its control row
+stepped up and down across its own length while the other two overlays stayed uniform. Text
+buttons still choose their own width (the aspect button holds a word); nothing chooses its own
+height.
+
+**The two floating surfaces (stream-info panel, list menu) have their corners cut in the buffer,
+and no border.** Nothing in GDI can express "transparent here": `RoundRect` leaves the pixels
+outside its curve untouched, and `NormalizeNativeControlBitmapAlpha` then reads an untouched
+pixel's zero alpha as "GDI drew this" and forces it **fully opaque** — so a rounded panel floating
+over the video came back as a hard black square with its rounded fill invisible inside it.
+`ApplyRoundRectAlphaMask` runs straight after the normalizer and scales those pixels down to the
+shape's coverage, which also makes the curve smooth (GDI's `RoundRect` is not antialiased). Only
+shapes *outside* the control bars need it — a button's corner falls on the bars' gradient backdrop,
+which already carries a non-zero alpha and is left alone. The radii are named
+(`kNativeInfoPanelRadius` / `kNativeMenuRadius`) because they are applied twice, by the fill and by
+the mask, and the two have to agree. The info panel also lost its accent outline: Android's
+`InfoPanel` and the shared Flutter `_infoPanel` are both a rounded fill with no border, and this
+was the only one of the three drawing a stroke.
+
+**Rounded shapes inside the bars are rasterized, not drawn by GDI.** `RoundRect` has no
+antialiasing, so every corner in the control bars was a visible staircase — obvious on a button over
+a bright frame, worst on the volume thumb, which is a circle drawn as a round rect. There is no GDI
+quality flag for it, so `FillRoundRectAA` composites the shape into the DIB itself with per-pixel
+coverage (`RoundRectCoverage`, shared with the corner mask), source-over in premultiplied space.
+
+**It is only valid over pixels whose alpha is already correct**, and that is the rule to keep: the
+bars' gradient backdrop is written directly by `FillVerticalScrim`, and anything already composited
+by `FillRoundRectAA` carries real alpha, so buttons, badges, both sliders and the live-EPG progress
+bar all qualify. A surface **GDI** drew does not — GDI leaves the alpha byte at 0 until
+`NormalizeNativeControlBitmapAlpha` runs at the very end of the paint, so blending against one reads
+the destination as transparent and the antialiased edge comes out see-through. That is why the
+floating panels and the menu's own option rows stay on plain `FillRoundRect` plus
+`ApplyRoundRectAlphaMask`. A zero-alpha *result* is likewise never written, because that is the
+value the normalizer reads as "GDI drew here" and forces opaque — it would plant a black dot.
+
+The DIB reaches those helpers through `g_overlay_paint_target`, scoped to one paint by
+`ScopedOverlayPaintTarget` (so an early return cannot leave a dangling pointer for the next frame);
+with no target set `FillRoundRectAA` falls back to GDI, so nothing depends on it being established.
+Each call flushes GDI's batch first, since the CPU is about to touch bits a queued `DrawText` may
+still be waiting to write.
+
+**`FillRoundRect`'s `radius` is a corner radius on both paths now.** GDI's `RoundRect` does not take
+one — its last two arguments are the *ellipse* width and height, i.e. twice the radius — and every
+call here passed the radius straight through, so a shape asking for 12 was drawn with a 6px corner.
+That was half what the same constant means in the Flutter and Compose overlays, and half what the
+rasterizer and the corner mask produce from it. Corners are visibly rounder than before, and now
+match the other two surfaces.
+
+`UiFont` asks for **`ANTIALIASED_QUALITY`, never `CLEARTYPE_QUALITY`.** This overlay is a
+per-pixel-alpha layered window, and GDI's ClearType is a subpixel filter that writes RGB without
+touching the alpha channel it is being blended through, leaving coloured fringing along every glyph
+edge. It is worst on the thinnest strokes, which is why button labels read as rough while the
+heavier badges looked fine, and it stands out most on an HDR display, where the compositor lifts
+SDR content into a higher-luminance space and lifts the fringes with it. Button labels are `FW_BOLD`
+for the same reason the badges are.
 
 `PaintNativeControlBar` **caches its ARGB back-buffer** (`OverlayBackBuffer`: DIB + memory DC,
 file-scope alongside the other single-overlay globals), recreating it only on a client-size change
