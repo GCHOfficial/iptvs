@@ -56,7 +56,24 @@ EpgGuideFeed xmltvGuideFeed({
 }) => EpgGuideFeed(
   url: url,
   open: () async* {
-    final bytes = await download(Uri.parse(url));
+    final Uint8List bytes;
+    try {
+      bytes = await download(Uri.parse(url));
+    } on HttpWorkloadException catch (error) {
+      // The size limits are not arbitrary and raising them is not the answer:
+      // the whole compressed body and then the whole decompressed body are held
+      // in memory before parsing, so an "all countries" guide — 192 MB
+      // compressed, 1.7 GB decompressed at the time of writing — is roughly
+      // 1.9 GB of RAM on hardware that is routinely a 2 GiB TV box.
+      //
+      // What the user needs is the way out, not the number. Most publishers of
+      // a combined guide also publish per-country files two orders of magnitude
+      // smaller, and one of those is what a player wants.
+      throw HttpWorkloadException(
+        '${error.message}. A combined "all countries" guide is usually far too '
+        'large for a player — use a per-country or per-provider guide instead.',
+      );
+    }
     yield* parseXmltvBatched(
       bytes,
       tvgIdToChannelId,
