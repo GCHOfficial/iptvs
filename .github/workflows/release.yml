@@ -1,8 +1,10 @@
 name: Release
 
 # Cut a release by pushing a tag like `v1.2.3`, or run manually (workflow_dispatch)
-# with a version. Builds Windows, Linux, and Android and publishes a GitHub
-# Release with the artifacts attached and auto-generated notes.
+# with a version — a manual run creates the tag itself (see "Ensure the release
+# tag exists"), because the publish step verifies it. Builds Windows, Linux, and
+# Android and publishes a GitHub Release with the artifacts attached and
+# auto-generated notes.
 on:
   push:
     tags: ['v*']
@@ -340,6 +342,38 @@ jobs:
             echo "All models failed; continuing without AI changelog."
             : > body.md
           fi
+      # The dispatch path's missing half. `gh release create --verify-tag` below
+      # refuses a tag that doesn't exist, so a manual run used to build all
+      # three platforms successfully and then abort at the last step — the
+      # workflow's own header promised a route it could not take. A tag push
+      # already satisfies `--verify-tag`; this makes the dispatch satisfy it too,
+      # rather than dropping the inputs (the `beta` track is only reachable here).
+      - name: Ensure the release tag exists
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            --jq '.object.sha' 2>/dev/null || true)
+          if [ -z "$existing" ]; then
+            echo "Creating $RELEASE_TAG at $GITHUB_SHA"
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA" >/dev/null
+          elif [ "$existing" = "$GITHUB_SHA" ]; then
+            # Re-running a dispatch for the same commit: nothing to do.
+            echo "$RELEASE_TAG already points at $GITHUB_SHA"
+          else
+            # Never move a tag that already exists. A published release is
+            # addressed by it, users may already hold the artifacts it named,
+            # and the signed update manifest authenticates a specific build —
+            # silently re-pointing it would invalidate all three.
+            echo "::error::$RELEASE_TAG already exists at $existing, not $GITHUB_SHA." \
+              "Refusing to move a published tag; pick a new version."
+            exit 1
+          fi
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
