@@ -2207,6 +2207,41 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   double _liveChannelRowExtent() =>
       _liveLayoutMetrics.channelRowExtent(_liveRowsShowEpg);
 
+  /// The row extent the live list was last built with, so a change in it can
+  /// re-reveal the selection.
+  double? _lastLiveRowExtent;
+
+  /// Re-reveal the selected row when the row *height* changes underneath it.
+  ///
+  /// The live list scrolls by exact `index * itemExtent` arithmetic, so the
+  /// offset is only correct for the extent it was computed against. Rows are
+  /// 72px without an EPG line and 112 with one, and **`_liveRowsShowEpg` can
+  /// flip after the rows are already on screen** — most visibly in the
+  /// cross-source Favorites view, whose guide is fetched separately
+  /// (`GlobalFavoritesController.hasEpg`) and lands after the list is built.
+  ///
+  /// The symptom is precise and was reported as such: the cursor is on the
+  /// right channel, the list is scrolled to the wrong place, and one press of
+  /// Up or Down snaps it back — because that press re-reveals against the
+  /// extent the rows now actually have. The error grows with the row index,
+  /// which is why it reads as "the highlighted channel isn't centred".
+  ///
+  /// Deliberately post-frame: the reveal has to run *after* the list has been
+  /// rebuilt with the new `itemExtent`, or it computes against the old geometry
+  /// again. The first observation only records the extent — there is nothing to
+  /// correct before a list exists.
+  void _resyncLiveRowExtent() {
+    final extent = _liveChannelRowExtent();
+    final previous = _lastLiveRowExtent;
+    if (previous == extent) return;
+    _lastLiveRowExtent = extent;
+    if (previous == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _focus.revealSelectedChannel();
+    });
+  }
+
   double _liveCategoryRowExtent() => _liveLayoutMetrics.categoryRowExtent;
 
   /// The last geometry line written, so an unchanged window logs once rather
@@ -2752,6 +2787,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   Widget _buildLiveBody(List<Channel> visible) {
     final crossSourceView = _categoryId == kAllSourcesFavoritesCategoryId;
+    // Row height can change under a selection that never moved — see
+    // [_resyncLiveRowExtent]. Checked here because this is the one place that
+    // knows the extent the list is about to be built with.
+    _resyncLiveRowExtent();
     return LiveTabView(
       loading: _live.loading,
       error: _live.error,

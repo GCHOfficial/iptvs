@@ -378,6 +378,19 @@ class LiveFocusCoordinator extends ChangeNotifier {
 
   // ── Scroll (exact, because rows are a uniform extent) ──────────────────────
 
+  /// Re-scroll the current selection into view.
+  ///
+  /// Exists for the case where the *row extent* changes under a selection that
+  /// did not move: this list scrolls by `index * extent` arithmetic, so a row
+  /// height that arrives late leaves an offset computed against the old one —
+  /// the cursor is on the right row, and the list is looking somewhere else.
+  /// See `_ChannelListScreenState._resyncLiveRowExtent`.
+  void revealSelectedChannel() {
+    final visible = visibleChannels();
+    if (visible.isEmpty) return;
+    _revealChannel(_selectedChannelIndex.clamp(0, visible.length - 1));
+  }
+
   void _revealChannel(int index) =>
       _reveal(scrollController, index, channelRowExtent());
 
