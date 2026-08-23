@@ -725,6 +725,20 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   duration in its place would change the default install while claiming to preserve it — the same
   reason the mpv map for `normal` is empty. `ExoBufferPolicyTest` asserts every invariant for
   **every** preset, which is the point now that the durations are user-selectable.
+- **The aspect cycle is Fit → Fill → Stretch → 16:9 → 4:3, and `Fill` ≠ `Stretch`.** Fill *crops*
+  to fill and keeps the picture's shape (`RESIZE_MODE_ZOOM` / mpv `panscan=1.0` /
+  `.resizeAspectFill` / `BoxFit.cover`); Stretch *distorts* to fill and keeps every pixel
+  (`RESIZE_MODE_FILL` / mpv `keepaspect=no` / `.resize` / `BoxFit.fill`). Every mode restores
+  `keepaspect` explicitly, because the modes are cycled and leaving Stretch must undo it.
+  **Every surface starts on Fit**, and `_aspectModeIndex` must agree with the Windows native
+  surface's initial `panscan` — they are two halves of one statement, and the chip previously said
+  "Fill" while the embedded surfaces rendered letterboxed. The
+  **embedded** surface is framed by Flutter (`Video(fit:)`), not by the mpv properties, so
+  `_AspectMode` carries both — the two surfaces swap on one machine on HDR alone, and framing must
+  not change with a stream's dynamic range. iOS offers the three that map onto `videoGravity`
+  exactly; 16:9/4:3 would need a hand-computed layer transform (docs/ios.md). Android's player
+  theme sets `windowLayoutInDisplayCutoutMode=shortEdges` so video reaches into the notch — safe
+  only because the Compose overlay insets itself with `safeDrawingPadding()`.
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,

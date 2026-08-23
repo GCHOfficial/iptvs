@@ -24,30 +24,40 @@ public enum PlayerMenu: String, Equatable, CaseIterable, Sendable {
 
 /// Aspect/zoom modes cycled by the aspect button.
 ///
-/// **Deliberately two modes, not Android's four.** Kotlin's `AspectMode` also
+/// **Three modes, not the other surfaces' five.** Kotlin's `AspectMode` also
 /// offers `16:9` and `4:3`, which the Compose/ExoPlayer host implements by
 /// resizing its `PlayerView`. The iOS video surface is an `AVPlayerLayer` whose
-/// only sizing knob is `videoGravity` (`resizeAspect` / `resizeAspectFill` /
-/// `resize`), so a forced 16:9 or 4:3 would need a hand-computed layer transform
-/// against the presentation size and a re-layout on every rotation — new
-/// geometry code with no way to verify it short of a device. Fit and Fill are
-/// the two modes that map onto `videoGravity` exactly. Recorded here rather than
-/// silently dropped; see docs/ios.md "Known parity gaps".
+/// only sizing knob is `videoGravity`, so a forced 16:9 or 4:3 would need a
+/// hand-computed layer transform against the presentation size and a re-layout
+/// on every rotation — new geometry code with no way to verify it short of a
+/// device. Recorded here rather than silently dropped; see docs/ios.md
+/// "Known parity gaps".
+///
+/// The rule for inclusion is whether a mode maps onto `videoGravity` exactly,
+/// and all three of these do: `resizeAspect`, `resizeAspectFill`, `resize`.
+/// [stretch] is the last of them and is **not** a duplicate of [fill] —
+/// `fill` crops to fill while keeping the picture's shape, `stretch` distorts
+/// to fill and keeps every pixel. On a tall handset that difference is a fifth
+/// of the frame or more, which is why a viewer asking to fill the screen may
+/// mean either one.
 public enum PlayerAspectMode: String, Equatable, CaseIterable, Sendable {
   case fit
   case fill
+  case stretch
 
   public var label: String {
     switch self {
     case .fit: return "Fit"
     case .fill: return "Fill"
+    case .stretch: return "Stretch"
     }
   }
 
   public func next() -> PlayerAspectMode {
     switch self {
     case .fit: return .fill
-    case .fill: return .fit
+    case .fill: return .stretch
+    case .stretch: return .fit
     }
   }
 }

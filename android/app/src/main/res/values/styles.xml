@@ -25,5 +25,18 @@
              without a black flash in between. -->
         <item name="android:windowDisablePreview">true</item>
         <item name="android:windowAnimationStyle">@null</item>
+        <!-- Let the video reach into the camera cutout.
+
+             Without this the default cutout mode letterboxes the whole window
+             away from the notch **in landscape** — a black band down one edge,
+             in the one orientation video is watched in, which reads as "the app
+             won't use my whole screen". `shortEdges` is safe here because the
+             Compose overlay insets itself with `safeDrawingPadding()`, whose
+             `safeDrawing` set already includes the cutout: the picture extends
+             behind the notch, the controls stay clear of it.
+
+             API 35+ enforces edge-to-edge and handles this itself; this is what
+             covers API 26-34, which is most phones in use. -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>

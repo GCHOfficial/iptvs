@@ -1282,8 +1282,19 @@ final class IptvsPlayerViewController: UIViewController {
 
   private func cycleAspect() {
     uiState.batch { $0.cycleAspect() }
-    videoView.playerLayer.videoGravity =
-      uiState.value.aspect == .fill ? .resizeAspectFill : .resizeAspect
+    // Each mode maps onto exactly one `videoGravity`, which is the reason these
+    // three are the modes iOS offers at all. Written as a plain switch rather
+    // than an immediately-applied closure so the assignment carries no return
+    // type for Swift to infer — this file only compiles in a macOS build, so it
+    // is worth preferring the form that cannot be wrong.
+    switch uiState.value.aspect {
+    case .fill:
+      videoView.playerLayer.videoGravity = .resizeAspectFill
+    case .stretch:
+      videoView.playerLayer.videoGravity = .resize
+    case .fit:
+      videoView.playerLayer.videoGravity = .resizeAspect
+    }
   }
 
   /// Applies the chosen speed to the player. VOD only, and only while already

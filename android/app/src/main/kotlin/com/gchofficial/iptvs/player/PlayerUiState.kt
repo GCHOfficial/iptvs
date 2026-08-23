@@ -26,10 +26,24 @@ data class EpgEntry(
 /** Which list-menu, if any, is currently open. Mirrors the Windows single-menu model. */
 enum class PlayerMenu { None, Audio, Subtitles, Speed }
 
-/** Aspect/zoom modes, cycled by the aspect button — same set as the Windows overlay. */
+/**
+ * Aspect/zoom modes, cycled by the aspect button — the same set, in the same
+ * order, on every surface (Windows GDI, the shared Flutter overlay, the Linux
+ * Lua OSD and iOS), because the label is just text those surfaces render and
+ * the sequence is what a user learns.
+ *
+ * [Fill] and [Stretch] are different things and the distinction is the whole
+ * reason both exist. `Fill` **crops** to fill while keeping the picture's
+ * shape; `Stretch` **distorts** to fill and keeps every pixel. Neither is
+ * strictly better: on a 20:9 handset, 16:9 content loses about a fifth of its
+ * width to `Fill`, and 4:3 content loses far more — which is why a user who
+ * wants the whole frame on screen asks for "stretch" and is not served by a
+ * zoom.
+ */
 enum class AspectMode(val label: String) {
     Fit("Fit"),
     Fill("Fill"),
+    Stretch("Stretch"),
     Ratio16x9("16:9"),
     Ratio4x3("4:3"),
 }

@@ -69,6 +69,16 @@ class PlayerVideoSurface extends StatefulWidget {
   /// state it is itself the source of truth for.
   final String aspectLabel;
 
+  /// How the embedded surface frames the picture for the current aspect mode.
+  ///
+  /// The embedded path is composited by **Flutter**, not by mpv: `media_kit`'s
+  /// `Video` draws the texture with a `BoxFit`, so the mpv `panscan`/
+  /// `keepaspect` properties that frame the *native* surfaces do not reach it.
+  /// Both come off the same `_AspectMode`, so the two surfaces — which swap on
+  /// one machine depending only on whether the stream is HDR — cannot end up
+  /// framing differently.
+  final BoxFit videoFit;
+
   /// Maps colorimetry to the badge/info label. Injected by [PlayerScreen]
   /// (its `_dynamicRangeLabel`, which folds in the async HDR10+ probe) so the
   /// label logic stays single-sourced in `dynamicRangeLabelFrom` — this file
@@ -105,6 +115,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.favorite,
     required this.liveSynced,
     required this.aspectLabel,
+    required this.videoFit,
     required this.dynamicRangeLabel,
     required this.onBack,
     required this.onToggleFavorite,
@@ -191,6 +202,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
     if (Platform.isLinux || Platform.isWindows || Platform.isIOS) {
       return Video(
         controller: widget.controller,
+        fit: widget.videoFit,
         controls: (state) {
           _videoState = state;
           return EmbeddedPlayerControls(
@@ -223,7 +235,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
       child: MaterialVideoControlsTheme(
         normal: _mobileTheme(),
         fullscreen: _mobileTheme(),
-        child: Video(controller: widget.controller),
+        child: Video(controller: widget.controller, fit: widget.videoFit),
       ),
     );
   }

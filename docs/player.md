@@ -419,9 +419,10 @@ docs/ios.md "Why not `AVPlayerViewController`").
   which is what keeps the pointer path (Linux/Windows) size-invariant **by construction**: a
   touch-only metric leaking into the pointer path is a failing pure test, not something a reviewer
   has to catch by eye.
-  Aspect cycling stays at the full four mpv modes here (Fit/Fill/16:9/4:3) rather than being cut to
-  the native controller's two: that limit is an `AVPlayerLayer`/`videoGravity` constraint
-  (docs/ios.md "Known parity gaps"), not a design choice, and mpv genuinely does all four.
+  Aspect cycling stays at the full five mpv modes here (Fit/Fill/Stretch/16:9/4:3) rather than
+  being cut to the native controller's three: that limit is an `AVPlayerLayer`/`videoGravity`
+  constraint (docs/ios.md "Known parity gaps"), not a design choice, and mpv genuinely does all
+  five.
   Auto-hide stays flat 4s, between the native 3.5s (VOD) and 4.5s (live). Nothing sets
   `SystemChrome.setEnabledSystemUIMode`, so the iOS status bar really does sit over this surface —
   `_barInsets` (`MediaQuery.paddingOf`) is what keeps the chrome clear of it and of the home
@@ -446,6 +447,63 @@ Read docs/ios.md before touching anything under `packages/iptvs_ios_player/` or
 `lib/player/ios_engine.dart` — it carries the full engine-selection rule table, the fallback
 engine's capability research (codec floor, the two open media_kit constraints), and the
 on-device test protocol.
+
+## Aspect modes, and why Fill and Stretch are both there
+
+The aspect button cycles **Fit → Fill → Stretch → 16:9 → 4:3**, the same labels in the same order
+on every surface. `Fill` and `Stretch` are not two words for one thing, and conflating them is the
+easy mistake:
+
+- **Fill** crops to fill the screen and *keeps the picture's shape*
+  (`RESIZE_MODE_ZOOM`, mpv `panscan=1.0`, `videoGravity = .resizeAspectFill`, `BoxFit.cover`).
+- **Stretch** distorts to fill and *keeps every pixel*
+  (`RESIZE_MODE_FILL`, mpv `keepaspect=no`, `videoGravity = .resize`, `BoxFit.fill`).
+
+Neither is strictly better. On a 20:9 handset, `Fill` costs 16:9 content about a fifth of its
+width and 4:3 content a great deal more — so a viewer who wants the whole frame edge to edge asks
+for stretch, and a zoom does not serve them. The app shipped only the zoom for a long time, which
+is what prompted a user to write in asking for "stretch to allow full-screen viewing".
+
+**Every surface starts on Fit, and the initial configuration has to match the initial label.**
+It used to start on Fill, because the Windows native surface was configured with `panscan=1.0` —
+but the embedded surfaces never applied panscan at all, so they rendered letterboxed while the
+overlay's chip said "Fill". That label lied on every platform but one, and once the embedded path
+began honouring the mode the lie would have turned into a real default of *cropping the picture*,
+losing the top and bottom of 4:3 content on first play. Fit is also what Kotlin (`AspectMode.Fit`)
+and Swift (`.fit`) already defaulted to, so Windows now agrees with them rather than the reverse.
+`_aspectModeIndex` and the native `panscan` are two halves of one statement; changing either alone
+puts the chip out of step with the picture.
+
+**`keepaspect` is restored by every mode, not just set by Stretch.** The modes are cycled, so
+leaving Stretch has to undo it on the very next press; a branch that only sets what it needs
+leaves the picture distorted in `Fit`.
+
+**The embedded surface is framed by Flutter, not by mpv.** `media_kit`'s `Video` draws the texture
+with a `BoxFit`, so the mpv properties that frame the native surfaces never reach it — which is
+why `_AspectMode` carries both a `BoxFit` and the mpv properties on one object. The two surfaces
+swap on the same machine depending only on whether the stream is HDR, and a framing that changed
+with a stream's dynamic range would be a bug.
+
+## The display cutout
+
+**The chip's width is measured on Linux and hand-set on Windows.** The Lua OSD sizes it with
+`text_button_width`; the Windows GDI layout runs without a device context, so it carries
+`kNativeAspectChipWidth`, sized for the longest label in the cycle. `DrawTextButton` draws with
+`DT_SINGLELINE` and no `DT_NOCLIP`, so a chip too narrow for its label *clips* rather than
+overflowing visibly — adding a longer label than "Stretch" means revisiting that constant.
+Android and iOS size to content and need nothing. Pinned on the Lua side by
+`overlay_layout_test.lua`, which renders the shortest and longest labels and asserts the chip's
+edge actually moves.
+
+`HdrPlayerTheme` sets `android:windowLayoutInDisplayCutoutMode = shortEdges`. Without it the
+default mode letterboxes the whole window away from the camera notch **in landscape** — a black
+band down one edge, in the one orientation video is watched in, which reads as "the app won't use
+my whole screen" and is easy to mistake for an aspect-ratio problem.
+
+It is safe precisely because the Compose overlay insets itself with `safeDrawingPadding()`, whose
+`safeDrawing` set already includes the cutout: the picture extends behind the notch, the controls
+stay clear of it. API 35+ enforces edge-to-edge and handles this itself; the attribute is what
+covers API 26–34, which is most phones in use.
 
 ## Buffer presets
 

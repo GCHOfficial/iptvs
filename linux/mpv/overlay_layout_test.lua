@@ -154,6 +154,43 @@ local live_state = {
   epgNextStopMs = NOW_MS + 85 * 60 * 1000,
 }
 
+-- ===== 0. the aspect chip grows with its label ===============================
+--
+-- The chip is the one control whose width is driven by its text
+-- (`text_button_width`), and the label set now includes "Stretch" — nearly
+-- twice the width of "Fit". A chip that did not measure would clip it, so this
+-- renders the longest and shortest labels and checks the chip actually moves.
+--
+-- It matters here specifically because the Windows GDI overlay *cannot* measure
+-- (its layout runs without a device context) and carries a hand-set width
+-- instead; this is the surface that proves the measuring path works.
+
+local narrow_events = render_with({
+  title = 'CALLE 13 HD',
+  isLive = true,
+  liveSynced = true,
+  aspectLabel = 'Fit',
+})
+local wide_events = render_with({
+  title = 'CALLE 13 HD',
+  isLive = true,
+  liveSynced = true,
+  aspectLabel = 'Stretch',
+})
+
+local narrow_chip = find_text(narrow_events, 'Fit')
+local wide_chip = find_text(wide_events, 'Stretch')
+check(narrow_chip ~= nil, 'the aspect chip renders a short label')
+check(wide_chip ~= nil, 'the aspect chip renders the longest label')
+if narrow_chip and wide_chip then
+  check(math.abs(narrow_chip.y - wide_chip.y) < 1,
+    'the aspect chip keeps its row whatever the label')
+  -- The control row is laid out right-to-left, so a wider chip starts further
+  -- left. Equal x would mean a fixed width, i.e. a clipped "Stretch".
+  check(wide_chip.x < narrow_chip.x,
+    'a longer aspect label makes the chip wider rather than clipping')
+end
+
 -- ===== 1. live with a guide: the three-row EPG strip ==========================
 
 local events = render_with(live_state)
