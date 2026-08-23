@@ -8,9 +8,10 @@ import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import '../data/load_token.dart';
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
+import 'epg_guides.dart';
+import 'epg_matching.dart';
 import 'expiry.dart';
 import 'source.dart';
-import 'xmltv.dart';
 
 /// Container extensions an Xtream panel can be asked for on the live and
 /// timeshift endpoints. Most panels serve both.
@@ -73,6 +74,11 @@ class XtreamSource
   /// from `player_api.php`.
   final String? playlistExpiryHint;
 
+  /// Extra XMLTV guides layered *under* the panel's own `xmltv.php`, in
+  /// priority order. See [mergeEpgGuides]: a channel is served by the first
+  /// guide that carries it, never by two at once.
+  final List<String> extraEpgUrls;
+
   /// Advanced per-source catch-up overrides. When omitted, Xtream panels are
   /// treated as using the device wall clock.
   final String? catchupTimezone;
@@ -100,6 +106,7 @@ class XtreamSource
     required this.password,
     String? streamExtension,
     this.playlistExpiryHint,
+    this.extraEpgUrls = const [],
     this.catchupTimezone,
     this.catchupOffsetMinutes,
     this.catchupMaxDays,
@@ -256,12 +263,17 @@ class XtreamSource
   static String _timeshiftStart(DateTime start, CatchupCapability capability) =>
       formatCatchupTime(start, capability);
 
+  /// Unbatched fallback, kept for [Source]'s contract. Drains the same merged
+  /// feed [epgBatched] builds, so the two can't diverge.
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
-    final map = _tvgIdMap(channels);
-    if (map.isEmpty) return const [];
-    final bytes = await _download(_xmltvUri, kEpgWorkload);
-    return parseXmltv(bytes, map);
+    final feeds = _guideFeeds(channels, null);
+    if (feeds.isEmpty) return const [];
+    final out = <Programme>[];
+    await for (final batch in mergeEpgGuides(feeds)) {
+      out.addAll(batch);
+    }
+    return out;
   }
 
   @override
@@ -269,30 +281,38 @@ class XtreamSource
     List<Channel> channels, {
     LoadToken? token,
   }) {
-    final map = _tvgIdMap(channels);
-    if (map.isEmpty) return null;
-    return _streamEpg(map, token);
+    final feeds = _guideFeeds(channels, token);
+    return feeds.isEmpty ? null : mergeEpgGuides(feeds, token: token);
   }
 
-  Map<String, String> _tvgIdMap(List<Channel> channels) {
-    final map = <String, String>{};
-    for (final c in channels) {
-      final tvg = c.extra['tvgId']?.toString();
-      if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
-    }
-    return map;
+  /// The panel's own `xmltv.php` first, then any [extraEpgUrls] the user added
+  /// — a panel guide that covers only part of the catalog is the usual reason
+  /// to add one.
+  List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    final urls = <String>[
+      _xmltvUri.toString(),
+      for (final url in extraEpgUrls)
+        if (url.isNotEmpty) url,
+    ];
+    final tvgIds = buildTvgIdIndex(channels);
+    final names = epgNameIndexFor(channels, extraCount: urls.length - 1);
+    if (tvgIds.isEmpty && names.isEmpty) return const [];
+    return [
+      for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
+        xmltvGuideFeed(
+          url: urls[i],
+          download: (uri) => _download(uri, kEpgWorkload),
+          tvgIdToChannelId: tvgIds,
+          // The panel's own guide keeps exact `tvg-id` matching only — see
+          // [epgNameIndexFor].
+          nameToChannelIds: i == 0 ? const {} : names,
+          token: token,
+        ),
+    ];
   }
 
   Uri get _xmltvUri =>
       Uri.parse('$_base/xmltv.php?username=$username&password=$password');
-
-  Stream<List<Programme>> _streamEpg(
-    Map<String, String> map,
-    LoadToken? token,
-  ) async* {
-    final bytes = await _download(_xmltvUri, kEpgWorkload);
-    yield* parseXmltvBatched(bytes, map, token: token);
-  }
 
   @override
   Future<List<MediaCategory>> mediaCategories(ContentKind kind) async {
@@ -550,6 +570,9 @@ class XtreamSource
     final req = await operation.wait(_http.getUrl(uri));
     final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
+      // Drain before throwing: an unread body never returns its socket to the
+      // pool, so a guide URL that 404s leaks one per EPG refresh.
+      await resp.drain<void>();
       // redactUrl strips the username/password query params from the panel URL.
       throw StateError('HTTP ${resp.statusCode} from ${redactUrl(uri)}');
     }

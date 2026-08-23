@@ -46,6 +46,7 @@ export const SOURCE_SECRET_KEYS = [
   'password',
   'playlistUrl',
   'epgUrl',
+  'epgUrls',
   'userAgent',
 ];
 export const METADATA_SECRET_KEYS = ['tmdbApiKey', 'tvdbApiKey', 'tvdbPin', 'mdblistApiKey'];
@@ -56,6 +57,26 @@ export const METADATA_SECRET_KEYS = ['tmdbApiKey', 'tvdbApiKey', 'tvdbPin', 'mdb
 // entry whose value is NON-EMPTY — an empty secret value is dropped so it reads
 // as *absent* ("this value isn't being set"), which the preserve-on-absent push
 // path treats as "keep whatever the server has" rather than "blank it".
+// Secret keys the edit form does not render, carried forward from what was
+// already stored.
+//
+// `set_source_secret` REPLACES the payload wholesale, so any key the form
+// omits is destroyed for every paired device on its next pull. Today that is
+// `epgUrls` (extra EPG guides, editable only in the app): renaming a source in
+// the panel would otherwise silently delete guides added on a TV.
+//
+// Only *unrendered* keys are carried — a key the form shows reflects the form,
+// including a deliberate clearing — and only non-empty values, so an absent key
+// still reads as "not set" rather than as a blanking instruction.
+export function carryUnrenderedSecrets(secret, storedSecret, renderedKeys) {
+  const rendered = new Set(renderedKeys);
+  const out = { ...secret };
+  for (const [k, v] of Object.entries(storedSecret ?? {})) {
+    if (!rendered.has(k) && v) out[k] = v;
+  }
+  return out;
+}
+
 export function splitFields(fields, secretKeys) {
   const set = new Set(secretKeys);
   const broad = {};

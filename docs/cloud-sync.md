@@ -140,7 +140,7 @@ per-profile **content key (CK)** the server never sees in the clear.
 ### What is a secret
 
 `lib/data/secret_keys.dart` is the canonical split. Source secret keys:
-`{mac, username, password, playlistUrl, epgUrl, userAgent}`; metadata secret keys:
+`{mac, username, password, playlistUrl, epgUrl, epgUrls, userAgent}`; metadata secret keys:
 `{tmdbApiKey, tvdbApiKey, tvdbPin, mdblistApiKey}`. Everything else (`portal`, `host`,
 `playlistExpiryHint`, provider choice, `autoEnrich`, per-source `settings`) is broad. `portal`/
 `host` stay broad on purpose — they name the provider (so the panel and sources screen show a

@@ -1,9 +1,131 @@
-# Sources — subscription expiry and the M3U→Xtream upgrade
+# Sources — EPG guides, subscription expiry, and the M3U→Xtream upgrade
 
 Detail for two provider-layer areas whose rules are summarised in CLAUDE.md: how a subscription
 expiry is obtained per provider, and how an M3U source that is really an Xtream panel gets
 upgraded. Read this before touching `subscriptionExpiry()` on any `Source`, `lib/sources/expiry.dart`,
 `lib/sources/m3u_upgrade.dart`, or the expiry cache.
+
+## Multiple EPG guides per source
+
+A source has one guide by default — the provider's own (`xmltv.php` for Xtream, `get_epg_info`
+for Stalker, an explicit `epgUrl` or the playlist's `url-tvg` header for M3U). A user can add
+more in **Source settings → EPG guides**: extra XMLTV URLs that fill in the channels the guides
+above them do not cover.
+
+Storage is `fields['epgUrls']`, newline-separated, holding **only the additional** guides. The
+primary keeps its existing key, which is the whole reason for a new one: `epgUrl` is read as a
+single URL by every already-published build, and those builds pull this source from the cloud.
+Widening it in place would hand them a blob they would fetch as one URL and lose their guide
+over. It is a **secret** key (`secret_keys.dart`, and the strip in
+`20260823000000_epg_urls_secret.sql`) — a guide URL carries provider credentials as often as a
+playlist does.
+
+### Merging is per channel, not a row union
+
+`mergeEpgGuides` (`sources/epg_guides.dart`) consumes the guides in order and lets **the first
+guide that carries a channel own it**; later guides are filtered against those claims. Claims
+accumulate per guide and are merged in only once that guide is exhausted, so a guide is never
+filtered against itself.
+
+Concatenating the guides instead would be wrong, and quietly so. `programmes` rows are keyed by
+`(source_id, channel_id)` with no record of which guide wrote them, and `AppDatabase.nowNext`'s
+"now" half is a bare `start <= t AND stop > t` scan whose rows are folded into a map by channel
+id — **last row wins, arbitrarily**. Two guides covering one channel would therefore make its
+now-playing programme nondeterministic, flipping between them across refreshes, and would draw
+overlapping cells in the EPG grid.
+
+### Failure policy turns on whether the guide had yielded
+
+A guide that fails **before yielding anything** — refused, 404, unreadable gzip — has written
+nothing, so it is logged and skipped and the merge goes on. That matters more than it sounds: the
+case that motivates the whole feature is a *provider* guide that is broken or thin, with the
+top-up added to replace it. A hard-failing primary would block exactly that.
+
+A guide that fails **mid-feed** rethrows. Its batches are already inside the caller's transaction
+and cannot be taken back, so completing normally would commit a *truncated* guide as a whole one:
+`replaceEpgStream` would drop the previous guide and advance `epg_synced_at`, so a network drop
+80% of the way through a large guide would cost the user the complete one they had, with no retry
+for the whole refresh interval. Throwing rolls the transaction back and keeps the last good guide.
+
+If **every** guide fails without yielding, the last error is rethrown for the same reason: a
+normally-completed empty stream reads as a successful *empty* guide, and clearing the cache over
+a transient blip is the outcome to avoid.
+
+### Saving the list forces a refetch
+
+`_ensureEpg` skips the fetch while the cached guide is younger than its max age — right for a
+periodic refresh, wrong when the *set of guides* just changed, where it would leave a newly added
+guide invisible for hours and reading as a broken feature. So saving calls
+`AppDatabase.invalidateEpg`, which clears `epg_synced_at` and deliberately **keeps** the cached
+programmes: dropping them would blank every channel's EPG until the refetch lands, and for the
+whole retry interval if it fails, where keeping them means the worst case is the guide the user
+already had.
+
+The running `Source` still holds the old URL list, so the guides take effect when the source is
+next built — the same "applies on next load" contract the catch-up overrides have, and what the
+save confirmation says.
+
+### Stalker
+
+The portal's guide comes from `get_epg_info`, not XMLTV, so it joins the merge as a plain feed
+wrapping that call; only the top-ups go through `xmltvGuideFeed`. `epgBatched` returns null when
+there are no top-ups, keeping a portal-only source on the code path it has always taken.
+
+Two Stalker-specific points. Its channels carry **no `tvg-id`**, so an extra guide reaches them
+purely through name matching — on this provider that path is not a fallback, it is the only one.
+And third-party downloads use a separate `_downloadGuide`, never `_requestBytes`: the latter is
+the portal transport and sends the MAC cookie and the portal Bearer token, which must never reach
+an arbitrary user-supplied host. Only the emulated profile's `User-Agent` carries over, since
+some guide hosts reject a default one.
+
+### Matching: ids first, then names
+
+`sources/epg_matching.dart`. The historical path is exact — a guide's `<programme channel="…">`
+id looked up in a `tvg-id → channel id` map — and it is correct and cheap for a provider's own
+guide, where both sides come from the same panel. It contributes close to nothing for a
+**third-party** guide, which numbers its channels its own way: almost every id misses and the
+extra guide lands empty. So names fill the gap.
+
+**Name matching is for user-added guides only** (`epgNameIndexFor`); a provider's own guide stays
+on exact `tvg-id` matching. Its guide and its playlist come from the same panel, so their ids
+agree by construction and names would add only guesses — while turning it on there would silently
+change the EPG of every existing install on upgrade (a channel that had no guide can acquire one
+from a same-normalised-name channel, and since programmes are stored per `channel_id`, one guide
+entry claiming several rows multiplies the ingest). It would also put an O(channels) index build
+on the main isolate on every EPG refresh for users who added no guide at all, against a
+250k-channel baseline. Gated, that cost is paid only by those who opted in.
+
+`XmltvChannelResolver` settles claims over one streaming pass, which is enough because the XMLTV
+DTD fixes document order as `(channel*, programme*)`: every `<channel>` declaration is seen
+before the first `<programme>`, so the resolver can freeze a *globally* correct mapping on the
+first `resolve` call rather than re-reading a multi-hundred-MB guide. Rules, in order:
+
+1. A guide channel whose id is one of our `tvg-id`s claims that channel, outright.
+2. A guide channel whose *name* normalises onto one of ours claims it — but only if rule 1 left
+   it unclaimed, so a channel the guide already covers properly is never second-guessed.
+3. A channel contested by two guide channels goes to **neither**. Two names that normalise alike
+   are genuinely ambiguous, and picking by document order would be a coin flip rendered as fact.
+
+Matching is **exact after normalisation, never fuzzy**. Edit-distance matching would paint a
+channel with another channel's schedule, and wrong programme data is worse than none: the row
+looks authoritative, the catch-up window is computed from it, and nothing about it reads as a
+guess.
+
+Normalisation (`normalizeChannelName`) folds case, punctuation and diacritics — including the
+Romanian comma-below vs cedilla forms of `ș`/`ț`, which are distinct code points a playlist and
+a guide routinely disagree on — drops stream-quality tokens as whole words (`hd`, `fhd`, `4k`,
+`backup`, …, so `HDNet` and `Sharjah` survive intact), and strips a leading `RO:`/`UK |` country
+tag, which is ubiquitous in playlists and absent from every real guide. Parenthesised content is
+deliberately **kept**: `HBO (RO)` and `HBO (HU)` must not collapse into one key.
+
+One guide channel can claim **several** of ours — a playlist routinely carries the same channel
+as separate HD and SD entries, which share a schedule — but no more than `kMaxNameMatchGroup`
+(8). Beyond that a name is a generic label rather than a channel identity, and since programmes
+are stored per `channel_id`, an uncapped fan-out multiplies a ~10^6-programme guide into a
+multi-million-row ingest. The whole group is dropped rather than the first few kept: there is no
+principled way to pick the winners, and rule 3 already says an ambiguous match goes to nobody.
+Name matching is purely additive over the exact path, so the cap only ever limits what it
+*adds* — it can never take a guide away from a channel that had one.
 
 ## Subscription expiry
 

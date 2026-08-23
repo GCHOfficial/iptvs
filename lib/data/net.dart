@@ -505,6 +505,39 @@ String _redactUrlPath(String value) {
   return '$prefix/${path.replaceAll(RegExp(r'/+'), '/')}';
 }
 
+/// Whether [value] is usable as a provider/guide URL: parseable, http(s), with
+/// a non-empty host.
+///
+/// [requireScheme] decides how much this actually rejects, and the difference
+/// is larger than it looks. Without it the check is deliberately **very**
+/// lenient — prepending `http://` means `Uri` accepts almost any single token
+/// as a host (`nonsense` parses; so does `not a url`, whose spaces are
+/// percent-encoded into the authority). That is the correct trade for a
+/// *host/portal* field, where scheme-less input is supported syntax and a false
+/// rejection locks the owner out of saving an edit. It is the wrong trade for a
+/// full URL the user is expected to paste — an EPG guide locator — where
+/// there is no scheme-less convention to protect and accepting `nonsense`
+/// merely defers the failure to the next guide refresh.
+///
+/// **Normalises exactly the way the sources do before judging.** Both
+/// `XtreamSource._base` and `StalkerSource._base()` prepend `http://` when the
+/// user omitted a scheme, so `panel.example.com:8080` and `1.2.3.4:8080` are
+/// supported input, not mistakes. Validating the raw string rejected both:
+/// `Uri.tryParse` reads `panel.example.com` as the *scheme* (dots are legal
+/// there) and gives `1.2.3.4:8080` an empty host. That turned every
+/// scheme-less source into one the owner could no longer save an edit to —
+/// change the password, press Save, and the Host field they never touched
+/// errors out while the source itself still plays fine.
+bool looksLikeValidUrl(String value, {bool requireScheme = false}) {
+  final hasScheme =
+      value.startsWith('http://') || value.startsWith('https://');
+  if (requireScheme && !hasScheme) return false;
+  final normalised = hasScheme ? value : 'http://$value';
+  final uri = Uri.tryParse(normalised);
+  if (uri == null) return false;
+  return (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty;
+}
+
 /// Removes credentials from [url] so it is safe to surface in error messages,
 /// logs, and exported diagnostics.
 String redactUrl(Object url) {

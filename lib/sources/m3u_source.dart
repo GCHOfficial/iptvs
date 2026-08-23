@@ -8,10 +8,11 @@ import '../data/load_token.dart';
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import '../data/secret_locator_vault.dart' show hasSealedLocator;
+import 'epg_guides.dart';
+import 'epg_matching.dart';
 import 'expiry.dart';
 import 'source.dart';
 import 'source_identity.dart';
-import 'xmltv.dart';
 // For the Xtream-panel expiry probe in [M3uSource.subscriptionExpiry]. One-way:
 // `xtream_source.dart` does not import this file, so there is no cycle.
 import 'xtream_source.dart';
@@ -31,6 +32,12 @@ class M3uSource
   final String sourceId;
   final String playlistUrl;
   final String? epgUrl;
+
+  /// Extra XMLTV guides layered *under* [epgUrl]/`url-tvg`, in priority order.
+  /// See [mergeEpgGuides] for what "under" means: a channel is served by the
+  /// first guide that carries it, never by two at once.
+  final List<String> extraEpgUrls;
+
   final String? userAgent;
   final String? catchupTimezone;
   final int? catchupOffsetMinutes;
@@ -49,6 +56,7 @@ class M3uSource
     required this.sourceId,
     required this.playlistUrl,
     this.epgUrl,
+    this.extraEpgUrls = const [],
     this.userAgent,
     this.catchupTimezone,
     this.catchupOffsetMinutes,
@@ -79,7 +87,7 @@ class M3uSource
 
   @override
   SourceCapabilities get sourceCapabilities => SourceCapabilities(
-    epg: epgUrl != null
+    epg: (epgUrl != null || extraEpgUrls.isNotEmpty)
         ? CapabilityAvailability.supported
         : (_headerEpgUrl != null
               ? CapabilityAvailability.supported
@@ -155,14 +163,18 @@ class M3uSource
     );
   }
 
+  /// Unbatched fallback, kept for [Source]'s contract. Drains the same merged
+  /// feed [epgBatched] builds, so the two can't diverge in matching or merge
+  /// order — only in whether the result is held in memory at once.
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
-    final url = epgUrl ?? _headerEpgUrl;
-    if (url == null) return const [];
-    final map = _tvgIdMap(channels);
-    if (map.isEmpty) return const [];
-    final bytes = await _download(Uri.parse(url), kEpgWorkload);
-    return parseXmltv(bytes, map);
+    final feeds = _guideFeeds(channels, null);
+    if (feeds.isEmpty) return const [];
+    final out = <Programme>[];
+    await for (final batch in mergeEpgGuides(feeds)) {
+      out.addAll(batch);
+    }
+    return out;
   }
 
   @override
@@ -170,29 +182,40 @@ class M3uSource
     List<Channel> channels, {
     LoadToken? token,
   }) {
-    final url = epgUrl ?? _headerEpgUrl;
-    if (url == null) return null;
-    final map = _tvgIdMap(channels);
-    if (map.isEmpty) return null;
-    return _streamEpg(url, map, token);
+    final feeds = _guideFeeds(channels, token);
+    return feeds.isEmpty ? null : mergeEpgGuides(feeds, token: token);
   }
 
-  Map<String, String> _tvgIdMap(List<Channel> channels) {
-    final map = <String, String>{};
-    for (final c in channels) {
-      final tvg = c.extra['tvgId']?.toString();
-      if (tvg != null && tvg.isNotEmpty) map[tvg] = c.id;
-    }
-    return map;
-  }
-
-  Stream<List<Programme>> _streamEpg(
-    String url,
-    Map<String, String> map,
-    LoadToken? token,
-  ) async* {
-    final bytes = await _download(Uri.parse(url), kEpgWorkload);
-    yield* parseXmltvBatched(bytes, map, token: token);
+  /// The guides this source should ingest, in priority order: the playlist's
+  /// own (explicit [epgUrl] or its `url-tvg` header) first, then [extraEpgUrls].
+  ///
+  /// Empty — which both EPG entry points report as "no guide configured" — when
+  /// there is no URL, or when the channels offer nothing to match *on*. That
+  /// second test now accepts a name index as well as `tvg-id`s: a playlist
+  /// carrying no `tvg-id` at all used to skip its guide outright, and is
+  /// exactly the playlist a third-party guide is added for.
+  List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    final primary = epgUrl ?? _headerEpgUrl;
+    final hasPrimary = primary != null && primary.isNotEmpty;
+    final urls = <String>[
+      if (hasPrimary) primary,
+      for (final url in extraEpgUrls)
+        if (url.isNotEmpty && url != primary) url,
+    ];
+    if (urls.isEmpty) return const [];
+    final tvgIds = buildTvgIdIndex(channels);
+    final names = epgNameIndexFor(channels, extraCount: urls.length - 1);
+    if (tvgIds.isEmpty && names.isEmpty) return const [];
+    return [
+      for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
+        xmltvGuideFeed(
+          url: urls[i],
+          download: (uri) => _download(uri, kEpgWorkload),
+          tvgIdToChannelId: tvgIds,
+          nameToChannelIds: hasPrimary && i == 0 ? const {} : names,
+          token: token,
+        ),
+    ];
   }
 
   @override
@@ -363,6 +386,9 @@ class M3uSource
     }
     final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
+      // Drain before throwing: an unread body never returns its socket to the
+      // pool, so a guide URL that 404s leaks one per EPG refresh.
+      await resp.drain<void>();
       // redactUrl strips credentials some providers embed in the playlist URL.
       throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
     }

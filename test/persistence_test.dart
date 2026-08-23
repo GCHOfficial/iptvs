@@ -662,6 +662,47 @@ void main() {
       await db.close();
     });
 
+    test('invalidateEpg forgets the sync time but keeps the programmes', () async {
+      // Adding an EPG guide changes the *set* of guides, and `_ensureEpg` skips
+      // the fetch entirely while the cached guide is younger than its max age —
+      // so without this the new guide would be invisible for hours and read as
+      // a broken feature.
+      //
+      // The programmes stay: clearing them would blank every channel's EPG for
+      // however long the refetch takes, and for the whole retry interval if it
+      // fails, where keeping them means the worst case is the guide the user
+      // already had.
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+      );
+      await db.replaceEpg('src1', [
+        Programme(
+          channelId: 'ch1',
+          start: DateTime.utc(2024, 1, 1, 10),
+          stop: DateTime.utc(2024, 1, 1, 11),
+          title: 'A',
+        ),
+      ]);
+      expect(await db.lastEpgSynced('src1'), isNotNull);
+
+      await db.invalidateEpg('src1');
+
+      expect(await db.lastEpgSynced('src1'), isNull);
+      final kept = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: DateTime.utc(2024, 1, 1, 9),
+        to: DateTime.utc(2024, 1, 1, 12),
+      );
+      expect(kept, hasLength(1));
+      expect(kept.single.title, 'A');
+      await db.close();
+    });
+
     test(
       'replaceLibrary does not reset epg_synced_at on a repeat channel refresh',
       () async {

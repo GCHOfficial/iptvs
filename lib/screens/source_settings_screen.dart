@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
+import '../data/net.dart' show looksLikeValidUrl;
 import '../data/source_store.dart';
+import '../sources/epg_guides.dart' show kMaxEpgGuides;
 import '../sources/m3u_upgrade.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
@@ -93,7 +95,18 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       );
   String _query = '';
   String? _catchupError;
+  String? _epgError;
   bool _upgrading = false;
+
+  /// One controller per extra guide URL, in priority order.
+  ///
+  /// Seeded from the stored field and thereafter the source of truth for the
+  /// editor — rows are added and removed here, and only [_saveEpgGuides] writes
+  /// back. Kept as a growable list of controllers rather than a list of strings
+  /// so a row keeps its cursor and composing state while its neighbours change.
+  late final List<TextEditingController> _epgControllers = [
+    for (final url in _config.extraEpgUrls) TextEditingController(text: url),
+  ];
 
   @override
   void initState() {
@@ -107,6 +120,9 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     _catchupTimezoneController.dispose();
     _catchupOffsetController.dispose();
     _catchupDaysController.dispose();
+    for (final c in _epgControllers) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -206,6 +222,70 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       );
     }
     await _save(next);
+  }
+
+  /// The guide this source already has without any user configuration, named
+  /// for the read-only first row of the editor. Null when there is none, which
+  /// is an M3U playlist carrying neither an explicit EPG URL nor a `url-tvg`
+  /// header — there, a user-added guide is the *only* guide.
+  String? get _builtInGuideLabel => switch (_config.kind) {
+    SourceKind.xtream => "The panel's own guide (xmltv.php)",
+    SourceKind.stalker => 'The portal\'s own guide',
+    SourceKind.m3u =>
+      (_config.fields['epgUrl'] ?? '').isNotEmpty
+          ? 'The EPG URL set on this source'
+          : "The playlist's own url-tvg guide, if it has one",
+    SourceKind.demo => null,
+  };
+
+  void _addEpgGuide() {
+    setState(() => _epgControllers.add(TextEditingController()));
+  }
+
+  void _removeEpgGuide(int index) {
+    setState(() => _epgControllers.removeAt(index).dispose());
+  }
+
+  Future<void> _saveEpgGuides() async {
+    final urls = <String>[];
+    for (final controller in _epgControllers) {
+      final url = controller.text.trim();
+      if (url.isEmpty) continue; // a blank row is "not filled in yet"
+      if (!looksLikeValidUrl(url, requireScheme: true)) {
+        setState(
+          () => _epgError =
+              'Enter a valid URL starting with http:// or https://',
+        );
+        return;
+      }
+      // A duplicate would be silently dropped by the merge anyway (the second
+      // copy finds every channel already claimed), so say so rather than
+      // letting the user think it did something.
+      if (urls.contains(url)) {
+        setState(() => _epgError = 'That guide is already in the list.');
+        return;
+      }
+      urls.add(url);
+    }
+    final fields = <String, String>{..._config.fields};
+    if (urls.isEmpty) {
+      fields.remove('epgUrls');
+    } else {
+      fields['epgUrls'] = urls.join('\n');
+    }
+    await _save(_config.copyWith(fields: fields));
+    // Without this the new guide is invisible for up to `_epgMaxAge` — the
+    // refresh is skipped while the cached guide is still young, which is right
+    // for a periodic refresh and wrong when the set of guides just changed.
+    await widget.db.invalidateEpg(_config.id);
+    if (!mounted) return;
+    setState(() => _epgError = null);
+    ScaffoldMessenger.of(context).showSnackBar(
+      // Honest about the timing: the running `Source` still holds the old URL
+      // list, so the guides take effect when the source is next built — the
+      // same "applies on next load" contract the catch-up overrides above have.
+      const SnackBar(content: Text('EPG guides saved — applied on next reload')),
+    );
   }
 
   Future<void> _saveCatchupOverrides() async {
@@ -455,6 +535,112 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                                   icon: const Icon(Icons.save_outlined),
                                   label: const Text('Save catch-up overrides'),
                                 ),
+                              ),
+                            ),
+                            // Extra XMLTV guides. Here rather than on the
+                            // add/edit source form because it is an ongoing
+                            // per-source adjustment rather than part of setting
+                            // one up — and because Xtream and Stalker have no
+                            // EPG field on that form at all, while both can use
+                            // a top-up guide.
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'EPG guides',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 0, 6, 10),
+                              child: Text(
+                                'Extra XMLTV guides, used in order to fill in '
+                                'channels the guide above them does not cover. '
+                                'A channel is only ever served by one guide.',
+                                style: TextStyle(
+                                  color: AppColors.textLo,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            if (_builtInGuideLabel != null)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(6, 0, 6, 10),
+                                child: Row(
+                                  children: [
+                                    const Text(
+                                      '1. ',
+                                      style: TextStyle(
+                                        color: AppColors.textLo,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: Text(
+                                        _builtInGuideLabel!,
+                                        style: const TextStyle(
+                                          color: AppColors.textLo,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            for (var i = 0; i < _epgControllers.length; i++)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: _EpgGuideRow(
+                                  // Rebuild the row when its position changes,
+                                  // so removing row 2 of 3 renumbers row 3
+                                  // rather than leaving a stale label — and key
+                                  // by the controller so the surviving rows
+                                  // keep their state through the shuffle.
+                                  key: ObjectKey(_epgControllers[i]),
+                                  controller: _epgControllers[i],
+                                  position:
+                                      i + (_builtInGuideLabel == null ? 1 : 2),
+                                  onRemove: () => _removeEpgGuide(i),
+                                  onSubmitted: _saveEpgGuides,
+                                ),
+                              ),
+                            if (_epgError != null)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(6, 0, 6, 8),
+                                child: Text(
+                                  _epgError!,
+                                  style: const TextStyle(
+                                    color: AppColors.danger,
+                                  ),
+                                ),
+                              ),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  OutlinedButton.icon(
+                                    // The cap counts the built-in guide, so the
+                                    // editor offers one fewer row when there is
+                                    // one.
+                                    onPressed:
+                                        _epgControllers.length >=
+                                            kMaxEpgGuides -
+                                                (_builtInGuideLabel == null
+                                                    ? 0
+                                                    : 1)
+                                        ? null
+                                        : _addEpgGuide,
+                                    icon: const Icon(Icons.add),
+                                    label: const Text('Add guide'),
+                                  ),
+                                  FilledButton.icon(
+                                    onPressed: _saveEpgGuides,
+                                    icon: const Icon(Icons.save_outlined),
+                                    label: const Text('Save EPG guides'),
+                                  ),
+                                ],
                               ),
                             ),
                             // Only for an M3U source whose URL carries Xtream
@@ -815,6 +1001,57 @@ class _CategoryToggleRow extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// One editable extra-guide URL, with its position and a remove control.
+///
+/// A plain [Row] of Material controls rather than a [FocusableCard]: the field
+/// and the remove button are two separate stops, which is what lets a D-pad
+/// reach the button at all — wrapping the pair in one focusable card would make
+/// the row a single stop and leave no way to press it.
+class _EpgGuideRow extends StatelessWidget {
+  const _EpgGuideRow({
+    super.key,
+    required this.controller,
+    required this.position,
+    required this.onRemove,
+    required this.onSubmitted,
+  });
+
+  final TextEditingController controller;
+
+  /// This guide's place in the priority order, counting the built-in guide.
+  final int position;
+
+  final VoidCallback onRemove;
+  final Future<void> Function() onSubmitted;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Expanded(
+          child: TvTextField(
+            controller: controller,
+            hintText: 'http://.../guide.xml or .xml.gz',
+            label: 'Guide $position',
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => onSubmitted(),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 2),
+          child: IconButton(
+            onPressed: onRemove,
+            icon: const Icon(Icons.close),
+            tooltip: 'Remove guide $position',
+            color: AppColors.textLo,
+          ),
+        ),
+      ],
     );
   }
 }

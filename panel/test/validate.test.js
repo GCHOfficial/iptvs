@@ -2,22 +2,7 @@
 // (wired to `node --test test/` in package.json).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  validateSource,
-  scrubUrls,
-  friendlyError,
-  KIND_FIELDS,
-  splitFields,
-  kindHasSecret,
-  deviceProvisionState,
-  deviceNeedsKey,
-  SOURCE_SECRET_KEYS,
-  METADATA_SECRET_KEYS,
-  wasE2eeSeen,
-  markE2eeSeen,
-  acknowledgeDowngrade,
-  E2EE_SEEN_KEY,
-} from '../src/validate.js';
+import { E2EE_SEEN_KEY, KIND_FIELDS, METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, acknowledgeDowngrade, carryUnrenderedSecrets, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, markE2eeSeen, scrubUrls, splitFields, validateSource, wasE2eeSeen } from '../src/validate.js';
 
 // ---------------------------------------------------------- validateSource
 
@@ -99,7 +84,7 @@ test('KIND_FIELDS marks URL-bearing fields with isUrl', () => {
 test('secret-key registries mirror lib/data/secret_keys.dart', () => {
   assert.deepEqual(
     [...SOURCE_SECRET_KEYS].sort(),
-    ['epgUrl', 'mac', 'password', 'playlistUrl', 'userAgent', 'username'],
+    ['epgUrl', 'epgUrls', 'mac', 'password', 'playlistUrl', 'userAgent', 'username'],
   );
   assert.deepEqual(
     [...METADATA_SECRET_KEYS].sort(),
@@ -363,4 +348,30 @@ test('a missing storage (no localStorage at all) does not throw', () => {
   assert.equal(wasE2eeSeen('p1', null), false);
   assert.doesNotThrow(() => markE2eeSeen('p1', null));
   assert.doesNotThrow(() => acknowledgeDowngrade('p1', null));
+});
+
+test('carryUnrenderedSecrets keeps a stored key the form does not render', () => {
+  const out = carryUnrenderedSecrets(
+    { username: 'u', password: 'p' },
+    { username: 'old', password: 'old', epgUrls: 'http://a/g.xml' },
+    ['host', 'username', 'password'],
+  );
+  assert.equal(out.epgUrls, 'http://a/g.xml');
+  // A rendered key reflects the form, not the store.
+  assert.equal(out.username, 'u');
+});
+
+test('carryUnrenderedSecrets does not resurrect an emptied stored value', () => {
+  const out = carryUnrenderedSecrets({}, { epgUrls: '' }, []);
+  assert.equal('epgUrls' in out, false);
+});
+
+test('carryUnrenderedSecrets leaves the input untouched', () => {
+  const secret = { username: 'u' };
+  carryUnrenderedSecrets(secret, { epgUrls: 'x' }, []);
+  assert.deepEqual(secret, { username: 'u' });
+});
+
+test('carryUnrenderedSecrets tolerates a missing stored secret', () => {
+  assert.deepEqual(carryUnrenderedSecrets({ a: '1' }, null, []), { a: '1' });
 });

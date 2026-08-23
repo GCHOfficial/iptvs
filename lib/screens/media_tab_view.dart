@@ -13,6 +13,7 @@ import '../widgets/favorite_controls.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/image_utils.dart';
 import '../widgets/routed_focus_node.dart';
+import '../widgets/source_error_view.dart';
 import '../data/app_database.dart' show PlaybackPosition;
 import 'media_tab_controller.dart' show ContinueWatchingEntry;
 
@@ -416,22 +417,10 @@ class MediaTabView extends StatelessWidget {
   Widget _statusBody(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Couldn\'t load ${kind == ContentKind.movie ? 'movies' : 'series'}.\n$error',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: AppColors.textLo),
-              ),
-              const SizedBox(height: 16),
-              FilledButton(onPressed: onRetry, child: const Text('Try again')),
-            ],
-          ),
-        ),
+      final what = kind == ContentKind.movie ? 'movies' : 'series';
+      return SourceErrorView(
+        message: 'Couldn\'t load $what.\n$error',
+        onRetry: onRetry,
       );
     }
     final label = kind == ContentKind.movie ? 'movies' : 'series';
