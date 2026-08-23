@@ -41,19 +41,94 @@ nothing, so it is logged and skipped and the merge goes on. That matters more th
 case that motivates the whole feature is a *provider* guide that is broken or thin, with the
 top-up added to replace it. A hard-failing primary would block exactly that.
 
-A guide that fails **mid-feed** rethrows. Its batches are already inside the caller's transaction
-and cannot be taken back, so completing normally would commit a *truncated* guide as a whole one:
-`replaceEpgStream` would drop the previous guide and advance `epg_synced_at`, so a network drop
-80% of the way through a large guide would cost the user the complete one they had, with no retry
-for the whole refresh interval. Throwing rolls the transaction back and keeps the last good guide.
+A guide that fails **mid-feed** rethrows. Completing normally would commit a *truncated* guide as
+a whole one: `replaceEpgStream` would drop the previous guide and advance `epg_synced_at`, so a
+network drop 80% of the way through a large guide would cost the user the complete one they had,
+with no retry for the whole refresh interval. Throwing abandons the whole refresh and keeps the
+last good guide.
+
+The *reason* changed once and the rule did not. Batches used to be fed straight into the caller's
+open transaction, so a mid-feed failure genuinely could not be taken back. They now go through a
+[spool](#the-refresh-runs-behind-the-channel-list) first, so nothing is committed either way — but
+a truncated guide is still a truncated guide, and there is no way from inside the merge to tell
+how much of one arrived. Rethrowing stays correct; it is now conservative rather than forced.
 
 If **every** guide fails without yielding, the last error is rethrown for the same reason: a
 normally-completed empty stream reads as a successful *empty* guide, and clearing the cache over
 a transient blip is the outcome to avoid.
 
+### The refresh runs behind the channel list
+
+`LibraryRepository.load` returns as soon as the channels are ready and refreshes the guide
+afterwards. Awaiting it put the whole download and parse — 5–10 seconds with a single top-up guide
+— between the user and a channel list that was already in hand, on every forced reload.
+
+Backgrounding it was tried once before and reverted within the day, because it deadlocked. The
+mechanism is worth stating precisely, because nothing about it is visible from the call site:
+`AppDatabase.replaceEpgStream` holds **one write transaction** for the whole ingest (that is its
+atomicity contract, and it is right), and the batches it consumed were produced lazily — the first
+thing each guide does when the transaction pulls on it is an HTTP download. So the transaction
+stayed open across the network, on the single sqflite connection the entire app shares, and
+sqflite serialises *everything* on it: not just other writes but channel reads, now/next queries
+and favorite toggles too. Awaited, that was hidden behind the spinner the user was already
+watching. Unawaited it became a multi-second freeze, and switching source mid-ingest hung outright
+— `channel_list_focus_test` sat for ten minutes on sqflite's own
+`database has been locked for 0:00:10` warning. The lock also had **no upper bound**: a guide
+server that accepts a connection and then stalls held the whole application's database until the
+read timeout fired.
+
+Two pieces make it safe, and neither is optional on its own:
+
+* **`ProgrammeSpool` (`lib/data/programme_spool.dart`)** drains the merged guide to a temporary
+  file *before* any transaction opens. Fetch, decompress and parse happen with nothing blocked;
+  the transaction then spans local inserts only — bounded, deterministic, and with no network
+  inside it. Peak memory is one batch, the same bound the streaming parser already works to, so
+  this trades transient disk for a lock window rather than for RAM. Frames are length-prefixed
+  precisely so a truncated spool throws instead of replaying as a shorter guide, which
+  `replaceEpgStream` would commit as a complete one.
+* **`EpgIngestCoordinator` (`lib/data/epg_ingest.dart`)**, held on `AppDatabase` because the
+  contended resource is *that connection*, keeps one refresh at a time app-wide. Starting one
+  cancels its predecessor and **waits for it to actually stop** — cancellation is cooperative, so
+  "cancelled" and "no longer touching the database" are different moments and only the second is
+  safe to build on. `AppDatabase.close` **awaits** `shutdown()`, and that is not optional: an
+  ingest mid-transaction does not stop because the connection closed, so skipping the wait merely
+  moves it into `_db.close()`, which has no cancellation and logs nothing. A widget test that ended
+  while a guide was still being written hung there for its full ten-minute timeout, with only
+  sqflite's `database has been locked for 0:00:10` warning to go on. Waiting costs milliseconds —
+  the transaction is local, and the token has already stopped it feeding further batches.
+
+Because the list is now on screen before the guide, two things had to follow it. `AppDatabase`
+announces a replaced guide on `epgChanged` (carrying the source id — a background refresh for the
+source the user just *left* reaches the same stream, and re-reading for that one would blank the
+current source's now/next), which `LiveController` subscribes to; without it the new guide would
+sit in the database, unread, until the one-minute poll came round. And `LibraryRepository.load`
+decides staleness *before* scheduling rather than inside the refresh, so a load with nothing to do
+leaves `pendingEpgRefresh` null — the live status line reads that to append `· updating guide…`,
+and an already-fresh guide would otherwise flash the message for a frame on every load.
+
+### Two things the user can now see that they could not before
+
+**The rows are sized from what the source *says*, not only from what has arrived.** A channel row
+is 72 px without an EPG line and 112 px with one, and the guide now lands after the list is built —
+so a source's very first load would draw short rows and jump. `LiveController.expectsEpg` takes the
+source at its word while a refresh is running: Stalker and Xtream always report `supported`, M3U
+does when it has an EPG URL, and anything reporting `unknown` keeps the old wait-and-see behaviour
+rather than sizing rows tall for a guide that may never come. `_settleEpgRefresh` re-reads now/next
+*before* clearing the flag, or the rows would drop to 72 px for the frames between the two and rise
+again. `_resyncLiveRowExtent` still re-reveals the selection whenever the extent does change
+(docs/tv-navigation.md) — this reduces how often that happens rather than replacing it.
+
+**A guide that fails with nothing behind it says so.** A failed refresh retains the cached guide and
+is otherwise silent, which is right — except when there is no cached guide to retain, where "this
+source has no EPG" and "every guide URL is broken" look identical and only the second is actionable.
+`LibraryRepository.lastEpgRefreshFailed` records the verdict (a *superseded* refresh sets neither —
+it is not an outcome), and `LiveController.epgUnavailable` pairs it with an empty guide so the live
+status line reads `· guide unavailable`. Deliberately both conditions: a failure standing behind a
+cached guide is the retain policy working, not something to alarm anyone about.
+
 ### Saving the list forces a refetch
 
-`_ensureEpg` skips the fetch while the cached guide is younger than its max age — right for a
+`load` skips the fetch while the cached guide is younger than its max age — right for a
 periodic refresh, wrong when the *set of guides* just changed, where it would leave a newly added
 guide invisible for hours and reading as a broken feature. So saving calls
 `AppDatabase.invalidateEpg`, which clears `epg_synced_at` and deliberately **keeps** the cached

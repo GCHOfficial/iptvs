@@ -41,6 +41,47 @@ class _GatedRepo extends LibraryRepository {
   }
 }
 
+/// A repository whose *guide* refresh the test drives, rather than its load.
+///
+/// `load` returns immediately — these tests are about what the controller does
+/// with the refresh running behind the returned snapshot, which is the whole
+/// shape of the change: the channel list is on screen and the guide is not.
+class _EpgRepo extends LibraryRepository {
+  _EpgRepo({required super.source, required super.db});
+
+  final Completer<void> guide = Completer<void>();
+  bool failed = false;
+  ({Map<String, Programme> now, Map<String, Programme> next}) guideRows = (
+    now: const <String, Programme>{},
+    next: const <String, Programme>{},
+  );
+
+  @override
+  Future<void>? get pendingEpgRefresh => guide.future;
+
+  @override
+  bool get lastEpgRefreshFailed => failed;
+
+  @override
+  Future<LibrarySnapshot> load({bool forceRefresh = false}) async =>
+      _snapshot('loaded');
+
+  @override
+  Future<({Map<String, Programme> now, Map<String, Programme> next})>
+  nowNext() async => guideRows;
+}
+
+/// A source that will not say whether it carries a guide — the
+/// M3U-without-an-EPG-URL case, which reports `unknown`.
+class _UnknownCapabilitySource extends DemoSource {
+  @override
+  SourceCapabilities get sourceCapabilities => const SourceCapabilities(
+    epg: CapabilityAvailability.unknown,
+    catchup: CapabilityAvailability.unknown,
+    resolution: ResolutionCapability.unknown,
+  );
+}
+
 LibrarySnapshot _snapshot(String marker) => LibrarySnapshot(
   categories: const [],
   channels: [Channel(id: marker, name: marker)],
@@ -160,4 +201,107 @@ void main() {
       expect(notifications, notificationsBeforeDispose);
     },
   );
+
+  group('the guide refreshing behind the channel list', () {
+    late _EpgRepo epgRepo;
+    late LiveController epgController;
+
+    setUp(() {
+      epgRepo = _EpgRepo(source: DemoSource(), db: db);
+      epgController = LiveController(repo: epgRepo);
+    });
+
+    tearDown(() => epgController.dispose());
+
+    test('reports the refresh as running until it ends', () async {
+      await epgController.load();
+      expect(epgController.epgRefreshing, isTrue);
+
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+      expect(epgController.epgRefreshing, isFalse);
+    });
+
+    test('expects a guide from a source that says it carries one', () async {
+      // This is what holds the rows at their tall extent before the guide
+      // lands. Without it a source's first load draws 72 px rows and jumps to
+      // 112 px when the guide arrives.
+      await epgController.load();
+      expect(epgController.expectsEpg, isTrue);
+
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+      expect(
+        epgController.expectsEpg,
+        isFalse,
+        reason: 'once the refresh is over the real guide decides',
+      );
+    });
+
+    test('expects nothing from a source that reports unknown', () async {
+      // Taking an `unknown` source at its word would size every first load's
+      // rows tall and shrink them when no guide turned up — the same flip, in
+      // the other direction.
+      final unknown = _EpgRepo(source: _UnknownCapabilitySource(), db: db);
+      final controller = LiveController(repo: unknown);
+      addTearDown(controller.dispose);
+
+      await controller.load();
+      expect(controller.epgRefreshing, isTrue);
+      expect(controller.expectsEpg, isFalse);
+      unknown.guide.complete();
+    });
+
+    test('a failed refresh with no guide behind it is reported', () async {
+      // The case the user can act on: a wrong or dead guide URL looks exactly
+      // like a source that has no EPG.
+      epgRepo.failed = true;
+      await epgController.load();
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+
+      expect(epgController.epgUnavailable, isTrue);
+      expect(epgController.epgRefreshing, isFalse);
+    });
+
+    test('a failed refresh with a cached guide stays quiet', () async {
+      // Retaining the last good guide is the failure policy working, not
+      // something to alarm anyone about.
+      epgRepo
+        ..failed = true
+        ..guideRows = _nowNext('cached');
+      await epgController.load();
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+
+      expect(epgController.epgUnavailable, isFalse);
+    });
+
+    test('a successful refresh reports neither state', () async {
+      epgRepo.guideRows = _nowNext('fresh');
+      await epgController.load();
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+
+      expect(epgController.epgRefreshing, isFalse);
+      expect(epgController.epgUnavailable, isFalse);
+      expect(epgController.now.keys, ['fresh']);
+    });
+
+    test('a newer load clears a previous failure verdict', () async {
+      epgRepo.failed = true;
+      await epgController.load();
+      epgRepo.guide.complete();
+      await pumpEventQueue();
+      expect(epgController.epgUnavailable, isTrue);
+
+      // A retry must not open still showing the previous attempt's verdict.
+      final retry = _EpgRepo(source: DemoSource(), db: db);
+      final controller = LiveController(repo: retry);
+      addTearDown(controller.dispose);
+      await controller.load();
+      expect(controller.epgUnavailable, isFalse);
+      retry.guide.complete();
+    });
+  });
 }

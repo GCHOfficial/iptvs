@@ -109,6 +109,9 @@ class _EpgGridScreenState extends State<EpgGridScreen>
   final Set<String> _pendingBatch = {};
   bool _batchScheduled = false;
 
+  /// Watches for the cached guide being replaced under this screen.
+  StreamSubscription<String>? _guideLanded;
+
   static DateTime _floorToHalfHour(DateTime t) =>
       DateTime(t.year, t.month, t.day, t.hour, t.minute < 30 ? 0 : 30);
 
@@ -123,6 +126,15 @@ class _EpgGridScreenState extends State<EpgGridScreen>
       final tween = _panTween;
       if (tween != null) _hOffset.value = tween.value;
     });
+    // A row's programmes are read once and kept, which was safe while the guide
+    // was always settled before any list existed. `LibraryRepository.load` now
+    // refreshes it behind the channel list, so the grid can be opened *during*
+    // a refresh — and would then hold whatever it read (a stale guide, or an
+    // empty one on a first load) with no way to catch up short of backing out
+    // and re-entering.
+    _guideLanded = widget.repo.db.epgChanged.listen((sourceId) {
+      if (sourceId == widget.repo.source.id) _reloadLoadedRows();
+    });
     if (widget.channels.isNotEmpty) _ensureLoaded(widget.channels.first.id);
     // Open at "now" minus a little context.
     WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToNow());
@@ -130,6 +142,7 @@ class _EpgGridScreenState extends State<EpgGridScreen>
 
   @override
   void dispose() {
+    unawaited(_guideLanded?.cancel());
     _panController.dispose();
     _hOffset.dispose();
     _vController.dispose();
@@ -145,6 +158,22 @@ class _EpgGridScreenState extends State<EpgGridScreen>
     }
     _requested.add(channelId);
     _pendingBatch.add(channelId);
+    if (!_batchScheduled) {
+      _batchScheduled = true;
+      scheduleMicrotask(_runBatch);
+    }
+  }
+
+  /// Re-reads every row already on screen after the guide was replaced.
+  ///
+  /// Deliberately re-queries rather than clearing [_programmes] first: the rows
+  /// are replaced in place when the query returns, so a refresh does not blink
+  /// the whole grid through an empty state on its way to the new guide. Rows
+  /// never loaded are left alone — [_ensureLoaded] reads them when they scroll
+  /// into view, by which time they read the new guide anyway.
+  void _reloadLoadedRows() {
+    if (_programmes.isEmpty) return;
+    _pendingBatch.addAll(_programmes.keys);
     if (!_batchScheduled) {
       _batchScheduled = true;
       scheduleMicrotask(_runBatch);

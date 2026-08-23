@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -7,7 +8,8 @@ import 'app_database.dart';
 import 'diagnostics_log.dart';
 import 'load_token.dart';
 import 'metadata_provider.dart';
-import 'net.dart' show redactText;
+import 'net.dart' show formatBytes, redactText;
+import 'programme_spool.dart';
 
 class LibrarySnapshot {
   final List<Category> categories;
@@ -125,24 +127,73 @@ class LibraryRepository {
       token: token,
     );
 
-    // EPG is best-effort and time-sensitive — refresh on its own schedule, and
-    // never let an EPG failure break the channel list.
-    try {
-      await _ensureEpg(
-        snapshot.channels,
-        forceRefresh: forceRefresh,
-        token: token,
+    // EPG is best-effort and time-sensitive: the channel list does not depend
+    // on it, so it refreshes *behind* the returned snapshot rather than in
+    // front of it. A second guide costs a second download and parse, and
+    // awaiting that put 5-10 seconds of spinner between the user and a channel
+    // list that was already in hand.
+    //
+    // Backgrounding it was tried once before and reverted, because
+    // `replaceEpgStream` held one write transaction across every guide's
+    // *download*: on the single sqflite connection this app shares, that
+    // blocked all other database work for the length of the network fetch, and
+    // switching source mid-ingest deadlocked (`channel_list_focus_test` hung
+    // for ten minutes on sqflite's "database has been locked" warning). Two
+    // things make it safe now, and neither is optional:
+    //
+    //  * [ProgrammeSpool] drains the guide to a temporary file first, so the
+    //    transaction only ever spans local inserts — bounded, and with no
+    //    network inside it.
+    //  * [AppDatabase.epgIngest] holds one refresh at a time app-wide and waits
+    //    for a superseded one to stop before its replacement starts.
+    //
+    // Whether it is *worth* refreshing is decided here rather than inside the
+    // refresh, so a load that has nothing to do leaves [pendingEpgRefresh] null
+    // instead of handing the UI a future that completes immediately. The live
+    // status line reads that to say "updating guide", and a guide that was
+    // already fresh would otherwise flash the message for one frame on every
+    // load.
+    if (await _epgNeedsRefresh(forceRefresh)) {
+      unawaited(
+        _scheduleEpgRefresh(snapshot.channels, forceRefresh: forceRefresh),
       );
-    } catch (error) {
-      // Source may not provide EPG, or the call failed — keep the cached
-      // guide and just note the failure; retry happens on the next load.
-      DiagnosticsLog.instance.add(
-        'epg',
-        'EPG refresh failed; retaining cached guide: ${redactText(error.toString())}',
-      );
+    } else {
+      _pendingEpgRefresh = null;
     }
 
     return snapshot;
+  }
+
+  /// Whether the cached guide is old enough (or the load forced enough) to be
+  /// worth re-fetching.
+  Future<bool> _epgNeedsRefresh(bool forceRefresh) async {
+    if (forceRefresh) return true;
+    final last = await db.lastEpgSynced(source.id);
+    return last == null || DateTime.now().difference(last) > _epgMaxAge;
+  }
+
+  /// The background EPG refresh this repository last started, or null if it has
+  /// not started one.
+  ///
+  /// Exposed for tests and for any caller that genuinely needs the guide before
+  /// it can continue — [load] deliberately does not wait for it.
+  Future<void>? get pendingEpgRefresh => _pendingEpgRefresh;
+  Future<void>? _pendingEpgRefresh;
+
+  Future<void> _scheduleEpgRefresh(
+    List<Channel> channels, {
+    required bool forceRefresh,
+  }) {
+    // The token comes from the coordinator, not from [loadToken]: this outlives
+    // the `load()` that started it, and cancellation now means "a newer refresh
+    // has taken the slot", which is the coordinator's business rather than the
+    // load's.
+    final refresh = db.epgIngest.start(
+      source.id,
+      (token) => _refreshEpg(channels, forceRefresh: forceRefresh, token: token),
+    );
+    _pendingEpgRefresh = refresh;
+    return refresh;
   }
 
   Future<LibrarySnapshot> _loadChannels({
@@ -195,15 +246,56 @@ class LibraryRepository {
     );
   }
 
+  /// Whether the last completed guide refresh failed outright.
+  ///
+  /// A failed refresh is invisible by design — the cached guide is retained and
+  /// the channel list is untouched — which is right, except when there is no
+  /// cached guide to retain. "No EPG at all" and "every guide URL is broken"
+  /// then look identical on screen, and only the second is something the user
+  /// can act on. `LiveController` pairs this with an empty guide to say so.
+  ///
+  /// A *superseded* refresh sets neither verdict: it is not an outcome.
+  bool get lastEpgRefreshFailed => _lastEpgRefreshFailed;
+  bool _lastEpgRefreshFailed = false;
+
+  /// [_ensureEpg] wrapped in [load]'s failure policy, and the only place the
+  /// [lastEpgRefreshFailed] verdict is decided.
+  ///
+  /// Completes without an error in every case: the coordinator drops this
+  /// future, where a rejection would surface as an unhandled asynchronous
+  /// error rather than as anything a user could act on.
+  Future<void> _refreshEpg(
+    List<Channel> channels, {
+    required bool forceRefresh,
+    LoadToken? token,
+  }) async {
+    try {
+      await _ensureEpg(channels, forceRefresh: forceRefresh, token: token);
+      _lastEpgRefreshFailed = false;
+    } on LoadCancelledException {
+      // Superseded by a newer refresh — neither a success nor a failure, so the
+      // previous verdict stands rather than being overwritten by a non-event.
+      DiagnosticsLog.instance.add('epg', 'EPG refresh superseded');
+    } catch (error) {
+      // Source may not provide EPG, or the call failed — keep the cached
+      // guide and just note the failure; retry happens on the next load.
+      _lastEpgRefreshFailed = true;
+      DiagnosticsLog.instance.add(
+        'epg',
+        'EPG refresh failed; retaining cached guide: ${redactText(error.toString())}',
+      );
+    }
+  }
+
   Future<void> _ensureEpg(
     List<Channel> channels, {
     required bool forceRefresh,
     LoadToken? token,
   }) async {
-    final last = await db.lastEpgSynced(source.id);
-    final stale = last == null || DateTime.now().difference(last) > _epgMaxAge;
-    if (!forceRefresh && !stale) return;
-
+    // Staleness is the caller's call — [load] decides it before scheduling, and
+    // this is only reachable through that. Re-reading it here would be a second
+    // round trip to the same row for an answer that cannot have changed in the
+    // meantime.
     if (source is BatchedEpgSource) {
       // `is` doesn't promote across unrelated interfaces (Source and
       // BatchedEpgSource share no subtype relationship), hence the explicit
@@ -211,23 +303,34 @@ class LibraryRepository {
       final batchedSource = source as BatchedEpgSource;
       final batches = batchedSource.epgBatched(channels, token: token);
       if (batches != null) {
+        // Download, decompress and parse every guide to a temporary file
+        // **before** opening a transaction. See [ProgrammeSpool]: consumed
+        // directly, this stream would have held the app's only database
+        // connection for the length of the network fetch.
+        //
+        // A supersede propagates out of here rather than being caught: it is
+        // [_refreshEpg] that decides what a cancellation means, and swallowing
+        // it here recorded one as a successful guide.
+        final providerWatch = Stopwatch()..start();
+        final spool = await ProgrammeSpool.drain(batches);
+        providerWatch.stop();
         try {
-          final metrics = await db.replaceEpgStream(source.id, batches);
-          DiagnosticsLog.instance.recordIngestion(
-            scope: 'epg:${source.id}',
-            providerDuration: metrics.providerDuration,
-            databaseDuration: metrics.databaseDuration,
-          );
-        } on LoadCancelledException {
-          // Superseded by a newer load — not a real failure, so this stays
-          // out of `load()`'s outer catch (which would otherwise log it as a
-          // scary "EPG refresh failed" error). Keep the last-good guide;
-          // retry happens on the next load.
+          final metrics = await db.replaceEpgStream(source.id, spool.read());
           DiagnosticsLog.instance.add(
             'epg',
-            'EPG batch load superseded; retaining cached guide',
+            'guide staged for ${source.id}: ${spool.programmes} programmes '
+                'in ${spool.batches} batches, ${formatBytes(spool.bytes)} '
+                'spooled',
           );
+          DiagnosticsLog.instance.recordIngestion(
+            scope: 'epg:${source.id}',
+            providerDuration: providerWatch.elapsed,
+            databaseDuration: metrics.databaseDuration,
+          );
+        } finally {
+          await spool.dispose();
         }
+        db.notifyEpgChanged(source.id);
         return;
       }
     }
@@ -236,10 +339,13 @@ class LibraryRepository {
     final programmes = await source.epg(channels);
     providerWatch.stop();
     if (token?.isCancelled ?? false) {
-      // Superseded by a newer load — skip the stale guide write (the batched
-      // branch is already token-guarded). The previous guide stays intact with
-      // its epg_synced_at un-advanced, so the newer load still refreshes it.
-      return;
+      // Superseded by a newer refresh — skip the stale guide write. Thrown
+      // rather than returned so [_refreshEpg] can tell this apart from a
+      // guide that genuinely landed: returning normally recorded a supersede
+      // as a *success*, clearing any real failure verdict behind it. The
+      // previous guide stays intact with its epg_synced_at un-advanced, so
+      // the newer refresh still replaces it.
+      throw const LoadCancelledException();
     }
     // Always replace — a success-empty result (a source with no EPG data)
     // must still clear any stale cached programmes and advance
@@ -252,6 +358,7 @@ class LibraryRepository {
       providerDuration: providerWatch.elapsed,
       databaseDuration: databaseWatch.elapsed,
     );
+    db.notifyEpgChanged(source.id);
   }
 
   Future<({Map<String, Programme> now, Map<String, Programme> next})>

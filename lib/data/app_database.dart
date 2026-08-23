@@ -10,6 +10,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../sources/source.dart';
 import '../sources/source_identity.dart';
+import 'epg_ingest.dart';
 import 'load_token.dart';
 import 'secret_locator_vault.dart';
 
@@ -1035,6 +1036,33 @@ class AppDatabase {
   Stream<void> get favoritesChanged => _favoritesChanged.stream;
   final StreamController<void> _favoritesChanged =
       StreamController<void>.broadcast();
+
+  /// Fires when a source's cached guide has been replaced, carrying that
+  /// source's id.
+  ///
+  /// The EPG refresh runs behind `LibraryRepository.load`'s returned snapshot
+  /// (see [epgIngest]), so the guide lands *after* the channel list is already
+  /// on screen. Without this the live list would keep showing whatever now/next
+  /// it read before the refresh until its one-minute poll came round — up to a
+  /// minute of a visibly stale guide right after the user asked for a refresh.
+  Stream<String> get epgChanged => _epgChanged.stream;
+  final StreamController<String> _epgChanged =
+      StreamController<String>.broadcast();
+
+  /// Announces that [sourceId]'s guide has been replaced.
+  void notifyEpgChanged(String sourceId) {
+    if (!_epgChanged.isClosed) _epgChanged.add(sourceId);
+  }
+
+  /// The single slot every background EPG refresh runs in.
+  ///
+  /// It lives on the database rather than on `LibraryRepository` because the
+  /// resource being contended for is *this connection*: sqflite serialises all
+  /// work on it, repositories are built and discarded per source, and two
+  /// overlapping guide ingests would queue against each other with neither
+  /// aware the other exists. Everything sharing a database therefore shares the
+  /// slot, with no call site having to pass one around.
+  final EpgIngestCoordinator epgIngest = EpgIngestCoordinator();
 
   /// Fires when favorites were rewritten by something other than the user —
   /// today only the cloud pull, via [notifyFavoritesReplaced].
@@ -2367,8 +2395,14 @@ class AppDatabase {
   );
 
   Future<void> close() async {
+    // Awaited before the connection goes: an ingest mid-transaction does not
+    // stop because the database closed — `_db.close()` would simply block on it
+    // instead, with no cancellation and nothing in the log. See
+    // `EpgIngestCoordinator.shutdown`.
+    await epgIngest.shutdown();
     await _favoritesChanged.close();
     await _favoritesReplaced.close();
+    await _epgChanged.close();
     await _db.close();
   }
 }
