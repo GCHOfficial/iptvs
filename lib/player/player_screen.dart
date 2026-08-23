@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
+import 'buffer_preset.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
 import 'channel_owner.dart';
@@ -465,7 +466,13 @@ class PlayerScreen extends StatefulWidget {
     this.preferLinuxNative = false,
     this.preferWindowsEmbedded = false,
     this.iosEngineKey,
+    this.bufferPreset = BufferPreset.normal,
   });
+
+  /// How much media to hold ahead, chosen per source. Reaches ExoPlayer as a
+  /// name on the native `open` payload (its `LoadControl` is a build-time
+  /// argument) and mpv as extra properties in [_configureNativePlayer].
+  final BufferPreset bufferPreset;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -1116,6 +1123,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (widget.sourceName != null) 'sourceName': widget.sourceName,
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
+            'bufferPreset': widget.bufferPreset.storageName,
             // Android-only: iOS has no shared-engine adoption to ask for (see
             // docs/ios.md "Known parity gaps" — every AVPlayer open is a fresh
             // resolve, and an `IosSharedEngine` analogue is a deferred idea).
@@ -1733,6 +1741,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     Duration? resumeOverride,
   }) async {
     final native = await LinuxNativeSession.start(
+      bufferPreset: widget.bufferPreset,
       stream: stream,
       title: widget.title,
       sourceName: widget.sourceName,
@@ -2796,15 +2805,28 @@ class _PlayerScreenState extends State<PlayerScreen>
     NativePlayer platform,
     int? nativeWindowHandle,
   ) async {
+    // Layered over the base options rather than replacing them: the preset
+    // only carries cache depth, and `normal` carries nothing at all so an
+    // untouched source runs mpv's own defaults exactly as before.
+    final bufferOptions = mpvBufferOptions(widget.bufferPreset);
     final options = _isLive
-        ? kLiveMpvOptions
-        : const <String, String>{
+        ? {...kLiveMpvOptions, ...bufferOptions}
+        : <String, String>{
+            ...bufferOptions,
             // File-cache creation can fail for provider HTTP URLs on Windows,
             // and mpv still has the in-memory buffer configured above.
             'cache-on-disk': 'no',
             'demuxer-max-back-bytes': '48MiB',
             'network-timeout': '15',
           };
+    // Logged unconditionally, including `normal`. Gating it on the options
+    // being non-empty meant a diagnostics export could not tell "the user chose
+    // normal" from "the preset never reached the player" — which is exactly the
+    // question a buffering report asks.
+    _logPlayback(
+      'buffer preset=${widget.bufferPreset.storageName} '
+      'mpv=${bufferOptions.isEmpty ? 'defaults' : bufferOptions}',
+    );
 
     final videoOptions = nativeWindowHandle != null
         ? const <String, String>{

@@ -447,6 +447,94 @@ Read docs/ios.md before touching anything under `packages/iptvs_ios_player/` or
 engine's capability research (codec floor, the two open media_kit constraints), and the
 on-device test protocol.
 
+## Buffer presets
+
+Buffering depth is a per-source choice (`SourceConfig.settings['bufferPreset']`:
+`low`/`normal`/`high`, absent meaning normal), edited in **Source settings → Playback buffer**.
+It exists because the right depth is a property of the *link*, not of the app: a clean wired
+connection wants short buffers and instant zapping, a flaky or throttled one wants depth, and one
+default cannot serve both.
+
+Three presets rather than raw millisecond fields, deliberately. Four interacting durations is a
+knob people copy out of forum posts, and an invalid combination — a resume threshold above the
+stall watchdog's patience — is a reconnect loop we would then have to explain. The preset is also
+the only unit both engines can agree on: ExoPlayer takes four `LoadControl` durations, mpv takes
+cache seconds and a byte cap, and neither maps onto the other's numbers.
+
+### Only the sustained cushion moves
+
+This is the design, not an oversight. What absorbs network variance once playing is
+`minBufferMs`/`maxBufferMs`; the start gates (`bufferForPlaybackMs`,
+`bufferForPlaybackAfterRebufferMs`) decide how long a zap stares at black. Raising the gates to
+"buffer more" would cost the thing users notice while barely helping the thing they are trying to
+fix.
+
+It also cannot go far. A stream stuck below the resume threshold sits in `STATE_BUFFERING`, and
+`ReconnectPolicy.STALL_RECONNECT_MS` (8 s) of that reloads the source — the 4x margin that keeps
+an ordinary underrun from becoming a reconnect loop caps the resume threshold at 2 s, which
+`normal` and `high` already sit on. So `high` buys its stall resistance entirely from the
+cushion.
+
+On the mpv side the constraint does not apply — `cache-secs` is prefetch depth, not a start gate,
+since mpv begins playing as soon as it can decode — which is why the mpv `high` can afford to be
+proportionally much deeper than the ExoPlayer one.
+
+**The preset sets `cache-secs` and nothing else**, which is a correction worth recording because
+the obvious companion knob is a trap. `demuxer-max-bytes` looked like the natural way to bound
+that prefetch, but media_kit already owns it: `PlayerConfiguration.bufferSize` maps straight onto
+it, and this app sets it *per surface* — 64 MB for the fullscreen player, media_kit's own default
+for the preview. Driving it from the preset would replace two deliberate, different choices with
+one, would be a no-op on the surface whose default already matched, and on the VOD path would
+retune a cache sized for seek smoothness using a control whose UI talks about stability. The byte
+cap still bounds a deep `cache-secs` — prefetch stops at whichever limit comes first, degrading
+gracefully rather than growing without bound on a 2 GiB TV box.
+
+### `normal` means *exactly* as before
+
+On both engines. `ExoBufferPolicy.forPreset(NORMAL)` returns the four previously hardcoded
+numbers (pinned by name in `ExoBufferPolicyTest`), and `mpvBufferOptions(normal)` is an **empty
+map** so mpv keeps its own defaults rather than being handed a tuning that merely resembles them.
+An install that never touches the setting is unaffected, and returning the tile to Normal removes
+the key rather than storing it.
+
+### Where it applies
+
+- **ExoPlayer** — a name on the native `open` payload → `EXTRA_BUFFER_PRESET` → the engine
+  constructor. `LoadControl` is a build-time argument to `ExoPlayer.Builder`, so a preset change
+  reaches playback on the next *engine*, not the current one. `SharedEngine` therefore treats a
+  changed preset the way it treats changed headers — by building a fresh engine — or the preview
+  would silently keep the previous source's buffering.
+- **mpv** — merged over `kLiveMpvOptions` on the embedded/Windows path
+  (`_configureNativePlayer`), the preview (`LivePreviewController`), the Linux native session, and
+  Android's libmpv fallback (`MpvEngine` → `MpvController`, as a `cache-secs` option). All of them,
+  so the mpv surfaces on one machine buffer identically; which one runs is decided by whether the
+  stream is HDR on Wayland, or by whether ExoPlayer could decode it, and neither is something a
+  buffering choice should follow.
+  **The preview re-applies its options on every `start`, not just at player creation.**
+  `_createPlayer` runs once behind `_player ??=` and an ordinary `stop()` keeps that player alive,
+  so applying them only at creation meant the preview kept whichever preset it was first built
+  with: changing the setting and returning did nothing until an app restart, and previewing a
+  cross-source favorite ran on the previous source's buffering. These are plain mpv properties,
+  settable at runtime, so unlike ExoPlayer's `LoadControl` this needs no engine rebuild.
+- **A cross-source favorite uses its *owning* source's preset**
+  (`_bufferPresetForChannel`), the same rule its repository, EPG and reconnect already follow —
+  reading the active source's would apply one provider's setting to another provider's stream.
+- **iOS** — the same name on the same payload, parsed into `PlayerBufferPreset`
+  (`IptvsPlayerCore`) and applied as `AVPlayerItem.preferredForwardBufferDuration`. Held as a
+  property on `AvPlayerEngine` rather than passed to `load`, because the live reconnect watchdog
+  and "Go to live" both reload through `load`: a preset that survived only the first open would
+  revert to automatic buffering on the first reconnect, on exactly the flaky link it was raised
+  for. `.normal` leaves the property **unset** — AVFoundation's documented default (0) means "the
+  player picks an appropriate level", and that adaptive behaviour is what every build so far has
+  shipped, so writing a concrete duration in its place would change the default install while
+  claiming to preserve it. The parse and the preset→duration mapping are covered by the Core
+  package's `swift test` suite; the `AvPlayerEngine`/controller edits that consume them are not
+  compiled outside a macOS build.
+
+`ExoBufferPolicyTest` asserts every invariant for **every** preset. That is the point of the file
+now: the dangerous edit is no longer "someone changed a constant", it is "someone added a preset
+that looks reasonable in isolation and quietly violates the stall margin".
+
 ## The handoff's return leg
 
 Going *back* — fullscreen to preview — is the same output-surface transition as the claim, and it

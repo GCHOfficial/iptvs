@@ -43,6 +43,47 @@ public struct PlayerSubtitleSpec: Equatable, Sendable {
   }
 }
 
+/// How much media to hold ahead of playback — the per-source preset chosen in
+/// the app, mirrored here so one setting means the same thing on every surface.
+///
+/// Values match Dart's `BufferPreset` and Kotlin's, including the fallback:
+/// anything unrecognised — a name a newer app build wrote — is `.normal`,
+/// because degrading to the default is always safe and guessing is not.
+public enum PlayerBufferPreset: String, Sendable {
+  case low
+  case normal
+  case high
+
+  public init(name: String?) {
+    switch name?.lowercased() {
+    case "low": self = .low
+    case "high": self = .high
+    default: self = .normal
+    }
+  }
+
+  /// Seconds to hand `AVPlayerItem.preferredForwardBufferDuration`, or `nil` to
+  /// leave it at AVFoundation's automatic behaviour.
+  ///
+  /// `.normal` is deliberately `nil` rather than a number. The documented
+  /// default is `0`, meaning "the player picks an appropriate level", and that
+  /// adaptive choice is what every build so far has shipped — writing a
+  /// concrete duration in its place would silently change the default install
+  /// while claiming to preserve it, which is the one thing this preset must not
+  /// do. The same reason `mpvBufferOptions(.normal)` is an empty map.
+  ///
+  /// Apple's own warning applies to `.low`: a small value raises the chance of
+  /// a stall. That is exactly the trade the preset offers, and the app's hint
+  /// text says so.
+  public var preferredForwardBufferSeconds: Double? {
+    switch self {
+    case .low: return 3
+    case .normal: return nil
+    case .high: return 30
+    }
+  }
+}
+
 /// The parsed `open` method-call payload for the native iOS player.
 ///
 /// This exists in `Core` — Foundation-only, no Flutter or AVFoundation — for
@@ -87,6 +128,14 @@ public struct PlayerOpenRequest: Equatable, Sendable {
   public let headers: [String: String]
   public let isLive: Bool
 
+  /// How much media to hold ahead of playback, chosen per source in the app.
+  ///
+  /// The same three-way preset Android and mpv take, so one setting means the
+  /// same thing on every surface. See `docs/player.md` "Buffer presets" — in
+  /// particular why `.normal` must leave AVPlayer's automatic buffering alone
+  /// rather than pick a number that resembles it.
+  public let bufferPreset: PlayerBufferPreset
+
   /// VOD resume point in ms; `0` plays from the top. Never set for live.
   public let resumeMs: Int64
 
@@ -112,6 +161,7 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     sourceName: String? = nil,
     headers: [String: String] = [:],
     isLive: Bool = false,
+    bufferPreset: PlayerBufferPreset = .normal,
     resumeMs: Int64 = 0,
     canFavorite: Bool = false,
     isFavorite: Bool = false,
@@ -125,6 +175,7 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     self.sourceName = sourceName
     self.headers = headers
     self.isLive = isLive
+    self.bufferPreset = bufferPreset
     self.resumeMs = resumeMs
     self.canFavorite = canFavorite
     self.isFavorite = isFavorite
@@ -148,6 +199,9 @@ public struct PlayerOpenRequest: Equatable, Sendable {
     sourceName = PlayerOpenRequest.nonBlankString(map["sourceName"])
     headers = PlayerOpenRequest.parseHeaders(map["headers"])
     isLive = map["isLive"] as? Bool ?? false
+    bufferPreset = PlayerBufferPreset(
+      name: PlayerOpenRequest.string(map["bufferPreset"])
+    )
     resumeMs = max(0, PlayerOpenRequest.int64(map["resumeMs"]) ?? 0)
     canFavorite = map["canFavorite"] as? Bool ?? false
     isFavorite = map["isFavorite"] as? Bool ?? false

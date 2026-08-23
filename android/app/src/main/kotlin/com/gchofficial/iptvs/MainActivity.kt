@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.isTelevisionDevice
+import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -118,6 +119,7 @@ class MainActivity : FlutterActivity() {
                         url,
                         headers,
                         args["muted"] as? Boolean ?: true,
+                        BufferPreset.fromName(args["bufferPreset"] as? String),
                     )
                     result.success(true)
                 }
@@ -191,6 +193,13 @@ class MainActivity : FlutterActivity() {
                         putExtra(
                             HdrPlayerActivity.EXTRA_ADOPT_SHARED,
                             args["adoptShared"] as? Boolean ?: false,
+                        )
+                        // Per-source buffering. Without this the Activity reads
+                        // a null extra and builds every fullscreen engine on
+                        // NORMAL, so the setting only ever reached the preview.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_BUFFER_PRESET,
+                            args["bufferPreset"] as? String,
                         )
                         // VOD resume point (ms), 0 = play from the top.
                         putExtra(

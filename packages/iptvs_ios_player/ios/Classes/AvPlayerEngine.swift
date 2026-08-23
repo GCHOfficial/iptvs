@@ -139,6 +139,14 @@ final class AvPlayerEngine {
   private var timeObserver: Any?
   private var released = false
 
+  /// Applied to every `AVPlayerItem` this engine builds.
+  ///
+  /// A property rather than a `load` parameter because the live reconnect
+  /// watchdog and "Go to live" both reload through `load`, and a preset that
+  /// only survived the first open would quietly revert to automatic buffering
+  /// on the first reconnect — on exactly the flaky link the user raised it for.
+  var bufferPreset: PlayerBufferPreset = .normal
+
   init() {
     // Counted here rather than at the property initialiser so the increment and
     // the matching decrement in `release()` sit in the same file, one screen
@@ -186,6 +194,11 @@ final class AvPlayerEngine {
     if !headers.isEmpty { options[AvPlayerEngine.httpHeaderFieldsKey] = headers }
     let asset = AVURLAsset(url: assetURL, options: options.isEmpty ? nil : options)
     let item = AVPlayerItem(asset: asset)
+    if let seconds = bufferPreset.preferredForwardBufferSeconds {
+      // Left untouched for `.normal`, whose documented default (0) means
+      // "AVFoundation chooses" — see `PlayerBufferPreset`.
+      item.preferredForwardBufferDuration = seconds
+    }
     observeItem(item)
     player.replaceCurrentItem(with: item)
     player.play()

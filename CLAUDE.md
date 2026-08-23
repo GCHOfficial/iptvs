@@ -701,6 +701,30 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   *glyph*, never the button, whose filled state means focus. The native one round-trips state via
   Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
+- **Buffer depth is a per-source preset, and only the *sustained cushion* moves between the
+  presets.** `settings['bufferPreset']` (`low`/`normal`/`high`, absent = normal) reaches ExoPlayer
+  as a name on the native `open` payload — its `LoadControl` is a build-time argument, so
+  `SharedEngine` rebuilds the engine when the preset changes, exactly as it does for changed
+  headers — and mpv as **`cache-secs` only**, layered over `kLiveMpvOptions`
+  (`player/buffer_preset.dart`, applied on the embedded, preview, Windows-native, Linux-native and
+  Android-fallback paths). `demuxer-max-bytes` is deliberately left alone: media_kit already owns
+  it via `PlayerConfiguration.bufferSize`, and this app sets it *per surface*, so driving it from
+  the preset would override two deliberate different choices with one — and retune the VOD cache
+  (sized for seek smoothness) from a control whose UI talks about stability.
+  **The start gates deliberately do not move:** what absorbs network variance once playing is
+  `min`/`maxBufferMs`, while the gates decide how long a zap stares at black — and they cannot
+  rise far anyway, because a stream below the resume threshold sits in `STATE_BUFFERING` and
+  `ReconnectPolicy.STALL_RECONNECT_MS` (8 s) of that reloads the source, so the 4x margin caps the
+  resume threshold at 2 s. `normal` is byte-for-byte the previously hardcoded tuning on both
+  engines (the mpv map is *empty*), so an untouched install plays exactly as before.
+  iOS takes the same name on the same payload and applies it as
+  `AVPlayerItem.preferredForwardBufferDuration`, held on the engine (not passed to `load`) so a
+  reconnect or "Go to live" keeps it — a preset that survived only the first open would revert to
+  automatic buffering on exactly the flaky link it was raised for. **`normal` leaves that property
+  unset on purpose**: AVFoundation's default (0) means "the player chooses", and writing a concrete
+  duration in its place would change the default install while claiming to preserve it — the same
+  reason the mpv map for `normal` is empty. `ExoBufferPolicyTest` asserts every invariant for
+  **every** preset, which is the point now that the durations are user-selectable.
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,

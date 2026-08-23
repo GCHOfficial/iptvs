@@ -183,4 +183,65 @@ final class PlayerOpenRequestTests: XCTestCase {
     XCTAssertEqual(request?.canFavorite, true)
     XCTAssertEqual(request?.isFavorite, true)
   }
+
+  // MARK: - Buffer preset
+
+  func testBufferPresetParsesTheThreeNames() {
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "low"]))?.bufferPreset,
+      .low
+    )
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "normal"]))?.bufferPreset,
+      .normal
+    )
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "high"]))?.bufferPreset,
+      .high
+    )
+  }
+
+  /// An absent or unrecognised name — including one a newer app build wrote —
+  /// must degrade to the default rather than to an arbitrary preset.
+  func testBufferPresetFallsBackToNormal() {
+    XCTAssertEqual(PlayerOpenRequest(arguments: arguments([:]))?.bufferPreset, .normal)
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": ""]))?.bufferPreset,
+      .normal
+    )
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "enormous"]))?.bufferPreset,
+      .normal
+    )
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": 7]))?.bufferPreset,
+      .normal
+    )
+  }
+
+  func testBufferPresetIsCaseInsensitive() {
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "HIGH"]))?.bufferPreset,
+      .high
+    )
+  }
+
+  /// `.normal` must leave `preferredForwardBufferDuration` alone: AVFoundation's
+  /// documented default (0) means "the player chooses", and that adaptive
+  /// behaviour is what every build so far has shipped. Writing a concrete
+  /// duration in its place would change the default install while claiming to
+  /// preserve it.
+  func testNormalPresetLeavesAvFoundationAutomatic() {
+    XCTAssertNil(PlayerBufferPreset.normal.preferredForwardBufferSeconds)
+  }
+
+  func testForwardBufferGrowsWithThePreset() {
+    guard let low = PlayerBufferPreset.low.preferredForwardBufferSeconds,
+      let high = PlayerBufferPreset.high.preferredForwardBufferSeconds
+    else {
+      return XCTFail("low and high must both name a duration")
+    }
+    XCTAssertGreaterThan(low, 0)
+    XCTAssertGreaterThan(high, low)
+  }
 }

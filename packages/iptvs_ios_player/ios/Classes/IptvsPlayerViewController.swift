@@ -689,6 +689,9 @@ final class IptvsPlayerViewController: UIViewController {
     // the same instant `startBackstop` closes.
     videoBackstop.markLoaded()
     startWatchdogTicker()
+    // Set before the load so the first item gets it, and kept on the engine so
+    // every later reload (reconnect, "Go to live") keeps it too.
+    engine.bufferPreset = request.bufferPreset
     engine.load(url: url, headers: headers, subtitles: request.subtitles)
   }
 

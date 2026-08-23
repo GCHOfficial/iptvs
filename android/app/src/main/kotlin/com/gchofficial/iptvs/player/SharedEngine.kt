@@ -73,6 +73,9 @@ object SharedEngine {
     var url: String? = null
         private set
     private var headers: Map<String, String> = emptyMap()
+    // The preset the live engine was built with, so a change forces a
+    // rebuild rather than being silently ignored.
+    private var preset: BufferPreset = BufferPreset.NORMAL
 
     /** True while `HdrPlayerActivity` owns the engine's video output. */
     var adoptedByFullscreen = false
@@ -100,6 +103,7 @@ object SharedEngine {
         streamUrl: String,
         requestHeaders: Map<String, String>,
         muted: Boolean,
+        bufferPreset: BufferPreset = BufferPreset.NORMAL,
     ) {
         if (adoptedByFullscreen) {
             // Dart flows never preview while fullscreen owns the engine; refuse
@@ -108,7 +112,10 @@ object SharedEngine {
             return
         }
         val existing = engine
-        if (existing != null && headers == requestHeaders) {
+        // A changed preset needs a fresh engine for the same reason changed
+        // headers do: `LoadControl` is baked in at construction, so reusing the
+        // engine would silently keep the previous source's buffering.
+        if (existing != null && headers == requestHeaders && preset == bufferPreset) {
             url = streamUrl
             bindPreviewCallbacks(existing)
             previewSurface?.let { existing.attachPreviewSurface(it) }
@@ -119,11 +126,17 @@ object SharedEngine {
             // Headers are baked into the engine's HTTP data-source factory, so a
             // different set (source switch) needs a fresh engine.
             val state = PlayerUiState(title = "", isLive = true)
-            val fresh = ExoPlayerEngine(context.applicationContext, state, requestHeaders)
+            val fresh = ExoPlayerEngine(
+                context.applicationContext,
+                state,
+                requestHeaders,
+                bufferPreset,
+            )
             bindPreviewCallbacks(fresh)
             engine = fresh
             uiState = state
             headers = requestHeaders
+            preset = bufferPreset
             url = streamUrl
             previewSurface?.let { fresh.attachPreviewSurface(it) }
             fresh.load(streamUrl, emptyList())

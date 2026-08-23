@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/app_database.dart';
 import '../data/net.dart' show looksLikeValidUrl;
+import '../player/buffer_preset.dart';
 import '../data/source_store.dart';
 import '../sources/epg_guides.dart' show kMaxEpgGuides;
 import '../sources/m3u_upgrade.dart';
@@ -242,8 +243,20 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     setState(() => _epgControllers.add(TextEditingController()));
   }
 
-  void _removeEpgGuide(int index) {
-    setState(() => _epgControllers.removeAt(index).dispose());
+
+  Future<void> _cycleBufferPreset() async {
+    final next = nextBufferPreset(
+      bufferPresetFromName(_config.bufferPresetName),
+    );
+    final settings = <String, dynamic>{..._config.settings};
+    if (next == BufferPreset.normal) {
+      // Normal is the default, so store nothing — a source that never moved
+      // off it serializes exactly as it did before this setting existed.
+      settings.remove('bufferPreset');
+    } else {
+      settings['bufferPreset'] = next.storageName;
+    }
+    await _save(_config.copyWith(settings: settings));
   }
 
   Future<void> _saveEpgGuides() async {
@@ -279,6 +292,11 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     // for a periodic refresh and wrong when the set of guides just changed.
     await widget.db.invalidateEpg(_config.id);
     if (!mounted) return;
+    // Empty rows are deliberately **left in place**. Pruning them here looked
+    // tidier, but `_saveEpgGuides` also runs from a row's own Done key — so
+    // pressing Done in Guide 2 deleted the blank Guide 3 the user had just
+    // added and was about to fill in, with no explanation. An empty row costs
+    // nothing: it is skipped on save, and it is where the user was typing.
     setState(() => _epgError = null);
     ScaffoldMessenger.of(context).showSnackBar(
       // Honest about the timing: the running `Source` still holds the old URL
@@ -537,6 +555,19 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                                 ),
                               ),
                             ),
+                            const Padding(
+                              padding: EdgeInsets.fromLTRB(6, 20, 6, 8),
+                              child: Text(
+                                'Playback buffer',
+                                style: TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            _BufferPresetTile(
+                              preset: bufferPresetFromName(
+                                _config.bufferPresetName,
+                              ),
+                              onTap: _cycleBufferPreset,
+                            ),
                             // Extra XMLTV guides. Here rather than on the
                             // add/edit source form because it is an ongoing
                             // per-source adjustment rather than part of setting
@@ -590,16 +621,13 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
                                 child: _EpgGuideRow(
-                                  // Rebuild the row when its position changes,
-                                  // so removing row 2 of 3 renumbers row 3
-                                  // rather than leaving a stale label — and key
-                                  // by the controller so the surviving rows
-                                  // keep their state through the shuffle.
+                                  // Key by the controller so a surviving row
+                                  // keeps its state when another is pruned and
+                                  // the positions below it renumber.
                                   key: ObjectKey(_epgControllers[i]),
                                   controller: _epgControllers[i],
                                   position:
                                       i + (_builtInGuideLabel == null ? 1 : 2),
-                                  onRemove: () => _removeEpgGuide(i),
                                   onSubmitted: _saveEpgGuides,
                                 ),
                               ),
@@ -903,6 +931,58 @@ class _UpgradeToXtreamTile extends StatelessWidget {
   }
 }
 
+/// Cycles the per-source buffering preset, in the same one-focus-target shape
+/// as [_StreamFormatTile] — OK advances, so a D-pad needs no sub-menu.
+///
+/// Takes effect on the next playback start rather than immediately: ExoPlayer's
+/// `LoadControl` is a build-time argument, and mpv's cache options are applied
+/// when the player is configured. The hint says so rather than leaving the user
+/// to wonder why the current stream did not change.
+class _BufferPresetTile extends StatelessWidget {
+  final BufferPreset preset;
+  final VoidCallback onTap;
+
+  const _BufferPresetTile({required this.preset, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: onTap,
+      semanticsLabel:
+          'Playback buffer: ${bufferPresetLabel(preset)}. '
+          '${bufferPresetHint(preset)} Activate to change.',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.speed_outlined, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Buffer size: ${bufferPresetLabel(preset)}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    bufferPresetHint(preset),
+                    style: const TextStyle(
+                      color: AppColors.textLo,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StreamFormatTile extends StatelessWidget {
   final String? value;
   final VoidCallback onTap;
@@ -1005,18 +1085,27 @@ class _CategoryToggleRow extends StatelessWidget {
   }
 }
 
-/// One editable extra-guide URL, with its position and a remove control.
+/// One editable extra-guide URL, with its position and a clear affordance.
 ///
-/// A plain [Row] of Material controls rather than a [FocusableCard]: the field
-/// and the remove button are two separate stops, which is what lets a D-pad
-/// reach the button at all — wrapping the pair in one focusable card would make
-/// the row a single stop and leave no way to press it.
-class _EpgGuideRow extends StatelessWidget {
+/// **The clear is `TvTextField`'s own, not a sibling `IconButton`.** A Material
+/// icon button beside the field is focusable in the abstract, but it is not the
+/// pattern this app's TV surfaces use, and it inherits none of the work behind
+/// the built-in one: its own focus node, a focus indicator that paints from
+/// `hasFocus` rather than from `FocusManager.highlightMode` (which starts as
+/// `touch` on Android, so the ring can simply never appear), reachability with
+/// a single Right from the cell, and the Back-ladder rung that peels off it.
+/// Getting those right by hand, per control, is exactly the drift
+/// `docs/tv-navigation.md` exists to prevent.
+///
+/// So a guide is removed by clearing it and saving — an empty row is skipped on
+/// save and pruned from the editor afterwards. That also makes the affordance
+/// mean what it says everywhere else in the app rather than being a "remove"
+/// wearing a clear icon.
+class _EpgGuideRow extends StatefulWidget {
   const _EpgGuideRow({
     super.key,
     required this.controller,
     required this.position,
-    required this.onRemove,
     required this.onSubmitted,
   });
 
@@ -1025,33 +1114,42 @@ class _EpgGuideRow extends StatelessWidget {
   /// This guide's place in the priority order, counting the built-in guide.
   final int position;
 
-  final VoidCallback onRemove;
   final Future<void> Function() onSubmitted;
 
   @override
+  State<_EpgGuideRow> createState() => _EpgGuideRowState();
+}
+
+class _EpgGuideRowState extends State<_EpgGuideRow> {
+  @override
+  void initState() {
+    super.initState();
+    // The clear affordance appears and disappears with the text, so the row
+    // has to rebuild when the text changes — including changes this row did
+    // not cause (the clear itself).
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        Expanded(
-          child: TvTextField(
-            controller: controller,
-            hintText: 'http://.../guide.xml or .xml.gz',
-            label: 'Guide $position',
-            textInputAction: TextInputAction.done,
-            onSubmitted: (_) => onSubmitted(),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 2),
-          child: IconButton(
-            onPressed: onRemove,
-            icon: const Icon(Icons.close),
-            tooltip: 'Remove guide $position',
-            color: AppColors.textLo,
-          ),
-        ),
-      ],
+    return TvTextField(
+      controller: widget.controller,
+      hintText: 'http://.../guide.xml or .xml.gz',
+      label: 'Guide ${widget.position}',
+      textInputAction: TextInputAction.done,
+      onSubmitted: (_) => widget.onSubmitted(),
+      showClear: widget.controller.text.isNotEmpty,
+      onClear: widget.controller.clear,
     );
   }
 }

@@ -18,6 +18,7 @@ import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
 import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
+import '../player/buffer_preset.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
@@ -489,6 +490,20 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     );
   }
 
+
+  /// The buffering preset of the source that *owns* [channel].
+  ///
+  /// Mirrors [_repoForChannel]: a cross-source favorite plays through its own
+  /// source's repository, so it must play with its own source's buffering too
+  /// — reading the active source's would apply one provider's setting to
+  /// another provider's stream.
+  BufferPreset _bufferPresetForChannel(Channel channel) {
+    final cross = _crossSourceFavoriteFor(channel);
+    return bufferPresetFromName(
+      (cross?.config ?? widget.config).bufferPresetName,
+    );
+  }
+
   /// The repository that owns [channel] *in the current view* — the active
   /// source's, or a cross-source favorite's owning source.
   ///
@@ -709,7 +724,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       }
       final isWide = isWideLayout(MediaQuery.sizeOf(context));
       if (isWide && _tab == ContentKind.live) {
-        _preview.start(channel, from: _repoForChannel(channel));
+        _preview.start(
+          channel,
+          from: _repoForChannel(channel),
+          bufferPreset: _bufferPresetForChannel(channel),
+        );
       }
     });
   }
@@ -1268,6 +1287,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           channel,
           muted: !_deliberatePreview,
           from: playRepo,
+          bufferPreset: _bufferPresetForChannel(channel),
         );
     }
   }
@@ -1316,6 +1336,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               title: channel.name,
               stream: stream,
               sourceName: repo.source.name,
+              bufferPreset: _bufferPresetForChannel(channel),
               epgNow: epg.now,
               epgNext: epg.next,
               favoriteInitial: foreign
@@ -1563,6 +1584,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         title: channel.name,
         stream: playbackStream,
         sourceName: playRepo.source.name,
+        bufferPreset: _bufferPresetForChannel(channel),
         epgNow: epg.now,
         epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
@@ -1648,7 +1670,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         // preview was stopped only to free the connection/token for the other
         // engine (Linux native mpv / iOS AVPlayer), not because the user left
         // the channel.
-        await _preview.start(channel, muted: previewWasMuted, from: playRepo);
+        await _preview.start(
+          channel,
+          muted: previewWasMuted,
+          from: playRepo,
+          bufferPreset: _bufferPresetForChannel(channel),
+        );
       } else if (decision.seamless && _preview.stream != null) {
         await _preview.play();
         if (previewWasMuted) await _preview.setMuted(true);
@@ -1674,7 +1701,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               'channel=${channel.id}',
         );
         try {
-          await _preview.start(channel, muted: previewWasMuted, from: playRepo);
+          await _preview.start(
+            channel,
+            muted: previewWasMuted,
+            from: playRepo,
+            bufferPreset: _bufferPresetForChannel(channel),
+          );
         } catch (_) {}
       }
       messenger.showSnackBar(
@@ -1761,7 +1793,14 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     final previewRepo = _repoForChannel(channel);
     final foreign = !identical(previewRepo, widget.repo);
     final previousFocus = FocusManager.instance.primaryFocus;
-    unawaited(_preview.start(channel, muted: false, from: previewRepo));
+    unawaited(
+      _preview.start(
+        channel,
+        muted: false,
+        from: previewRepo,
+        bufferPreset: _bufferPresetForChannel(channel),
+      ),
+    );
     // Set when Play hands the preview to fullscreen — the handoff owns the
     // preview's lifecycle from there (stopped when fullscreen exits), so the
     // post-sheet cleanup below must leave it alone.
@@ -1884,6 +1923,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             title: '${channel.name} · ${programme.title}',
             stream: stream,
             sourceName: widget.repo.source.name,
+            bufferPreset: _bufferPresetForChannel(channel),
             epgNow: programme,
             // Catch-up is deliberately memoised under its own key rather than
             // the live channel's: an archive URL can be a different container
@@ -1958,6 +1998,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             title: item.title,
             stream: stream,
             sourceName: widget.repo.source.name,
+            // Movies/series are always the active source — only live rows can
+            // belong to another one.
+            bufferPreset: bufferPresetFromName(widget.config.bufferPresetName),
             playback: PlaybackContext(
               db: widget.repo.db,
               sourceId: widget.repo.source.id,

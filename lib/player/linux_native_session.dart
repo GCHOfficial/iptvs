@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../data/diagnostics_log.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
+import 'buffer_preset.dart';
 import 'mpv_options.dart';
 
 /// Native Linux presentation backend selected from the desktop session.
@@ -344,6 +345,7 @@ class LinuxNativeSession {
     required bool liveSynced,
     required String aspectLabel,
     Duration? resumeFrom,
+    BufferPreset bufferPreset = BufferPreset.normal,
   }) async {
     final backend = detectBackend();
     final executable = findExecutable();
@@ -379,6 +381,7 @@ class LinuxNativeSession {
         aspectLabel: aspectLabel,
         overlayScript: overlayScript,
         resumeFrom: resumeFrom,
+        bufferPreset: bufferPreset,
       );
       return session;
     } catch (error) {
@@ -403,6 +406,7 @@ class LinuxNativeSession {
     required String aspectLabel,
     required String overlayScript,
     Duration? resumeFrom,
+    BufferPreset bufferPreset = BufferPreset.normal,
   }) async {
     final temp = Directory.systemTemp;
     _socketPath = p.join(
@@ -480,7 +484,14 @@ class LinuxNativeSession {
     // before loadfile so it's in effect for the upcoming open, same ordering
     // as the embedded path's setProperty-before-Media.open.
     if (stream.isLive) {
-      for (final entry in kLiveMpvOptions.entries) {
+      // Layered the same way the embedded/Windows path layers them, so the two
+      // mpv surfaces on one machine buffer identically — the native window is
+      // chosen only by whether the stream is HDR on Wayland, which is not
+      // something the user's buffering choice should follow.
+      for (final entry in {
+        ...kLiveMpvOptions,
+        ...mpvBufferOptions(bufferPreset),
+      }.entries) {
         await command(['set_property', entry.key, entry.value]);
       }
     }

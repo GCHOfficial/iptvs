@@ -27,6 +27,7 @@ import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/player/player_screen.dart';
 import 'package:iptvs/player/resource_counters.dart';
+import 'package:iptvs/player/buffer_preset.dart';
 import 'package:iptvs/screens/live_preview_controller.dart';
 import 'package:iptvs/sources/demo_source.dart';
 
@@ -93,7 +94,11 @@ void main() {
     final repo = LibraryRepository(source: demo, db: db);
     final preview = LivePreviewController(repo: repo);
     for (var i = 0; i < cycles; i++) {
-      await preview.start(channel, muted: true);
+      await preview.start(
+        channel,
+        muted: true,
+        bufferPreset: BufferPreset.normal,
+      );
       await tester.pump(const Duration(milliseconds: 200));
       await preview.stop(clearSelection: true);
       await tester.pump(const Duration(milliseconds: 200));
