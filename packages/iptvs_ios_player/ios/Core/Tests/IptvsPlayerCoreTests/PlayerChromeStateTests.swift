@@ -365,7 +365,7 @@ final class PlayerChromeStateTests: XCTestCase {
 
   // MARK: - Aspect
 
-  func testAspectCyclesBetweenTheTwoGravitiesAVPlayerLayerHas() {
+  func testAspectCyclesThroughTheGravitiesAVPlayerLayerHas() {
     var state = PlayerChromeState()
     XCTAssertEqual(state.aspect, .fit)
     XCTAssertEqual(state.aspectLabel, "Fit")
@@ -373,7 +373,37 @@ final class PlayerChromeStateTests: XCTestCase {
     XCTAssertEqual(state.aspect, .fill)
     XCTAssertEqual(state.aspectLabel, "Fill")
     state.cycleAspect()
+    XCTAssertEqual(state.aspect, .stretch)
+    XCTAssertEqual(state.aspectLabel, "Stretch")
+    state.cycleAspect()
     XCTAssertEqual(state.aspect, .fit)
+  }
+
+  /// `fill` and `stretch` are different framings, not two names for one.
+  /// `fill` crops to fill and keeps the picture's shape; `stretch` distorts to
+  /// fill and keeps every pixel. Collapsing them — which is easy to do by
+  /// mapping both onto `resizeAspectFill` — silently removes the mode users ask
+  /// for by name.
+  func testFillAndStretchAreDistinctModes() {
+    XCTAssertNotEqual(PlayerAspectMode.fill, PlayerAspectMode.stretch)
+    XCTAssertNotEqual(
+      PlayerAspectMode.fill.label,
+      PlayerAspectMode.stretch.label
+    )
+  }
+
+  /// Every mode has to be reachable by pressing the button, and the cycle has
+  /// to return to where it started — a mode that only `CaseIterable` knows
+  /// about is a mode no user can select.
+  func testEveryAspectModeIsReachableByCycling() {
+    var seen: [PlayerAspectMode] = []
+    var mode = PlayerAspectMode.fit
+    for _ in PlayerAspectMode.allCases {
+      seen.append(mode)
+      mode = mode.next()
+    }
+    XCTAssertEqual(Set(seen), Set(PlayerAspectMode.allCases))
+    XCTAssertEqual(mode, .fit, "the cycle must close")
   }
 
   // MARK: - Seeding from the open payload

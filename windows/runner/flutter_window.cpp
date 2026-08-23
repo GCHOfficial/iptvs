@@ -932,6 +932,11 @@ constexpr int kNativeButtonWidth = 44;
 constexpr int kNativeButtonHeight = 40;
 constexpr int kNativeButtonRadius = 12;
 
+// Width of the aspect-mode text chip. Must fit the widest label the cycle can
+// show ("Stretch", drawn at 13px bold and centred with no internal padding),
+// with margins comparable to the "Go to live" chip beside it.
+constexpr int kNativeAspectChipWidth = 80;
+
 // The two floating surfaces. Named because their corners are rounded twice —
 // once by GDI's fill, once by [ApplyRoundRectAlphaMask] cutting the alpha —
 // and the two radii have to agree.
@@ -1090,9 +1095,17 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   };
   place(l.fullscreen, kBtn);
   place(l.info, kBtn);
-  // Wider than an icon button because it holds a word ("Fit"/"Fill"), the same
-  // height as everything else.
-  place(l.aspect, 56);
+  // Wider than an icon button because it holds a word, the same height as
+  // everything else.
+  //
+  // **Sized for the longest label in the cycle, which is "Stretch"** — the
+  // others are "Fit", "Fill", "16:9", "4:3". `DrawTextButton` renders with
+  // `DT_SINGLELINE` and no `DT_NOCLIP`, so a chip too narrow for its label
+  // clips the text rather than overflowing visibly, which is the quiet kind of
+  // wrong. The Lua OSD measures its chip (`text_button_width`); this layout
+  // runs without a device context, so the width is a constant that has to be
+  // revisited when a longer label joins the set.
+  place(l.aspect, kNativeAspectChipWidth);
   l.has_subtitles = !g_native_control_state.subtitle_tracks.empty();
   if (l.has_subtitles) {
     place(l.subtitles, kBtn);

@@ -670,9 +670,22 @@ class _PlayerScreenState extends State<PlayerScreen>
   // VOD resume plumbing (null when untracked / live).
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
-  // Index into [_aspectModes]. Starts at "Fill" to match the panscan=1.0 the
-  // native surface is configured with in [_configureNativePlayer].
-  int _aspectModeIndex = 1;
+  // Index into [_aspectModes]. **Starts at "Fit", and every surface is
+  // configured to match it.**
+  //
+  // It used to start at "Fill" because the Windows native surface was
+  // configured with `panscan=1.0`. The embedded surfaces never applied panscan
+  // at all, so they rendered letterboxed while the overlay claimed "Fill" — a
+  // label that lied on every platform but one. Now that the embedded path
+  // honours the mode (`_AspectMode.fit` → `Video(fit:)`), that lie would have
+  // become a real default of *cropping the picture*, silently discarding the
+  // top and bottom of 4:3 content on first play.
+  //
+  // Fit is also what the other players already default to (Kotlin
+  // `AspectMode.Fit`, Swift `.fit`), so this makes Windows agree with them
+  // rather than the reverse. The visible change is confined to the Windows
+  // native HDR surface, and it is toward the option that discards nothing.
+  int _aspectModeIndex = 0;
 
   static const List<double> _speedOptions = <double>[
     0.5,
@@ -683,11 +696,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     2.0,
   ];
 
+  /// The framing cycle, in the order every surface renders it.
+  ///
+  /// **`Fill` and `Stretch` are different and both are wanted.** `Fill` crops
+  /// to fill while keeping the picture's shape; `Stretch` distorts to fill and
+  /// keeps every pixel. On a 20:9 handset `Fill` costs 16:9 content about a
+  /// fifth of its width, and 4:3 content far more — so a viewer who wants the
+  /// whole frame edge to edge asks for stretch, and a zoom does not serve them.
   static const List<_AspectMode> _aspectModes = <_AspectMode>[
-    _AspectMode('Fit', '0.0', 'no'),
-    _AspectMode('Fill', '1.0', 'no'),
-    _AspectMode('16:9', '0.0', '16:9'),
-    _AspectMode('4:3', '0.0', '4:3'),
+    _AspectMode('Fit', '0.0', 'no', fit: BoxFit.contain),
+    _AspectMode('Fill', '1.0', 'no', fit: BoxFit.cover),
+    _AspectMode('Stretch', '0.0', 'no', keepaspect: 'no', fit: BoxFit.fill),
+    // A forced display aspect reshapes the picture itself, so the embedded
+    // surface still letterboxes whatever comes out of that.
+    _AspectMode('16:9', '0.0', '16:9', fit: BoxFit.contain),
+    _AspectMode('4:3', '0.0', '4:3', fit: BoxFit.contain),
   ];
 
   // Whether playback is *currently* on the native HWND surface. Starts from the
@@ -2002,6 +2025,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
         final mode = _aspectModes[_aspectModeIndex];
         await session.command(['set_property', 'panscan', mode.panscan]);
+        // Pushed by every mode, not only Stretch: the cycle has to undo it on
+        // the next press.
+        await session.command([
+          'set_property',
+          'keepaspect',
+          mode.keepaspect,
+        ]);
         await session.command([
           'set_property',
           'video-aspect-override',
@@ -2471,6 +2501,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       final properties = <String, String>{
         'panscan': mode.panscan,
         'video-aspect-override': mode.aspect,
+        // Restored explicitly by every mode, not just set by Stretch: the modes
+        // are cycled, so leaving Stretch has to undo it on the next press.
+        'keepaspect': mode.keepaspect,
       };
       for (final entry in properties.entries) {
         try {
@@ -2728,6 +2761,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_nativePlaybackLaunched) return _nativePlaybackOverlay();
     if (_controller == null) return _nativePlaybackOverlay();
     return PlayerVideoSurface(
+      videoFit: _aspectModes[_aspectModeIndex].fit,
       key: _embeddedSurfaceKey,
       player: _player,
       controller: _controller,
@@ -2854,7 +2888,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             'target-colorspace-hint': 'yes',
             'tone-mapping': 'auto',
             'hdr-compute-peak': 'yes',
-            'panscan': '1.0',
+            // Matches the initial `_aspectModeIndex` ("Fit"). These two must
+            // agree, or the overlay's chip names a mode the picture isn't in.
+            'panscan': '0.0',
             'sub-ass': 'yes',
             'sub-visibility': 'yes',
             'secondary-sub-visibility': 'yes',
@@ -3303,12 +3339,30 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 }
 
-/// A video framing mode for the Windows native surface. [panscan] maps to mpv's
-/// `panscan` (0 = letterbox/fit, 1 = crop to fill) and [aspect] to
-/// `video-aspect-override` (`no` clears any forced display aspect).
+/// A video framing mode.
+///
+/// [panscan] maps to mpv's `panscan` (0 = letterbox/fit, 1 = crop to fill),
+/// [aspect] to `video-aspect-override` (`no` clears any forced display aspect),
+/// and [keepaspect] to mpv's `keepaspect` (`no` is stretch — the picture is
+/// scaled on both axes independently).
+///
+/// [fit] is the same framing expressed for the **embedded** surface, which is
+/// composited by Flutter rather than by mpv: `media_kit`'s `Video` widget draws
+/// the texture with a `BoxFit`, so that is the lever there. Both are carried on
+/// one object so a mode cannot be defined for one surface and forgotten on the
+/// other — the two surfaces swap on the same machine (HDR decides which), and a
+/// framing that changed with the stream's dynamic range would be a bug.
 class _AspectMode {
   final String label;
   final String panscan;
   final String aspect;
-  const _AspectMode(this.label, this.panscan, this.aspect);
+  final String keepaspect;
+  final BoxFit fit;
+  const _AspectMode(
+    this.label,
+    this.panscan,
+    this.aspect, {
+    this.keepaspect = 'yes',
+    required this.fit,
+  });
 }

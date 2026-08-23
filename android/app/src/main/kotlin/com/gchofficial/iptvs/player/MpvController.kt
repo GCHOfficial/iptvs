@@ -152,18 +152,33 @@ class MpvController(
         val mpv = mpv ?: return
         when (mode) {
             AspectMode.Fit -> {
+                // Every branch restores `keepaspect` explicitly rather than
+                // assuming it: the modes are cycled, so leaving Stretch must
+                // undo it on the very next press.
+                mpv.setPropertyString("keepaspect", "yes")
                 mpv.setPropertyString("panscan", "0")
                 mpv.setPropertyString("video-aspect-override", "-1")
             }
             AspectMode.Fill -> {
+                mpv.setPropertyString("keepaspect", "yes")
                 mpv.setPropertyString("video-aspect-override", "-1")
                 mpv.setPropertyString("panscan", "1.0")
             }
+            // `keepaspect=no` is mpv's stretch: the picture is scaled to the
+            // window on both axes independently. Distinct from `panscan`, which
+            // crops to fill while preserving the shape.
+            AspectMode.Stretch -> {
+                mpv.setPropertyString("panscan", "0")
+                mpv.setPropertyString("video-aspect-override", "-1")
+                mpv.setPropertyString("keepaspect", "no")
+            }
             AspectMode.Ratio16x9 -> {
+                mpv.setPropertyString("keepaspect", "yes")
                 mpv.setPropertyString("panscan", "0")
                 mpv.setPropertyString("video-aspect-override", "16:9")
             }
             AspectMode.Ratio4x3 -> {
+                mpv.setPropertyString("keepaspect", "yes")
                 mpv.setPropertyString("panscan", "0")
                 mpv.setPropertyString("video-aspect-override", "4:3")
             }

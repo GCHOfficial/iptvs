@@ -875,15 +875,18 @@ class ExoPlayerEngine(
             16f / 9f
         }
         val ratio = when (mode) {
-            AspectMode.Fit, AspectMode.Fill -> videoRatio
+            AspectMode.Fit, AspectMode.Fill, AspectMode.Stretch -> videoRatio
             AspectMode.Ratio16x9 -> 16f / 9f
             AspectMode.Ratio4x3 -> 4f / 3f
         }
         frame.setAspectRatio(ratio)
-        frame.resizeMode = if (mode == AspectMode.Fill) {
-            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-        } else {
-            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        // ZOOM crops to fill and keeps the shape; FILL distorts to fill and keeps
+        // every pixel. media3 gives us both, and they are the two halves of what
+        // users mean by "make it fill the screen".
+        frame.resizeMode = when (mode) {
+            AspectMode.Fill -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            AspectMode.Stretch -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
     }
 

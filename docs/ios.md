@@ -919,9 +919,13 @@ separately, and no `v1`/`v2` split left in this design.
   re-evaluate the badge**, because the EDR headroom read is part of that same one-shot latch. A
   channel that badged SDR on the phone's own screen keeps reading SDR after routing to an
   HDR-capable AirPlay display, and vice versa, until the next reload.
-- **Aspect is Fit/Fill only** (`videoGravity` toggles between `.resizeAspect` and
-  `.resizeAspectFill`) — no Zoom/Stretch/4:3-force tier the Android Compose overlay's aspect
-  cycle offers.
+- **Aspect is Fit/Fill/Stretch only** — the three modes `videoGravity` expresses exactly
+  (`.resizeAspect` / `.resizeAspectFill` / `.resize`). The **16:9 and 4:3 force** modes the other
+  surfaces offer are the gap: an `AVPlayerLayer`'s only sizing knob is `videoGravity`, so forcing a
+  display aspect would need a hand-computed layer transform against the presentation size plus a
+  re-layout on every rotation — new geometry with no way to verify it short of a device. The rule
+  for inclusion is "maps onto a `videoGravity` exactly", which is why Stretch belongs here and the
+  forced ratios do not.
 - **Sidecar subtitles have no home on the AVPlayer engine.** `request.subtitles` (external
   sidecar tracks — the same ones the mpv fallback and every other platform accept) are received
   and currently ignored: composing them onto an `AVURLAsset` needs an `AVMutableComposition`, and
