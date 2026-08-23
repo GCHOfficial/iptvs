@@ -413,20 +413,22 @@ void main() {
       await db.close();
     });
 
-    test('cross-source read skips favorites whose channel is uncached',
-        () async {
-      final db = await AppDatabase.openAt(dbPath());
-      await db.replaceLibrary('src1', 'One', const [], const [
-        Channel(id: 'ch1', name: 'Alpha'),
-      ]);
-      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
-      // Favorited, but its catalog row is gone (favorites outlive a refresh).
-      await db.setFavorite('src1', ContentKind.live, 'ghost', true);
+    test(
+      'cross-source read skips favorites whose channel is uncached',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.replaceLibrary('src1', 'One', const [], const [
+          Channel(id: 'ch1', name: 'Alpha'),
+        ]);
+        await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+        // Favorited, but its catalog row is gone (favorites outlive a refresh).
+        await db.setFavorite('src1', ContentKind.live, 'ghost', true);
 
-      final all = await db.readFavoriteChannelsAcrossSources();
-      expect(all.map((e) => e.channel.id), ['ch1']);
-      await db.close();
-    });
+        final all = await db.readFavoriteChannelsAcrossSources();
+        expect(all.map((e) => e.channel.id), ['ch1']);
+        await db.close();
+      },
+    );
 
     test('cross-source read keeps locators sealed', () async {
       final db = await AppDatabase.openAt(dbPath());
@@ -538,41 +540,51 @@ void main() {
       await db.close();
     });
 
-    test('categories come back in the provider order, not alphabetical', () async {
-      // The pane shows `Source.categories()` on a fresh load and the cached
-      // read on every load after it. While the cached read sorted by title,
-      // those two disagreed: the category order — and, since Favorites derive
-      // their order from it, the favorites list — reshuffled between a forced
-      // refresh and the next app start.
-      final db = await AppDatabase.openAt(dbPath());
-      // Deliberately anti-alphabetical, so a title sort is distinguishable.
-      const provided = [
-        Category(id: 'z', title: 'Zulu'),
-        Category(id: 'a', title: 'Alpha'),
-        Category(id: 'm', title: 'Mike'),
-      ];
-      await db.replaceLibrary('src1', 'Src', provided, const [
-        Channel(id: 'ch1', name: 'One', categoryId: 'z'),
-      ]);
+    test(
+      'categories come back in the provider order, not alphabetical',
+      () async {
+        // The pane shows `Source.categories()` on a fresh load and the cached
+        // read on every load after it. While the cached read sorted by title,
+        // those two disagreed: the category order — and, since Favorites derive
+        // their order from it, the favorites list — reshuffled between a forced
+        // refresh and the next app start.
+        final db = await AppDatabase.openAt(dbPath());
+        // Deliberately anti-alphabetical, so a title sort is distinguishable.
+        const provided = [
+          Category(id: 'z', title: 'Zulu'),
+          Category(id: 'a', title: 'Alpha'),
+          Category(id: 'm', title: 'Mike'),
+        ];
+        await db.replaceLibrary('src1', 'Src', provided, const [
+          Channel(id: 'ch1', name: 'One', categoryId: 'z'),
+        ]);
 
-      expect(
-        (await db.readCategories('src1')).map((c) => c.id),
-        ['z', 'a', 'm'],
-      );
+        expect((await db.readCategories('src1')).map((c) => c.id), [
+          'z',
+          'a',
+          'm',
+        ]);
 
-      // A refresh that reorders the provider's list is reflected, rather than
-      // the first write's order sticking around in freed rowids.
-      await db.replaceLibrary('src1', 'Src', const [
-        Category(id: 'm', title: 'Mike'),
-        Category(id: 'z', title: 'Zulu'),
-        Category(id: 'a', title: 'Alpha'),
-      ], const [Channel(id: 'ch1', name: 'One', categoryId: 'z')]);
-      expect(
-        (await db.readCategories('src1')).map((c) => c.id),
-        ['m', 'z', 'a'],
-      );
-      await db.close();
-    });
+        // A refresh that reorders the provider's list is reflected, rather than
+        // the first write's order sticking around in freed rowids.
+        await db.replaceLibrary(
+          'src1',
+          'Src',
+          const [
+            Category(id: 'm', title: 'Mike'),
+            Category(id: 'z', title: 'Zulu'),
+            Category(id: 'a', title: 'Alpha'),
+          ],
+          const [Channel(id: 'ch1', name: 'One', categoryId: 'z')],
+        );
+        expect((await db.readCategories('src1')).map((c) => c.id), [
+          'm',
+          'z',
+          'a',
+        ]);
+        await db.close();
+      },
+    );
 
     test('a second source cannot disturb the first ones order', () async {
       // rowids are handed out across the whole table, so two sources interleave
@@ -598,20 +610,16 @@ void main() {
 
     test('media categories keep the provider order too', () async {
       final db = await AppDatabase.openAt(dbPath());
-      await db.replaceMediaLibrary(
-        'src1',
-        ContentKind.movie,
-        const [
-          MediaCategory(id: 'z', title: 'Zulu', kind: ContentKind.movie),
-          MediaCategory(id: 'a', title: 'Alpha', kind: ContentKind.movie),
-        ],
-        const [],
-      );
+      await db.replaceMediaLibrary('src1', ContentKind.movie, const [
+        MediaCategory(id: 'z', title: 'Zulu', kind: ContentKind.movie),
+        MediaCategory(id: 'a', title: 'Alpha', kind: ContentKind.movie),
+      ], const []);
 
       expect(
-        (await db.readMediaCategories('src1', ContentKind.movie)).map(
-          (c) => c.id,
-        ),
+        (await db.readMediaCategories(
+          'src1',
+          ContentKind.movie,
+        )).map((c) => c.id),
         ['z', 'a'],
       );
       await db.close();
@@ -687,6 +695,89 @@ void main() {
           const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
         );
         expect(await db.lastEpgSynced('src1'), t0);
+        await db.close();
+      },
+    );
+  });
+
+  group('AppDatabase series titles for episodes', () {
+    // The "Continue watching" rail on the series tab is built from episode
+    // rows, whose `title` is the *episode* name — so the rail read as a list of
+    // unrelated titles with no indication of which series each belonged to.
+    // The series is two hops up: episode -> season -> series, the shape every
+    // provider builds.
+    Future<void> seedSeries(AppDatabase db) async {
+      await db.replaceMediaLibrary('src', ContentKind.series, const [], const [
+        MediaItem(id: 'sr1', title: 'Caminandes', kind: ContentKind.series),
+      ]);
+      await db.replaceMediaLibrary('src', ContentKind.season, const [], const [
+        MediaItem(
+          id: 'sr1:s1',
+          title: 'Season 1',
+          kind: ContentKind.season,
+          parentId: 'sr1',
+          seasonNumber: 1,
+        ),
+      ], parentId: 'sr1');
+      await db.replaceMediaLibrary('src', ContentKind.episode, const [], const [
+        MediaItem(
+          id: 'e1',
+          title: 'Gran Dillama',
+          kind: ContentKind.episode,
+          parentId: 'sr1:s1',
+          seasonNumber: 1,
+          episodeNumber: 1,
+        ),
+        MediaItem(
+          id: 'e2',
+          title: 'Llamigos',
+          kind: ContentKind.episode,
+          parentId: 'sr1:s1',
+          seasonNumber: 1,
+          episodeNumber: 2,
+        ),
+      ], parentId: 'sr1:s1');
+    }
+
+    test('resolves the series two hops up from the episode', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await seedSeries(db);
+      expect(await db.readSeriesTitlesForEpisodes('src', ['e1', 'e2']), {
+        'e1': 'Caminandes',
+        'e2': 'Caminandes',
+      });
+      await db.close();
+    });
+
+    test('an episode whose ancestors are not cached is simply absent', () async {
+      // Both joins are inner, so a half-cached tree yields no row rather than a
+      // blank title — the caller falls back to the episode name.
+      final db = await AppDatabase.openAt(dbPath());
+      await seedSeries(db);
+      await db.replaceMediaLibrary('src', ContentKind.episode, const [], const [
+        MediaItem(
+          id: 'orphan',
+          title: 'Nowhere',
+          kind: ContentKind.episode,
+          parentId: 'season-never-cached',
+        ),
+      ], parentId: 'season-never-cached');
+      final titles = await db.readSeriesTitlesForEpisodes('src', [
+        'e1',
+        'orphan',
+      ]);
+      expect(titles['e1'], 'Caminandes');
+      expect(titles.containsKey('orphan'), isFalse);
+      await db.close();
+    });
+
+    test(
+      'never reaches across sources, and an empty list is a no-op',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await seedSeries(db);
+        expect(await db.readSeriesTitlesForEpisodes('other', ['e1']), isEmpty);
+        expect(await db.readSeriesTitlesForEpisodes('src', const []), isEmpty);
         await db.close();
       },
     );

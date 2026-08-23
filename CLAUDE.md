@@ -166,7 +166,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   controller notifications rebuild scoped `ListenableBuilder` subtrees, never the whole screen),
   `live_tab_view.dart` (live body: channel list, category pane, preview panel, catch-up +
   phone-preview sheets), `media_tab_view.dart` (movies/series grid, details sheet, series
-  browser), `live_focus_coordinator.dart` (the live D-pad selection model),
+  browser; its **"Continue watching" rail leads with the series name**, resolved
+  episode -> season -> series by `readSeriesTitlesForEpisodes` — an episode row's own
+  `title` is the *episode* name, so a rail of those read as unrelated titles. The tile has exactly
+  two single-line runs and its rail height is derived from that, so the episode name lives in the
+  semantics label rather than a third line), `live_focus_coordinator.dart` (the live D-pad selection model),
   `epg_grid_screen.dart` (the TV-guide timeline, selection-cursor model) — both navigation models
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
   (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`
@@ -618,7 +622,13 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `Next · HH:mm – HH:mm · title`); LIVE is a **top-bar badge**, and the badges read source, LIVE,
   resolution, HDR, fps, clock — in the compact labels every native uses (`1080p`, `HDR10`, `50fps`,
   **nothing** for SDR; Dart's pure `resolutionBadgeLabel`/`hdrBadgeLabel`/`fpsBadgeLabel`/
-  `sourceBadgeLabel`/`playerClockLabel`). The jump-to-live-edge control is a plain text chip reading
+  `sourceBadgeLabel`/`playerClockLabel`). **Control buttons are one geometry across the surfaces**
+  — 44x40 r12 in the Flutter pointer metrics (`EmbeddedOverlayMetrics`) and the Windows GDI overlay
+  (`kNativeButtonWidth`/`kNativeButtonHeight`/`kNativeButtonRadius`), 44dp on Android
+  (`PlayerDimens.ButtonSize`); a text button picks its own width, never its own height. The GDI
+  overlay additionally draws text with **`ANTIALIASED_QUALITY`, never ClearType** — it is a
+  per-pixel-alpha layered window, where ClearType's subpixel filter leaves colour fringes it never
+  writes alpha for (docs/player.md "Windows"). The jump-to-live-edge control is a plain text chip reading
   **"Go to live"** on every surface — never "LIVE", which duplicated the status badge greying beside
   it — and it **hands focus to play/pause before it disappears** (it is the one control that removes
   itself while focused; on a D-pad that stranded the remote until Back). Android Compose, iOS UIKit,
@@ -630,7 +640,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
   control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
   Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
-  **favorite star** in both overlays; the native one round-trips state via Intent extra + a
+  **favorite star**, and it is in **one slot on every surface**: the control row, immediately right
+  of "Go to live", at that row's ordinary button size (Kotlin `RightCluster`, iOS `clusterStack`,
+  the Windows GDI `BottomLayout::favorite`, the Flutter `cluster`, the Lua OSD). Windows/Flutter/Lua
+  used to draw it in the top bar among the badges at three different sizes. The accent tints the
+  *glyph*, never the button, whose filled state means focus. The native one round-trips state via
+  Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
