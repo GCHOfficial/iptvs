@@ -31,6 +31,7 @@ import 'package:flutter/foundation.dart'
         defaultTargetPlatform,
         TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:iptvs/screens/live_focus_coordinator.dart';
@@ -63,6 +64,7 @@ void main() {
     bool deliberate = true,
     String? previewChannelId,
     List<Channel>? visible,
+    void Function(LiveFocusCoordinator)? expose,
   }) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = size;
@@ -110,6 +112,7 @@ void main() {
       scroll.dispose();
       categoryScroll.dispose();
     });
+    expose?.call(focus);
 
     await tester.pumpWidget(
       MaterialApp(
@@ -232,6 +235,66 @@ void main() {
         await tester.tap(find.text('Channel 2'));
         await tester.pump();
         expect(played, ['c2']);
+      });
+    });
+  });
+
+  group('the favorite star cell', () {
+    // Regression: the accent ring was a `decoration` border, which *adds* its
+    // width to the cell — 20 (icon) + 12 (padding) + 4 (border) = 36. That
+    // fits the 44 px pointer target but not the ten-foot 32 px one, so the
+    // `Center` above squeezed the cell back to 32, the `Icon` collapsed 20 →
+    // 16, and a 20 px glyph paints from the *top-left* of the box it
+    // overflows: on a TV the star sat ~2 px down and right of the ring drawn
+    // around it. The ring is a `foregroundDecoration` now, which costs no
+    // layout.
+    final rowStar = find
+        .descendant(
+          of: find.byType(IndexedSemantics),
+          matching: find.byIcon(Icons.star_outline_rounded),
+        )
+        .first;
+
+    testWidgets('the ring does not move or shrink the glyph', (tester) async {
+      await asAndroid(() async {
+        late final LiveFocusCoordinator focus;
+        await pumpLiveTab(
+          tester,
+          size: const Size(960, 540),
+          expose: (f) => focus = f,
+        );
+
+        final size = tester.getSize(rowStar);
+        final center = tester.getCenter(rowStar);
+        expect(size, const Size(20, 20), reason: 'the icon is not squeezed');
+
+        // Right enters the row's favorite column, which draws the ring.
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+        expect(focus.channelColumn, ChannelRowColumn.favorite);
+
+        expect(tester.getSize(rowStar), size);
+        expect(tester.getCenter(rowStar), center);
+      });
+    });
+
+    testWidgets('the cell fits the ten-foot hit target', (tester) async {
+      await asAndroid(() async {
+        await pumpLiveTab(tester, size: const Size(960, 540));
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+
+        final target = LiveLayoutMetrics.forSize(
+          const Size(960, 540),
+          compactWideLayout: true,
+        ).favoriteTargetSize;
+        final cell = tester
+            .renderObjectList<RenderBox>(
+              find.ancestor(of: rowStar, matching: find.byType(Container)),
+            )
+            .first;
+        expect(cell.size.width, lessThanOrEqualTo(target));
+        expect(cell.size.height, lessThanOrEqualTo(target));
       });
     });
   });

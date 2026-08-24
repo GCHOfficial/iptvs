@@ -2023,6 +2023,19 @@ class _ChannelTileState extends State<_ChannelTile> {
                     // 56 px tall and can't hold 44, so it keeps 32. The
                     // decorated cell inside stays its natural size, so the
                     // accent ring doesn't balloon with the target.
+                    //
+                    // **The ring is painted, not laid out** — same reason as the
+                    // row body's, and here it was load-bearing rather than
+                    // cosmetic. As a `decoration` border it *added* 4 px to the
+                    // cell (20 icon + 12 padding + 4 border = 36), which fits
+                    // the 44 px target but not the ten-foot 32 px one: the
+                    // `Center` above then squeezed the cell back to 32, the
+                    // `Icon` collapsed 20 → 16, and a 20 px glyph paints from
+                    // the *top-left* of the box it overflows — so on a TV the
+                    // star sat ~2 px down and right of the ring drawn around it.
+                    // With the ring in `foregroundDecoration` the cell is 32 in
+                    // both states, fits the ten-foot target exactly, and the
+                    // glyph stays centred.
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: onToggleFavorite,
@@ -2038,13 +2051,18 @@ class _ChannelTileState extends State<_ChannelTile> {
                               borderRadius: BorderRadius.circular(
                                 AppRadius.tile,
                               ),
-                              border: favoriteCursor && listFocused
-                                  ? Border.all(
+                            ),
+                            foregroundDecoration: favoriteCursor && listFocused
+                                ? BoxDecoration(
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadius.tile,
+                                    ),
+                                    border: Border.all(
                                       color: AppColors.accent,
                                       width: 2,
-                                    )
-                                  : null,
-                            ),
+                                    ),
+                                  )
+                                : null,
                             child: Icon(
                               favorite
                                   ? Icons.star_rounded
