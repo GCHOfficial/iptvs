@@ -37,7 +37,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/screens/live_focus_coordinator.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/sources/source.dart';
-import 'package:iptvs/theme.dart' show kWideLayoutMinWidth;
+import 'package:iptvs/theme.dart' show AppColors, kWideLayoutMinWidth;
 
 void main() {
   setUpAll(() => debugDisableNetworkChannelLogos = true);
@@ -275,6 +275,42 @@ void main() {
 
         expect(tester.getSize(rowStar), size);
         expect(tester.getCenter(rowStar), center);
+      });
+    });
+
+    // The same property `channel_list_focus_test.dart` asserts — but that file
+    // builds a real preview player, so 22 of its 23 tests skip on any machine
+    // without libmpv and the whole thing runs only on CI. Reading the ring here
+    // too means a change that moves it back onto `decoration` fails on a
+    // developer's own `flutter test`, not two pushes later.
+    testWidgets('the ring is painted, not laid out', (tester) async {
+      await asAndroid(() async {
+        late final LiveFocusCoordinator focus;
+        await pumpLiveTab(
+          tester,
+          size: const Size(960, 540),
+          expose: (f) => focus = f,
+        );
+
+        Border? ring() {
+          final cell = tester.widget<Container>(
+            find.ancestor(of: rowStar, matching: find.byType(Container)).first,
+          );
+          expect(
+            (cell.decoration as BoxDecoration?)?.border,
+            isNull,
+            reason: 'a decoration border would inset the glyph',
+          );
+          return (cell.foregroundDecoration as BoxDecoration?)?.border
+              as Border?;
+        }
+
+        expect(ring(), isNull, reason: 'the cursor starts on the row body');
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+        expect(focus.channelColumn, ChannelRowColumn.favorite);
+        expect(ring()?.top.color, AppColors.accent);
       });
     });
 

@@ -654,15 +654,19 @@ void main() {
                   w.icon == Icons.star_outline_rounded),
         ),
       );
-      // The star cell is the icon's nearest enclosing Container; its border is
-      // the intra-row cursor's accent ring.
+      // The star cell is the icon's nearest enclosing Container, and the
+      // intra-row cursor's accent ring is its **foreground** decoration — a
+      // `decoration` border is reserved as padding, which squeezed the cell
+      // below the ten-foot hit target and pushed the glyph off its own centre
+      // (see `live_tab_layout_test.dart`).
       Color? starBorderOf(String name) {
         final container = tester.widget<Container>(
           find
               .ancestor(of: starIconIn(name), matching: find.byType(Container))
               .first,
         );
-        final border = (container.decoration as BoxDecoration?)?.border;
+        final border =
+            (container.foregroundDecoration as BoxDecoration?)?.border;
         return (border as Border?)?.top.color;
       }
 
