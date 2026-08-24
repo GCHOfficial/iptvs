@@ -153,4 +153,28 @@ void main() {
       }
     });
   });
+
+  group('formatBytes', () {
+    // These strings reach the user: a rejected download surfaces its exception
+    // text in the source error body and in the exportable log. "exceeds
+    // 134217728 bytes" says nothing about how far over the limit you are.
+    test('reads the way a person would say it', () {
+      expect(formatBytes(512), '512 B');
+      expect(formatBytes(1024), '1 KB');
+      expect(formatBytes(1536), '1.5 KB');
+      expect(formatBytes(128 * 1024 * 1024), '128 MB');
+      expect(formatBytes(201283455), '192 MB');
+      expect(formatBytes(1822576729), '1.7 GB');
+    });
+
+    test('keeps large values readable rather than precise', () {
+      // Three significant figures is plenty for "is this over the limit".
+      expect(formatBytes(1500 * 1024 * 1024), '1.5 GB');
+      expect(formatBytes(105 * 1024 * 1024), '105 MB');
+    });
+
+    test('never runs past the largest unit it knows', () {
+      expect(formatBytes(9999 * 1024 * 1024 * 1024), endsWith('GB'));
+    });
+  });
 }

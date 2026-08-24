@@ -382,15 +382,41 @@ Future<void> _consumeWithTimeouts(
   return completer.future;
 }
 
+/// Byte counts as a human reads them.
+///
+/// These numbers reach the user — a rejected download surfaces its exception
+/// text in the source error body and the exportable log — and "exceeds
+/// 134217728 bytes" tells someone nothing about how far over they are or what
+/// to do. `192 MB` against `128 MB` is immediately actionable.
+String formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  const units = ['KB', 'MB', 'GB'];
+  var value = bytes / 1024;
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final rounded = value >= 100 || value == value.roundToDouble()
+      ? value.round().toString()
+      : value.toStringAsFixed(1);
+  return '$rounded ${units[unit]}';
+}
+
 void _checkContentLength(int contentLength, int maximum, String name) {
   if (contentLength >= 0 && contentLength > maximum) {
-    throw HttpWorkloadException('$name Content-Length exceeds $maximum bytes');
+    throw HttpWorkloadException(
+      '$name download is ${formatBytes(contentLength)}, over the '
+      '${formatBytes(maximum)} limit',
+    );
   }
 }
 
 void _checkLimit(int actual, int maximum, String name) {
   if (actual > maximum) {
-    throw HttpWorkloadException('$name exceeds $maximum bytes');
+    throw HttpWorkloadException(
+      '$name is ${formatBytes(actual)}, over the ${formatBytes(maximum)} limit',
+    );
   }
 }
 

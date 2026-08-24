@@ -101,7 +101,10 @@ class PlayerUiState(
     var muted by mutableStateOf(false)
     var speed by mutableStateOf(1.0f)
 
-    var aspect by mutableStateOf(AspectMode.Fit)
+    // Fill, matching every other surface (Dart `_aspectModeIndex`, Swift
+    // `.fill`). Crops to fill rather than letterboxing — identical to Fit
+    // whenever the picture and the screen share a shape, which is most viewing.
+    var aspect by mutableStateOf(AspectMode.Fill)
 
     // Live-edge sync: true while at the live edge, false once the user has paused
     // (and thus fallen behind). Drives the grey LIVE badge + the go-to-live button.

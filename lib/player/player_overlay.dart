@@ -1717,8 +1717,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       if (range.isNotEmpty) ('Dynamic range', range),
       if (videoCodec != null) ('Video', videoCodec),
       if (audioLine.isNotEmpty) ('Audio', audioLine),
+      // Through `trimmedDecimal`, like every other number this app renders.
+      // `toStringAsFixed(3)` printed a whole rate as "25.000 FPS" — three
+      // decimals of nothing — while the badge a few pixels above already said
+      // "25fps", so the panel was the only thing disagreeing with itself.
       if (video.fps case final fps? when fps > 0)
-        ('Frame rate', '${fps.toStringAsFixed(3)} FPS'),
+        ('Frame rate', '${trimmedDecimal(fps)} FPS'),
     ];
   }
 

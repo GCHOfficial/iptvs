@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/app_database.dart';
 import '../data/diagnostics_log.dart';
+import 'aspect_mode.dart';
 import 'buffer_preset.dart';
 import '../data/net.dart';
 import '../sources/source.dart';
@@ -467,7 +468,21 @@ class PlayerScreen extends StatefulWidget {
     this.preferWindowsEmbedded = false,
     this.iosEngineKey,
     this.bufferPreset = BufferPreset.normal,
+    this.initialAspectLabel,
+    this.onAspectChanged,
   });
+
+  /// The aspect mode this player opens on, as a [AspectMode.label] — the value
+  /// the user last chose for this source. Null (or a label this build no longer
+  /// has) falls back to [defaultAspectModeIndex].
+  final String? initialAspectLabel;
+
+  /// Called with the new [AspectMode.label] whenever the user cycles the mode,
+  /// so the choice outlives the player.
+  ///
+  /// Without this the mode reset on every open and anyone who preferred the
+  /// non-default re-pressed the button for every channel they started.
+  final void Function(String label)? onAspectChanged;
 
   /// How much media to hold ahead, chosen per source. Reaches ExoPlayer as a
   /// name on the native `open` payload (its `LoadControl` is a build-time
@@ -670,22 +685,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   // VOD resume plumbing (null when untracked / live).
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
-  // Index into [_aspectModes]. **Starts at "Fit", and every surface is
-  // configured to match it.**
-  //
-  // It used to start at "Fill" because the Windows native surface was
-  // configured with `panscan=1.0`. The embedded surfaces never applied panscan
-  // at all, so they rendered letterboxed while the overlay claimed "Fill" — a
-  // label that lied on every platform but one. Now that the embedded path
-  // honours the mode (`_AspectMode.fit` → `Video(fit:)`), that lie would have
-  // become a real default of *cropping the picture*, silently discarding the
-  // top and bottom of 4:3 content on first play.
-  //
-  // Fit is also what the other players already default to (Kotlin
-  // `AspectMode.Fit`, Swift `.fit`), so this makes Windows agree with them
-  // rather than the reverse. The visible change is confined to the Windows
-  // native HDR surface, and it is toward the option that discards nothing.
-  int _aspectModeIndex = 0;
+  /// Index into [kAspectModes]: the user's stored choice if they have one,
+  /// otherwise [defaultAspectModeIndex] — Fill on a television or handset, Fit
+  /// on a desktop, for the reasons documented there.
+  ///
+  /// The native surface's initial `panscan` is derived from this same index
+  /// rather than hardcoded, so the overlay's chip can never name a mode the
+  /// picture isn't in.
+  late int _aspectModeIndex = resolveAspectModeIndex(widget.initialAspectLabel);
 
   static const List<double> _speedOptions = <double>[
     0.5,
@@ -696,22 +703,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     2.0,
   ];
 
-  /// The framing cycle, in the order every surface renders it.
-  ///
-  /// **`Fill` and `Stretch` are different and both are wanted.** `Fill` crops
-  /// to fill while keeping the picture's shape; `Stretch` distorts to fill and
-  /// keeps every pixel. On a 20:9 handset `Fill` costs 16:9 content about a
-  /// fifth of its width, and 4:3 content far more — so a viewer who wants the
-  /// whole frame edge to edge asks for stretch, and a zoom does not serve them.
-  static const List<_AspectMode> _aspectModes = <_AspectMode>[
-    _AspectMode('Fit', '0.0', 'no', fit: BoxFit.contain),
-    _AspectMode('Fill', '1.0', 'no', fit: BoxFit.cover),
-    _AspectMode('Stretch', '0.0', 'no', keepaspect: 'no', fit: BoxFit.fill),
-    // A forced display aspect reshapes the picture itself, so the embedded
-    // surface still letterboxes whatever comes out of that.
-    _AspectMode('16:9', '0.0', '16:9', fit: BoxFit.contain),
-    _AspectMode('4:3', '0.0', '4:3', fit: BoxFit.contain),
-  ];
 
   // Whether playback is *currently* on the native HWND surface. Starts from the
   // initial SDR/HDR decision (`preferWindowsEmbedded`) but flips true when an
@@ -1147,6 +1138,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             'headers': widget.stream.headers,
             'isLive': widget.stream.isLive,
             'bufferPreset': widget.bufferPreset.storageName,
+            // So the native fullscreen player opens on the same mode the rest
+            // of the app is in, rather than its own compiled-in default.
+            'aspect': kAspectModes[_aspectModeIndex].label,
             // Android-only: iOS has no shared-engine adoption to ask for (see
             // docs/ios.md "Known parity gaps" — every AVPlayer open is a fresh
             // resolve, and an `IosSharedEngine` analogue is a deferred idea).
@@ -1415,6 +1409,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (favorite is bool && favorite != _favorite) {
           _favorite = favorite;
           await widget.onSetFavorite?.call(favorite);
+        }
+        // The aspect the user left the native overlay in. Persisted the same
+        // way a change made on this side is, so the two surfaces cannot end up
+        // remembering different modes for one source.
+        final aspect = args['aspect'];
+        if (aspect is String) {
+          final index = aspectModeIndexOf(aspect);
+          if (index >= 0 && index != _aspectModeIndex) {
+            _aspectModeIndex = index;
+            widget.onAspectChanged?.call(kAspectModes[index].label);
+          }
         }
       }
       await _finishNativePlayback();
@@ -1773,7 +1778,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       canFavorite: _canFavorite,
       favorite: _favorite,
       liveSynced: _liveSynced,
-      aspectLabel: _aspectModes[_aspectModeIndex].label,
+      aspectLabel: kAspectModes[_aspectModeIndex].label,
       resumeFrom: resumeOverride ?? widget.playback?.resumeFrom,
     );
     if (native == null) return false;
@@ -2019,11 +2024,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         await session.command(const ['cycle', 'sub']);
       case 'aspect':
         // Dart owns the label sequence (shared with the Windows overlay via
-        // _aspectModes/_aspectModeIndex) so the overlay always shows the mode
+        // kAspectModes/_aspectModeIndex) so the overlay always shows the mode
         // mpv actually ended up in, rather than mpv cycling its own
         // 'video-aspect-override' values out of step with a hardcoded label.
-        _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
-        final mode = _aspectModes[_aspectModeIndex];
+        _aspectModeIndex = (_aspectModeIndex + 1) % kAspectModes.length;
+        final mode = kAspectModes[_aspectModeIndex];
+        widget.onAspectChanged?.call(mode.label);
         await session.command(['set_property', 'panscan', mode.panscan]);
         // Pushed by every mode, not only Stretch: the cycle has to undo it on
         // the next press.
@@ -2279,7 +2285,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       favorite: _favorite,
       isLive: _isLive,
       liveSynced: _liveSynced,
-      aspectLabel: _aspectModes[_aspectModeIndex].label,
+      aspectLabel: kAspectModes[_aspectModeIndex].label,
       reconnecting: _reconnecting,
       hdr10Plus: _hdr10Plus,
     );
@@ -2355,7 +2361,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           'audioTracks': _nativeAudioTrackPayload(),
           'selectedSpeedId': _speedId(_player.state.rate),
           'speedOptions': _speedOptionPayload(),
-          'aspectLabel': _aspectModes[_aspectModeIndex].label,
+          'aspectLabel': kAspectModes[_aspectModeIndex].label,
           ..._streamInfoPayload(),
         },
       });
@@ -2486,7 +2492,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _cycleNativeAspect() async {
-    _aspectModeIndex = (_aspectModeIndex + 1) % _aspectModes.length;
+    _aspectModeIndex = (_aspectModeIndex + 1) % kAspectModes.length;
+    widget.onAspectChanged?.call(kAspectModes[_aspectModeIndex].label);
     // The embedded overlay reads its `aspectLabel` from this index through
     // `PlayerScreen.build`, and `_syncNativeControlState()` below is a no-op
     // off the native surfaces — so without an explicit rebuild the new text
@@ -2495,7 +2502,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // it replaced. (The Linux-native branch is unaffected; it pushes the label
     // over IPC.)
     if (mounted) setState(() {});
-    final mode = _aspectModes[_aspectModeIndex];
+    final mode = kAspectModes[_aspectModeIndex];
     final platform = _player.platform;
     if (platform is NativePlayer) {
       final properties = <String, String>{
@@ -2761,13 +2768,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_nativePlaybackLaunched) return _nativePlaybackOverlay();
     if (_controller == null) return _nativePlaybackOverlay();
     return PlayerVideoSurface(
-      videoFit: _aspectModes[_aspectModeIndex].fit,
+      videoFit: kAspectModes[_aspectModeIndex].fit,
       key: _embeddedSurfaceKey,
       player: _player,
       controller: _controller,
       title: widget.title,
       sourceName: widget.sourceName,
-      aspectLabel: _aspectModes[_aspectModeIndex].label,
+      aspectLabel: kAspectModes[_aspectModeIndex].label,
       // Windows fullscreen is a window operation the runner owns; media_kit's
       // own toggle is inert here. See [_toggleFullscreenForCurrentSurface].
       onRequestFullscreen: (Platform.isWindows || Platform.isLinux)
@@ -2863,7 +2870,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
 
     final videoOptions = nativeWindowHandle != null
-        ? const <String, String>{
+        ? <String, String>{
             // On Windows, prefer mpv's D3D11 path and advertise HDR metadata
             // to the display stack. With a native HWND, mpv presents directly
             // instead of round-tripping frames through Flutter's SDR texture.
@@ -2888,9 +2895,14 @@ class _PlayerScreenState extends State<PlayerScreen>
             'target-colorspace-hint': 'yes',
             'tone-mapping': 'auto',
             'hdr-compute-peak': 'yes',
-            // Matches the initial `_aspectModeIndex` ("Fit"). These two must
-            // agree, or the overlay's chip names a mode the picture isn't in.
-            'panscan': '0.0',
+            // Derived from the resolved initial mode, not hardcoded — these
+            // must agree or the chip names a mode the picture isn't in. All
+            // three levers, not just panscan: the index is restored from the
+            // user's stored choice now, so it can open on 16:9 or 4:3, which
+            // only `video-aspect-override` expresses.
+            'panscan': kAspectModes[_aspectModeIndex].panscan,
+            'keepaspect': kAspectModes[_aspectModeIndex].keepaspect,
+            'video-aspect-override': kAspectModes[_aspectModeIndex].aspect,
             'sub-ass': 'yes',
             'sub-visibility': 'yes',
             'secondary-sub-visibility': 'yes',
@@ -3339,30 +3351,3 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 }
 
-/// A video framing mode.
-///
-/// [panscan] maps to mpv's `panscan` (0 = letterbox/fit, 1 = crop to fill),
-/// [aspect] to `video-aspect-override` (`no` clears any forced display aspect),
-/// and [keepaspect] to mpv's `keepaspect` (`no` is stretch — the picture is
-/// scaled on both axes independently).
-///
-/// [fit] is the same framing expressed for the **embedded** surface, which is
-/// composited by Flutter rather than by mpv: `media_kit`'s `Video` widget draws
-/// the texture with a `BoxFit`, so that is the lever there. Both are carried on
-/// one object so a mode cannot be defined for one surface and forgotten on the
-/// other — the two surfaces swap on the same machine (HDR decides which), and a
-/// framing that changed with the stream's dynamic range would be a bug.
-class _AspectMode {
-  final String label;
-  final String panscan;
-  final String aspect;
-  final String keepaspect;
-  final BoxFit fit;
-  const _AspectMode(
-    this.label,
-    this.panscan,
-    this.aspect, {
-    this.keepaspect = 'yes',
-    required this.fit,
-  });
-}

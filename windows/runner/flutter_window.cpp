@@ -7,6 +7,7 @@
 #include <ctime>
 #include <cstdint>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -932,10 +933,10 @@ constexpr int kNativeButtonWidth = 44;
 constexpr int kNativeButtonHeight = 40;
 constexpr int kNativeButtonRadius = 12;
 
-// Width of the aspect-mode text chip. Must fit the widest label the cycle can
-// show ("Stretch", drawn at 13px bold and centred with no internal padding),
-// with margins comparable to the "Go to live" chip beside it.
-constexpr int kNativeAspectChipWidth = 80;
+// Padding either side of a measured text chip's label. Mirrors the Lua OSD's
+// `text_button_width` (`pad_h * 2 + measure(text)`), so the two surfaces size a
+// chip the same way rather than one measuring and the other guessing.
+constexpr int kNativeChipPaddingX = 14;
 
 // The two floating surfaces. Named because their corners are rounded twice —
 // once by GDI's fill, once by [ApplyRoundRectAlphaMask] cutting the alpha —
@@ -968,6 +969,50 @@ void DrawIconButton(HDC hdc, const RECT &rect, const std::wstring &icon,
   DrawTextWithFont(hdc, icon, rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    icon_font, fg);
   DeleteObject(icon_font);
+}
+
+// Width of a text chip sized to its own label, the way every other overlay
+// does it.
+//
+// The chip used to carry a hand-set width covering the *longest* label in its
+// cycle, which meant every shorter label sat in an oversized box — visibly so
+// once "Stretch" joined the aspect cycle and dragged "Fit" out to its width.
+// The Flutter and Compose overlays wrap their content, and the Lua OSD measures
+// (`text_button_width`); this makes the Windows chip agree with all three.
+//
+// Measured against a screen DC because `ComputeBottomLayout` runs outside a
+// paint and has no device context of its own. It uses the same font
+// `DrawTextButton` will draw with, so the number is the real glyph width rather
+// than an estimate. Floored at an icon button's width so a two-letter label
+// never renders narrower than the buttons beside it.
+int MeasureTextChipWidth(const std::wstring &label) {
+  // Cached per label. `ComputeBottomLayout` runs from the paint, the hit test
+  // and the focus-ring walk — several times a frame while the overlay is up —
+  // and creating a font plus a screen DC for each of those, to re-measure one
+  // of five fixed strings, is work with a known answer. The key set is the
+  // aspect cycle, so the map never grows past a handful of entries. UI thread
+  // only, like everything else in this file's layout path.
+  static std::map<std::wstring, int> cache;
+  const auto hit = cache.find(label);
+  if (hit != cache.end()) {
+    return hit->second;
+  }
+  HDC screen = GetDC(nullptr);
+  if (screen == nullptr) {
+    return kNativeButtonWidth;
+  }
+  HFONT font = UiFont(13, FW_BOLD);
+  HFONT old_font = static_cast<HFONT>(SelectObject(screen, font));
+  SIZE size{};
+  GetTextExtentPoint32(screen, label.c_str(), static_cast<int>(label.size()),
+                       &size);
+  SelectObject(screen, old_font);
+  DeleteObject(font);
+  ReleaseDC(nullptr, screen);
+  const int width = size.cx + kNativeChipPaddingX * 2;
+  const int clamped = width < kNativeButtonWidth ? kNativeButtonWidth : width;
+  cache.emplace(label, clamped);
+  return clamped;
 }
 
 void DrawTextButton(HDC hdc, const RECT &rect, const std::wstring &label,
@@ -1095,17 +1140,14 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   };
   place(l.fullscreen, kBtn);
   place(l.info, kBtn);
-  // Wider than an icon button because it holds a word, the same height as
-  // everything else.
-  //
-  // **Sized for the longest label in the cycle, which is "Stretch"** — the
-  // others are "Fit", "Fill", "16:9", "4:3". `DrawTextButton` renders with
-  // `DT_SINGLELINE` and no `DT_NOCLIP`, so a chip too narrow for its label
-  // clips the text rather than overflowing visibly, which is the quiet kind of
-  // wrong. The Lua OSD measures its chip (`text_button_width`); this layout
-  // runs without a device context, so the width is a constant that has to be
-  // revisited when a longer label joins the set.
-  place(l.aspect, kNativeAspectChipWidth);
+  // Sized to the label it is about to draw. `DrawTextButton` renders with
+  // `DT_SINGLELINE` and no `DT_NOCLIP`, so a chip narrower than its text clips
+  // rather than overflowing visibly — and a chip sized for the cycle's longest
+  // label leaves every shorter one rattling around in it.
+  place(l.aspect, MeasureTextChipWidth(
+                      g_native_control_state.aspect_label.empty()
+                          ? L"Fit"
+                          : g_native_control_state.aspect_label));
   l.has_subtitles = !g_native_control_state.subtitle_tracks.empty();
   if (l.has_subtitles) {
     place(l.subtitles, kBtn);
@@ -1116,6 +1158,9 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   }
   l.has_speed = !g_native_control_state.speed_options.empty();
   if (l.has_speed) {
+    // Left as a constant: every speed label is within a few pixels of the
+    // others ("0.5x" to "1.25x"), so there is no oversized-box problem to
+    // solve, and `ShortSpeed` is defined below this function.
     place(l.speed, 54);
   }
   // The favorite star, between "Go to live" and speed — the slot Android's

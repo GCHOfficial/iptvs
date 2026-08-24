@@ -315,6 +315,12 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.supportsPip = supportsPip()
         // Favorite toggle (live only): seeded from the Dart store, read back on
         // exit (see finish) so the channel list reflects it on return.
+        // Opens on the mode Dart is already in (the user's stored choice, or a
+        // platform default), rather than this class's own initial value — the
+        // two overlays would otherwise disagree across the handoff.
+        AspectMode.entries
+            .firstOrNull { it.label == intent.getStringExtra(EXTRA_ASPECT) }
+            ?.let { uiState.aspect = it }
         uiState.canFavorite = intent.getBooleanExtra(EXTRA_CAN_FAVORITE, false)
         uiState.isFavorite = intent.getBooleanExtra(EXTRA_IS_FAVORITE, false)
 
@@ -833,6 +839,13 @@ class HdrPlayerActivity : ComponentActivity() {
                 result.putExtra(RESULT_FAVORITE, uiState.isFavorite)
                 hasResult = true
             }
+            // The aspect the user left the player in, so the choice outlives
+            // this Activity — Dart persists it per source. Reported for VOD
+            // too, unlike the favorite: framing is a property of the source,
+            // and a mode chosen while watching a film is just as deliberate as
+            // one chosen on a channel.
+            result.putExtra(RESULT_ASPECT, uiState.aspect.label)
+            hasResult = true
             if (hasResult) setResult(RESULT_OK, result)
         }
         if (enteredPip) restoreMainTaskAfterPip()
@@ -974,6 +987,7 @@ class HdrPlayerActivity : ComponentActivity() {
         /** Adopt the shared preview engine instead of loading fresh (see [SharedEngine]). */
         const val EXTRA_ADOPT_SHARED = "adopt_shared"
         const val EXTRA_BUFFER_PRESET = "buffer_preset"
+        const val EXTRA_ASPECT = "aspect"
 
         /** VOD resume: start playback at this position (ms), 0 = from the top. */
         const val EXTRA_RESUME_MS = "resume_ms"
@@ -993,6 +1007,7 @@ class HdrPlayerActivity : ComponentActivity() {
         const val RESULT_POSITION_MS = "position_ms"
         const val RESULT_DURATION_MS = "duration_ms"
         const val RESULT_FAVORITE = "favorite"
+        const val RESULT_ASPECT = "aspect"
 
         /**
          * Local decoder rebuilds allowed per handoff. One: a second would be a

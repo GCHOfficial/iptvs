@@ -125,6 +125,21 @@ class SourceConfig {
     return (v == null || v.isEmpty) ? null : v;
   }
 
+  /// The aspect mode this source's player last used, as the mode's label
+  /// (`Fit`/`Fill`/`Stretch`/`16:9`/`4:3`), or null if the user has never
+  /// chosen one — in which case the player picks a platform-appropriate
+  /// default.
+  ///
+  /// Stored per source rather than globally for the same reason the buffer
+  /// preset is: it rides the existing `settings` blob into the cloud, needs no
+  /// new storage, and a user with an SD-heavy provider and an HD one may well
+  /// want different framing for each. Broad, not secret — it is a preference,
+  /// not a credential.
+  String? get aspectModeLabel {
+    final value = settings['aspectMode']?.toString();
+    return (value == null || value.isEmpty) ? null : value;
+  }
+
   /// How much media the players hold ahead of playback for this source, as
   /// the stored preset name (`low`/`normal`/`high`; anything else, including a
   /// value a newer build wrote, reads as `normal`).

@@ -464,15 +464,56 @@ width and 4:3 content a great deal more — so a viewer who wants the whole fram
 for stretch, and a zoom does not serve them. The app shipped only the zoom for a long time, which
 is what prompted a user to write in asking for "stretch to allow full-screen viewing".
 
-**Every surface starts on Fit, and the initial configuration has to match the initial label.**
-It used to start on Fill, because the Windows native surface was configured with `panscan=1.0` —
-but the embedded surfaces never applied panscan at all, so they rendered letterboxed while the
-overlay's chip said "Fill". That label lied on every platform but one, and once the embedded path
-began honouring the mode the lie would have turned into a real default of *cropping the picture*,
-losing the top and bottom of 4:3 content on first play. Fit is also what Kotlin (`AspectMode.Fit`)
-and Swift (`.fit`) already defaulted to, so Windows now agrees with them rather than the reverse.
-`_aspectModeIndex` and the native `panscan` are two halves of one statement; changing either alone
-puts the chip out of step with the picture.
+**The cycle is one shared list.** It lived in `_PlayerScreenState` as a private `_AspectMode` and
+`_aspectModes`, which meant the Kotlin and Swift copies were pinned by their own tests and the
+Dart one — the original — was not. It is now `lib/player/aspect_mode.dart`, and
+`test/aspect_mode_test.dart` covers it.
+
+**The default is chosen by the shape of the container, not by taste.** `defaultAspectModeIndex()`
+returns **Fill on a television or a handset** and **Fit on a desktop**. A TV or phone screen is a
+fixed shape that usually matches the content, so on 16:9 material — most viewing — Fill and Fit
+render identically; they differ only on 4:3, where filling the screen is what a television viewer
+expects and where the black pillars are what they complain about. A desktop window is whatever
+shape the user dragged it to, so the same Fill crops continuously, by an amount that changes every
+time the window is resized, and nothing on screen explains why.
+
+It keys off `isTelevision` and `Platform`, and deliberately **not** off which rendering surface is
+in use. On Windows the native and embedded surfaces are selected purely by whether the stream is
+HDR; a default read from the surface would frame the same channel differently on the same machine
+depending on its dynamic range.
+
+This reverses an earlier decision to start every surface on Fit, and the reasoning that produced
+it still holds where it applied. Fit was chosen because the Windows native surface was configured
+with `panscan=1.0` while the embedded surfaces never applied panscan at all — so they rendered
+letterboxed while the overlay's chip said "Fill". The bug was the *disagreement*, not the value.
+The initial `panscan`, `keepaspect` **and `video-aspect-override`** sent to the native surface are
+now **derived from the resolved index** rather than written out separately, so they cannot drift
+apart again whatever the default is. All three, not just panscan: the index is restored from the
+user's stored choice, so the surface can open on `16:9` or `4:3`, and only `video-aspect-override`
+expresses those.
+
+**The choice persists, per source.** It is stored on `SourceConfig.settings['aspectMode']` as the
+mode's label (`SourceConfig.aspectModeLabel`), the same broad — not secret — blob the buffer
+preset rides into the cloud on. Per source rather than globally because a user with an SD-heavy
+provider and an HD one may reasonably want different framing for each, and because that blob
+already exists. `channel_list_screen._persistAspectMode` writes it against the **owning** config,
+so a cross-source favorite stores against its own provider like every other per-source lever, and
+a label this build does not recognise is dropped rather than stored — it could only have come from
+a newer build, and keeping it would hand this one a mode it cannot select.
+
+It round-trips through the native players as well: Android receives `EXTRA_ASPECT` on the open
+payload so `HdrPlayerActivity` starts on the mode the rest of the app is in, and returns the mode
+the user left in as `RESULT_ASPECT`, relayed through `nativeClosed`. A change made in the native
+overlay therefore persists identically to one made on the Flutter side, and the two surfaces
+cannot end up remembering different modes for one source.
+
+`RESULT_ASPECT` is reported for **VOD as well as live**, unlike `RESULT_FAVORITE` beside it, which
+only a live channel has: framing is a property of the source, and a mode chosen while watching a
+film is exactly as deliberate as one chosen on a channel.
+
+Without persistence the mode reset on every open, so anyone who preferred the non-default pressed
+the button again for every channel they started — which is the same complaint that produced the
+Stretch mode in the first place, one layer up.
 
 **`keepaspect` is restored by every mode, not just set by Stretch.** The modes are cycled, so
 leaving Stretch has to undo it on the very next press; a branch that only sets what it needs

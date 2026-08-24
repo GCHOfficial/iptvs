@@ -18,6 +18,7 @@ import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
 import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
+import '../player/aspect_mode.dart' show aspectModeIndexOf;
 import '../player/buffer_preset.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
@@ -176,11 +177,19 @@ enum ChannelPlayAction {
 /// Pure and top-level for the same reason as
 /// [shouldLeaveCrossSourceFavoritesView]: the screen that uses it can only be
 /// widget-tested with libmpv present, which no Windows dev box has.
+/// [expectsEpg] is the active source saying a guide is on its way before one
+/// has arrived — see `LiveController.expectsEpg`. It applies only to the
+/// ordinary views: the cross-source Favorites view is fed by a different
+/// controller with its own guide, and the active source's expectations say
+/// nothing about whether a *foreign* row will draw one.
 bool liveRowsShowEpg({
   required String? categoryId,
   required bool hasEpg,
   required bool hasCrossSourceEpg,
-}) => categoryId == kAllSourcesFavoritesCategoryId ? hasCrossSourceEpg : hasEpg;
+  required bool expectsEpg,
+}) => categoryId == kAllSourcesFavoritesCategoryId
+    ? hasCrossSourceEpg
+    : hasEpg || expectsEpg;
 
 /// Whether the live tab must fall back to "All" because the cross-source
 /// Favorites view is selected but no longer offered.
@@ -490,6 +499,30 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     );
   }
 
+  /// Remembers [label] as this source's aspect mode.
+  ///
+  /// Per *owning* source for a cross-source favorite, matching every other
+  /// per-source lever (repository, EPG, buffering, reconnect) — a foreign row's
+  /// framing belongs to its own provider, not to whichever source happens to be
+  /// active.
+  ///
+  /// A label this build doesn't know is dropped rather than stored: it could
+  /// only come from a newer build, and persisting it would keep handing this
+  /// one a mode it cannot select.
+  Future<void> _persistAspectMode(SourceConfig owner, String label) async {
+    if (aspectModeIndexOf(label) < 0) return;
+    if (owner.aspectModeLabel == label) return;
+    await widget.store.save(
+      owner.copyWith(
+        settings: <String, dynamic>{...owner.settings, 'aspectMode': label},
+      ),
+    );
+  }
+
+  /// The [SourceConfig] that owns [channel] — the active source's, or a
+  /// cross-source favorite's own.
+  SourceConfig _configForChannel(Channel channel) =>
+      _crossSourceFavoriteFor(channel)?.config ?? widget.config;
 
   /// The buffering preset of the source that *owns* [channel].
   ///
@@ -1337,6 +1370,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               stream: stream,
               sourceName: repo.source.name,
               bufferPreset: _bufferPresetForChannel(channel),
+              initialAspectLabel: _configForChannel(channel).aspectModeLabel,
+              onAspectChanged: (label) => unawaited(
+                _persistAspectMode(_configForChannel(channel), label),
+              ),
               epgNow: epg.now,
               epgNext: epg.next,
               favoriteInitial: foreign
@@ -1585,6 +1622,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         stream: playbackStream,
         sourceName: playRepo.source.name,
         bufferPreset: _bufferPresetForChannel(channel),
+        initialAspectLabel: _configForChannel(channel).aspectModeLabel,
+        onAspectChanged: (label) => unawaited(
+          _persistAspectMode(_configForChannel(channel), label),
+        ),
         epgNow: epg.now,
         epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
@@ -1924,6 +1965,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             stream: stream,
             sourceName: widget.repo.source.name,
             bufferPreset: _bufferPresetForChannel(channel),
+            initialAspectLabel: _configForChannel(channel).aspectModeLabel,
+            onAspectChanged: (label) => unawaited(
+              _persistAspectMode(_configForChannel(channel), label),
+            ),
             epgNow: programme,
             // Catch-up is deliberately memoised under its own key rather than
             // the live channel's: an archive URL can be a different container
@@ -2001,6 +2046,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             // Movies/series are always the active source — only live rows can
             // belong to another one.
             bufferPreset: bufferPresetFromName(widget.config.bufferPresetName),
+            initialAspectLabel: widget.config.aspectModeLabel,
+            onAspectChanged: (label) =>
+                unawaited(_persistAspectMode(widget.config, label)),
             playback: PlaybackContext(
               db: widget.repo.db,
               sourceId: widget.repo.source.id,
@@ -2104,6 +2152,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             : ' · synced ${_ago(_live.syncedAt!)}',
       );
     }
+    // The channel list no longer waits for the guide, so these are the only
+    // things that distinguish "still downloading" and "every guide failed" from
+    // "this source has no guide" — which is exactly the question a user asks
+    // when the EPG column is blank after a reload. Only the second is something
+    // they can act on, and it is deliberately not shown while a cached guide is
+    // still standing in for the failed one.
+    if (_live.epgRefreshing) {
+      b.write(' · updating guide…');
+    } else if (_live.epgUnavailable) {
+      b.write(' · guide unavailable');
+    }
     return b.toString();
   }
 
@@ -2202,6 +2261,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     categoryId: _categoryId,
     hasEpg: _live.now.isNotEmpty,
     hasCrossSourceEpg: _globalFavorites.hasEpg,
+    expectsEpg: _live.expectsEpg,
   );
 
   double _liveChannelRowExtent() =>

@@ -201,6 +201,7 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_BUFFER_PRESET,
                             args["bufferPreset"] as? String,
                         )
+                        putExtra(HdrPlayerActivity.EXTRA_ASPECT, args["aspect"] as? String)
                         // VOD resume point (ms), 0 = play from the top.
                         putExtra(
                             HdrPlayerActivity.EXTRA_RESUME_MS,
@@ -484,6 +485,9 @@ class MainActivity : FlutterActivity() {
                 }
                 data?.takeIf { it.hasExtra(HdrPlayerActivity.RESULT_FAVORITE) }?.let { result ->
                     put("favorite", result.getBooleanExtra(HdrPlayerActivity.RESULT_FAVORITE, false))
+                }
+                data?.getStringExtra(HdrPlayerActivity.RESULT_ASPECT)?.let {
+                    put("aspect", it)
                 }
             }
             nativeHdrChannel.invokeMethod("nativeClosed", if (map.isEmpty()) null else map)

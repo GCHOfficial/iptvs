@@ -146,7 +146,29 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   the streamed counterpart (large XMLTV guides via the optional `BatchedEpgSource` capability):
   same one-transaction, success-empty semantics, and a cancelled feed must end in a thrown
   `LoadCancelledException` — never a quiet stream close — so the transaction rolls back instead
-  of committing a half-fed guide. Don't reintroduce an `isNotEmpty` guard before `replaceEpg`/
+  of committing a half-fed guide.
+  **`load` returns as soon as the channels are ready and refreshes the guide behind them** — and
+  the two things that make that safe are load-bearing, not incidental. `ProgrammeSpool`
+  (`data/programme_spool.dart`) drains the merged guide to a temp file *before* the transaction
+  opens, because `replaceEpgStream` otherwise held its write transaction across each guide's
+  **download**, on the single sqflite connection the whole app shares — which serialises reads
+  too, and has no upper bound when a guide server stalls. `AppDatabase.epgIngest`
+  (`data/epg_ingest.dart`) keeps one refresh at a time app-wide and *waits for* a superseded one
+  to stop, not merely cancels it — and `close()` must `await epgIngest.shutdown()`, because an
+  ingest mid-transaction doesn't stop when the connection closes; skipping the wait just moves it
+  into `_db.close()`, which has no cancellation and logs nothing (a widget test hung there for its
+  full ten-minute timeout). A replaced
+  guide is announced on `AppDatabase.epgChanged` **carrying the source id** (a refresh for the
+  source the user just left reaches the same stream, and re-reading for it would blank the current
+  source's now/next). Staleness is decided in `load` before scheduling, so a load with nothing to
+  do leaves `pendingEpgRefresh` null — the live status line reads that to say `· updating guide…`.
+  Don't reintroduce an `await` on the refresh, and don't feed a lazy provider stream straight into
+  `replaceEpgStream`. Because the guide now lands *after* the list is built, two states are
+  surfaced that used to be impossible: `LiveController.expectsEpg` sizes rows tall while a refresh
+  runs on a source whose `capabilitiesOf(...).epg` is `supported` (an `unknown` source waits and
+  sees, so it isn't sized tall for a guide that never comes), and `epgUnavailable` —
+  `lastEpgRefreshFailed` **and** an empty guide — reads `· guide unavailable`, since a failure
+  behind a *cached* guide is the retain policy working. See [docs/sources.md](docs/sources.md). Don't reintroduce an `isNotEmpty` guard before `replaceEpg`/
   `replaceEpgStream`, and don't write the `sources` row with `INSERT OR REPLACE` (it destroys
   columns the writer doesn't own — see `replaceLibrary`).
 - **`lib/data/app_database.dart`** — local SQLite cache keyed by `Source.id`, versioned schema
@@ -730,11 +752,29 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `.resizeAspectFill` / `BoxFit.cover`); Stretch *distorts* to fill and keeps every pixel
   (`RESIZE_MODE_FILL` / mpv `keepaspect=no` / `.resize` / `BoxFit.fill`). Every mode restores
   `keepaspect` explicitly, because the modes are cycled and leaving Stretch must undo it.
-  **Every surface starts on Fit**, and `_aspectModeIndex` must agree with the Windows native
-  surface's initial `panscan` — they are two halves of one statement, and the chip previously said
-  "Fill" while the embedded surfaces rendered letterboxed. The
+  **The cycle is shared, not per-surface** (`player/aspect_mode.dart` — `kAspectModes`, pinned by
+  `test/aspect_mode_test.dart`; it used to be private to `_PlayerScreenState`, so Kotlin and Swift
+  were pinned and Dart was not). **The default is the container's shape, not the app's taste:**
+  `defaultAspectModeIndex()` picks **Fill on a television or handset** — a fixed screen that
+  usually matches the content, where Fill and Fit are indistinguishable and differ only on 4:3
+  material — and **Fit on a desktop**, whose window is whatever shape it was dragged to, so Fill
+  would crop continuously and by an amount that changes as it is resized. It keys off
+  `isTelevision`/`Platform`, **never off which rendering surface is in use**: on Windows the
+  native and embedded surfaces are chosen purely by HDR, so keying off the surface would frame the
+  same channel differently depending on its dynamic range. **The choice persists**, per source, in
+  `settings['aspectMode']` (`SourceConfig.aspectModeLabel`, saved by
+  `channel_list_screen._persistAspectMode` against the *owning* config, so a cross-source favorite
+  stores against its own provider) — a broad key, not a secret, riding the existing blob. It
+  round-trips through the native players too (`EXTRA_ASPECT` in, `RESULT_ASPECT` out on Android),
+  so a change made in the native overlay persists exactly like one made on the Flutter side, and a
+  label this build doesn't know is dropped rather than stored. The Windows native surface's
+  initial `panscan`/`keepaspect`/`video-aspect-override` are **derived from the resolved index**,
+  not hardcoded — they are halves of one statement, and the chip previously said "Fill" while
+  the embedded surfaces rendered letterboxed; all three because a restored index can be `16:9` or
+  `4:3`, which only the override expresses. `RESULT_ASPECT` comes back for **VOD too**, unlike the
+  favorite beside it. The
   **embedded** surface is framed by Flutter (`Video(fit:)`), not by the mpv properties, so
-  `_AspectMode` carries both — the two surfaces swap on one machine on HDR alone, and framing must
+  `AspectMode` carries both — the two surfaces swap on one machine on HDR alone, and framing must
   not change with a stream's dynamic range. iOS offers the three that map onto `videoGravity`
   exactly; 16:9/4:3 would need a hand-computed layer transform (docs/ios.md). Android's player
   theme sets `windowLayoutInDisplayCutoutMode=shortEdges` so video reaches into the notch — safe

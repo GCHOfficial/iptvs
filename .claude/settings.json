@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | tr -d '\\r' | { read -r f; case \"$f\" in *.dart) out=$(flutter analyze --no-pub --no-congratulate \"$f\" 2>&1); code=$?; if [ $code -ne 0 ]; then echo \"$out\" >&2; exit 2; fi;; esac; }",
+            "timeout": 30,
+            "statusMessage": "Running flutter analyze on edited file..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | tr -d '\\r' | { read -r f; norm=$(printf '%s' \"$f\" | tr '\\\\' '/'); case \"$norm\" in */android/local.properties|*/android/key.properties|*/android/*.keystore|*/docs/private/*) printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Blocked: local signing config or a gitignored private record (see docs/android-signing.md / docs/store-publishing.md). Edit manually outside Claude Code if intentional.\"}}';; esac; }"
+          }
+        ]
+      }
+    ]
+  }
+}

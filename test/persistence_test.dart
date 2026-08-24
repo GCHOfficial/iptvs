@@ -2,6 +2,7 @@
 // LibraryRepository cache behaviour. These exercise the real SQLite engine via
 // the FFI factory (desktop), without depending on path_provider.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -1756,6 +1757,9 @@ void main() {
 
         final beforeLoad = DateTime.now();
         await repo.load(forceRefresh: true);
+        // `load` returns as soon as the channel list is ready; the guide
+        // refreshes behind it.
+        await repo.pendingEpgRefresh;
 
         final result = await db.nowNext('fake', now);
         expect(result.now, isEmpty);
@@ -1805,6 +1809,7 @@ void main() {
         // epg_synced_at, and the EPG fetch itself fails; load()'s outer catch
         // swallows the exception so the channel list still loads.
         await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
 
         // replaceEpg is never reached on a failed fetch, so the earlier
         // delete-then-insert never ran — the cached programme survives, and
@@ -1815,6 +1820,151 @@ void main() {
         await db.close();
       },
     );
+
+    test('load returns the channel list without waiting for the guide', () async {
+      // The whole point of the change: one extra guide used to add its download
+      // and parse to the time the user spent looking at a spinner.
+      final db = await AppDatabase.openAt(dbPath());
+      final now = DateTime.now();
+      final source = _FakeSource()
+        ..epgGate = Completer<void>()
+        ..epgResult = [
+          Programme(
+            channelId: 'a',
+            start: now.subtract(const Duration(minutes: 5)),
+            stop: now.add(const Duration(minutes: 55)),
+            title: 'Late arrival',
+          ),
+        ];
+      final repo = LibraryRepository(source: source, db: db);
+
+      final snapshot = await repo.load(forceRefresh: true);
+      expect(snapshot.channels, hasLength(2));
+      await source.epgStarted.future;
+
+      // Still in flight, and nothing about it reached the cache yet.
+      expect((await db.nowNext('fake', now)).now, isEmpty);
+      expect(repo.pendingEpgRefresh, isNotNull);
+
+      source.epgGate!.complete();
+      await repo.pendingEpgRefresh;
+
+      expect((await db.nowNext('fake', now)).now['a']?.title, 'Late arrival');
+      await db.close();
+    });
+
+    test('announces the guide once it lands, naming the source', () async {
+      // The live list is already built by then, so it has to be told rather
+      // than wait — otherwise it shows the previous guide until its next
+      // one-minute poll.
+      final db = await AppDatabase.openAt(dbPath());
+      final announced = <String>[];
+      final subscription = db.epgChanged.listen(announced.add);
+      final repo = LibraryRepository(source: _FakeSource(), db: db);
+
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
+      await pumpEventQueue();
+
+      expect(announced, ['fake']);
+      await subscription.cancel();
+      await db.close();
+    });
+
+    test('a fresh guide is not re-fetched, and reports nothing pending', () async {
+      // `pendingEpgRefresh` is what the status line reads to say "updating
+      // guide", so a load with no work to do must leave it null rather than
+      // hand back an already-completed future.
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _FakeSource();
+      final repo = LibraryRepository(source: source, db: db);
+
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
+      expect(source.epgStarted.isCompleted, isTrue);
+
+      final second = LibraryRepository(source: _FakeSource(), db: db);
+      await second.load();
+      expect(second.pendingEpgRefresh, isNull);
+      await db.close();
+    });
+
+    test('a newer load supersedes the guide refresh still running', () async {
+      // Two repositories, one database — the shape of a source switch. The
+      // outgoing refresh is for a source the user has already left.
+      final db = await AppDatabase.openAt(dbPath());
+      final outgoing = _FakeSource()..epgGate = Completer<void>();
+      final first = LibraryRepository(source: outgoing, db: db);
+      await first.load(forceRefresh: true);
+      await outgoing.epgStarted.future;
+
+      final incoming = _FakeSource();
+      final second = LibraryRepository(source: incoming, db: db);
+      final loaded = second.load(forceRefresh: true);
+
+      // The incoming source's channel list does not queue behind the outgoing
+      // guide — that deadlock is what made the first attempt at this
+      // unshippable.
+      expect((await loaded).channels, hasLength(2));
+
+      outgoing.epgGate!.complete();
+      await first.pendingEpgRefresh;
+      await second.pendingEpgRefresh;
+      expect(db.epgIngest.isBusy, isFalse);
+      await db.close();
+    });
+
+    test('a failed refresh is recorded, and a later good one clears it', () async {
+      // The verdict the live status line reads to say "guide unavailable".
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _FakeSource()..epgThrow = StateError('guide refused');
+      final repo = LibraryRepository(source: source, db: db);
+
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
+      expect(repo.lastEpgRefreshFailed, isTrue);
+
+      source.epgThrow = null;
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
+      expect(repo.lastEpgRefreshFailed, isFalse);
+      await db.close();
+    });
+
+    test('a superseded refresh leaves the previous verdict standing', () async {
+      // Cancelled is not an outcome. Recording one as a *success* cleared a
+      // real failure verdict and took "guide unavailable" off the screen with
+      // nothing actually fixed — which is what happened while `_ensureEpg`
+      // returned normally on a cancelled token instead of throwing.
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _FakeSource()..epgThrow = StateError('guide refused');
+      final repo = LibraryRepository(source: source, db: db);
+
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
+      expect(repo.lastEpgRefreshFailed, isTrue);
+
+      // A second refresh, held inside `epg()` so a newer one can take the
+      // coordinator's slot out from under it.
+      source
+        ..epgThrow = null
+        ..epgGate = Completer<void>()
+        ..epgReentered = Completer<void>();
+      await repo.load(forceRefresh: true);
+      await source.epgReentered!.future;
+
+      // Awaiting the *load* is enough to know the slot changed hands: the
+      // refresh is scheduled before `load` returns.
+      final other = LibraryRepository(source: _FakeSource(), db: db);
+      await other.load(forceRefresh: true);
+
+      source.epgGate!.complete();
+      await repo.pendingEpgRefresh;
+      await other.pendingEpgRefresh;
+
+      expect(repo.lastEpgRefreshFailed, isTrue);
+      await db.close();
+    });
   });
 }
 
@@ -1867,8 +2017,24 @@ class _FakeSource implements Source {
   List<Programme> epgResult = const [];
   Object? epgThrow;
 
+  /// Held open to keep the guide fetch in flight, so a test can observe what
+  /// `load()` does while the refresh has not finished.
+  Completer<void>? epgGate;
+
+  /// Completes the first time the guide fetch is entered.
+  final Completer<void> epgStarted = Completer<void>();
+
+  /// Completes when the guide fetch is next entered, if armed — re-armable,
+  /// so a test can wait for a *second* refresh the way [epgStarted] waits for
+  /// the first.
+  Completer<void>? epgReentered;
+
   @override
   Future<List<Programme>> epg(List<Channel> channels) async {
+    if (!epgStarted.isCompleted) epgStarted.complete();
+    final reentered = epgReentered;
+    if (reentered != null && !reentered.isCompleted) reentered.complete();
+    if (epgGate != null) await epgGate!.future;
     if (epgThrow != null) throw epgThrow!;
     return epgResult;
   }
