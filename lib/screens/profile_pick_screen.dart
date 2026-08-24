@@ -5,9 +5,11 @@ import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
 import '../data/local_profile_store.dart';
 import '../data/metadata_config.dart';
+import '../data/profile_pin.dart';
 import '../data/source_store.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
+import '../widgets/pin_entry.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
@@ -29,14 +31,23 @@ class _ProfileEntry {
   final int colorIndex;
   final _ProfileSource source;
 
+  /// The profile's PIN verifier, or null when it is open. Local profiles carry
+  /// theirs in the keychain; cloud profiles carry theirs in the cloud row (with
+  /// a device-side mirror for when the network is down — see
+  /// [LocalProfileStore.cloudPins]).
+  final String? pin;
+
   const _ProfileEntry({
     required this.id,
     required this.name,
     required this.colorIndex,
     required this.source,
+    this.pin,
   });
 
   bool get isCloud => source == _ProfileSource.cloud;
+
+  bool get locked => pin != null && pin!.isNotEmpty;
 }
 
 /// "Who's watching?" screen. Local profiles work with no cloud account; cloud
@@ -98,6 +109,11 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
   bool _busy = false;
   bool _isPaired = false;
   bool _manageMode = false;
+
+  /// The app booted into a PIN-locked profile and has not been let past yet.
+  /// While this holds, Skip is hidden and re-selecting the active profile still
+  /// asks for its PIN — otherwise the gate would be one tap wide.
+  bool _lockedBoot = false;
   List<_ProfileEntry> _profiles = const [];
   String? _activeProfileId;
   _ProfileSource? _activeSource;
@@ -119,20 +135,45 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     // local profiles.
     List<CloudProfile> cloudProfiles = [];
     bool isPaired = false;
+    bool pairingKnown = false;
+    bool cloudListed = false;
     String? cloudActiveId;
     final sync = _sync;
     if (sync != null) {
       try {
         await sync.ensureAnonSession();
         isPaired = await sync.isPaired();
+        pairingKnown = true;
         if (isPaired) {
           cloudProfiles = await sync.listProfiles();
           cloudActiveId = await sync.activeProfileId();
+          cloudListed = true;
         }
       } catch (_) {
         // Offline / backend unreachable — behave as unpaired for this visit.
       }
+      // The cached fallback is for "the server never answered", never for "the
+      // server said no". A device the panel unpaired answers *not paired*
+      // definitively, and its stale cache would then conjure a locked cloud
+      // profile it can no longer sync — holding the boot screen on a profile
+      // that no longer exists for this device.
+      if (!cloudListed && !(pairingKnown && !isPaired)) {
+        try {
+          cloudActiveId = await sync.cachedProfileId();
+        } catch (_) {}
+      }
     }
+
+    // Mirror the locked cloud profiles device-side on every successful listing,
+    // and read the mirror back for the offline case.
+    if (cloudListed) {
+      await _localStore.saveCloudPins({
+        for (final p in cloudProfiles)
+          if (p.locked)
+            p.id: CloudProfileLock(verifier: p.pin!, name: p.name),
+      });
+    }
+    final cachedLocks = await _localStore.cloudPins();
 
     final localProfiles = await _localStore.loadAll();
     final localActiveId = await _localStore.activeId();
@@ -148,13 +189,29 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
           name: p.name,
           colorIndex: profileColorIndexFor(p.id),
           source: _ProfileSource.cloud,
+          pin: p.pin,
         ),
+      // The device is offline and its cloud profile was locked. Without this
+      // the screen would gate the boot (below) on a profile it isn't drawing —
+      // a "Who's watching?" with nothing to watch with. The entry is built from
+      // the cached lock alone: selecting it is the identity short-circuit, so
+      // no cloud call is needed to enter it once the PIN is right.
+      if (!cloudListed && cloudActiveId != null)
+        if (cachedLocks[cloudActiveId] case final lock?)
+          _ProfileEntry(
+            id: cloudActiveId,
+            name: lock.name.isEmpty ? 'Cloud profile' : lock.name,
+            colorIndex: profileColorIndexFor(cloudActiveId),
+            source: _ProfileSource.cloud,
+            pin: lock.verifier,
+          ),
       for (final p in localProfiles)
         _ProfileEntry(
           id: p.id,
           name: p.name,
           colorIndex: p.colorIndex,
           source: _ProfileSource.local,
+          pin: p.pin,
         ),
     ];
 
@@ -182,16 +239,33 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     // `_snapshotCurrent` a no-op until the user explicitly picks a profile,
     // which restores that profile's snapshot through the normal path.
 
+    // A locked active profile turns the boot short-circuit off and holds the
+    // screen: the app has not been handed over until the PIN is right, so Skip
+    // is withdrawn too (see [_lockedBoot]).
+    _ProfileEntry? activeEntry;
+    for (final e in entries) {
+      if (e.id == activeId && e.source == activeSource) {
+        activeEntry = e;
+        break;
+      }
+    }
+    final lockedBoot = widget.bootMode && (activeEntry?.locked ?? false);
+
     if (widget.bootMode) {
       final mode = await _localStore.pickerStartup();
       if (!mounted) return;
-      if (!shouldShowPickerAtStartup(mode, entries.length)) {
+      if (!shouldShowPickerAtStartup(
+        mode,
+        entries.length,
+        activeProfileLocked: lockedBoot,
+      )) {
         _goHome();
         return;
       }
     }
 
     setState(() {
+      _lockedBoot = lockedBoot;
       _isPaired = isPaired;
       _profiles = entries;
       _activeProfileId = activeId;
@@ -305,10 +379,40 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     return confirmed == true;
   }
 
+  /// Ask for [entry]'s PIN, if it has one. True when the caller may proceed.
+  ///
+  /// A profile with an unreadable verifier (one written by a newer build) can
+  /// never return true — see [verifyProfilePin]. That is deliberate: the only
+  /// alternative is opening a profile whose owner asked for it to be shut.
+  Future<bool> _passesPin(_ProfileEntry entry) async {
+    if (!entry.locked) return true;
+    return promptUnlockProfile(
+      context,
+      profileName: entry.name.isEmpty ? 'Profile' : entry.name,
+      verifier: entry.pin!,
+    );
+  }
+
   Future<void> _selectProfile(_ProfileEntry entry) async {
     if (_busy) return;
+    final isActive =
+        entry.id == _activeProfileId && entry.source == _activeSource;
+    // The active profile is the one already loaded behind this screen, so
+    // re-entering it asks for nothing — *except* at a locked boot, which is
+    // precisely the case where the app hasn't been handed over yet.
+    //
+    // A correct PIN deliberately does **not** clear [_lockedBoot]. Verifying is
+    // not entering: the switch below can still be declined at the restore
+    // confirmation, or fail on the cloud pull, and leave the user back on this
+    // screen. Clearing here would bring Skip back at that point — and Skip goes
+    // home into the profile that is *still loaded*, which is the locked one the
+    // boot was being held for. The flag only ever ends by leaving the screen.
+    if (entry.locked && (!isActive || _lockedBoot)) {
+      if (!await _passesPin(entry)) return;
+      if (!mounted) return;
+    }
     // Re-selecting the active profile: the store already holds its state.
-    if (entry.id == _activeProfileId && entry.source == _activeSource) {
+    if (isActive) {
       _goHome();
       return;
     }
@@ -428,6 +532,117 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
           // Snapshotting the outgoing (possibly cloud) profile can hit a cloud
           // call that throws a PostgrestException with credential-bearing
           // details; render only the safe, redacted message.
+          _error = friendlyCloudError(e);
+        });
+      }
+    }
+  }
+
+  // ── Manage mode ───────────────────────────────────────────────────────────
+
+  /// The manage-mode menu for one profile.
+  ///
+  /// It opens **without** the PIN, and that is a deliberate asymmetry: the two
+  /// PIN actions inside each ask for the current one, while Delete does not.
+  /// Deleting reveals nothing — it only destroys — and it is the one way out of
+  /// a forgotten PIN on a device-local profile, which has no panel to clear it
+  /// from. Putting delete behind the PIN would trade a gate for a profile that
+  /// can neither be opened nor removed.
+  Future<void> _manageProfile(_ProfileEntry entry) async {
+    if (_busy) return;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        backgroundColor: AppColors.panel,
+        title: Text(entry.name.isEmpty ? 'Profile' : entry.name),
+        // `ListTile`, not `SimpleDialogOption`: on a remote every row has to be
+        // a focus target, and the first has to take focus when it opens.
+        children: [
+          ListTile(
+            autofocus: true,
+            leading: const Icon(Icons.pin_outlined),
+            title: Text(entry.locked ? 'Change PIN' : 'Set a PIN'),
+            onTap: () => Navigator.of(ctx).pop('pin'),
+          ),
+          if (entry.locked)
+            ListTile(
+              leading: const Icon(Icons.lock_open_rounded),
+              title: const Text('Remove PIN'),
+              onTap: () => Navigator.of(ctx).pop('unpin'),
+            ),
+          if (!entry.isCloud)
+            ListTile(
+              leading: const Icon(
+                Icons.delete_outline_rounded,
+                color: AppColors.danger,
+              ),
+              title: const Text(
+                'Delete profile',
+                style: TextStyle(color: AppColors.danger),
+              ),
+              onTap: () => Navigator.of(ctx).pop('delete'),
+            ),
+          ListTile(
+            leading: const Icon(Icons.close_rounded),
+            title: const Text('Cancel'),
+            onTap: () => Navigator.of(ctx).pop(),
+          ),
+        ],
+      ),
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'pin':
+        await _setPin(entry);
+      case 'unpin':
+        await _setPin(entry, remove: true);
+      case 'delete':
+        await _deleteProfile(entry);
+    }
+  }
+
+  /// Set, change, or (with [remove]) clear [entry]'s PIN.
+  ///
+  /// Changing or clearing an existing PIN requires the current one — otherwise
+  /// the gate would be removable by whoever it was meant to keep out.
+  Future<void> _setPin(_ProfileEntry entry, {bool remove = false}) async {
+    if (entry.locked && !await _passesPin(entry)) return;
+    if (!mounted) return;
+    String? verifier;
+    if (!remove) {
+      final pin = await promptNewProfilePin(
+        context,
+        profileName: entry.name.isEmpty ? 'Profile' : entry.name,
+      );
+      if (pin == null || !mounted) return;
+      verifier = hashProfilePin(pin);
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      if (entry.isCloud) {
+        final sync = _sync;
+        if (sync == null) throw StateError('cloud is not configured');
+        await sync.setProfilePin(entry.id, verifier);
+        // Mirror it immediately rather than waiting for the next listing: the
+        // gate has to hold on the very next boot, network or not.
+        await _localStore.setCloudPin(entry.id, verifier, name: entry.name);
+      } else {
+        await _localStore.setPin(entry.id, verifier);
+      }
+      if (!mounted) return;
+      // `_check` does not clear `_busy` — it only ever runs while the screen is
+      // idle — so the reload below would otherwise leave every circle inert.
+      setState(() => _busy = false);
+      await _reload();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          // A cloud RPC failure can carry Postgres details that echo row data;
+          // render only the safe, redacted message.
           _error = friendlyCloudError(e);
         });
       }
@@ -577,9 +792,11 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                                   onTap: _manageMode
                                       ? null
                                       : () => _selectProfile(_profiles[i]),
-                                  onDelete: _profiles[i].isCloud
-                                      ? null
-                                      : () => _deleteProfile(_profiles[i]),
+                                  // Cloud profiles are manageable here too now
+                                  // — their PIN is one of the few things the
+                                  // app can change about them (deleting one is
+                                  // still the panel's job).
+                                  onManage: () => _manageProfile(_profiles[i]),
                                 ),
                               ],
                               // "+" button — always last
@@ -661,7 +878,10 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
                           ),
                         ),
                       ),
-                    if (!_manageMode)
+                    // Skip is withdrawn while a locked profile is holding the
+                    // boot: it is a way past the picker, and past the picker is
+                    // exactly where the PIN is meant to stop you.
+                    if (!_manageMode && !_lockedBoot)
                       TextButton(
                         onPressed: _busy ? null : _goHome,
                         child: Text(
@@ -741,7 +961,9 @@ class _ProfileCircle extends StatefulWidget {
   /// threshold lives in one place — the screen's LayoutBuilder).
   final bool compact;
   final VoidCallback? onTap;
-  final VoidCallback? onDelete;
+
+  /// Manage-mode activation: opens the profile's menu (PIN, delete).
+  final VoidCallback? onManage;
 
   const _ProfileCircle({
     required this.entry,
@@ -752,7 +974,7 @@ class _ProfileCircle extends StatefulWidget {
     required this.avatarSize,
     required this.compact,
     required this.onTap,
-    required this.onDelete,
+    required this.onManage,
   });
 
   @override
@@ -797,7 +1019,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
           onInvoke: (_) {
             if (!widget.busy) {
               if (widget.manageMode) {
-                widget.onDelete?.call();
+                widget.onManage?.call();
               } else {
                 widget.onTap?.call();
               }
@@ -810,7 +1032,7 @@ class _ProfileCircleState extends State<_ProfileCircle> {
         onTap: widget.busy
             ? null
             : widget.manageMode
-            ? widget.onDelete
+            ? widget.onManage
             : widget.onTap,
         child: SizedBox(
           width: widget.avatarSize + 20,
@@ -857,28 +1079,11 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                         ),
                       ),
                     ),
-                    // Delete badge (manage mode, local profiles only)
-                    if (widget.manageMode && !widget.entry.isCloud)
-                      Positioned(
-                        right: 0,
-                        top: 0,
-                        child: Container(
-                          width: 28,
-                          height: 28,
-                          decoration: const BoxDecoration(
-                            color: AppColors.danger,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                        ),
-                      ),
-                    // Cloud lock badge (manage mode, cloud profiles — deleted
-                    // from the web panel, not here)
-                    if (widget.manageMode && widget.entry.isCloud)
+                    // Manage badge. One badge for both kinds now that manage
+                    // mode opens a menu rather than deleting on the spot — the
+                    // menu is where the two kinds differ (a cloud profile is
+                    // still deleted from the web panel, not here).
+                    if (widget.manageMode)
                       Positioned(
                         right: 0,
                         top: 0,
@@ -890,10 +1095,32 @@ class _ProfileCircleState extends State<_ProfileCircle> {
                             shape: BoxShape.circle,
                             border: Border.all(color: AppColors.line, width: 1),
                           ),
-                          child: Icon(
-                            Icons.lock_outline_rounded,
-                            color: AppColors.textLo,
-                            size: 14,
+                          child: const Icon(
+                            Icons.more_horiz_rounded,
+                            color: AppColors.textHi,
+                            size: 16,
+                          ),
+                        ),
+                      ),
+                    // PIN badge — shown in every mode, because "this profile
+                    // will ask for a PIN" is information you want *before*
+                    // choosing it, not only while managing.
+                    if (widget.entry.locked)
+                      Positioned(
+                        left: 0,
+                        top: 0,
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: AppColors.panel,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: AppColors.line, width: 1),
+                          ),
+                          child: const Icon(
+                            Icons.lock_rounded,
+                            color: AppColors.accent,
+                            size: 13,
                           ),
                         ),
                       ),

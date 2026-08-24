@@ -17,7 +17,19 @@ enum ProfilePickerStartup {
 }
 
 /// Pure decision for the boot short-circuit — unit-tested directly.
-bool shouldShowPickerAtStartup(ProfilePickerStartup mode, int profileCount) {
+///
+/// [activeProfileLocked] overrides every mode: a profile with a PIN must be
+/// re-opened with it on each launch, and the only place that can ask is this
+/// screen. Without the override, `off` (and `auto` with a single profile) would
+/// boot straight into the locked profile's library — the gate would exist only
+/// for accounts that happen to have several profiles *and* have left the picker
+/// on, which is not a gate at all.
+bool shouldShowPickerAtStartup(
+  ProfilePickerStartup mode,
+  int profileCount, {
+  bool activeProfileLocked = false,
+}) {
+  if (activeProfileLocked) return true;
   switch (mode) {
     case ProfilePickerStartup.auto:
       // Show on first launch (0 profiles) so the user can create one, and
@@ -135,24 +147,47 @@ SnapshotRestorePreview previewSnapshotRestore(
 }
 
 /// A locally-stored profile. No cloud account needed — just a name, a display
-/// colour index, and its [ProfileSnapshot] of the device state.
+/// colour index, an optional PIN, and its [ProfileSnapshot] of the device state.
 class LocalProfile {
   final String id;
   final String name;
   final int colorIndex;
+
+  /// The profile's PIN verifier (`profile_pin.dart`), or null when the profile
+  /// is open. Never the PIN itself.
+  ///
+  /// It rides the profile row into the keychain and **nowhere else** — a local
+  /// profile has no cloud row, and this must not be confused with the cloud
+  /// column of the same purpose (`CloudSync.setProfilePin`).
+  final String? pin;
   final ProfileSnapshot snapshot;
 
   const LocalProfile({
     required this.id,
     required this.name,
     required this.colorIndex,
+    this.pin,
     this.snapshot = const ProfileSnapshot(),
   });
+
+  bool get locked => pin != null && pin!.isNotEmpty;
 
   LocalProfile withSnapshot(ProfileSnapshot snapshot) => LocalProfile(
     id: id,
     name: name,
     colorIndex: colorIndex,
+    pin: pin,
+    snapshot: snapshot,
+  );
+
+  /// [pin] of null clears the PIN — this is the one field whose "absent" and
+  /// "unchanged" cases differ, so it is a separate call rather than a
+  /// `copyWith` default.
+  LocalProfile withPin(String? pin) => LocalProfile(
+    id: id,
+    name: name,
+    colorIndex: colorIndex,
+    pin: pin,
     snapshot: snapshot,
   );
 
@@ -160,6 +195,9 @@ class LocalProfile {
     id: j['id'] as String,
     name: (j['name'] as String?) ?? '',
     colorIndex: (j['colorIndex'] as int?) ?? 0,
+    pin: (j['pin'] as String?)?.trim().isEmpty ?? true
+        ? null
+        : (j['pin'] as String).trim(),
     snapshot: j['snapshot'] == null
         ? const ProfileSnapshot()
         : ProfileSnapshot.fromJson(
@@ -171,8 +209,29 @@ class LocalProfile {
     'id': id,
     'name': name,
     'colorIndex': colorIndex,
+    if (pin != null) 'pin': pin,
     'snapshot': snapshot.toJson(),
   };
+}
+
+/// A cloud profile's cached lock: the PIN verifier plus the name to draw it
+/// with. See [LocalProfileStore.cloudPins].
+class CloudProfileLock {
+  final String verifier;
+  final String name;
+
+  const CloudProfileLock({required this.verifier, this.name = ''});
+
+  static CloudProfileLock? fromJson(Map<String, dynamic> j) {
+    final verifier = (j['pin'] as String?)?.trim() ?? '';
+    if (verifier.isEmpty) return null;
+    return CloudProfileLock(
+      verifier: verifier,
+      name: (j['name'] as String?) ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {'pin': verifier, 'name': name};
 }
 
 /// Persists [LocalProfile]s — plus per-cloud-profile device snapshots and the
@@ -182,6 +241,7 @@ class LocalProfileStore {
   static const _kActiveId = 'active_local_profile_id';
   static const _kCloudSnapshots = 'cloud_profile_snapshots_v1';
   static const _kPickerStartup = 'profile_picker_startup';
+  static const _kCloudPins = 'cloud_profile_pins_v1';
 
   final FlutterSecureStorage _storage;
 
@@ -253,6 +313,94 @@ class LocalProfileStore {
     );
     await save(profile);
     return profile;
+  }
+
+  /// Set (or, with null, clear) a local profile's PIN verifier. A no-op for an
+  /// id that isn't stored, so a delete racing a PIN change can't resurrect a
+  /// profile row.
+  Future<void> setPin(String id, String? verifier) async {
+    final all = await loadAll();
+    final idx = all.indexWhere((p) => p.id == id);
+    if (idx < 0) return;
+    all[idx] = all[idx].withPin(verifier);
+    await _storage.write(
+      key: _kProfiles,
+      value: json.encode([for (final p in all) p.toJson()]),
+    );
+  }
+
+  // ── Cloud-profile PIN cache ───────────────────────────────────────────────
+  // A cloud profile's PIN lives in its cloud row, but the gate has to hold when
+  // the network doesn't: the boot check runs before any cloud call can answer,
+  // and a device that is offline (or whose token has expired) must not let a
+  // locked profile through just because it couldn't ask.
+  //
+  // So every successful profile listing mirrors the locked profiles here, and
+  // the picker falls back to this cache when the listing fails. The **name** is
+  // cached beside the verifier for one specific reason: an offline boot into a
+  // locked cloud profile has to show that profile so its PIN can be typed. With
+  // only the verifier there would be nothing to draw — the picker would present
+  // a screen with no way forward at all.
+  //
+  // Staleness only ever fails *closed*: a PIN cleared on the panel while this
+  // device was offline stays enforced until the next successful listing, which
+  // is the safe direction and self-heals. The cache holds verifiers, never
+  // PINs, and only for profiles that actually have one.
+
+  Future<Map<String, CloudProfileLock>> cloudPins() async {
+    final raw = await _storage.read(key: _kCloudPins);
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      final map = Map<String, dynamic>.from(json.decode(raw) as Map);
+      final out = <String, CloudProfileLock>{};
+      for (final e in map.entries) {
+        if (e.value is! Map) continue;
+        final lock = CloudProfileLock.fromJson(
+          Map<String, dynamic>.from(e.value as Map),
+        );
+        if (lock != null) out[e.key] = lock;
+      }
+      return out;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Replace the whole cache from a fresh listing. A *replace*, not a merge:
+  /// a profile whose PIN was cleared on the panel is simply absent from
+  /// [locks], and merging would keep enforcing a PIN the account no longer has.
+  Future<void> saveCloudPins(Map<String, CloudProfileLock> locks) =>
+      _storage.write(
+        key: _kCloudPins,
+        value: json.encode({
+          for (final e in locks.entries) e.key: e.value.toJson(),
+        }),
+      );
+
+  /// Drop every cached cloud lock. Called when the device unpairs: these
+  /// verifiers belong to the account being left, and a re-pair to a *different*
+  /// account that happens to reuse a profile id would otherwise inherit them
+  /// and shut a profile nobody locked. Same reasoning as `CloudSync`'s sticky
+  /// E2EE marks, which are cleared in the same place.
+  Future<void> clearCloudPins() => _storage.delete(key: _kCloudPins);
+
+  /// Update one profile's cached lock without waiting for the next listing —
+  /// used right after this device sets or clears a PIN itself.
+  Future<void> setCloudPin(
+    String profileId,
+    String? verifier, {
+    String name = '',
+  }) async {
+    final map = Map<String, CloudProfileLock>.from(await cloudPins());
+    if (verifier == null || verifier.isEmpty) {
+      map.remove(profileId);
+    } else {
+      map[profileId] = CloudProfileLock(
+        verifier: verifier,
+        name: name.isEmpty ? (map[profileId]?.name ?? '') : name,
+      );
+    }
+    await saveCloudPins(map);
   }
 
   // ── Cloud-profile device snapshots ────────────────────────────────────────

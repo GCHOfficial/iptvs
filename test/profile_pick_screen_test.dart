@@ -23,12 +23,14 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:iptvs/data/app_database.dart';
 import 'package:iptvs/data/local_profile_store.dart';
+import 'package:iptvs/data/profile_pin.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/profile_pick_screen.dart';
 import 'package:iptvs/sources/source_config.dart';
@@ -84,6 +86,7 @@ void main() {
     Future<bool> pumpPicker(
       WidgetTester tester, {
       required SourceStore store,
+      bool bootMode = false,
     }) async {
       var done = false;
       await tester.pumpWidget(
@@ -91,6 +94,7 @@ void main() {
           home: ProfilePickScreen(
             db: db,
             store: store,
+            bootMode: bootMode,
             onDone: () => done = true,
           ),
         ),
@@ -117,6 +121,10 @@ void main() {
       await tester.tap(find.text('Manage profiles'));
       await pumpFor(tester);
       await tester.tap(find.text('Bravo'));
+      await pumpFor(tester);
+      // Manage mode opens a menu now (PIN actions live there too), so delete
+      // is two steps: the menu entry, then the confirmation.
+      await tester.tap(find.text('Delete profile'));
       await pumpFor(tester);
       await tester.tap(find.text('Delete'));
       await pumpFor(tester);
@@ -148,6 +156,8 @@ void main() {
         await tester.tap(find.text('Manage profiles'));
         await pumpFor(tester);
         await tester.tap(find.text('Alice'));
+        await pumpFor(tester);
+        await tester.tap(find.text('Delete profile'));
         await pumpFor(tester);
         await tester.tap(find.text('Delete'));
         await pumpFor(tester);
@@ -189,6 +199,8 @@ void main() {
         await pumpFor(tester);
         await tester.tap(find.text('Alice'));
         await pumpFor(tester);
+        await tester.tap(find.text('Delete profile'));
+        await pumpFor(tester);
         await tester.tap(find.text('Delete'));
         await pumpFor(tester);
 
@@ -221,6 +233,286 @@ void main() {
         await tester.pumpWidget(const SizedBox());
       },
     );
+
+    // -- PIN gate --------------------------------------------------------
+
+    /// Tap [pin] on the dialog's keypad. `flutter_test` reports Android, so the
+    /// pad is the surface under test — the desktop key-entry path is covered in
+    /// `pin_entry_test.dart`.
+    Future<void> typePin(WidgetTester tester, String pin) async {
+      for (var i = 0; i < pin.length; i++) {
+        // The digit's own `Text`, which is the pad button's only label — the
+        // enclosing `SizedBox` finder matches the dialog's content box too.
+        await tester.tap(find.text(pin[i]));
+        await pumpFor(tester, frames: 4);
+      }
+      await pumpFor(tester);
+    }
+
+    testWidgets('a locked profile is not entered without its PIN', (
+      tester,
+    ) async {
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      await localStore.setPin(b.id, hashProfilePin('4821'));
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Bravo'));
+      await pumpFor(tester);
+
+      // The PIN is asked *before* anything about the switch is decided — the
+      // snapshot-restore confirmation must not even have been offered yet.
+      expect(find.text('Switch profile'), findsNothing);
+
+      await typePin(tester, '1111');
+      expect(find.text('Wrong PIN. Try again.'), findsOneWidget);
+      expect(await localStore.activeId(), a.id, reason: 'still Alice');
+
+      await typePin(tester, '4821');
+      await tester.tap(find.text('Switch profile'));
+      await pumpFor(tester);
+
+      expect(_doneFlags[tester]!(), isTrue);
+      expect(await localStore.activeId(), b.id);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('cancelling the PIN leaves the active profile alone', (
+      tester,
+    ) async {
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      await localStore.setPin(b.id, hashProfilePin('4821'));
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Bravo'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Cancel'));
+      await pumpFor(tester);
+
+      expect(_doneFlags[tester]!(), isFalse);
+      expect(await localStore.activeId(), a.id);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a locked active profile holds the boot, Skip included', (
+      tester,
+    ) async {
+      // `off` would normally boot straight past this screen. A locked profile
+      // overrides that — and Skip, the other way past it, is withdrawn.
+      await localStore.setPickerStartup(ProfilePickerStartup.off);
+      final store = SourceStore();
+      final a = await localStore.createProfile(
+        'Alice',
+        0,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setPin(a.id, hashProfilePin('4821'));
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store, bootMode: true);
+
+      expect(_doneFlags[tester]!(), isFalse, reason: 'the picker must show');
+      expect(find.text('Skip'), findsNothing);
+
+      // Even the *active* profile has to be unlocked here: it is the one the
+      // app would otherwise have booted straight into.
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      expect(find.text('Cancel'), findsOneWidget, reason: 'the PIN was asked');
+      await typePin(tester, '4821');
+
+      expect(_doneFlags[tester]!(), isTrue);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a declined switch at a locked boot does not reopen Skip', (
+      tester,
+    ) async {
+      // Verifying a PIN is not entering a profile. Unlock *Bravo*, then decline
+      // the restore confirmation: the screen is back where it started, with
+      // Alice's sources still the ones loaded — so Skip must still be gone, or
+      // it would walk straight into the profile the boot was being held for.
+      await localStore.setPickerStartup(ProfilePickerStartup.off);
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      await localStore.setPin(b.id, hashProfilePin('1234'));
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setPin(a.id, hashProfilePin('4821'));
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store, bootMode: true);
+      expect(find.text('Skip'), findsNothing);
+
+      await tester.tap(find.text('Bravo'));
+      await pumpFor(tester);
+      await typePin(tester, '1234');
+
+      // The restore confirmation: decline it.
+      expect(find.text('Switch profile'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await pumpFor(tester);
+
+      expect(_doneFlags[tester]!(), isFalse);
+      expect(find.text('Skip'), findsNothing, reason: 'the gate still holds');
+      expect(await localStore.activeId(), a.id);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an open profile still boots straight through', (tester) async {
+      await localStore.setPickerStartup(ProfilePickerStartup.off);
+      final store = SourceStore();
+      final a = await localStore.createProfile(
+        'Alice',
+        0,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store, bootMode: true);
+      expect(_doneFlags[tester]!(), isTrue);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('manage mode sets and clears a local profile PIN', (
+      tester,
+    ) async {
+      final store = SourceStore();
+      final a = await localStore.createProfile(
+        'Alice',
+        0,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Set a PIN'));
+      await pumpFor(tester);
+      await typePin(tester, '4821');
+      await typePin(tester, '4821'); // confirmation
+      await pumpFor(tester);
+
+      final stored = (await localStore.loadAll()).single;
+      expect(stored.locked, isTrue);
+      expect(verifyProfilePin('4821', stored.pin!), isTrue);
+      expect(
+        stored.pin,
+        isNot(contains('4821')),
+        reason: 'the verifier is stored, never the PIN',
+      );
+
+      // Removing it asks for the current PIN first.
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Remove PIN'));
+      await pumpFor(tester);
+      await typePin(tester, '4821');
+      await pumpFor(tester);
+
+      expect((await localStore.loadAll()).single.locked, isFalse);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the manage menu is operable with OK alone', (tester) async {
+      // The manage flow is new focus surface on a screen whose primary input is
+      // a remote: the menu's first row has to take focus when it opens, or the
+      // first OK press is spent giving it focus and the dialog looks dead.
+      final store = SourceStore();
+      final a = await localStore.createProfile(
+        'Alice',
+        0,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await pumpFor(tester);
+      // "Delete profile" is the menu's alone — the PIN dialog that replaced it
+      // is titled "Set a PIN", the same words as the row that opened it.
+      expect(find.text('Delete profile'), findsNothing, reason: 'menu closed');
+      expect(find.textContaining('4-digit PIN'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel'));
+      await pumpFor(tester);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a mismatched confirmation does not set a PIN', (tester) async {
+      final store = SourceStore();
+      final a = await localStore.createProfile(
+        'Alice',
+        0,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Set a PIN'));
+      await pumpFor(tester);
+      await typePin(tester, '4821');
+      await typePin(tester, '4822');
+      await pumpFor(tester);
+
+      expect(find.textContaining('did not match'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await pumpFor(tester);
+
+      expect((await localStore.loadAll()).single.locked, isFalse);
+
+      await tester.pumpWidget(const SizedBox());
+    });
 
     testWidgets('a select failure renders friendlyCloudError, not the raw error', (
       tester,

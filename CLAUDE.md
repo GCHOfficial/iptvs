@@ -422,7 +422,14 @@ docs/tv-navigation.md before touching focus or navigation code** — the current
 per-row-focus approach whose races produced repeated D-pad bugs, and the doc records why.
 
 - Lists/grids use `FocusableCard`; text inputs use `TvTextField` ("OK to edit") — never a bare
-  `TextField` on a TV-facing screen (it traps D-pad focus).
+  `TextField` on a TV-facing screen (it traps D-pad focus). The profile-PIN dialog
+  (`widgets/pin_entry.dart`) takes that further and uses **no text field at all** off desktop: a
+  3x4 pad of `FocusableCard`s is arrow-navigable by construction and needs no IME, while hardware
+  digits still bubble up from the focused button so a remote's number keys work
+  (`pinKeypadForPlatform`). **That pad fits the window rather than scrolling** — a D-pad cannot
+  scroll a modal, so a key below the fold is a profile that cannot be opened: `Flexible` +
+  `FittedBox(scaleDown)`, the explanatory line dropped below a 420 px viewport, and digit labels
+  opted out of text scaling. Swept over sizes and text scales in `test/layout_overflow_test.dart`.
 - **Exception:** the two live-tab lists and the EPG grid are **selection models** — one focus
   node + a selected index; rows are *not* focus targets. Never add focus nodes to their rows.
   Both live lists set an explicit `itemExtent` (`kChannelRowExtentWithEpg` 112 /
@@ -548,9 +555,30 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
 - Every profile (local and cloud) owns a `ProfileSnapshot`; switching snapshots the outgoing
   state and restores the incoming one, keeping cloud-managed source ids scoped per profile so
   pulls never leak sources across profiles (`local_profile_store.dart`).
+- **A profile can carry an optional 4-digit PIN, and it is a gate on a shared television — not a
+  security control.** Ten thousand values means whoever holds the verifier recovers the PIN
+  whatever the KDF cost, so `profiles.pin` is a **broad** column (encrypting it would buy nothing
+  and would make the gate unenforceable on an E2EE-**locked** device, which is the one that most
+  needs it), and `kProfilePinIterations` is sized for a set-top box verifying on the UI path, not
+  for an attacker. What makes guessing impractical is the dialog's cooldown (5 misses → 30 s).
+  The format `pbkdf2-sha256$<iters>$<salt>$<hash>` is a **three-implementation contract** —
+  `profile_pin.dart` derives *and checks*, `panel/src/pin.js` only ever *sets* (a browser cannot
+  be asked to prove a PIN), Postgres validates the shape only — and both client tests assert the
+  same vectors, because nothing would reveal a mismatch later. An unparseable verifier **fails
+  closed** (a future format must not read as "no PIN" on an older build), and the server's shape
+  check is deliberately *narrower* than the app's parser — storing a verifier the device cannot
+  read is the unopenable profile that check exists to prevent. Devices write it through
+  `set_profile_pin`, never directly; a PIN change advances `profiles.updated_at` (deliberately
+  *not* favorites-exempt). The wrong-PIN cooldown is **per profile, not per dialog** — in the
+  dialog's state it reset on every Cancel, which made it decoration. Device-side: a locked *active* profile overrides the startup mode and
+  withdraws Skip, the active profile isn't re-asked outside that boot, cloud verifiers are
+  mirrored **with their names** in `LocalProfileStore.cloudPins` so an offline boot can still draw
+  and unlock one, and manage-mode **delete is deliberately not behind the PIN** — it reveals
+  nothing and is the only way out of a forgotten PIN on a local profile. Read
+  [docs/cloud-sync.md](docs/cloud-sync.md) "Profile PINs" before touching any of it.
 - The app boots into `ProfilePickScreen`, which self-decides via
-  `shouldShowPickerAtStartup(mode, profileCount)` — single-profile installs boot straight to
-  `HomeShell`.
+  `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:)` — single-profile installs
+  boot straight to `HomeShell` unless the active profile is PIN-locked.
 - Cloud writes are bounded by BEFORE-triggers on the tables (binding panel *direct* writes too)
   plus pre-mutation count/size guards in the push RPCs, and pushes are rate-limited DB-side —
   limits are sized ≥10x over a 250k-channel portal, and rejections are `iptvs: `-prefixed
