@@ -29,10 +29,16 @@ select lives_ok(
   'the owner may set a well-formed pin directly (the panel path)'
 );
 
+-- 23514 (check_violation), not plpgsql's default P0001: every `iptvs: ` guard
+-- raises with that errcode on purpose, because it is the class the clients'
+-- error surfaces know to render as a plain message with the Postgres
+-- details/hint stripped. Asserting the code, not just the text, is what keeps a
+-- future edit from quietly dropping the `using errcode` and leaking a
+-- "Failing row contains (...)" DETAIL to the UI.
 select throws_ok(
   format('update public.profiles set pin = %L where id = %L::uuid',
          'hunter2', :'profile_a_id'::uuid),
-  'P0001',
+  '23514',
   'iptvs: profile pin is not a recognised verifier',
   'a raw PIN (or any non-verifier) is rejected, not stored'
 );
@@ -72,7 +78,7 @@ select is(
 select throws_ok(
   format('select public.set_profile_pin(%L::uuid, %L)',
          :'profile_a_id'::uuid, 'pbkdf2-sha256$10000$short$nope'),
-  'P0001',
+  '23514',
   'iptvs: profile pin is not a recognised verifier',
   'the device path is validated by the same trigger as the panel path'
 );
