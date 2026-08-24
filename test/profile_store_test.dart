@@ -133,6 +133,80 @@ void main() {
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.off, 0), isFalse);
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.off, 5), isFalse);
     });
+
+    test('a locked active profile overrides every mode', () {
+      // Otherwise the gate would exist only for accounts that happen to have
+      // several profiles and have left the picker on — which is not a gate.
+      for (final mode in ProfilePickerStartup.values) {
+        for (final count in [1, 5]) {
+          expect(
+            shouldShowPickerAtStartup(mode, count, activeProfileLocked: true),
+            isTrue,
+            reason: '$mode with $count profiles',
+          );
+        }
+      }
+      expect(
+        shouldShowPickerAtStartup(
+          ProfilePickerStartup.off,
+          1,
+          activeProfileLocked: false,
+        ),
+        isFalse,
+        reason: 'an open profile still boots straight through',
+      );
+    });
+  });
+
+  group('profile PINs', () {
+    test('the verifier round-trips and an absent one stays absent', () {
+      const open = LocalProfile(id: 'p1', name: 'Alice', colorIndex: 0);
+      expect(open.locked, isFalse);
+      expect(open.toJson().containsKey('pin'), isFalse);
+      expect(LocalProfile.fromJson(open.toJson()).locked, isFalse);
+
+      final locked = open.withPin('pbkdf2-sha256\$1\$c2FsdA==\$aGFzaA==');
+      expect(locked.locked, isTrue);
+      final restored = LocalProfile.fromJson(locked.toJson());
+      expect(restored.pin, locked.pin);
+      expect(restored.name, 'Alice');
+    });
+
+    test('withPin(null) clears it, and withSnapshot carries it', () {
+      const open = LocalProfile(id: 'p1', name: 'Alice', colorIndex: 0);
+      final locked = open.withPin('x');
+      expect(locked.withPin(null).locked, isFalse);
+      expect(
+        locked.withSnapshot(const ProfileSnapshot()).pin,
+        'x',
+        reason: 'switching profiles must not silently unlock one',
+      );
+    });
+
+    test('a blank stored pin reads as no pin', () {
+      // Both stores normalise empty to absent, so a row written by either one
+      // has to mean the same thing here.
+      final blank = LocalProfile.fromJson({
+        'id': 'p1',
+        'name': 'Alice',
+        'pin': '   ',
+      });
+      expect(blank.locked, isFalse);
+    });
+  });
+
+  group('CloudProfileLock', () {
+    test('round-trips, and a verifier-less entry is dropped', () {
+      const lock = CloudProfileLock(verifier: 'v', name: 'Family');
+      final restored = CloudProfileLock.fromJson(lock.toJson());
+      expect(restored?.verifier, 'v');
+      expect(restored?.name, 'Family');
+      // The cache holds *locked* profiles only: an entry with no verifier is
+      // meaningless, and reading one as a lock would shut a profile nobody
+      // locked.
+      expect(CloudProfileLock.fromJson({'name': 'Family'}), isNull);
+      expect(CloudProfileLock.fromJson({'pin': '', 'name': 'x'}), isNull);
+    });
   });
 
   group('profileColorIndexFor', () {

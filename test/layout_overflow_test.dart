@@ -35,6 +35,8 @@ import 'package:iptvs/screens/media_tab_controller.dart'
 import 'package:iptvs/screens/media_tab_view.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/theme.dart';
+import 'package:iptvs/data/profile_pin.dart';
+import 'package:iptvs/widgets/pin_entry.dart';
 
 /// Registers the app's bundled Inter faces under the family name the theme
 /// asks for, so the widget tree lays text out with production metrics.
@@ -340,6 +342,130 @@ void main() {
         });
       }
     }
+  });
+
+  group('the PIN pad fits the window', () {
+    // The pad is a lattice of fixed-size keys inside a dialog, on a screen the
+    // user cannot leave until they type four digits — so "it scrolls" is not an
+    // acceptable answer here. A key the remote cannot reach is a profile the
+    // remote cannot open, and the smallest phone and the ten-foot layout sit at
+    // opposite ends of the range it has to survive.
+    //
+    // 320x568 is the smallest phone still shipping; 800x360 is a landscape
+    // handset; 960x540 is the Android TV logical viewport.
+    for (final size in const [
+      Size(320, 568),
+      Size(360, 640),
+      Size(800, 360),
+      // Deliberately past anything shipping, to prove the compaction has room
+      // to spare rather than exactly enough.
+      Size(640, 300),
+      Size(960, 540),
+      Size(1280, 800),
+      Size(1920, 1080),
+    ]) {
+      for (final textScale in const [1.0, 1.3, 2.0]) {
+        testWidgets('every key is on screen at $size, text scale $textScale', (
+          tester,
+        ) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          useWindow(tester, size, textScale);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: Builder(
+                  builder: (ctx) => TextButton(
+                    onPressed: () => promptUnlockProfile(
+                      ctx,
+                      profileName: 'A Rather Long Profile Name pygjq',
+                      verifier: hashProfilePin('4821'),
+                    ),
+                    child: const Text('open'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('open'));
+          await tester.pump();
+          await tester.pump();
+
+          expect(tester.takeException(), isNull);
+
+          final window = Offset.zero & size;
+          for (final digit in const [
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+          ]) {
+            final key = find.text(digit);
+            expect(key, findsOneWidget, reason: 'digit $digit is drawn');
+            final rect = tester.getRect(key);
+            expect(
+              window.contains(rect.topLeft) && window.contains(rect.bottomRight),
+              isTrue,
+              reason: 'digit $digit is off screen at $size/$textScale: $rect',
+            );
+          }
+
+          // And it still works: the pad is not merely present, it is operable
+          // at this geometry.
+          for (final digit in const ['4', '8', '2', '1']) {
+            await tester.tap(find.text(digit));
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          for (var i = 0; i < 10; i++) {
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+          expect(find.text('Wrong PIN. Try again.'), findsNothing);
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        });
+      }
+    }
+
+    testWidgets('the desktop surface fits the smallest window too', (
+      tester,
+    ) async {
+      // No pad there, but the dots and the message still have to fit a small
+      // restored window at a large text scale.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      useWindow(tester, const Size(400, 300), 2.0);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.dark,
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => TextButton(
+                onPressed: () => promptUnlockProfile(
+                  ctx,
+                  profileName: 'A Rather Long Profile Name pygjq',
+                  verifier: hashProfilePin('4821'),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Cancel'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
   });
 
   group('the media tab fits its cells', () {

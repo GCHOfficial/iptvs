@@ -5,6 +5,7 @@ import { supabase, KIND_FIELDS } from './supabase.js';
 import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, splitFields, stashPairingCode, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
+import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
 import {
   generatePassphrase,
   passphraseStrength,
@@ -511,6 +512,10 @@ async function renderProfiles() {
     el.onclick = () => renameProfile(el.dataset.rename, data);
   for (const el of view().querySelectorAll('[data-del]'))
     el.onclick = () => deleteProfile(el.dataset.del, data.length);
+  for (const el of view().querySelectorAll('[data-pin]'))
+    el.onclick = () => setProfilePin(el.dataset.pin);
+  for (const el of view().querySelectorAll('[data-unpin]'))
+    el.onclick = () => removeProfilePin(el.dataset.unpin);
   for (const el of view().querySelectorAll('[data-up]'))
     el.onclick = () => reorderProfiles(data, data.findIndex((p) => p.id === el.dataset.up), -1);
   for (const el of view().querySelectorAll('[data-down]'))
@@ -519,16 +524,19 @@ async function renderProfiles() {
 
 function profileRow(p, i, n) {
   const active = p.id === currentProfileId;
+  const locked = !!p.pin;
   return `
     <div class="row">
       <div>
         <div class="title">${esc(p.name || 'Profile')}${active ? ' · selected' : ''}</div>
-        <div class="muted">profile</div>
+        <div class="muted">profile${locked ? ` · PIN` : ''}</div>
       </div>
       <div class="actions">
         <button data-up="${p.id}" class="ghost icon" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button data-down="${p.id}" class="ghost icon" title="Move down" ${i === n - 1 ? 'disabled' : ''}>↓</button>
         <button data-rename="${p.id}" class="ghost">Rename</button>
+        <button data-pin="${p.id}" class="ghost">${locked ? 'Change PIN' : 'Set PIN'}</button>
+        ${locked ? `<button data-unpin="${p.id}" class="ghost">Remove PIN</button>` : ''}
         <button data-del="${p.id}" class="ghost danger" ${n === 1 ? 'disabled' : ''}>Delete</button>
       </div>
     </div>`;
@@ -562,6 +570,40 @@ async function renameProfile(id, data) {
   if (error) { logError(error); return toast(friendlyError(error), true); }
   await ensureProfiles();
   render();
+}
+
+// A profile PIN is a gate on the *device* — it is asked for on the television
+// when someone switches into this profile, and nowhere in this panel. The panel
+// can set one or clear one; it can never be asked to prove one, because the
+// verifier it writes is not something a browser can be trusted to check.
+async function setProfilePin(id) {
+  const pin = prompt(`New ${PIN_LENGTH}-digit PIN for this profile`, '');
+  if (pin === null) return;
+  if (!isValidPin(pin.trim())) {
+    return toast(`The PIN must be exactly ${PIN_LENGTH} digits.`, true);
+  }
+  let verifier;
+  try {
+    verifier = await hashPin(pin.trim());
+  } catch (e) {
+    logError(e);
+    return toast('Could not set the PIN in this browser.', true);
+  }
+  // The PIN itself never leaves this function — only the verifier is stored.
+  const { error } = await supabase.from('profiles').update({ pin: verifier }).eq('id', id);
+  if (error) { logError(error); return toast(friendlyError(error), true); }
+  await ensureProfiles();
+  toast('PIN set. Devices will ask for it when switching to this profile.');
+  renderProfiles();
+}
+
+async function removeProfilePin(id) {
+  if (!confirm('Remove this profile PIN? Any device will be able to open it.')) return;
+  const { error } = await supabase.from('profiles').update({ pin: null }).eq('id', id);
+  if (error) { logError(error); return toast(friendlyError(error), true); }
+  await ensureProfiles();
+  toast('PIN removed.');
+  renderProfiles();
 }
 
 async function deleteProfile(id, count) {

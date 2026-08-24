@@ -42,7 +42,8 @@ a `profile_id` and a per-source `settings` jsonb for hidden categories), `metada
 creates/renames profiles). The `..._profiles.sql` migration backfills a `Default` profile per
 existing owner, so a single-profile account is unchanged. Owner-scoping stays the security
 boundary (`profile_id` is only an added filter); legacy 1-arg `push_*` delegate to the device's
-active profile for older app builds.
+active profile for older app builds. A profile may also carry an optional `pin` — see
+[Profile PINs](#profile-pins).
 
 ## Open-source security model
 
@@ -665,15 +666,148 @@ about a URL shape and converting on it blind could break a working source. The a
 that verifies. Full rationale, including why `no-cors` doesn't help and why a server-side probe
 was deferred, is in **[sources.md](sources.md)** ("Why the web panel suggests and the app proves").
 
+## Profile PINs
+
+A profile can require **four digits** before a device switches into it. The whole feature is one
+optional column, one RPC, and one dialog — but it is worth being precise about what it is, because
+the temptation to treat it as a security control leads to worse decisions in every direction.
+
+**It is a gate on a shared television, not a secret.** Four digits is ten thousand values, so
+anyone holding the verifier recovers the PIN by trying all of them — whatever KDF cost we pick.
+Three consequences follow, and each of them is the reason something is built the way it is:
+
+* `profiles.pin` is a **broad** column, not a secret one. It is not routed through the secret
+  store and not encrypted under the profile's content key. Encrypting it would buy nothing (see
+  above) while making the gate unenforceable on an **E2EE-locked** device — which is precisely the
+  device that still has to enforce it. Fail-closed there would mean "no profile opens at all",
+  i.e. a lockout rather than a gate.
+* The credentials a PIN sits in front of are protected **independently** — by the keychain, by
+  RLS, by the secret store, by E2EE. None of that changes with or without a PIN, so nothing about
+  the security model rests on this column.
+* Iterations (`kProfilePinIterations` = 10 000, PBKDF2-HMAC-SHA-256) are sized for the slowest
+  device that must *verify* one — a remote-only set-top box, on the UI path — not for an attacker.
+  One derivation measured ~25 ms in the desktop VM; it runs **synchronously on the UI thread** and
+  has not been measured on a set-top box, so a hundred thousand rounds would multiply an already
+  unmeasured stall by ten and buy nothing.
+
+What actually makes guessing tedious is the **cooldown**: five consecutive misses stop input for
+30 seconds (`kPinAttemptsBeforeLockout` / `kPinLockout`), which puts an exhaustive search at
+roughly seventeen hours of uninterrupted button-pressing. That is the defence that matches the
+threat — the person standing in front of the television.
+
+The count is deliberately **not** dialog state (`_attempts` in `pin_entry.dart`, keyed per
+profile, process-lifetime). It was, first, and that made the cooldown decoration: four wrong tries
+and a Back press bought four more, indefinitely. Killing the app still clears it, which is the
+honest limit of a device-side gate.
+
+### The format is a three-implementation contract
+
+`pbkdf2-sha256$<iterations>$<base64 salt>$<base64 hash>` (16-byte salt, 32-byte hash, ~90 chars).
+
+* `lib/data/profile_pin.dart` derives **and checks** it. It is the only implementation that ever
+  sees a PIN.
+* `panel/src/pin.js` derives it through WebCrypto. The panel can *set* or *clear* a PIN and can
+  never be asked to prove one — a browser is not where that check belongs.
+* Postgres checks the **shape only** (`profiles_validate`), so a malformed write is rejected
+  rather than becoming a profile nobody can open. Its iteration bound (and the panel's) is
+  deliberately *narrower* than the app's parser accepts — a verifier the server stores but the
+  device cannot read is exactly the unopenable profile the check exists to prevent.
+
+Both client tests assert the same two vectors (`test/profile_pin_test.dart`,
+`panel/test/pin.test.js`), cross-checked against an independent PBKDF2 implementation. That is
+what guarantees a PIN set in the panel opens the profile on a television that has never talked to
+that panel — there is no feedback path that would reveal a mismatch later.
+
+**An unreadable verifier fails closed.** A build that cannot parse the stored string (a future
+algorithm, a longer PIN) leaves the profile shut and says why. Reading it as "no PIN" would turn
+every forward-compatible change into a silent removal of the gate on every older install.
+
+**The gate is enforced by the client, so an app build older than this feature ignores it.** That is
+inherent — the server cannot check a PIN it never sees — and it is another reason not to describe
+this as protection. It is also why nothing else was made to depend on it: no push, pull, or secret
+path consults `pin`, so an old build that ignores the column behaves exactly as it always did.
+
+### Write paths
+
+* Panel: a direct `update` under the existing owner-scoped `profiles_update` policy.
+* Device: `set_profile_pin(p_profile_id, p_pin)` — devices hold zero direct table writes, so this
+  follows the same SECURITY DEFINER shape as the push RPCs (owner resolution, profile ownership,
+  then `check_push_rate`). Validation is the shared trigger's, so the two paths cannot diverge.
+
+A PIN change **advances `profiles.updated_at`** like any other profile edit. It is deliberately
+not given the favorites-style exemption: favorites are exempt because they are device-owned and
+push constantly, while a PIN changes about once in a profile's life. One extra "changed on the
+panel" prompt is a fair price for not putting a second hole in a guard that exists to stop a
+device push overwriting real panel edits. Pinned by `supabase/tests/16_profile_pin.test.sql`.
+
+### Device side
+
+`_ProfileEntry.locked` drives a lock badge on the avatar (in **every** mode — "this will ask for a
+PIN" is something you want to know *before* choosing a profile), and `ProfilePickScreen` asks
+before switching. Three rules that are easy to get wrong:
+
+* **The active profile is not re-asked** when the picker is opened from the avatar menu: you are
+  already inside that profile, and its data is on the screen behind the dialog. The one exception
+  is a locked *boot* (`_lockedBoot`), where the app has not been handed over yet — there, even
+  re-selecting the active profile asks, and **Skip is withdrawn**, since Skip is the other way
+  past this screen.
+* **A locked active profile overrides the startup mode** (`shouldShowPickerAtStartup(...,
+  activeProfileLocked: true)`). Without that, `off` — or `auto` with a single profile — would boot
+  straight into the locked profile, and the gate would exist only for accounts that happen to have
+  several profiles *and* have left the picker on.
+* **A cloud profile's verifier is mirrored device-side** (`LocalProfileStore.cloudPins`, refreshed
+  on every successful listing) **with its name beside it**. The boot check runs before any cloud
+  call can answer, and an offline device must not hand over a locked profile just because it could
+  not ask. The name is cached because an offline boot into a locked cloud profile has to *draw*
+  that profile for its PIN to be typed — with only the verifier there would be a "Who's watching?"
+  with nothing to watch with. Staleness fails closed (a PIN cleared on the panel stays enforced
+  until the next successful listing) and self-heals.
+
+  Two boundaries keep that cache from outliving its account. The fallback is used only when the
+  server **never answered** — a device the panel unpaired answers *not paired* definitively, and
+  reading the cache there would conjure a locked profile it can no longer sync and hold the boot on
+  it. And `CloudSync.unpair` clears the cache (`clearCloudPins`) for the same reason it clears the
+  sticky E2EE marks: re-pairing to a *different* account that happens to reuse a profile id would
+  otherwise inherit a lock nobody set.
+
+Manage mode opens a per-profile menu (Set/Change PIN, Remove PIN, Delete). Changing or clearing a
+PIN asks for the current one; **deleting does not**. That asymmetry is deliberate: deleting
+reveals nothing — it only destroys — and it is the one way out of a forgotten PIN on a
+device-local profile, which has no panel to clear it from. Behind the PIN, a delete would leave a
+profile that can be neither opened nor removed.
+
+The dialog (`lib/widgets/pin_entry.dart`) draws an **in-app keypad everywhere except desktop**
+(`pinKeypadForPlatform`): on a television a `TextField` opens the platform IME, which on Android TV
+is a full alphabetic keyboard that traps D-pad focus — the reason `TvTextField` exists at all — and
+four digits deserve better than that. Desktop always has a keyboard attached, so the pad would be a
+mouse-only detour. Hardware digits work on **both** surfaces regardless: a remote's number keys
+bubble from whichever pad button holds focus up to the dialog's own handler.
+
+**The pad fits the window; it never scrolls.** This is a modal the user cannot leave without typing
+four digits, and on a remote a key below the fold is simply unreachable — a D-pad does not scroll a
+dialog. So the lattice is laid out at its comfortable size inside `Flexible` + `FittedBox`
+(`scaleDown`, so a roomy layout is unchanged) and shrinks into whatever height the lines above
+leave; the explanatory line — the one piece of chrome that is nice rather than necessary — is
+dropped below a 420 px viewport so the pad keeps that space, and the digit labels opt out of the
+platform text scale because the pad's size is already a layout fact. A landscape handset at a 2.0
+text scale is the case that forces all three.
+
+Pinned by `test/pin_entry_test.dart` (both surfaces, the full arrows-and-OK walk of the pad
+including the corner where Down from 7 has to find 0, the cooldown), the PIN group in
+`test/profile_pick_screen_test.dart` (the gate, the locked boot, manage mode operable with OK
+alone), and a sweep in `test/layout_overflow_test.dart` — 7 window sizes from 320x568 to 1920x1080
+x text scales 1.0/1.3/2.0, asserting every key is **inside the window** and the pad still types.
+
 ## Profiles (device-side)
 
 The app boots into `ProfilePickScreen` (`main.dart` `home:`, `bootMode: true`) — a "Who's
 watching?" grid that combines **cloud profiles** (only when built with Supabase config *and*
 paired) and **local profiles**, which need no cloud at all. At boot the screen decides for itself
-whether to appear: `shouldShowPickerAtStartup(mode, profileCount)` with the persisted
-`ProfilePickerStartup` mode (`auto` = only when >1 profile, `always`, `off`; cycled from a
-`FocusableCard` row atop `sources_screen.dart`) — otherwise it silently short-circuits to
-`HomeShell`, so a single-profile install boots exactly as before. Profiles are also reachable
+whether to appear: `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:)` with the
+persisted `ProfilePickerStartup` mode (`auto` = only when >1 profile, `always`, `off`; cycled from
+a `FocusableCard` row atop `sources_screen.dart`) — otherwise it silently short-circuits to
+`HomeShell`, so a single-profile install boots exactly as before. A **PIN-locked active profile
+overrides every mode** and holds the screen; see [Profile PINs](#profile-pins). Profiles are also reachable
 from the channel-list AppBar avatar (`ProfileAvatarButton` → "Change profile") and a Profiles
 action on the sources screen.
 
@@ -685,8 +819,9 @@ empty list — and clears the managed-ids set so a later cloud "Pull now" can't 
 into a local profile); switching to a cloud profile restores its snapshot first (its device-local
 extra sources + managed ids), then does the normal `setProfile` + pull. This keeps `pullSources`'s
 "preserve non-managed sources" semantic working on the right baseline and prevents cross-profile
-source leaks. New local profiles are seeded with only the Demo source. Local profiles can be
-deleted in the picker's manage mode; cloud profiles are managed in the web panel.
+source leaks. New local profiles are seeded with only the Demo source. Manage mode opens a
+per-profile menu — set/change/remove its PIN, and (local profiles only) delete it; cloud profiles
+are otherwise managed in the web panel.
 
 **Deleting the *active* profile** needs care: at delete time that profile's device state is still
 live in the store, and the picker must not let it leak or be mis-attributed. So deleting the
@@ -704,5 +839,5 @@ straight to `HomeShell`, since that profile carries a persisted active id.
 
 JSON round-trips, the startup decision, and the stable cloud-avatar colour hash are unit-tested in
 `test/profile_store_test.dart`; the deletion contract (non-active delete, delete-active with others
-present / as the last profile, and the `friendlyCloudError` surface) is pinned by
+present / as the last profile, and the `friendlyCloudError` surface) and the PIN gate are pinned by
 `test/profile_pick_screen_test.dart`.

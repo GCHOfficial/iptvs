@@ -9,6 +9,7 @@ import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'cloud_crypto.dart';
+import 'local_profile_store.dart';
 import 'device_label.dart';
 import 'metadata_config.dart';
 import 'net.dart';
@@ -93,12 +94,24 @@ class CloudProfile {
   final String name;
   final int position;
   final DateTime? updatedAt;
+
+  /// The profile's PIN verifier (`profile_pin.dart`), or null when the profile
+  /// is open. A **broad** column, deliberately: a four-digit PIN is a gate on a
+  /// shared television, not a secret, and a verifier for one is brute-forceable
+  /// by anyone holding it whatever the KDF cost — so encrypting it would buy
+  /// nothing while making the gate unenforceable on an E2EE-locked device,
+  /// which is the device most in need of it.
+  final String? pin;
+
   const CloudProfile({
     required this.id,
     required this.name,
     required this.position,
     this.updatedAt,
+    this.pin,
   });
+
+  bool get locked => pin != null && pin!.isNotEmpty;
 }
 
 /// Server-authoritative revision metadata used by a client before a
@@ -540,7 +553,7 @@ class CloudSync {
   Future<List<CloudProfile>> listProfiles() async {
     final rows = await _client
         .from('profiles')
-        .select('id, name, position, updated_at')
+        .select('id, name, position, updated_at, pin')
         .order('position');
     return [
       for (final r in rows)
@@ -551,8 +564,24 @@ class CloudSync {
           updatedAt: r['updated_at'] == null
               ? null
               : DateTime.tryParse(r['updated_at'].toString()),
+          pin: (r['pin'] as String?)?.trim().isEmpty ?? true
+              ? null
+              : (r['pin'] as String).trim(),
         ),
     ];
+  }
+
+  /// Set (or, with a null [verifier], clear) a cloud profile's PIN.
+  ///
+  /// Devices hold no direct table writes, so this goes through the owner-scoped
+  /// `set_profile_pin` RPC like every other device→cloud write. The server
+  /// validates the verifier's *shape* only — it never sees a PIN, and could not
+  /// check one if it did.
+  Future<void> setProfilePin(String profileId, String? verifier) async {
+    await _client.rpc(
+      'set_profile_pin',
+      params: {'p_profile_id': profileId, 'p_pin': verifier},
+    );
   }
 
   Future<CloudRevision?> profileRevision(String profileId) async {
@@ -588,6 +617,14 @@ class CloudSync {
     }
     return _storage.read(key: _kProfileId);
   }
+
+  /// The profile this device last synced, **from the local cache only**.
+  ///
+  /// [activeProfileId] asks the server first and therefore throws when the
+  /// device is offline. The boot-time PIN gate has to work then too — a locked
+  /// profile must not be handed over just because the network was down — so it
+  /// reads this instead.
+  Future<String?> cachedProfileId() => _storage.read(key: _kProfileId);
 
   /// Choose which profile this device syncs (persisted server-side via the
   /// `set_device_profile` RPC and cached locally).
@@ -989,6 +1026,9 @@ class CloudSync {
     // reuse an id. (Unpairing is an explicit user action, so this is not a
     // server-triggerable reset.)
     await _storage.delete(key: _kE2eeMarks);
+    // The cached cloud profile PIN verifiers are account-scoped for exactly the
+    // same reason, and live one store over.
+    await const LocalProfileStore().clearCloudPins();
     final id = deviceId;
     if (id == null) return;
     try {

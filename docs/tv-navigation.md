@@ -293,6 +293,17 @@ with no dialog to route focus through and no hold-timing gesture to discover.
   focused*. Both wrap the same rect, so the ring looks identical and now costs no layout.
   The selected row's `panelHi` fill stays either way, so the row remains visible. The star cell
   fits inside the row extents, which are no longer fixed: they scale with density *and* with the platform text scale, and the star target scales with the text scale alongside them.
+- **The star cell's own ring is a `foregroundDecoration` for a second, sharper reason.** As a
+  `decoration` border it *added* its 4 px to the cell: 20 (icon) + 12 (padding) + 4 = 36, which
+  fits the 44 px pointer target but **not** the ten-foot 32 px one
+  (`LiveLayoutMetrics.favoriteTargetSize`). The `Center` above it then squeezed the cell back to
+  32, the `Icon` collapsed 20 → 16, and a 20 px glyph paints from the **top-left** of the box it
+  overflows — so on a television the star sat about 2 px down and right of the ring drawn around
+  it, and *only* while focused, which is the one state where a ring is there to show the offset.
+  Measured off a photograph of the panel and reproduced exactly by the test. With the ring painted
+  instead of laid out, the cell is 32 in both states, fits the ten-foot target, and the glyph stays
+  centred. Pinned by the "favorite star cell" group in `test/live_tab_layout_test.dart`, which
+  asserts the `Icon` is 20x20 and its centre unmoved across the ring appearing.
 - **Touch**: tapping the star toggles directly (selecting the row first, so cursor and pointer
   never disagree). Tapping the row body **plays only on a phone** — on a wide layout the first tap
   starts/switches the preview and a second tap (or tap while already previewing that channel) goes
