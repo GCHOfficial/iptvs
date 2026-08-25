@@ -577,8 +577,20 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   nothing and is the only way out of a forgotten PIN on a local profile. Read
   [docs/cloud-sync.md](docs/cloud-sync.md) "Profile PINs" before touching any of it.
 - The app boots into `ProfilePickScreen`, which self-decides via
-  `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:)` — single-profile installs
-  boot straight to `HomeShell` unless the active profile is PIN-locked.
+  `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:, hasActiveProfile:)` —
+  single-profile installs boot straight to `HomeShell` unless the active profile is PIN-locked, or
+  the device is **ownerless**: the state deleting the active profile leaves behind (empty
+  baseline, nothing marked active — deliberately, so no snapshot is overwritten with state that
+  isn't its own). The picker is the only thing that restores a snapshot, so short-circuiting past
+  it there boots into an empty library that a relaunch cannot repair — `auto` with one profile
+  left never opens the picker again. Ownerless is a **persisted mark**
+  (`LocalProfileStore.ownerless`), never inferred from "is an entry drawn as active": an offline
+  device can't draw its active cloud profile *and still holds its sources*, while a stale cloud
+  `active_profile_id` (never cleared by switching to a local profile) would otherwise claim the
+  empty baseline through both the boot short-circuit and `_selectProfile`'s identity shortcut.
+  While it is set, `_check` marks no entry active at all. Delete-of-active also **adopts the sole
+  survivor** when it is local and unlocked (`_adoptSoleSurvivor`); a locked or cloud survivor is
+  left for the picker.
 - Cloud writes are bounded by BEFORE-triggers on the tables (binding panel *direct* writes too)
   plus pre-mutation count/size guards in the push RPCs, and pushes are rate-limited DB-side —
   limits are sized ≥10x over a 250k-channel portal, and rejections are `iptvs: `-prefixed

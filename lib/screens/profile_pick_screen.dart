@@ -169,14 +169,36 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     if (cloudListed) {
       await _localStore.saveCloudPins({
         for (final p in cloudProfiles)
-          if (p.locked)
-            p.id: CloudProfileLock(verifier: p.pin!, name: p.name),
+          if (p.locked) p.id: CloudProfileLock(verifier: p.pin!, name: p.name),
       });
     }
     final cachedLocks = await _localStore.cloudPins();
 
     final localProfiles = await _localStore.loadAll();
     final localActiveId = await _localStore.activeId();
+    // Is the live device state owned by any profile?
+    //
+    // The mark is the authority (it is the only thing that can see a *stale*
+    // cloud pointer), but it is joined by an inference for the installs that
+    // already hit this bug on an older build: they have profiles, no local
+    // active id, and no cloud pairing to explain it, and nothing will ever
+    // write the mark for them retroactively. The inference deliberately stops
+    // at `cloudActiveId != null` — a merely offline device can't draw its
+    // active cloud profile either, and its store does hold that profile's
+    // sources.
+    //
+    // A local active id proves a mark is stale — only a real selection writes
+    // one — so that direction self-heals too.
+    var ownerless = await _localStore.ownerless();
+    if (ownerless && localActiveId != null) {
+      await _localStore.setOwnerless(false);
+      ownerless = false;
+    }
+    ownerless =
+        ownerless ||
+        (localProfiles.isNotEmpty &&
+            localActiveId == null &&
+            cloudActiveId == null);
 
     if (!mounted) return;
 
@@ -217,9 +239,18 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
 
     // Determine the active profile (an active local profile takes precedence:
     // it's the most recent explicit selection).
+    //
+    // Unless the device is *ownerless* — the active profile was deleted, so
+    // the live store is the empty baseline and belongs to nobody. A persisted
+    // cloud `active_profile_id` can outlive that (see
+    // `LocalProfileStore.ownerless`), and letting it claim the baseline is how
+    // the boot short-circuit and the identity shortcut in `_selectProfile`
+    // both end up in an empty library.
     String? activeId;
     _ProfileSource? activeSource;
-    if (localActiveId != null &&
+    if (ownerless) {
+      // Nothing is active. Falls through to the checks below with both null.
+    } else if (localActiveId != null &&
         entries.any((e) => e.id == localActiveId && !e.isCloud)) {
       activeId = localActiveId;
       activeSource = _ProfileSource.local;
@@ -258,6 +289,18 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
         mode,
         entries.length,
         activeProfileLocked: lockedBoot,
+        // Nothing owns the device state — the active profile was deleted and
+        // the live store is the empty baseline. Booting past this screen would
+        // load an empty library that no restart can fix, because the picker is
+        // the only thing that restores a snapshot and with one profile left
+        // `auto` never opens it again.
+        //
+        // Read from the mark, not from `activeId`: a device that is merely
+        // *offline* can't draw its active cloud profile either, and its store
+        // does still hold that profile's sources. Inferring ownership from the
+        // entry list would put "Who's watching?" in front of that user on
+        // every launch with no network.
+        hasActiveProfile: !ownerless,
       )) {
         _goHome();
         return;
@@ -470,6 +513,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
         await _restoreSnapshot(target.snapshot);
         await _localStore.setActive(entry.id);
       }
+      await _localStore.setOwnerless(false);
       setState(() {
         _activeProfileId = entry.id;
         _activeSource = entry.source;
@@ -522,6 +566,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       );
       await _restoreSnapshot(seed);
       await _localStore.setActive(profile.id);
+      await _localStore.setOwnerless(false);
       _activeProfileId = profile.id;
       _activeSource = _ProfileSource.local;
       if (mounted) _goHome();
@@ -669,9 +714,7 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.danger,
-            ),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('Delete'),
           ),
@@ -689,10 +732,47 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
       // invariant that guarantees no profile's stored snapshot is ever
       // overwritten with state that isn't its own.
       await _restoreSnapshot(const ProfileSnapshot());
+      await _localStore.setOwnerless(true);
       _activeProfileId = null;
       _activeSource = null;
+      await _adoptSoleSurvivor(entry);
     }
     await _reload();
+  }
+
+  /// After deleting the profile that was active, the device holds the neutral
+  /// empty baseline and *no* profile owns it. When exactly one profile is
+  /// left, adopt it here — restoring its snapshot the same way a switch would.
+  ///
+  /// Without this the survivor is only reachable by finding the profile
+  /// switcher by hand: the boot check does force the picker open now, but the
+  /// user who deletes a profile and walks away (Skip, or straight into the
+  /// app) sits in an empty library until the next launch, and every earlier
+  /// build shipped that dead end permanently. Adopting is safe precisely
+  /// because nothing is active: [_snapshotCurrent] is a no-op, so the
+  /// survivor's stored snapshot cannot be overwritten with state that isn't
+  /// its own before it is read back.
+  ///
+  /// A locked survivor is deliberately left unadopted — its sources would then
+  /// sit one Skip away with no PIN ever asked. It is entered through the
+  /// picker, which the ownerless boot check now always opens.
+  Future<void> _adoptSoleSurvivor(_ProfileEntry deleted) async {
+    final survivors = [
+      for (final e in _profiles)
+        if (e.id != deleted.id || e.source != deleted.source) e,
+    ];
+    if (survivors.length != 1) return;
+    final survivor = survivors.single;
+    // Cloud entries stay out: entering one is a pull, not a restore.
+    if (survivor.isCloud || survivor.locked) return;
+    final all = await _localStore.loadAll();
+    final idx = all.indexWhere((p) => p.id == survivor.id);
+    if (idx < 0) return;
+    await _restoreSnapshot(all[idx].snapshot);
+    await _localStore.setActive(survivor.id);
+    await _localStore.setOwnerless(false);
+    _activeProfileId = survivor.id;
+    _activeSource = _ProfileSource.local;
   }
 
   Future<void> _goToCloudSync() async {

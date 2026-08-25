@@ -803,11 +803,14 @@ x text scales 1.0/1.3/2.0, asserting every key is **inside the window** and the 
 The app boots into `ProfilePickScreen` (`main.dart` `home:`, `bootMode: true`) — a "Who's
 watching?" grid that combines **cloud profiles** (only when built with Supabase config *and*
 paired) and **local profiles**, which need no cloud at all. At boot the screen decides for itself
-whether to appear: `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:)` with the
-persisted `ProfilePickerStartup` mode (`auto` = only when >1 profile, `always`, `off`; cycled from
-a `FocusableCard` row atop `sources_screen.dart`) — otherwise it silently short-circuits to
-`HomeShell`, so a single-profile install boots exactly as before. A **PIN-locked active profile
-overrides every mode** and holds the screen; see [Profile PINs](#profile-pins). Profiles are also reachable
+whether to appear: `shouldShowPickerAtStartup(mode, profileCount, activeProfileLocked:,
+hasActiveProfile:)` with the persisted `ProfilePickerStartup` mode (`auto` = only when >1 profile,
+`always`, `off`; cycled from a `FocusableCard` row atop `sources_screen.dart`) — otherwise it
+silently short-circuits to `HomeShell`, so a single-profile install boots exactly as before. A
+**PIN-locked active profile overrides every mode** and holds the screen; see
+[Profile PINs](#profile-pins). An **ownerless device — profiles exist but none is active —
+overrides every mode too**; see [Deleting a profile](#deleting-a-profile) for why that state is
+otherwise unrecoverable. Profiles are also reachable
 from the channel-list AppBar avatar (`ProfileAvatarButton` → "Change profile") and a Profiles
 action on the sources screen.
 
@@ -823,6 +826,8 @@ source leaks. New local profiles are seeded with only the Demo source. Manage mo
 per-profile menu — set/change/remove its PIN, and (local profiles only) delete it; cloud profiles
 are otherwise managed in the web panel.
 
+### Deleting a profile
+
 **Deleting the *active* profile** needs care: at delete time that profile's device state is still
 live in the store, and the picker must not let it leak or be mis-attributed. So deleting the
 profile you're currently "in" resets the live state to a neutral empty baseline
@@ -833,11 +838,47 @@ isn't its own.* The mechanism relies on two things staying true — the parking 
 (`_snapshotCurrent`) is a no-op while no profile is active, and `_check` only marks a profile
 active when a genuine persisted selection (local `activeId` / cloud `active_profile_id`) points at
 it. Selecting a profile afterwards restores its snapshot through the normal switch path. Deleting a
-*non-active* profile leaves the active profile and its live state untouched. Single-profile
-short-circuit (`shouldShowPickerAtStartup`) is unaffected: an install with one profile still boots
-straight to `HomeShell`, since that profile carries a persisted active id.
+*non-active* profile leaves the active profile and its live state untouched.
+
+That empty baseline is correct but it is not a resting place, and leaving the device parked there
+was a shipped dead end: **the picker is the only thing that restores a snapshot**, and with one
+profile left `shouldShowPickerAtStartup(auto, 1)` answers *false* — so the survivor booted into an
+empty library on every launch, force-close included, until the user found "Change profile" by hand.
+(`off` reaches the same dead end at any profile count.) Two changes close it, and both are needed:
+
+* **The boot check knows about ownerless.** `hasActiveProfile: !ownerless` in `_check`; profiles
+  present with nothing owning the device forces the picker open whatever the mode says.
+
+  Ownerless-ness is a **persisted device-local mark** (`LocalProfileStore.ownerless`), written at
+  delete-of-active, and *not* inferred from "is some entry drawn as active". Both directions of
+  that inference are wrong. A device that is merely **offline** cannot draw its active cloud
+  profile — its store still holds that profile's sources, and inferring from the entry list would
+  put "Who's watching?" in front of that user on every launch with no network. In the other
+  direction, deleting the active *local* profile leaves the cloud `active_profile_id` pointing at
+  a profile whose sources are **not** loaded (switching to a local profile never clears it, and
+  there is no RPC that can), so that stale pointer would claim the empty baseline — the boot
+  short-circuits into it *and* `_selectProfile`'s identity shortcut answers a tap on it with
+  `_goHome()`, both landing in the empty library. While the mark is set, `_check` marks **no**
+  entry active, which disarms both paths at once.
+
+  The mark is joined by one inference, for installs that already hit this bug on an older build
+  and will never have a mark written retroactively: profiles exist, no local active id, **and no
+  cloud pairing** to explain it. That last clause is what keeps the offline-cloud device out.
+  Clearing is symmetric — selecting a profile, creating one, and the adoption below all clear it,
+  and a local active id present alongside a mark proves the mark stale (only a real selection
+  writes one), so it self-heals.
+* **Delete-of-active adopts the sole survivor** (`_adoptSoleSurvivor`): exactly one profile left,
+  local, and unlocked → restore its snapshot and mark it active, right there. Ownership is
+  unambiguous with one candidate, and the user who deletes and then walks straight into the app
+  (Skip, or the avatar menu) shouldn't have to wait for a relaunch to get their library back.
+  Adopting is safe *because* nothing is active at that moment: `_snapshotCurrent` is a no-op, so
+  the survivor's stored snapshot cannot be overwritten before it is read back — the invariant
+  above still holds. A **locked** survivor is deliberately *not* adopted (its sources would sit one
+  Skip away with no PIN asked) and neither is a cloud one (entering it is a pull, not a restore);
+  both are reached through the picker the ownerless check now opens.
 
 JSON round-trips, the startup decision, and the stable cloud-avatar colour hash are unit-tested in
-`test/profile_store_test.dart`; the deletion contract (non-active delete, delete-active with others
-present / as the last profile, and the `friendlyCloudError` surface) and the PIN gate are pinned by
-`test/profile_pick_screen_test.dart`.
+`test/profile_store_test.dart` (including the ownerless override); the deletion contract
+(non-active delete, delete-active with others present / as the last profile, sole-survivor
+adoption, a locked survivor left unadopted, the ownerless boot, and the `friendlyCloudError`
+surface) and the PIN gate are pinned by `test/profile_pick_screen_test.dart`.
