@@ -24,12 +24,27 @@ enum ProfilePickerStartup {
 /// boot straight into the locked profile's library — the gate would exist only
 /// for accounts that happen to have several profiles *and* have left the picker
 /// on, which is not a gate at all.
+///
+/// [hasActiveProfile] false while profiles exist overrides every mode too, for
+/// the mirror-image reason: the device state belongs to *no* profile, and the
+/// picker is the only thing that can restore a snapshot. That state is reached
+/// by deleting the active profile, which drops to the empty baseline and marks
+/// nothing active, deliberately — so booting past the picker here means booting
+/// into an empty library that no restart can fix, because with one profile left
+/// `auto` never shows the picker again. The user had to find the profile
+/// switcher by hand to recover.
+///
+/// It is the caller's [LocalProfileStore.ownerless] mark, not "is some profile
+/// drawn as active": an offline device can't draw its active cloud profile and
+/// still holds that profile's sources.
 bool shouldShowPickerAtStartup(
   ProfilePickerStartup mode,
   int profileCount, {
   bool activeProfileLocked = false,
+  bool hasActiveProfile = true,
 }) {
   if (activeProfileLocked) return true;
+  if (profileCount > 0 && !hasActiveProfile) return true;
   switch (mode) {
     case ProfilePickerStartup.auto:
       // Show on first launch (0 profiles) so the user can create one, and
@@ -242,6 +257,7 @@ class LocalProfileStore {
   static const _kCloudSnapshots = 'cloud_profile_snapshots_v1';
   static const _kPickerStartup = 'profile_picker_startup';
   static const _kCloudPins = 'cloud_profile_pins_v1';
+  static const _kOwnerless = 'profile_state_ownerless';
 
   final FlutterSecureStorage _storage;
 
@@ -295,6 +311,32 @@ class LocalProfileStore {
       await _storage.delete(key: _kActiveId);
     } else {
       await _storage.write(key: _kActiveId, value: id);
+    }
+  }
+
+  // ── Ownerless device state ────────────────────────────────────────────────
+  // Set when the *active* profile is deleted: the live source list is reset to
+  // the empty baseline and no profile owns it any more. It is an explicit fact
+  // rather than something inferred from "is there an active id", because the
+  // two persisted selections can't express it between them — deleting the
+  // active local profile clears `activeId` but leaves the cloud
+  // `active_profile_id` pointing at a profile whose sources are *not* loaded
+  // (switching to a local profile never clears it, and there is no RPC to),
+  // so the picker would mark that profile active, short-circuit the boot into
+  // it, and answer a tap on it with the identity shortcut — landing in an
+  // empty library either way.
+  //
+  // Cleared by every path that hands the device to a profile: selecting one,
+  // creating one, and the sole-survivor adoption after a delete.
+
+  Future<bool> ownerless() async =>
+      (await _storage.read(key: _kOwnerless)) == '1';
+
+  Future<void> setOwnerless(bool value) async {
+    if (value) {
+      await _storage.write(key: _kOwnerless, value: '1');
+    } else {
+      await _storage.delete(key: _kOwnerless);
     }
   }
 

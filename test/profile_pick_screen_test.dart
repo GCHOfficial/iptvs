@@ -69,8 +69,12 @@ void main() {
 
     const localStore = LocalProfileStore();
 
-    SourceConfig cfg(String id) =>
-        SourceConfig(id: id, kind: SourceKind.demo, label: id, fields: const {});
+    SourceConfig cfg(String id) => SourceConfig(
+      id: id,
+      kind: SourceKind.demo,
+      label: id,
+      fields: const {},
+    );
 
     ProfileSnapshot snap(String srcId) => ProfileSnapshot(
       sourcesJson: [cfg(srcId).toJson()],
@@ -105,48 +109,56 @@ void main() {
       return done;
     }
 
-    testWidgets('deleting a non-active profile leaves the active one untouched', (
-      tester,
-    ) async {
-      final store = SourceStore();
-      await localStore.createProfile('Bravo', 0, snapshot: snap('src-b'));
-      final a = await localStore.createProfile('Alice', 1, snapshot: snap('src-a'));
-      await localStore.setActive(a.id);
-      await store.setAll([cfg('src-a')]);
-      await store.setActive('src-a');
+    testWidgets(
+      'deleting a non-active profile leaves the active one untouched',
+      (tester) async {
+        final store = SourceStore();
+        await localStore.createProfile('Bravo', 0, snapshot: snap('src-b'));
+        final a = await localStore.createProfile(
+          'Alice',
+          1,
+          snapshot: snap('src-a'),
+        );
+        await localStore.setActive(a.id);
+        await store.setAll([cfg('src-a')]);
+        await store.setActive('src-a');
 
-      await pumpPicker(tester, store: store);
+        await pumpPicker(tester, store: store);
 
-      // Delete Bravo (not the active profile).
-      await tester.tap(find.text('Manage profiles'));
-      await pumpFor(tester);
-      await tester.tap(find.text('Bravo'));
-      await pumpFor(tester);
-      // Manage mode opens a menu now (PIN actions live there too), so delete
-      // is two steps: the menu entry, then the confirmation.
-      await tester.tap(find.text('Delete profile'));
-      await pumpFor(tester);
-      await tester.tap(find.text('Delete'));
-      await pumpFor(tester);
+        // Delete Bravo (not the active profile).
+        await tester.tap(find.text('Manage profiles'));
+        await pumpFor(tester);
+        await tester.tap(find.text('Bravo'));
+        await pumpFor(tester);
+        // Manage mode opens a menu now (PIN actions live there too), so delete
+        // is two steps: the menu entry, then the confirmation.
+        await tester.tap(find.text('Delete profile'));
+        await pumpFor(tester);
+        await tester.tap(find.text('Delete'));
+        await pumpFor(tester);
 
-      // Active profile + its live state are completely untouched.
-      expect(await localStore.activeId(), a.id);
-      final live = await store.list();
-      expect(live.map((c) => c.id), ['src-a']);
-      final remaining = await localStore.loadAll();
-      expect(remaining.map((p) => p.id), [a.id]);
-      final storedA = remaining.single;
-      expect(storedA.snapshot.sourcesJson.single['id'], 'src-a');
+        // Active profile + its live state are completely untouched.
+        expect(await localStore.activeId(), a.id);
+        final live = await store.list();
+        expect(live.map((c) => c.id), ['src-a']);
+        final remaining = await localStore.loadAll();
+        expect(remaining.map((p) => p.id), [a.id]);
+        final storedA = remaining.single;
+        expect(storedA.snapshot.sourcesJson.single['id'], 'src-a');
 
-      await tester.pumpWidget(const SizedBox());
-    });
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
 
     testWidgets(
       'deleting the last (active) profile drops to an empty baseline, no active',
       (tester) async {
         final store = SourceStore();
-        final a =
-            await localStore.createProfile('Alice', 0, snapshot: snap('src-a'));
+        final a = await localStore.createProfile(
+          'Alice',
+          0,
+          snapshot: snap('src-a'),
+        );
         await localStore.setActive(a.id);
         await store.setAll([cfg('src-a')]);
         await store.setActive('src-a');
@@ -182,12 +194,21 @@ void main() {
         // Three local profiles, in creation (list) order Charlie, Bravo, Alice.
         // Alice is active and loaded into the live store.
         final store = SourceStore();
-        final c =
-            await localStore.createProfile('Charlie', 0, snapshot: snap('src-c'));
-        final b =
-            await localStore.createProfile('Bravo', 1, snapshot: snap('src-b'));
-        final a =
-            await localStore.createProfile('Alice', 2, snapshot: snap('src-a'));
+        final c = await localStore.createProfile(
+          'Charlie',
+          0,
+          snapshot: snap('src-c'),
+        );
+        final b = await localStore.createProfile(
+          'Bravo',
+          1,
+          snapshot: snap('src-b'),
+        );
+        final a = await localStore.createProfile(
+          'Alice',
+          2,
+          snapshot: snap('src-a'),
+        );
         await localStore.setActive(a.id);
         await store.setAll([cfg('src-a')]);
         await store.setActive('src-a');
@@ -233,6 +254,213 @@ void main() {
         await tester.pumpWidget(const SizedBox());
       },
     );
+
+    testWidgets('deleting the active profile adopts the sole survivor', (
+      tester,
+    ) async {
+      // The reported dead end: with one profile left, `auto` never opens the
+      // picker again, so the survivor — the only thing that can restore a
+      // snapshot — was never reached and the library stayed empty across
+      // restarts. Deleting the active profile must hand the device to it.
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete profile'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete'));
+      await pumpFor(tester);
+
+      expect(await localStore.activeId(), b.id);
+      final live = await store.list();
+      expect(live.map((c) => c.id), ['src-b']);
+      expect(await store.activeId(), 'src-b');
+      // Bravo's own snapshot is what was restored — never Alice's leftovers.
+      expect(
+        (await localStore.loadAll()).single.snapshot.sourcesJson.single['id'],
+        'src-b',
+      );
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a locked sole survivor is not adopted, and holds the boot', (
+      tester,
+    ) async {
+      // Adopting it would put its sources one Skip away with no PIN asked. It
+      // stays ownerless instead — and the ownerless boot check keeps the
+      // picker open so it can still be entered with the PIN.
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      await localStore.setPin(b.id, hashProfilePin('4821'));
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete profile'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete'));
+      await pumpFor(tester);
+
+      expect(await localStore.activeId(), isNull);
+      expect(await store.list(), isEmpty);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an ownerless device opens the picker at boot', (tester) async {
+      // One profile and nothing active: `auto` would normally short-circuit on
+      // the count alone, booting into a library no profile owns and that no
+      // restart can repair. This is also the shape an install left in by the
+      // *older* build carries — no mark was ever written for it, so the boot
+      // check has to infer ownerless-ness from an unpaired device with no
+      // active id at all.
+      final store = SourceStore();
+      await localStore.createProfile('Alice', 0, snapshot: snap('src-a'));
+      await localStore.setActive(null);
+
+      await pumpPicker(tester, store: store, bootMode: true);
+
+      expect(_doneFlags[tester]!(), isFalse, reason: 'the picker must show');
+      expect(find.text('Alice'), findsOneWidget);
+
+      // And picking it hands the device over.
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Switch profile'));
+      await pumpFor(tester);
+
+      expect(_doneFlags[tester]!(), isTrue);
+      expect((await store.list()).map((c) => c.id), ['src-a']);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a stale cloud active id cannot claim the empty baseline', (
+      tester,
+    ) async {
+      // Switching to a local profile never clears the cloud
+      // `active_profile_id`, and there is no RPC that can. So after deleting
+      // the active *local* profile the stale cloud pointer was left as the one
+      // "active" profile — the boot short-circuited into it and a tap on it
+      // took the identity shortcut, both landing in the empty baseline. The
+      // ownerless mark is what stops it claiming anything.
+      final store = SourceStore();
+      final b = await localStore.createProfile(
+        'Bravo',
+        0,
+        snapshot: snap('src-b'),
+      );
+      final a = await localStore.createProfile(
+        'Alice',
+        1,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete profile'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete'));
+      await pumpFor(tester);
+
+      // Bravo is the sole survivor, so it is adopted — and adoption is exactly
+      // what clears the mark again.
+      expect(await localStore.ownerless(), isFalse);
+      expect(await localStore.activeId(), b.id);
+
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('the ownerless mark survives a relaunch and clears on select', (
+      tester,
+    ) async {
+      // Two survivors, so nothing is adopted: the device stays ownerless and
+      // the mark has to still be there on the next launch, or the boot check
+      // has nothing to read.
+      final store = SourceStore();
+      await localStore.createProfile('Charlie', 0, snapshot: snap('src-c'));
+      final b = await localStore.createProfile(
+        'Bravo',
+        1,
+        snapshot: snap('src-b'),
+      );
+      final a = await localStore.createProfile(
+        'Alice',
+        2,
+        snapshot: snap('src-a'),
+      );
+      await localStore.setActive(a.id);
+      await store.setAll([cfg('src-a')]);
+      await store.setActive('src-a');
+
+      await pumpPicker(tester, store: store);
+      await tester.tap(find.text('Manage profiles'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Alice'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete profile'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Delete'));
+      await pumpFor(tester);
+      await tester.pumpWidget(const SizedBox());
+
+      expect(await localStore.ownerless(), isTrue);
+
+      // Relaunch: `auto` with two profiles would open the picker anyway, so
+      // assert the mark's own effect — nothing is drawn as active, and picking
+      // a profile clears it.
+      await pumpPicker(tester, store: store, bootMode: true);
+      expect(_doneFlags[tester]!(), isFalse);
+
+      await tester.tap(find.text('Bravo'));
+      await pumpFor(tester);
+      await tester.tap(find.text('Switch profile'));
+      await pumpFor(tester);
+
+      expect(_doneFlags[tester]!(), isTrue);
+      expect(await localStore.ownerless(), isFalse);
+      expect(await localStore.activeId(), b.id);
+      expect((await store.list()).map((c) => c.id), ['src-b']);
+
+      await tester.pumpWidget(const SizedBox());
+    });
 
     // -- PIN gate --------------------------------------------------------
 
@@ -514,35 +742,40 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('a select failure renders friendlyCloudError, not the raw error', (
-      tester,
-    ) async {
-      // Seed the live store via a plain store, then hand the picker a store
-      // whose setAll throws a PostgrestException with credential-bearing
-      // details — the shape a cloud pull/setProfile can throw. The catch must
-      // route through friendlyCloudError so those details never reach the UI.
-      final seed = SourceStore();
-      await seed.setAll([cfg('src-a')]);
-      await seed.setActive('src-a');
-      await localStore.createProfile('Bravo', 0, snapshot: snap('src-b'));
-      final a = await localStore.createProfile('Alice', 1, snapshot: snap('src-a'));
-      await localStore.setActive(a.id);
+    testWidgets(
+      'a select failure renders friendlyCloudError, not the raw error',
+      (tester) async {
+        // Seed the live store via a plain store, then hand the picker a store
+        // whose setAll throws a PostgrestException with credential-bearing
+        // details — the shape a cloud pull/setProfile can throw. The catch must
+        // route through friendlyCloudError so those details never reach the UI.
+        final seed = SourceStore();
+        await seed.setAll([cfg('src-a')]);
+        await seed.setActive('src-a');
+        await localStore.createProfile('Bravo', 0, snapshot: snap('src-b'));
+        final a = await localStore.createProfile(
+          'Alice',
+          1,
+          snapshot: snap('src-a'),
+        );
+        await localStore.setActive(a.id);
 
-      final store = _ThrowOnSetAllStore();
-      await pumpPicker(tester, store: store);
+        final store = _ThrowOnSetAllStore();
+        await pumpPicker(tester, store: store);
 
-      await tester.tap(find.text('Bravo'));
-      await pumpFor(tester);
-      await tester.tap(find.text('Switch profile'));
-      await pumpFor(tester);
+        await tester.tap(find.text('Bravo'));
+        await pumpFor(tester);
+        await tester.tap(find.text('Switch profile'));
+        await pumpFor(tester);
 
-      // The safe, prefix-stripped message shows; the raw details never do.
-      expect(find.text('could not switch profile'), findsOneWidget);
-      expect(find.textContaining('Failing row'), findsNothing);
-      expect(find.textContaining('sekret'), findsNothing);
+        // The safe, prefix-stripped message shows; the raw details never do.
+        expect(find.text('could not switch profile'), findsOneWidget);
+        expect(find.textContaining('Failing row'), findsNothing);
+        expect(find.textContaining('sekret'), findsNothing);
 
-      await tester.pumpWidget(const SizedBox());
-    });
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
   });
 }
 

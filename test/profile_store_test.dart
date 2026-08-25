@@ -134,6 +134,36 @@ void main() {
       expect(shouldShowPickerAtStartup(ProfilePickerStartup.off, 5), isFalse);
     });
 
+    test('an ownerless device overrides every mode', () {
+      // Profiles exist but none is active — the state left behind by deleting
+      // the active profile. The picker is the only thing that can restore a
+      // snapshot, so short-circuiting past it boots into a library no profile
+      // owns, and with one profile left `auto` would never open it again.
+      for (final mode in ProfilePickerStartup.values) {
+        for (final count in [1, 5]) {
+          expect(
+            shouldShowPickerAtStartup(mode, count, hasActiveProfile: false),
+            isTrue,
+            reason: '$mode with $count profiles',
+          );
+        }
+      }
+      // A fresh install (no profiles at all) keeps its per-mode answer.
+      expect(
+        shouldShowPickerAtStartup(
+          ProfilePickerStartup.off,
+          0,
+          hasActiveProfile: false,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldShowPickerAtStartup(ProfilePickerStartup.off, 1),
+        isFalse,
+        reason: 'an owned single profile still boots straight through',
+      );
+    });
+
     test('a locked active profile overrides every mode', () {
       // Otherwise the gate would exist only for accounts that happen to have
       // several profiles and have left the picker on — which is not a gate.
