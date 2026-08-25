@@ -355,8 +355,25 @@ jobs:
           RELEASE_TAG: v${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-            --jq '.object.sha' 2>/dev/null || true)
+          # Probe existence via the REST status code, exactly as the publish
+          # step below does. `gh api --jq` cannot be used for this: on a 404 it
+          # prints the error body to *stdout*, so the command substitution
+          # captured `{"message":"Not Found",...}` and the guard read every
+          # missing tag as an existing one. A dispatch could therefore never
+          # create its own tag — it failed here with "already exists at
+          # {"message":"Not Found"...}" — which is the whole point of the step.
+          # A real 404 is the only "absent"; anything else is transient and
+          # must not be mistaken for it.
+          probe=""
+          if probe=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --silent 2>&1); then
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
+          elif grep -q "HTTP 404" <<<"$probe"; then
+            existing=""
+          else
+            printf '%s\n' "$probe" >&2
+            echo "::error::Could not determine whether $RELEASE_TAG exists."
+            exit 1
+          fi
           if [ -z "$existing" ]; then
             echo "Creating $RELEASE_TAG at $GITHUB_SHA"
             gh api "repos/$GITHUB_REPOSITORY/git/refs" \
