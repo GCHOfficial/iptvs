@@ -15,6 +15,13 @@ takes the version as an input and **creates the tag itself** at the dispatched c
 publish step runs `gh release create --verify-tag` and refuses a tag that does not exist — a
 dispatch without that step builds all three platforms and then aborts at the last one.
 
+That step probes for the tag with a **REST status check**, the same idiom the publish step uses
+for the release itself and for the same reason: `gh api --jq` prints a 404's error body to
+*stdout*, so a missing tag came back as the string `{"message":"Not Found",...}` and the guard
+read every absent tag as an existing one — a dispatch could never create its own tag, and died
+here with `already exists at {"message":"Not Found"...}`. Only a real HTTP 404 counts as absent;
+anything else is transient and fails the step rather than being mistaken for it.
+
 That step never *moves* an existing tag. A published release is addressed by it, users may already
 hold the artifacts it named, and the signed manifest authenticates a specific build — re-pointing
 it would invalidate all three, so a tag that exists at a different commit is a hard failure asking

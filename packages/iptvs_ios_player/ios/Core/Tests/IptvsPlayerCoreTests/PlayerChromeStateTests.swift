@@ -365,8 +365,22 @@ final class PlayerChromeStateTests: XCTestCase {
 
   // MARK: - Aspect
 
+  /// The default is the *container's* shape, not the app's taste: iOS is a
+  /// fixed screen that usually matches the content, where Fill and Fit are
+  /// indistinguishable and differ only on 4:3 material. It matches Dart's
+  /// `defaultAspectModeIndex()` and Kotlin's `AspectMode.Fill` — the three
+  /// surfaces must not frame the same stream differently.
+  func testAFreshStateStartsOnFillLikeEveryOtherSurface() {
+    let state = PlayerChromeState()
+    XCTAssertEqual(state.aspect, .fill)
+    XCTAssertEqual(state.aspectLabel, "Fill")
+  }
+
   func testAspectCyclesThroughTheGravitiesAVPlayerLayerHas() {
     var state = PlayerChromeState()
+    // Walk from `fit` explicitly: the cycle's order is what this test is for,
+    // and starting it at whatever the default happens to be couples the two.
+    state.aspect = .fit
     XCTAssertEqual(state.aspect, .fit)
     XCTAssertEqual(state.aspectLabel, "Fit")
     state.cycleAspect()
