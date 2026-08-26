@@ -365,11 +365,15 @@ final class PlayerChromeStateTests: XCTestCase {
 
   // MARK: - Aspect
 
-  /// The default is the *container's* shape, not the app's taste: iOS is a
-  /// fixed screen that usually matches the content, where Fill and Fit are
-  /// indistinguishable and differ only on 4:3 material. It matches Dart's
-  /// `defaultAspectModeIndex()` and Kotlin's `AspectMode.Fill` — the three
-  /// surfaces must not frame the same stream differently.
+  /// This is the **seedless fallback**, not the product default. Every open
+  /// carries `aspect` on its payload — the user's stored choice, or Dart's
+  /// `defaultAspectModeIndex()`, which reads the window's shape and so answers
+  /// Fit for a portrait handset — and the controller adopts it, so a fresh
+  /// state is only what this type holds before that arrives.
+  ///
+  /// It stays `Fill`, matching Kotlin's `AspectMode.Fill`, because the two
+  /// native surfaces must not differ from each other when neither was told.
+  /// Dart owns the real decision; do not re-derive one here.
   func testAFreshStateStartsOnFillLikeEveryOtherSurface() {
     let state = PlayerChromeState()
     XCTAssertEqual(state.aspect, .fill)
