@@ -470,17 +470,43 @@ Dart one — the original — was not. It is now `lib/player/aspect_mode.dart`, 
 `test/aspect_mode_test.dart` covers it.
 
 **The default is chosen by the shape of the container, not by taste.** `defaultAspectModeIndex()`
-returns **Fill on a television or a handset** and **Fit on a desktop**. A TV or phone screen is a
-fixed shape that usually matches the content, so on 16:9 material — most viewing — Fill and Fit
-render identically; they differ only on 4:3, where filling the screen is what a television viewer
-expects and where the black pillars are what they complain about. A desktop window is whatever
-shape the user dragged it to, so the same Fill crops continuously, by an amount that changes every
-time the window is resized, and nothing on screen explains why.
+returns **Fill on a television**, **Fit on a desktop**, and on a **handset or tablet** whichever
+the window's own shape asks for. A TV is a fixed 16:9 panel that never rotates and usually matches
+the content, so on 16:9 material — most viewing — Fill and Fit render identically; they differ only
+on 4:3, where filling the screen is what a television viewer expects and where the black pillars
+are what they complain about. A desktop window is whatever shape the user dragged it to, so the
+same Fill crops continuously, by an amount that changes every time the window is resized, and
+nothing on screen explains why.
 
-It keys off `isTelevision` and `Platform`, and deliberately **not** off which rendering surface is
-in use. On Windows the native and embedded surfaces are selected purely by whether the stream is
-HDR; a default read from the surface would frame the same channel differently on the same machine
-depending on its dynamic range.
+**A handset was originally lumped in with the television, and that was wrong: it rotates.**
+Nothing pins the player to landscape, so "a fixed shape that usually matches the content" only
+described half of a phone's life. In portrait the window is roughly 9:20 and Fill opened on a
+vertical sliver of the middle of the frame — a football pitch with no ball and no players, which
+is exactly how it was reported. The window's aspect is therefore the input, tested against
+`kFillMinContainerAspect` (4:3): landscape still opens Fill as intended, portrait opens Fit, and a
+near-square foldable — where Fill would take 40% of a 16:9 frame — falls on the Fit side with it.
+4:3 is the line because it is the narrowest shape television material was ever authored for; above
+it Fill trims, below it Fill discards.
+
+The container is read from `PlatformDispatcher`'s view rather than a `MediaQuery`, so the lookup
+stays legal from the `late` field initialiser where `_PlayerScreenState` resolves its mode —
+before the route's first build, and before its first `didChangeDependencies`. Physical pixels,
+since the device pixel ratio divides out of a ratio. **An unreadable window falls to Fit**, the
+mode that shows every pixel: being wrong there costs black bars, being wrong the other way costs
+picture.
+
+The stored choice still wins over all of it — someone who picked Fill on a phone keeps Fill in
+portrait, because that is their answer rather than a guess.
+
+It keys off `isTelevision`, `Platform` and the window, and deliberately **not** off which rendering
+surface is in use. On Windows the native and embedded surfaces are selected purely by whether the
+stream is HDR; a default read from the surface would frame the same channel differently on the same
+machine depending on its dynamic range.
+
+The Kotlin and Swift chrome types still initialise to `Fill`, and that is **not** a second copy of
+this decision — every native open carries `aspect` on its payload, so their compiled-in value is
+only what they hold before Dart tells them. It is kept identical between the two so the two native
+surfaces cannot differ from each other when neither was told; Dart owns the actual rule.
 
 This reverses an earlier decision to start every surface on Fit, and the reasoning that produced
 it still holds where it applied. Fit was chosen because the Windows native surface was configured

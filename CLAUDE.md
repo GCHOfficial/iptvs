@@ -795,13 +795,24 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   **The cycle is shared, not per-surface** (`player/aspect_mode.dart` — `kAspectModes`, pinned by
   `test/aspect_mode_test.dart`; it used to be private to `_PlayerScreenState`, so Kotlin and Swift
   were pinned and Dart was not). **The default is the container's shape, not the app's taste:**
-  `defaultAspectModeIndex()` picks **Fill on a television or handset** — a fixed screen that
-  usually matches the content, where Fill and Fit are indistinguishable and differ only on 4:3
-  material — and **Fit on a desktop**, whose window is whatever shape it was dragged to, so Fill
-  would crop continuously and by an amount that changes as it is resized. It keys off
-  `isTelevision`/`Platform`, **never off which rendering surface is in use**: on Windows the
-  native and embedded surfaces are chosen purely by HDR, so keying off the surface would frame the
-  same channel differently depending on its dynamic range. **The choice persists**, per source, in
+  `defaultAspectModeIndex({container})` picks **Fill on a television** — a fixed 16:9 panel that
+  never rotates and usually matches the content, where Fill and Fit are indistinguishable and
+  differ only on 4:3 material — **Fit on a desktop**, whose window is whatever shape it was dragged
+  to, so Fill would crop continuously and by an amount that changes as it is resized, and on a
+  **handset/tablet whatever the window's own shape asks for**. That last one is the correction: a
+  phone *rotates*, nothing pins the player to landscape, and in portrait Fill opened on a vertical
+  sliver of the middle of the frame. The window's aspect is tested against `kFillMinContainerAspect`
+  (4:3 — the narrowest shape TV material was authored for; above it Fill trims, below it Fill
+  discards), so landscape still opens Fill and portrait and near-square foldables open Fit. The
+  container is read from `PlatformDispatcher`'s view, **not a `MediaQuery`**, because the player
+  resolves its mode in a `late` field initialiser that runs before the first build; an unreadable
+  window **fails to Fit**, which shows every pixel. A stored choice still wins over all of it.
+  Kotlin's and Swift's `Fill` initial values are the **seedless fallback**, not a second copy of
+  this rule — every native open carries `aspect` on its payload — and are kept equal to each other
+  so the two native surfaces can't disagree when neither was told. It keys off
+  `isTelevision`/`Platform`/the window, **never off which rendering surface is in use**: on Windows
+  the native and embedded surfaces are chosen purely by HDR, so keying off the surface would frame
+  the same channel differently depending on its dynamic range. **The choice persists**, per source, in
   `settings['aspectMode']` (`SourceConfig.aspectModeLabel`, saved by
   `channel_list_screen._persistAspectMode` against the *owning* config, so a cross-source favorite
   stores against its own provider) — a broad key, not a secret, riding the existing blob. It

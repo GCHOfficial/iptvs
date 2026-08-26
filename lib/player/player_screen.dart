@@ -686,8 +686,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
   /// Index into [kAspectModes]: the user's stored choice if they have one,
-  /// otherwise [defaultAspectModeIndex] — Fill on a television or handset, Fit
-  /// on a desktop, for the reasons documented there.
+  /// otherwise [defaultAspectModeIndex] — Fill on a television, Fit on a
+  /// desktop, and on a handset whatever the window's shape asks for (so
+  /// portrait opens Fit rather than on a sliver of the frame), for the reasons
+  /// documented there.
+  ///
+  /// Resolved with no `container`, so the default reads the host window — which
+  /// is what this fullscreen route fills.
   ///
   /// The native surface's initial `panscan` is derived from this same index
   /// rather than hardcoded, so the overlay's chip can never name a mode the

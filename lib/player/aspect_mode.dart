@@ -7,6 +7,7 @@
 library;
 
 import 'dart:io' show Platform;
+import 'dart:ui' show PlatformDispatcher, Size;
 
 import 'package:flutter/widgets.dart' show BoxFit;
 
@@ -66,37 +67,91 @@ int aspectModeIndexOf(String? label) {
   return -1;
 }
 
+/// The narrowest container shape [defaultAspectModeIndex] will still open
+/// **Fill** in, as width ÷ height.
+///
+/// 4:3 is the narrowest shape television material was ever authored for, so a
+/// container at least that wide can crop to fill without losing much of any
+/// ordinary frame. Below it the loss stops being a trim: 16:9 content in a 4:3
+/// container already gives up a quarter of its width, and in a 9:20 portrait
+/// handset — the case this threshold exists for — Fill keeps barely a fifth of
+/// the picture. A near-square foldable sits in the same band and is caught by
+/// the same test.
+const double kFillMinContainerAspect = 4 / 3;
+
 /// The mode a player opens on when the user has never chosen one.
 ///
-/// **Fill on a television or a handset, Fit on a desktop**, and the difference
-/// is not inconsistency — it is the same intent ("use the screen well")
-/// answered for two different kinds of container.
+/// **Fill on a television, Fit on a desktop, and on a handset or tablet
+/// whichever the window's own shape asks for.** That is not three rules — it is
+/// the same intent ("use the screen well without throwing the picture away")
+/// answered for three kinds of container.
 ///
-/// A TV or phone screen is a *fixed* shape that almost always matches the
-/// content, so Fill and Fit are identical there: no crop happens at all. They
-/// differ only on 4:3 material, where filling the screen is what a viewer of a
-/// television expects and pillarboxing reads as a fault.
+/// A television is a *fixed* 16:9 panel that never rotates and almost always
+/// matches the content, so Fill and Fit are identical there: no crop happens at
+/// all. They differ only on 4:3 material, where filling the screen is what a
+/// viewer of a television expects and pillarboxing reads as a fault.
 ///
 /// A desktop window is whatever shape the user dragged it to, so the mismatch
 /// is permanent and Fill would crop *continuously* — by an amount that changes
 /// as the window is resized, taking most of the frame from a tall narrow one.
 /// That is why every desktop player defaults to letterboxing.
 ///
-/// **Keyed off the platform, never off which rendering surface was chosen.** On
-/// Windows the native and embedded surfaces are picked purely by whether the
-/// stream is HDR, so keying off the surface would frame the same channel
-/// differently depending on its dynamic range.
-int defaultAspectModeIndex() {
-  final fills = isTelevision || Platform.isAndroid || Platform.isIOS;
-  final index = aspectModeIndexOf(fills ? 'Fill' : 'Fit');
+/// A **handset rotates**, which is what the old "a phone screen is a fixed
+/// shape" reasoning missed: nothing pins the player to landscape, and in
+/// portrait the window is roughly 9:20, so Fill opened on a sliver of the
+/// middle of the frame. The window's aspect is therefore the input, measured
+/// against [kFillMinContainerAspect] — landscape still opens Fill, as intended,
+/// and portrait opens Fit.
+///
+/// [container] is any size in the surface's own units; only its ratio is read.
+/// It defaults to the host window, which is the whole screen for a fullscreen
+/// player. An unreadable window **fails to Fit**, the mode that shows every
+/// pixel of the frame — being wrong there costs black bars, while being wrong
+/// the other way costs picture.
+///
+/// **Keyed off the platform and the window, never off which rendering surface
+/// was chosen.** On Windows the native and embedded surfaces are picked purely
+/// by whether the stream is HDR, so keying off the surface would frame the same
+/// channel differently depending on its dynamic range.
+int defaultAspectModeIndex({Size? container}) {
+  final int index;
+  if (isTelevision) {
+    index = aspectModeIndexOf('Fill');
+  } else if (!Platform.isAndroid && !Platform.isIOS) {
+    index = aspectModeIndexOf('Fit');
+  } else {
+    final size = container ?? _hostWindowSize();
+    final wide =
+        size != null &&
+        size.height > 0 &&
+        size.width >= size.height * kFillMinContainerAspect;
+    index = aspectModeIndexOf(wide ? 'Fill' : 'Fit');
+  }
   // The labels are const in this file, so this cannot miss — but a rename
   // should degrade to a valid mode rather than an out-of-range index.
   return index < 0 ? 0 : index;
 }
 
+/// The host window's size, or null when there isn't one to read.
+///
+/// Taken straight from [PlatformDispatcher] rather than a `MediaQuery` so this
+/// stays callable from a `late` field initialiser, which is where the player
+/// resolves its mode — before its first build, and possibly before its first
+/// `didChangeDependencies`. Physical pixels: the device pixel ratio divides out
+/// of a ratio, so it is never applied.
+Size? _hostWindowSize() {
+  final dispatcher = PlatformDispatcher.instance;
+  final view =
+      dispatcher.implicitView ??
+      (dispatcher.views.isEmpty ? null : dispatcher.views.first);
+  final size = view?.physicalSize;
+  if (size == null || size.width <= 0 || size.height <= 0) return null;
+  return size;
+}
+
 /// The stored mode's index, falling back to [defaultAspectModeIndex] when the
 /// user has never chosen one (or chose one a later build removed).
-int resolveAspectModeIndex(String? storedLabel) {
+int resolveAspectModeIndex(String? storedLabel, {Size? container}) {
   final stored = aspectModeIndexOf(storedLabel);
-  return stored < 0 ? defaultAspectModeIndex() : stored;
+  return stored < 0 ? defaultAspectModeIndex(container: container) : stored;
 }
