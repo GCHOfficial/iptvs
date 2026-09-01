@@ -2,6 +2,12 @@
 title: iptvs
 description: A cross-platform IPTV player for Windows, Android, Android TV and Linux. Manage your sources from the web; your devices pull them down.
 template: splash
+# Starlight composes `<title>` as "{page title} | {site title}", which on the
+# home page — where both are "iptvs" — reads "iptvs | iptvs". Override the
+# document title without touching `title`, which is also the hero heading.
+head:
+  - tag: title
+    content: iptvs — IPTV for Windows, Android TV and Linux
 hero:
   tagline: Your IPTV sources, on every screen you own. Set them up once in a browser — no typing credentials into a TV remote.
   image:
