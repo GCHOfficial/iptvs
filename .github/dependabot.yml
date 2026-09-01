@@ -14,6 +14,23 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # The web panel (panel/package.json): supabase-js and Vite. Small surface, but
+  # it is the only part of this project that ships as code a browser downloads,
+  # so a dependency advisory here lands in front of every panel user at once —
+  # unlike the app, which they update on their own schedule. Grouped like pub:
+  # minor/patch together, majors on their own.
+  - package-ecosystem: "npm"
+    directory: "/panel"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(panel)"
+    groups:
+      npm-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # GitHub Actions used by the build/release workflows — all bumps in one PR.
   - package-ecosystem: "github-actions"
     directory: "/"
