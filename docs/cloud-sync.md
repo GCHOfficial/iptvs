@@ -682,32 +682,51 @@ reorder; new sources append); devices show sources in that order. Branded with t
 (`panel/public/icon.png`, copied from `assets/icon/`). Note: the Flutter web target lives in
 `web/`; the panel deliberately lives in `panel/`.
 
-#### Hosting: two targets, one workflow
+#### Hosting: three origins, and why
 
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) publishes the panel **twice**, and
-both stay live:
-
-| Host | URL | Base | Delivered by |
+| Origin | Serves | Source | Deployed by |
 | --- | --- | --- | --- |
-| GitHub Pages | `https://<user>.github.io/iptvs/` | `/iptvs/` | `upload-pages-artifact@v5` + `deploy-pages@v5` |
-| Cloudflare Pages | the apex custom domain | `/` (`PANEL_BASE`) | `wrangler pages deploy` |
+| `iptvs.click` | landing page, store badges, knowledge base | `kb/` (Astro Starlight) | `pages.yml` → Cloudflare Pages `iptvs-site` |
+| `panel.iptvs.click` | the source panel | `panel/` | `pages.yml` → Cloudflare Pages `iptvs-panel` |
+| `gchofficial.github.io/iptvs/` | a redirect, nothing else | `redirect/` | `github-pages-redirect.yml` → GitHub Pages |
 
-It is built **twice**, not built once and copied: the base path is baked into the bundle, and one
-artifact cannot serve both — every asset URL and `import.meta.env.BASE_URL` would be wrong on one
-of them, and `BASE_URL` is what `emailRedirectTo` is composed from.
+**The panel is a separate origin from the site as a security boundary, not for tidiness.** It holds
+an authenticated Supabase session, an unwrapped CK and provider credentials, and its runtime
+dependency tree is one package; Starlight's is hundreds, and its Markdown is the part most likely to
+take community PRs. Same origin would put every one of those inside the panel's `localStorage` and
+session — which is precisely the "XSS'd panel" case the [threat boundary](#threat-boundary) says the
+crypto does *not* cover. The two CSPs measure the same conclusion: a built Starlight docs page
+carries ~16 inline `<script>` blocks and ~80 inline `style=` attributes (Shiki), so it needs
+per-build script hashes plus an `'unsafe-inline'` exemption scoped to `style-src-attr` (a style
+*attribute* has no hash form). The panel is a flat `script-src 'self'` with nothing inline. One
+origin means one policy, and it would have been the looser one.
 
-**Both targets are permanent, not a migration.** `CloudConfig.panelUrl` (`lib/data/cloud_config.dart`)
-hardcodes the GitHub Pages URL as its `defaultValue` and no workflow overrides it, so that URL is
-baked into every already-shipped build — it is what the pairing QR encodes and what the Cloud sync
-screen prints. Installs are arbitrarily old, so retiring it would strand them; instead it keeps
-receiving the same deploys. **Both origins must therefore stay in Supabase's Auth → URL
-Configuration redirect allow-list**, which is exact — a missing entry breaks sign-in outright.
+**The github.io URL can never simply stop answering.** `CloudConfig.panelUrl`
+(`lib/data/cloud_config.dart`) is a compile-time constant, so every install carries the URL it was
+built with, and that is what the pairing screen prints and what `pairingPanelLink` encodes into the
+QR. Installs are arbitrarily old. `redirect/` therefore serves that path forever, forwarding to
+`panel.iptvs.click` **with the query string intact** — the QR carries `?code=ABCD2345` and the panel
+reads it to prefill the Pair form, so a bare `<meta refresh>` (which drops the query) would turn a
+working shortcut into a blank form. It deploys from its own workflow because it is the only thing
+left needing `pages: write`, and it changes roughly never.
 
-Supabase values come from repo **Variables**; the Cloudflare step needs `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID` **Secrets** and skips itself when they are absent, so a fork publishes
-nothing and fails nothing. `wrangler` is a lockfile-pinned devDependency rather than an `npx
-wrangler@4` that would resolve a fresh minor at run time — everything else in this repo's CI is
-pinned, and a deploy credential is the wrong place to make an exception.
+**Every origin the panel is served from must be in Supabase's Auth → URL Configuration
+redirect allow-list**, which is exact. Two consequences: a missing entry breaks sign-in outright,
+and — the reason never to widen it to a wildcard — that allow-list is what stops a **forked copy**
+of this panel, standing at an attacker's own domain, from completing a magic-link flow against this
+project. The Supabase URL and anon key are public by design; the allow-list is the control.
+
+Supabase values come from repo **Variables** (`SUPABASE_URL`, `SUPABASE_ANON_KEY`), the site's
+canonical origin from `SITE_URL`; the deploys need `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` **Secrets** and skip themselves when those are absent, so a fork publishes
+nothing and fails nothing. Scope the token to Pages:Edit on this account — never a global key — and
+keep secrets out of any `pull_request_target` workflow. `wrangler` is a lockfile-pinned
+devDependency rather than an `npx wrangler@4` resolving a fresh minor at run time: everything else
+in this repo's CI is pinned, and a deploy credential is the wrong place to make an exception.
+
+`PANEL_BASE=/` now that the panel owns an origin; `/iptvs/` was a GitHub Pages *project page*
+artefact. The base path is baked into the bundle and `import.meta.env.BASE_URL` is what
+`emailRedirectTo` is composed from, so it has to match the origin it is served at.
 
 ### Xtream detection on an M3U source (suggest, never convert)
 
