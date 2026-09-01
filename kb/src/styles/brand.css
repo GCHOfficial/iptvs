@@ -96,9 +96,26 @@
   margin-top: 1.5rem;
 }
 
-/* Trademark attribution for the store names used above. Small and quiet — it
-   is a legal note, not a design element — but present, because naming a store
-   in plain text is only ordinary trademark use when it is attributed. */
+/* Official store artwork. No border, background or padding of our own — each
+   badge is a finished graphic and wrapping it in chrome would read as altering
+   it. The margin IS the required clear space: at least a quarter of the badge
+   height (44px / 4 = 11px) on every side, kept in CSS rather than baked into
+   the assets so the row controls its own rhythm. */
+.store-badge-image {
+  display: inline-flex;
+  text-decoration: none;
+  margin: 11px 11px 11px 0;
+}
+
+.store-badge-image img {
+  display: block;
+  height: 44px;
+  width: auto;
+}
+
+/* Trademark attribution for the marks used above. Small and quiet — it is a
+   legal note, not a design element — but present, because both vendors' brand
+   terms expect attribution wherever their marks appear. */
 .store-trademarks {
   margin-top: 0.75rem;
   font-size: 0.75rem;
