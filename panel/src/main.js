@@ -182,17 +182,45 @@ function renderLogin() {
       </p>
     </div>`;
   const redirectTo = window.location.origin + import.meta.env.BASE_URL;
-  document.getElementById('magic').onsubmit = async (e) => {
+  const form = document.getElementById('magic');
+  const submit = form.querySelector('button[type="submit"]');
+  const submitLabel = submit.textContent;
+  // The send is throttled per address *and* against a project-wide email quota
+  // (see `friendlyError`'s rate-limit note), so every extra in-flight request is
+  // spent budget that buys nothing. A form with a live submit button collects
+  // impatient double-taps by construction — and two concurrent sends for an
+  // address with no account yet raced GoTrue's user insert into a
+  // `users_email_partial_key` duplicate-key 500, which is a *different* error
+  // for the same underlying cause. One at a time.
+  let inFlight = false;
+  form.onsubmit = async (e) => {
     e.preventDefault();
-    const email = document.getElementById('email').value.trim();
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: redirectTo },
-    });
-    if (error) logError(error);
-    document.getElementById('msg').textContent = error
-      ? friendlyError(error)
-      : 'Check your email for the sign-in link.';
+    if (inFlight) return;
+    inFlight = true;
+    submit.disabled = true;
+    submit.textContent = 'Sending…';
+    const msg = document.getElementById('msg');
+    msg.textContent = '';
+    try {
+      const email = document.getElementById('email').value.trim();
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: redirectTo },
+      });
+      if (error) logError(error, 'signin');
+      msg.textContent = error
+        ? friendlyError(error)
+        : 'Check your email for the sign-in link.';
+    } catch (err) {
+      // A network failure rejects rather than returning `{ error }`; without
+      // this the button would stay stuck on "Sending…" with nothing said.
+      logError(err, 'signin');
+      msg.textContent = friendlyError(err);
+    } finally {
+      inFlight = false;
+      submit.disabled = false;
+      submit.textContent = submitLabel;
+    }
   };
 }
 

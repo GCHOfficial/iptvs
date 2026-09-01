@@ -236,6 +236,34 @@ test('friendlyError falls back to a generic message for anything else', () => {
   assert.ok(!out.includes('check the table name'));
 });
 
+test('friendlyError names the wait for the per-address magic-link cooldown', () => {
+  const err = { status: 429, message: 'For security purposes, you can only request this after 53 seconds.' };
+  assert.equal(friendlyError(err), 'Too many attempts. Try again in 53 seconds.');
+});
+
+test('friendlyError says to wait for the project-wide email quota', () => {
+  // The one a user hits after trying a second mailbox: nothing about the
+  // address is the problem, so the message must not suggest retrying now.
+  const err = { status: 429, message: 'email rate limit exceeded' };
+  const out = friendlyError(err);
+  assert.match(out, /Wait a few minutes/);
+  assert.ok(!out.includes('Something went wrong'));
+});
+
+test('friendlyError treats a 429 as rate limiting whatever the wording', () => {
+  assert.match(friendlyError({ status: 429, message: 'unexpected_failure' }), /Wait a few minutes/);
+  assert.match(
+    friendlyError({ code: 'over_email_send_rate_limit', message: '' }),
+    /Wait a few minutes/,
+  );
+});
+
+test('friendlyError drops an out-of-range cooldown rather than printing it', () => {
+  // Wording is not a contract; a nonsense countdown is worse than none.
+  const err = { status: 429, message: 'you can only request this after 99999 seconds.' };
+  assert.match(friendlyError(err), /Wait a few minutes/);
+});
+
 test('friendlyError never surfaces error.details or error.hint even alongside an iptvs: message', () => {
   const err = { message: 'iptvs: not allowed', details: 'secret internal detail', hint: 'secret hint' };
   const out = friendlyError(err);
