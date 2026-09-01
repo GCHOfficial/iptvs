@@ -1,0 +1,32 @@
+---
+// Starlight's footer, plus the site-wide legal line.
+//
+// Wraps the default rather than replacing it, so pagination, "last updated" and
+// the edit link all keep working — replacing it outright would silently drop
+// them the next time Starlight adds something there.
+//
+// The trademark attribution lives here rather than beside the download badges
+// because that is where a legal footnote belongs, and because putting it in the
+// footer makes it present on every page rather than only the one that happens
+// to render the badges today.
+import Default from '@astrojs/starlight/components/Footer.astro';
+---
+
+<Default><slot /></Default>
+
+<p class="site-legal">
+  Google Play and the Google Play logo are trademarks of Google LLC. Microsoft
+  Store is a trademark of the Microsoft group of companies. iptvs is not
+  affiliated with, endorsed by, or connected to any IPTV provider.
+</p>
+
+<style>
+  .site-legal {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sl-color-hairline);
+    font-size: 0.7rem;
+    line-height: 1.6;
+    color: var(--sl-color-gray-4);
+  }
+</style>

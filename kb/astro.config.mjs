@@ -60,6 +60,11 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/brand.css'],
+      // Wraps Starlight's own Footer to append the site-wide legal line; see
+      // the component. Everything Starlight puts there is preserved.
+      components: {
+        Footer: './src/components/Footer.astro',
+      },
       // Matches the app and the panel rather than Starlight's defaults; the
       // palette is the single source in brand.css.
       sidebar: [

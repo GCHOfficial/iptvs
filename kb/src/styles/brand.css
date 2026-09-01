@@ -130,15 +130,8 @@
   max-width: none !important;
 }
 
-/* Trademark attribution for the marks used above. Small and quiet — it is a
-   legal note, not a design element — but present, because both vendors' brand
-   terms expect attribution wherever their marks appear. */
-.store-trademarks {
-  margin-top: 2rem;
-  font-size: 0.7rem;
-  line-height: 1.5;
-  color: var(--sl-color-gray-4);
-}
+/* The trademark attribution the store badges require is not here — it lives in
+   the site footer (`src/components/Footer.astro`), scoped to that component. */
 
 .store-badge {
   display: inline-flex;
