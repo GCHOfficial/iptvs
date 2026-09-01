@@ -22,7 +22,8 @@
 //    futures don't advance under the widget-test fake clock, so we drive the
 //    real event loop with runAsync between pumps (`pumpUntil`).
 //  * The screen holds a 1-minute periodic EPG timer, so we never pumpAndSettle;
-//    tests unmount at the end so State.dispose cancels it.
+//    tests unmount at the end so State.dispose cancels it. `unmount` also
+//    drains the background guide refresh — see its doc comment.
 
 import 'dart:io';
 
@@ -169,8 +170,29 @@ void main() {
     await settle(tester);
   }
 
-  Future<void> unmount(WidgetTester tester) =>
-      tester.pumpWidget(const SizedBox());
+  /// Tears the screen down **and drains the background EPG refresh**.
+  ///
+  /// `LibraryRepository.load` returns as soon as the channels are ready and
+  /// refreshes the guide behind them, so an ingest is routinely still running
+  /// when a test finishes — and `sqflite_common` arms a 10-second lock-warning
+  /// `Timer` for the duration of every `transaction()`. Started under the
+  /// widget-test fake clock, that is a `FakeTimer` nothing ever fires or
+  /// cancels, and `!timersPending` fails the case with "A Timer is still
+  /// pending even after the widget tree was disposed".
+  ///
+  /// It is a race, not a constant: which test loses depends on where the
+  /// ingest's transaction happens to sit when the body ends, so it moved
+  /// between cases run to run and read as CI flake. `tearDown`'s `db.close()`
+  /// already waits for the ingest — but that runs *after* the invariant check,
+  /// which is exactly one step too late. Wait here instead, and on the real
+  /// event loop (`runAsync`): the ingest's futures come back through
+  /// `sqflite_common_ffi`'s background isolate and never advance under the
+  /// fake clock.
+  Future<void> unmount(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(() => db.epgIngest.cancelAndWait());
+    await tester.pump();
+  }
 
   String focusLabel() => focusRouteKey(FocusManager.instance.primaryFocus);
 
