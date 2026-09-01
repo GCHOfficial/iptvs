@@ -111,11 +111,23 @@
   flex-shrink: 0;
 }
 
-.store-badge-image img {
-  display: block;
-  height: 44px;
-  width: auto;
-  max-width: none;
+/* Deliberately over-specified, and the `!important` is deliberate too.
+ *
+ * These are third-party badges that must render at an exact size to stay within
+ * Google's and Microsoft's brand terms, competing against Starlight's blanket
+ * `.sl-markdown-content :is(img,…)` rule — which has *identical* specificity to
+ * a plain `.store-badge-image img` (0,1,1) and is emitted ~53 kB later in the
+ * bundle, so it wins every tie on source order. `.not-content` is the
+ * documented opt-out and is applied on the row as well, but a size that is a
+ * brand requirement should not depend on a framework's selector staying
+ * exactly as it is today. Two selectors deep (0,2,1) plus `!important` makes it
+ * unconditional. Width is stated rather than left to `auto` so nothing has to
+ * infer it from the intrinsic aspect. */
+.store-badges .store-badge-image img {
+  display: block !important;
+  height: 44px !important;
+  width: auto !important;
+  max-width: none !important;
 }
 
 /* Trademark attribution for the marks used above. Small and quiet — it is a
