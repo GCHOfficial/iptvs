@@ -105,21 +105,27 @@
   display: inline-flex;
   text-decoration: none;
   margin: 11px 11px 11px 0;
+  /* Never shrink. These are fixed-size artwork, and flex shrink is
+     proportional to base size — which is what collapsed the wider Play badge
+     to a third of the Microsoft one before `.not-content` was applied. */
+  flex-shrink: 0;
 }
 
 .store-badge-image img {
   display: block;
   height: 44px;
   width: auto;
+  max-width: none;
 }
 
 /* Trademark attribution for the marks used above. Small and quiet — it is a
    legal note, not a design element — but present, because both vendors' brand
    terms expect attribution wherever their marks appear. */
 .store-trademarks {
-  margin-top: 0.75rem;
-  font-size: 0.75rem;
-  color: var(--sl-color-gray-3);
+  margin-top: 2rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--sl-color-gray-4);
 }
 
 .store-badge {
