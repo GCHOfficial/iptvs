@@ -91,8 +91,25 @@
 .store-badges {
   display: flex;
   flex-wrap: wrap;
+  /* Centred, not stretched: the Google Play badge is official artwork whose
+     supplied asset bundles Google's required clear space, so its box is taller
+     than the text buttons and has to sit centred against them. */
+  align-items: center;
   gap: 0.75rem;
   margin-top: 1.5rem;
+}
+
+/* Official store artwork. No border, background or padding of our own — the
+   badge carries its own, and adding chrome around it would be a modification. */
+.store-badge-image {
+  display: inline-flex;
+  text-decoration: none;
+}
+
+.store-badge-image img {
+  display: block;
+  height: 112px;
+  width: auto;
 }
 
 .store-badge {
