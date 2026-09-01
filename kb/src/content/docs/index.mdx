@@ -25,7 +25,14 @@ hero:
 import StoreBadges from '../../components/StoreBadges.astro';
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-<StoreBadges github="https://github.com/GCHOfficial/iptvs/releases" />
+{/* Identities are recorded in docs/store-publishing.md: the Play application id
+    is `com.gchofficial.iptvs.player`, the Microsoft Store ID `9P8KK9T379WN`.
+    Both listings verified live before wiring these. */}
+<StoreBadges
+  play="https://play.google.com/store/apps/details?id=com.gchofficial.iptvs.player"
+  microsoft="https://apps.microsoft.com/detail/9P8KK9T379WN"
+  github="https://github.com/GCHOfficial/iptvs/releases"
+/>
 
 <CardGrid stagger>
   <Card title="Plays what a browser can't" icon="seti:video">
