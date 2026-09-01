@@ -1,0 +1,57 @@
+---
+// Download badges for the landing page.
+//
+// A store's URL is a fact about a published listing, not about this repo, so
+// each is passed in from the page rather than hardcoded here — and a badge with
+// no URL yet simply doesn't render, so this ships before the listings are live
+// without showing anyone a dead link.
+interface Props {
+  play?: string;
+  microsoft?: string;
+  github?: string;
+}
+
+const { play, microsoft, github } = Astro.props;
+---
+
+<div class="store-badges">
+  {
+    play && (
+      <a class="store-badge" href={play}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+          <path d="M3.6 1.8a1 1 0 0 0-.5.9v18.6a1 1 0 0 0 .5.9l10-10.2-10-10.2Zm11.1 9.1 2.7-2.8-8.9-5.1 6.2 7.9Zm0 2.2-6.2 7.9 8.9-5.1-2.7-2.8Zm4.1-.9 2.5-1.4a1 1 0 0 0 0-1.7l-2.5-1.4-1.6 1.6 1.6 1.6-1.6 1.6 1.6 1.7Z" />
+        </svg>
+        <span class="store-badge-line">
+          <span class="store-badge-lead">Get it on</span>
+          <span class="store-badge-name">Google Play</span>
+        </span>
+      </a>
+    )
+  }
+  {
+    microsoft && (
+      <a class="store-badge" href={microsoft}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+          <path d="M2 3.6 10.4 2.5v8.6H2V3.6Zm0 16.8 8.4 1.1v-8.5H2v7.4Zm9.6 1.3L22 23V12.6H11.6v9.1Zm0-19.4v9.2H22V1l-10.4 1.3Z" />
+        </svg>
+        <span class="store-badge-line">
+          <span class="store-badge-lead">Get it from</span>
+          <span class="store-badge-name">Microsoft Store</span>
+        </span>
+      </a>
+    )
+  }
+  {
+    github && (
+      <a class="store-badge" href={github}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+          <path d="M12 1.5a10.5 10.5 0 0 0-3.3 20.5c.5.1.7-.2.7-.5v-1.9c-2.9.6-3.5-1.4-3.5-1.4-.5-1.2-1.2-1.5-1.2-1.5-.9-.6.1-.6.1-.6 1 .1 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.8-1.2-4.8-5.2 0-1.2.4-2.1 1.1-2.9-.1-.3-.5-1.4.1-2.9 0 0 .9-.3 2.9 1.1a10 10 0 0 1 5.2 0c2-1.4 2.9-1.1 2.9-1.1.6 1.5.2 2.6.1 2.9.7.8 1.1 1.7 1.1 2.9 0 4-2.5 4.9-4.8 5.2.4.3.7 1 .7 2v2.9c0 .3.2.6.7.5A10.5 10.5 0 0 0 12 1.5Z" />
+        </svg>
+        <span class="store-badge-line">
+          <span class="store-badge-lead">Source and releases</span>
+          <span class="store-badge-name">GitHub</span>
+        </span>
+      </a>
+    )
+  }
+</div>

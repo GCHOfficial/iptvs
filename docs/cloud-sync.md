@@ -315,19 +315,31 @@ the Supabase origin; the legal pages run with `script-src 'none'`), injected at 
 `panel/vite.config.js`. This is part of the threat boundary below: the CSP is what makes "XSS'd
 panel" a hard target rather than a soft one.
 
-The policy deliberately carries **no `frame-ancestors`**. The panel is static files on GitHub
-Pages, which cannot set response headers, so the CSP can only be delivered by `<meta
-http-equiv>` — and `frame-ancestors` is **ignored by spec** when delivered that way. It enforced
-nothing and only logged a console warning, while advertising clickjacking protection the panel
-did not have. Anti-framing is instead enforced by **`panel/src/framebust.js`**, the mandatory
-*first* import of `main.js`: ES module dependencies evaluate in source order, so it throws before
-the entry graph evaluates and a framed panel builds no UI and attaches no listeners. It refuses
-to run rather than busting out — no `top.location = …`, which would make the panel an
-open-redirect gadget — and offers the user a plain link to the real origin instead. This matters
-because the panel is exactly the surface worth framing: passphrase entry, provider credential
-fields, and the device "Send key" action. Keep that import first. If the panel ever moves to a
-host that can send headers, serve this policy as a real `Content-Security-Policy` header and
-restore `frame-ancestors 'none'` there.
+**The policy is delivered twice, and deliberately not identically.** The `<meta http-equiv>` copy
+carries **no `frame-ancestors`**: that directive is **ignored by spec** when delivered that way, so
+listing it enforced nothing, logged a console warning, and advertised clickjacking protection the
+panel did not have. The `_headers` copy (emitted into every build by the `iptvs-security-policy`
+plugin) *does* carry `frame-ancestors 'none'`, alongside `X-Frame-Options`, `nosniff`,
+`Referrer-Policy` and HSTS. Where both are present a browser enforces the intersection — identical
+directives, plus one the meta tag could never carry.
+
+Which one is live depends on the host, which is why both exist: **GitHub Pages serves static files
+and cannot set response headers**, so that deployment is the meta tag alone; **Cloudflare Pages
+reads `_headers`**, so the apex deployment gets the real thing. `_headers` is inert on GitHub Pages
+(served as a plain file, revealing nothing the meta tag doesn't already state), which is what lets
+both targets share one build config. HSTS is deliberately without `includeSubDomains`/`preload` —
+the apex is the panel, but the domain's other names are mail infrastructure, and a static site
+should not pin HTTPS across a whole zone; set it zone-wide in Cloudflare if that is ever wanted.
+
+Anti-framing is *also* enforced by **`panel/src/framebust.js`**, the mandatory *first* import of
+`main.js`: ES module dependencies evaluate in source order, so it throws before the entry graph
+evaluates and a framed panel builds no UI and attaches no listeners. It refuses to run rather than
+busting out — no `top.location = …`, which would make the panel an open-redirect gadget — and
+offers the user a plain link to the real origin instead. **Keep that import first even though the
+header now exists**: it is the only protection on the GitHub Pages copy, which stays live for
+already-shipped app installs (see "Hosting" below). This matters because the panel is exactly the
+surface worth framing: passphrase entry, provider credential fields, and the device "Send key"
+action.
 
 ### Threat boundary
 
@@ -667,10 +679,35 @@ unit-tested in `test/cloud_sync_test.dart`; the crypto vectors + fail-closed cas
 sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Sources carry an integer
 `position` and the list has **↑/↓ reorder** controls (positions self-heal to a clean `0..n-1` on
 reorder; new sources append); devices show sources in that order. Branded with the app icon
-(`panel/public/icon.png`, copied from `assets/icon/`). Deployed to **GitHub Pages** by
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) (`upload-pages-artifact@v5` +
-`deploy-pages@v5`; Supabase values from repo Variables). Note: the Flutter web target lives in
+(`panel/public/icon.png`, copied from `assets/icon/`). Note: the Flutter web target lives in
 `web/`; the panel deliberately lives in `panel/`.
+
+#### Hosting: two targets, one workflow
+
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) publishes the panel **twice**, and
+both stay live:
+
+| Host | URL | Base | Delivered by |
+| --- | --- | --- | --- |
+| GitHub Pages | `https://<user>.github.io/iptvs/` | `/iptvs/` | `upload-pages-artifact@v5` + `deploy-pages@v5` |
+| Cloudflare Pages | the apex custom domain | `/` (`PANEL_BASE`) | `wrangler pages deploy` |
+
+It is built **twice**, not built once and copied: the base path is baked into the bundle, and one
+artifact cannot serve both — every asset URL and `import.meta.env.BASE_URL` would be wrong on one
+of them, and `BASE_URL` is what `emailRedirectTo` is composed from.
+
+**Both targets are permanent, not a migration.** `CloudConfig.panelUrl` (`lib/data/cloud_config.dart`)
+hardcodes the GitHub Pages URL as its `defaultValue` and no workflow overrides it, so that URL is
+baked into every already-shipped build — it is what the pairing QR encodes and what the Cloud sync
+screen prints. Installs are arbitrarily old, so retiring it would strand them; instead it keeps
+receiving the same deploys. **Both origins must therefore stay in Supabase's Auth → URL
+Configuration redirect allow-list**, which is exact — a missing entry breaks sign-in outright.
+
+Supabase values come from repo **Variables**; the Cloudflare step needs `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` **Secrets** and skips itself when they are absent, so a fork publishes
+nothing and fails nothing. `wrangler` is a lockfile-pinned devDependency rather than an `npx
+wrangler@4` that would resolve a fresh minor at run time — everything else in this repo's CI is
+pinned, and a deploy credential is the wrong place to make an exception.
 
 ### Xtream detection on an M3U source (suggest, never convert)
 

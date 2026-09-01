@@ -1,0 +1,135 @@
+/* iptvs brand palette, mapped onto Starlight's tokens.
+ *
+ * The values are the ones the app and the panel already use — `AppColors` in
+ * lib/theme.dart and `:root` in panel/src/styles.css — so the three surfaces
+ * read as one product. Keep them in step: this file is a *mapping*, not a
+ * second source of truth. If a brand colour changes it changes there first.
+ *
+ *   ink      #0e0f13   app background
+ *   panel    #171922   cards / surfaces
+ *   panel-hi #1f2230   raised surface / borders
+ *   text     #e7e9ee
+ *   text-lo  #9aa0ad
+ *   accent   #7b6cf6   brand hue — rings, links, progress
+ *   accentFill #6f5fec accent darkened until white 14px bold clears WCAG AA
+ *                      4.5:1 on it (measured 4.64:1; plain accent is 3.95:1).
+ *                      Use it wherever white text sits ON the accent.
+ */
+
+:root {
+  /* Accent ramp. `--sl-color-accent` backs filled buttons and other places
+   * Starlight puts white text on the accent, so it takes accentFill rather than
+   * the brand hue — same reasoning as AppColors.accentFill. */
+  --sl-color-accent-low: #241f4d;
+  --sl-color-accent: #6f5fec;
+  --sl-color-accent-high: #c4bdff;
+
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e7e9ee;
+  --sl-color-gray-2: #c3c7d1;
+  --sl-color-gray-3: #9aa0ad;
+  --sl-color-gray-4: #5f6675;
+  --sl-color-gray-5: #333747;
+  --sl-color-gray-6: #1f2230;
+  --sl-color-black: #0e0f13;
+
+  --sl-color-bg: #0e0f13;
+  --sl-color-bg-nav: #171922;
+  --sl-color-bg-sidebar: #171922;
+  --sl-color-bg-inline-code: #1f2230;
+  --sl-color-hairline: #1f2230;
+  --sl-color-hairline-light: #333747;
+
+  --sl-color-text: #e7e9ee;
+  --sl-color-text-accent: #a99fff;
+
+  --sl-font: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+/* Light theme. The app ships dark only, so this is the one place the site has
+ * no palette to inherit — it keeps the same accent so the brand survives, and
+ * takes neutral greys around it rather than inventing a second brand. */
+:root[data-theme='light'] {
+  --sl-color-accent-low: #dedaff;
+  --sl-color-accent: #5a49d8;
+  --sl-color-accent-high: #241f4d;
+
+  --sl-color-white: #0e0f13;
+  --sl-color-gray-1: #22242c;
+  --sl-color-gray-2: #3d414d;
+  --sl-color-gray-3: #5f6675;
+  --sl-color-gray-4: #8c93a1;
+  --sl-color-gray-5: #d3d6dd;
+  --sl-color-gray-6: #eceef2;
+  --sl-color-gray-7: #f6f7f9;
+  --sl-color-black: #ffffff;
+
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: #f6f7f9;
+  --sl-color-bg-sidebar: #f6f7f9;
+  --sl-color-bg-inline-code: #eceef2;
+  --sl-color-hairline: #e2e4ea;
+  --sl-color-hairline-light: #d3d6dd;
+
+  --sl-color-text: #22242c;
+  --sl-color-text-accent: #5a49d8;
+}
+
+/* The logo is a rounded-square app icon; Starlight renders it raw. Match the
+ * radius the panel's `.logo` uses so the two headers look like one product. */
+.site-title img {
+  border-radius: 7px;
+}
+
+/* ── Landing page ────────────────────────────────────────────────────────── */
+
+/* Store badges. Deliberately text buttons rather than the official artwork:
+ * the badge images are trademarked, must not be recoloured or resized, and
+ * come in fixed pixel heights that look wrong next to Starlight's hero
+ * actions. Swap in the official assets if the listings ever require them —
+ * both stores publish exact-use guidelines. */
+.store-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.store-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 10px;
+  background: var(--sl-color-bg-nav);
+  color: var(--sl-color-text);
+  text-decoration: none;
+  line-height: 1.2;
+}
+
+.store-badge:hover {
+  border-color: var(--sl-color-accent);
+  color: var(--sl-color-text);
+}
+
+.store-badge svg {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+}
+
+.store-badge .store-badge-line {
+  display: flex;
+  flex-direction: column;
+}
+
+.store-badge .store-badge-lead {
+  font-size: 0.7rem;
+  color: var(--sl-color-gray-3);
+}
+
+.store-badge .store-badge-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+}

@@ -1,0 +1,41 @@
+---
+title: iptvs
+description: A cross-platform IPTV player for Windows, Android, Android TV and Linux. Manage your sources from the web; your devices pull them down.
+template: splash
+hero:
+  tagline: Your IPTV sources, on every screen you own. Set them up once in a browser — no typing credentials into a TV remote.
+  image:
+    file: ../../assets/icon.png
+  actions:
+    - text: Get started
+      link: /guides/installing/
+      icon: right-arrow
+    - text: Open the panel
+      link: https://panel.example.invalid/
+      icon: external
+      variant: minimal
+---
+
+import StoreBadges from '../../components/StoreBadges.astro';
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<StoreBadges github="https://github.com/GCHOfficial/iptvs/releases" />
+
+<CardGrid stagger>
+  <Card title="Plays what a browser can't" icon="seti:video">
+    HEVC, AC-3 and MPEG-TS, with HDR passthrough on Android, Windows and Linux —
+    the formats IPTV providers actually send.
+  </Card>
+  <Card title="Built for a remote" icon="approve-check">
+    Every screen is fully D-pad navigable on Android TV, down to the on-screen
+    PIN pad. No touch-only corners.
+  </Card>
+  <Card title="Set up in a browser" icon="laptop">
+    Add sources from a real keyboard in the web panel, pair a device with a
+    code or a QR, and it pulls everything down.
+  </Card>
+  <Card title="Your credentials stay yours" icon="seti:lock">
+    Provider logins live in your device's keychain. Sync them through the cloud
+    panel and they can be end-to-end encrypted with a passphrase only you hold.
+  </Card>
+</CardGrid>
