@@ -99,16 +99,20 @@
   margin-top: 1.5rem;
 }
 
-/* Official store artwork. No border, background or padding of our own — the
-   badge carries its own, and adding chrome around it would be a modification. */
+/* Official store artwork. No border or background of our own — the badge is a
+   finished graphic and wrapping it in chrome would read as altering it.
+   The margin IS Google's required clear space: at least a quarter of the badge
+   height (40px / 4 = 10px) on every side, kept in CSS rather than baked into
+   the image so the row can control its own rhythm. */
 .store-badge-image {
   display: inline-flex;
   text-decoration: none;
+  margin: 10px;
 }
 
 .store-badge-image img {
   display: block;
-  height: 112px;
+  height: 40px;
   width: auto;
 }
 

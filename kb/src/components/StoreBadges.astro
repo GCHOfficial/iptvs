@@ -17,23 +17,24 @@ const { play, microsoft, github } = Astro.props;
 <div class="store-badges">
   {
     play && (
-      /* Google's official artwork, served byte-for-byte from `public/` rather
-         than recreated or run through image optimisation. Their badge
-         guidelines are explicit that the supplied badge must not be redrawn or
-         altered, and proportional scaling is the only change permitted.
+      /* Google's official artwork. The badge pixels are untouched — their
+         guidelines forbid redrawing or altering it, and proportional scaling is
+         the only change allowed — but the supplied 880x572 file is cropped to
+         the badge itself (811x241). That is not an alteration: the surrounding
+         transparency was never the required clear space, since the file only
+         carried 34px of it horizontally against a 1/4-of-height rule that wants
+         ~60px. Clear space is provided by `.store-badge-image`'s margin
+         instead, which is both correct and layout-controllable.
 
-         The 880x572 asset is mostly the *clear space* Google requires around
-         the badge — the black pill is only ~245px of that height, about 43%. So
-         the box renders taller than its neighbours by design, and 112px of box
-         puts the visible badge near 48px, matching the text buttons beside it
-         and comfortably over the 28px minimum. `.store-badges` centres the row
-         so the extra height reads as breathing room rather than misalignment. */
+         Rendered at 40px tall — above the 28px minimum, and the right visual
+         weight beside the text buttons. Served straight from `public/`, not
+         through image optimisation, so nothing recompresses the artwork. */
       <a class="store-badge-image" href={play}>
         <img
           src="/store/google-play-badge.png"
           alt="Get it on Google Play"
-          width="172"
-          height="112"
+          width="135"
+          height="40"
         />
       </a>
     )
