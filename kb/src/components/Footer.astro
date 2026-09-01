@@ -10,9 +10,23 @@
 // footer makes it present on every page rather than only the one that happens
 // to render the badges today.
 import Default from '@astrojs/starlight/components/Footer.astro';
+
+// Absolute, and on the panel's origin, because that is where these pages
+// actually live (`panel/public/`) — and where the Play and Microsoft Store
+// listings already point. Moving the files here would mean updating both store
+// listings in the same pass, so they stay put and the site links across.
+const PANEL = 'https://panel.iptvs.click';
 ---
 
 <Default><slot /></Default>
+
+<nav class="site-links" aria-label="Legal and support">
+  <a href={`${PANEL}/privacy`}>Privacy</a>
+  <a href={`${PANEL}/support`}>Support</a>
+  <a href={`${PANEL}/delete-account`}>Delete account</a>
+  <a href="https://github.com/GCHOfficial/iptvs">GitHub</a>
+  <a href="https://ko-fi.com/georgecosminhanta">Ko-fi</a>
+</nav>
 
 {/* The two trademark sentences are the vendors' **official attribution
     wording** and are reproduced verbatim. Do not reword, shorten, merge or
@@ -26,10 +40,28 @@ import Default from '@astrojs/starlight/components/Footer.astro';
 </p>
 
 <style>
-  .site-legal {
+  .site-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.1rem;
     margin-top: 1.5rem;
     padding-top: 1rem;
     border-top: 1px solid var(--sl-color-hairline);
+    font-size: 0.8rem;
+  }
+
+  .site-links a {
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+  }
+
+  .site-links a:hover {
+    color: var(--sl-color-text-accent);
+    text-decoration: underline;
+  }
+
+  .site-legal {
+    margin-top: 0.75rem;
     font-size: 0.7rem;
     line-height: 1.6;
     color: var(--sl-color-gray-4);
