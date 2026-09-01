@@ -2,6 +2,8 @@
 
 [![Build](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml/badge.svg)](https://github.com/GCHOfficial/iptvs/actions/workflows/build.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/site-iptvs.click-7b6cf6)](https://iptvs.click)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-ff5e5b)](https://ko-fi.com/georgecosminhanta)
 
 A cross-platform **IPTV player** for Windows, Linux, and Android (including **Android TV**),
 built with Flutter and libmpv. It connects to your own IPTV provider, caches its
@@ -55,8 +57,14 @@ element can't.
 
 ## Download
 
-Grab the latest Linux AppImage, Windows zip, and Android APK from the
-[**Releases**](https://github.com/GCHOfficial/iptvs/releases) page. The APK installs
+[**Google Play**](https://play.google.com/store/apps/details?id=com.gchofficial.iptvs.player)
+· [**Microsoft Store**](https://apps.microsoft.com/detail/9P8KK9T379WN)
+· [**iptvs.click**](https://iptvs.click)
+
+Or grab the latest Linux AppImage, Windows zip, and Android APK from the
+[**Releases**](https://github.com/GCHOfficial/iptvs/releases) page. Note the Play build and
+the direct APK are signed with **different certificates** and cannot be installed over one
+another — pick one. The APK installs
 on both phones and Android TV. The AppImage is portable and updates itself from
 the same signed GitHub release channel when launched from a writable location.
 
@@ -91,9 +99,9 @@ CI expectation: `flutter analyze` is clean and `flutter test` is green.
 ## Cloud sync (optional)
 
 Maintaining a source list with a TV remote is painful, so iptvs can optionally talk to
-a **web panel** — a static site on GitHub Pages backed by [Supabase](https://supabase.com) —
-where you manage, reorder, and keep your sources and metadata keys with a real keyboard.
-The live panel is at **<https://gchofficial.github.io/iptvs/>**. Each device pulls a list
+a **web panel** — a static site backed by [Supabase](https://supabase.com) — where you
+manage, reorder, and keep your sources and metadata keys with a real keyboard.
+The live panel is at **<https://panel.iptvs.click>**. Each device pulls a list
 down after a one-time **pairing code**, so there is **no login on the TV** — and can
 optionally **push** its own set back up (newest change wins).
 
@@ -112,10 +120,26 @@ optionally **push** its own set back up (newest change wins).
   stays hidden (`CloudConfig.isConfigured`).
 
 Setup lives in [`supabase/README.md`](supabase/README.md) (database, RLS, auth) and
-[`panel/README.md`](panel/README.md) (the web app, deployed to Pages by
-[`pages.yml`](.github/workflows/pages.yml)). To enable it in the app, build with the Supabase
-values — locally via `flutter run --dart-define-from-file=dart_define.json` (copy
+[`panel/README.md`](panel/README.md) (the web app). Both the panel and the site are
+published to Cloudflare Pages by [`pages.yml`](.github/workflows/pages.yml), on
+**separate origins** — the panel holds an authenticated session and provider credentials,
+so it does not share an origin with a docs site and its dependency tree. To enable cloud
+sync in the app, build with the Supabase values — locally via
+`flutter run --dart-define-from-file=dart_define.json` (copy
 [`dart_define.example.json`](dart_define.example.json)); in CI they come from repo Variables.
+
+## Website and knowledge base
+
+**<https://iptvs.click>** — download links, and a knowledge base covering installing per
+platform, adding a source, cloud sync and pairing, profiles and PINs, the TV remote
+controls, and troubleshooting. It is an [Astro Starlight](https://starlight.astro.build)
+site living in [`kb/`](kb/); the pages are plain Markdown, so corrections are welcome as
+pull requests.
+
+## Support
+
+iptvs is free and GPLv3, with no ads, no tracking, and no account needed to use it.
+If you would like to support development: **<https://ko-fi.com/georgecosminhanta>**.
 
 ## Disclaimer
 

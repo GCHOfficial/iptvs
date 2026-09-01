@@ -1,31 +1,36 @@
-name: Deploy panel
+name: Deploy web
 
-# Builds the web source panel (panel/) and publishes it to GitHub Pages.
-# Runs only on pushes to main that touch the panel. This is a deploy workflow,
-# not a gate: the panel's unit tests (`npm test` in panel/) run in build.yml's
-# analyze-test job, which is what covers pull requests.
+# Publishes the two web surfaces to Cloudflare Pages. Deploy-only, not a gate:
+# both are built and checked on pull requests by build.yml's analyze-test job.
+#
+# They are two Pages projects on two origins **on purpose**, not for tidiness.
+# The panel holds an authenticated Supabase session, an unwrapped content key and
+# provider credentials; the marketing/KB site is Astro Starlight with a large
+# dependency tree and community-editable Markdown. Same origin would put every
+# one of those dependencies — and every future docs PR — inside the panel's
+# localStorage and session. See docs/cloud-sync.md.
 on:
   push:
     branches: [main]
     paths:
       - 'panel/**'
+      - 'kb/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
-# Allow this workflow to publish Pages; concurrency keeps one live deploy.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: web-deploy
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build panel
+  panel:
+    name: Panel → panel.<domain>
     runs-on: ubuntu-latest
+    env:
+      HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -35,25 +40,51 @@ jobs:
           cache-dependency-path: panel/package-lock.json
       - run: npm ci
         working-directory: panel
+      # Anon/publishable values only — repo Variables (Settings → Secrets and
+      # variables → Actions → Variables). Never service_role.
+      #
+      # PANEL_BASE=/ because the panel now owns its own origin. It was /iptvs/
+      # while it was a GitHub Pages *project* page.
       - name: Build
         working-directory: panel
-        # Anon/publishable values only — set as repo Variables (Settings →
-        # Secrets and variables → Actions → Variables). Never service_role.
         env:
           VITE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
-        run: npm run build
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
-        with:
-          path: panel/dist
+          PANEL_BASE: /
+        run: npm run verify-build
+      - name: Deploy
+        if: env.HAS_CLOUDFLARE == 'true'
+        working-directory: panel
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler pages deploy dist --project-name iptvs-panel --branch main
 
-  deploy:
-    name: Deploy to Pages
-    needs: build
+  site:
+    name: Site → apex
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
-      - id: deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: kb/package-lock.json
+      - run: npm ci
+        working-directory: kb
+      # SITE_URL feeds canonical URLs and the sitemap, so it must be the real
+      # origin — a wrong value ships wrong <link rel="canonical"> to every page.
+      - name: Build
+        working-directory: kb
+        env:
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: npm run build
+      - name: Deploy
+        if: env.HAS_CLOUDFLARE == 'true'
+        working-directory: kb
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler pages deploy dist --project-name iptvs-site --branch main

@@ -1,0 +1,68 @@
+---
+// Store badges for the landing page: official artwork only.
+//
+// A store's URL is a fact about a published listing, not about this repo, so
+// each is passed in from the page rather than hardcoded here — and a badge with
+// no URL yet simply doesn't render, so this ships before a listing is live
+// without showing anyone a dead link.
+//
+// **Both are the vendors' own assets, unmodified, served straight from
+// `public/`** — no image optimisation, so nothing recompresses or re-encodes
+// them. Google's and Microsoft's badge guidelines both forbid redrawing or
+// altering the artwork, and proportional scaling is the only change either
+// allows. An earlier version hand-drew both marks; that is precisely what the
+// guidelines prohibit, so it is not a fallback.
+//
+// The Play PNG is cropped from the supplied 880x572 file to the badge itself
+// (811x241). That is not an alteration — it removes surrounding transparency,
+// which was never the required clear space anyway: the rule is a quarter of the
+// badge height per side, and the file carried only 34px horizontally against a
+// ~60px requirement. Clear space is provided by CSS margin instead, which
+// actually satisfies the rule and leaves the row in control of its rhythm.
+//
+// The two are near-identical proportions — Play 3.36:1, Microsoft 3.66:1 — so
+// at a shared 44px height they read as a matched pair. That pairing is why
+// there is no GitHub button here: a third, differently shaped button broke it,
+// and the GitHub link already sits in the site header on every page.
+interface Props {
+  play?: string;
+  microsoft?: string;
+}
+
+const { play, microsoft } = Astro.props;
+---
+
+{/* `not-content` is Starlight's opt-out from its markdown-content styling, and
+    it is load-bearing here rather than cosmetic. That rule is
+    `.sl-markdown-content :is(img,…):not(:where(.not-content *))` — the same
+    specificity as `.store-badge-image img` (0,1,1) — so it wins on source order
+    and forces `height:auto`. The images then take their intrinsic sizes, and
+    since this row is a flex container and flex-shrink is proportional to base
+    size, the 811px-wide Play PNG collapsed while Microsoft's natively-44px SVG
+    happened to look correct. Opting out lets the 44px below actually apply. */}
+<div class="store-badges not-content">
+  {
+    play && (
+      <a class="store-badge-image" href={play}>
+        <img
+          src="/store/google-play-badge.png"
+          alt="Get it on Google Play"
+          width="148"
+          height="44"
+        />
+      </a>
+    )
+  }
+  {
+    microsoft && (
+      <a class="store-badge-image" href={microsoft}>
+        <img
+          src="/store/microsoft-store-badge.svg"
+          alt="Get it from Microsoft"
+          width="161"
+          height="44"
+        />
+      </a>
+    )
+  }
+</div>

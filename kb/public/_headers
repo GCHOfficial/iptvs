@@ -1,0 +1,20 @@
+# Real response headers for Cloudflare Pages.
+#
+# No Content-Security-Policy here. Astro's own `security.csp` emits a <meta>
+# tag with per-build hashes for the inline scripts Starlight ships (the theme
+# selector, mainly), and hand-writing a header alongside it would mean a browser
+# enforcing the intersection of two policies that drift apart on every build.
+# The panel — which is where a CSP actually earns its keep — is a separate
+# origin with its own strict policy. See docs/cloud-sync.md.
+#
+# `frame-ancestors` cannot be delivered by a meta tag at all, so anti-framing is
+# the X-Frame-Options header below.
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000
+
+# Hashed, immutable build output.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable

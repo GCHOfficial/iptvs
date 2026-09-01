@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iptvs sources has moved</title>
+    <meta name="robots" content="noindex" />
+    <!--
+      The panel used to live here, at gchofficial.github.io/iptvs/. It now lives
+      at panel.iptvs.click, and this page exists only so that already-shipped
+      app builds keep working.
+
+      `CloudConfig.panelUrl` (lib/data/cloud_config.dart) is a compile-time
+      constant, so every install carries whatever URL it was built with — and it
+      is what the pairing screen prints and encodes into its QR code. Installs
+      are arbitrarily old, so this URL can never simply stop answering.
+
+      The query string is the whole point: the QR encodes `?code=ABCD2345`, and
+      the panel reads that to prefill its Pair form. A <meta refresh> would drop
+      it and silently turn a working shortcut into a blank form, so the redirect
+      is scripted and the meta tag below is only a no-JS backstop.
+
+      `location.replace` rather than `location.href` so this page does not land
+      in history — Back from the panel should return to the app, not bounce
+      through here forever.
+    -->
+    <noscript><meta http-equiv="refresh" content="0; url=https://panel.iptvs.click/" /></noscript>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0e0f13;
+        color: #e7e9ee;
+        font: 15px/1.6 Inter, system-ui, sans-serif;
+        text-align: center;
+        padding: 24px;
+      }
+      a { color: #a99fff; }
+      p { margin: 0 0 8px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>The iptvs source panel has moved.</p>
+      <p><a id="go" href="https://panel.iptvs.click/">Continue to panel.iptvs.click</a></p>
+    </main>
+    <script>
+      (function () {
+        // Carry the path across, not just the query.
+        //
+        // The pairing QR needs `?code=…`, which is why the query was always
+        // forwarded. But the Play and Microsoft Store listings point at
+        // `/iptvs/privacy.html`, and shipped app builds open
+        // `/iptvs/{privacy,support,delete-account}.html` from `AppLinks` — all
+        // of which land on GitHub Pages' 404 and then here. Dropping the path
+        // would send a store reviewer following the privacy link to the panel's
+        // sign-in screen instead of the policy.
+        //
+        // Everything after the `/iptvs/` project-page prefix is the panel's own
+        // path. Anything else (a bare `/iptvs`, an unexpected root) falls back
+        // to the panel root rather than guessing.
+        var prefix = '/iptvs/';
+        var path = location.pathname;
+        var rest = path.indexOf(prefix) === 0 ? path.slice(prefix.length) : '';
+        var target =
+          'https://panel.iptvs.click/' + rest + location.search + location.hash;
+        document.getElementById('go').href = target;
+        location.replace(target);
+      })();
+    </script>
+  </body>
+</html>

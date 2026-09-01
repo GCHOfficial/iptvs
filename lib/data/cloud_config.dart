@@ -15,9 +15,17 @@ class CloudConfig {
       String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
 
   /// Where users go to manage their sources and claim a device's pairing code.
+  ///
+  /// This is a **compile-time constant**, so every install carries whatever URL
+  /// it was built with — and it is what the pairing screen prints and what
+  /// [pairingPanelLink] encodes into the QR. Installs are arbitrarily old, so
+  /// the previous value (`gchofficial.github.io/iptvs/`, from when the panel was
+  /// a GitHub Pages project page) can never simply stop answering: it now serves
+  /// a redirect that forwards the `?code=` query here. See `redirect/index.html`
+  /// and docs/cloud-sync.md before changing this again.
   static const String panelUrl = String.fromEnvironment(
     'PANEL_URL',
-    defaultValue: 'https://gchofficial.github.io/iptvs/',
+    defaultValue: 'https://panel.iptvs.click/',
   );
 
   /// Cloud sync is only available when both Supabase values are provided.

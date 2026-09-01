@@ -1,0 +1,76 @@
+---
+title: iptvs
+description: A cross-platform IPTV player for Windows, Android, Android TV and Linux. Manage your sources from the web; your devices pull them down.
+template: splash
+# Starlight composes `<title>` as "{page title} | {site title}", which on the
+# home page — where both are "iptvs" — reads "iptvs | iptvs". Override the
+# document title without touching `title`, which is also the hero heading.
+head:
+  - tag: title
+    content: iptvs — IPTV for Windows, Android TV and Linux
+hero:
+  tagline: Your IPTV sources, on every screen you own. Set them up once in a browser — no typing credentials into a TV remote.
+  image:
+    file: ../../assets/icon.png
+  actions:
+    - text: Get started
+      link: /guides/installing/
+      icon: right-arrow
+    - text: Open the panel
+      link: https://panel.iptvs.click/
+      icon: external
+      variant: minimal
+---
+
+import StoreBadges from '../../components/StoreBadges.astro';
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+{/* Identities are recorded in docs/store-publishing.md: the Play application id
+    is `com.gchofficial.iptvs.player`, the Microsoft Store ID `9P8KK9T379WN`.
+    Both listings verified live before wiring these. */}
+<StoreBadges
+  play="https://play.google.com/store/apps/details?id=com.gchofficial.iptvs.player"
+  microsoft="https://apps.microsoft.com/detail/9P8KK9T379WN"
+/>
+
+Prefer a direct download, or on Linux? Every build is on the
+[releases page](https://github.com/GCHOfficial/iptvs/releases) — Linux AppImage,
+Windows zip and Android APK.
+
+{/* The trademark attribution these badges require lives in the site footer
+    (`src/components/Footer.astro`), which is both where a legal footnote
+    belongs and how it ends up on every page rather than only this one. */}
+
+<CardGrid stagger>
+  <Card title="Plays what a browser can't" icon="seti:video">
+    HEVC, AC-3 and MPEG-TS, with HDR passthrough on Android, Windows and Linux —
+    the formats IPTV providers actually send.
+  </Card>
+  <Card title="Built for a remote" icon="approve-check">
+    Every screen is fully D-pad navigable on Android TV, down to the on-screen
+    PIN pad. No touch-only corners.
+  </Card>
+  <Card title="Set up in a browser" icon="laptop">
+    Add sources from a real keyboard in the web panel, pair a device with a
+    code or a QR, and it pulls everything down.
+  </Card>
+  <Card title="Your credentials stay yours" icon="seti:lock">
+    Provider logins live in your device's keychain. Sync them through the cloud
+    panel and they can be end-to-end encrypted with a passphrase only you hold.
+  </Card>
+</CardGrid>
+
+## Support the project
+
+iptvs is free and open source, GPLv3, with no ads, no tracking and no accounts
+required to use it. If it earned a coffee:
+
+<a class="store-badge support-badge" href="https://ko-fi.com/georgecosminhanta">
+  <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+    <path d="M12 21.2 3.6 12.8a5.6 5.6 0 0 1 0-7.9 5.6 5.6 0 0 1 7.9 0l.5.5.5-.5a5.6 5.6 0 0 1 7.9 0 5.6 5.6 0 0 1 0 7.9L12 21.2Z" />
+  </svg>
+  <span class="store-badge-line">
+    <span class="store-badge-lead">Buy me a coffee on</span>
+    <span class="store-badge-name">Ko-fi</span>
+  </span>
+</a>

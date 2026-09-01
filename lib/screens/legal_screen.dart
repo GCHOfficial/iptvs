@@ -61,6 +61,14 @@ class LegalScreen extends StatelessWidget {
                   subtitle: 'Troubleshooting and contact information',
                   onTap: () => _open(context, AppLinks.support),
                 ),
+                // Above the repository link on purpose: someone opening this
+                // screen for help wants the guides, not the source.
+                _LinkCard(
+                  icon: Icons.menu_book_outlined,
+                  title: 'Knowledge base',
+                  subtitle: 'Guides for setup, pairing, and the TV remote',
+                  onTap: () => _open(context, AppLinks.website),
+                ),
                 _LinkCard(
                   icon: Icons.code,
                   title: 'Source code & issues',

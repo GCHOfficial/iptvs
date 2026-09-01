@@ -315,19 +315,31 @@ the Supabase origin; the legal pages run with `script-src 'none'`), injected at 
 `panel/vite.config.js`. This is part of the threat boundary below: the CSP is what makes "XSS'd
 panel" a hard target rather than a soft one.
 
-The policy deliberately carries **no `frame-ancestors`**. The panel is static files on GitHub
-Pages, which cannot set response headers, so the CSP can only be delivered by `<meta
-http-equiv>` — and `frame-ancestors` is **ignored by spec** when delivered that way. It enforced
-nothing and only logged a console warning, while advertising clickjacking protection the panel
-did not have. Anti-framing is instead enforced by **`panel/src/framebust.js`**, the mandatory
-*first* import of `main.js`: ES module dependencies evaluate in source order, so it throws before
-the entry graph evaluates and a framed panel builds no UI and attaches no listeners. It refuses
-to run rather than busting out — no `top.location = …`, which would make the panel an
-open-redirect gadget — and offers the user a plain link to the real origin instead. This matters
-because the panel is exactly the surface worth framing: passphrase entry, provider credential
-fields, and the device "Send key" action. Keep that import first. If the panel ever moves to a
-host that can send headers, serve this policy as a real `Content-Security-Policy` header and
-restore `frame-ancestors 'none'` there.
+**The policy is delivered twice, and deliberately not identically.** The `<meta http-equiv>` copy
+carries **no `frame-ancestors`**: that directive is **ignored by spec** when delivered that way, so
+listing it enforced nothing, logged a console warning, and advertised clickjacking protection the
+panel did not have. The `_headers` copy (emitted into every build by the `iptvs-security-policy`
+plugin) *does* carry `frame-ancestors 'none'`, alongside `X-Frame-Options`, `nosniff`,
+`Referrer-Policy` and HSTS. Where both are present a browser enforces the intersection — identical
+directives, plus one the meta tag could never carry.
+
+Which one is live depends on the host, which is why both exist: **GitHub Pages serves static files
+and cannot set response headers**, so that deployment is the meta tag alone; **Cloudflare Pages
+reads `_headers`**, so the apex deployment gets the real thing. `_headers` is inert on GitHub Pages
+(served as a plain file, revealing nothing the meta tag doesn't already state), which is what lets
+both targets share one build config. HSTS is deliberately without `includeSubDomains`/`preload` —
+the apex is the panel, but the domain's other names are mail infrastructure, and a static site
+should not pin HTTPS across a whole zone; set it zone-wide in Cloudflare if that is ever wanted.
+
+Anti-framing is *also* enforced by **`panel/src/framebust.js`**, the mandatory *first* import of
+`main.js`: ES module dependencies evaluate in source order, so it throws before the entry graph
+evaluates and a framed panel builds no UI and attaches no listeners. It refuses to run rather than
+busting out — no `top.location = …`, which would make the panel an open-redirect gadget — and
+offers the user a plain link to the real origin instead. **Keep that import first even though the
+header now exists**: it is the only protection on the GitHub Pages copy, which stays live for
+already-shipped app installs (see "Hosting" below). This matters because the panel is exactly the
+surface worth framing: passphrase entry, provider credential fields, and the device "Send key"
+action.
 
 ### Threat boundary
 
@@ -667,10 +679,54 @@ unit-tested in `test/cloud_sync_test.dart`; the crypto vectors + fail-closed cas
 sign-in only** (no OAuth). Field shapes mirror `SourceConfig` per kind. Sources carry an integer
 `position` and the list has **↑/↓ reorder** controls (positions self-heal to a clean `0..n-1` on
 reorder; new sources append); devices show sources in that order. Branded with the app icon
-(`panel/public/icon.png`, copied from `assets/icon/`). Deployed to **GitHub Pages** by
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) (`upload-pages-artifact@v5` +
-`deploy-pages@v5`; Supabase values from repo Variables). Note: the Flutter web target lives in
+(`panel/public/icon.png`, copied from `assets/icon/`). Note: the Flutter web target lives in
 `web/`; the panel deliberately lives in `panel/`.
+
+#### Hosting: three origins, and why
+
+| Origin | Serves | Source | Deployed by |
+| --- | --- | --- | --- |
+| `iptvs.click` | landing page, store badges, knowledge base | `kb/` (Astro Starlight) | `pages.yml` → Cloudflare Pages `iptvs-site` |
+| `panel.iptvs.click` | the source panel | `panel/` | `pages.yml` → Cloudflare Pages `iptvs-panel` |
+| `gchofficial.github.io/iptvs/` | a redirect, nothing else | `redirect/` | `github-pages-redirect.yml` → GitHub Pages |
+
+**The panel is a separate origin from the site as a security boundary, not for tidiness.** It holds
+an authenticated Supabase session, an unwrapped CK and provider credentials, and its runtime
+dependency tree is one package; Starlight's is hundreds, and its Markdown is the part most likely to
+take community PRs. Same origin would put every one of those inside the panel's `localStorage` and
+session — which is precisely the "XSS'd panel" case the [threat boundary](#threat-boundary) says the
+crypto does *not* cover. The two CSPs measure the same conclusion: a built Starlight docs page
+carries ~16 inline `<script>` blocks and ~80 inline `style=` attributes (Shiki), so it needs
+per-build script hashes plus an `'unsafe-inline'` exemption scoped to `style-src-attr` (a style
+*attribute* has no hash form). The panel is a flat `script-src 'self'` with nothing inline. One
+origin means one policy, and it would have been the looser one.
+
+**The github.io URL can never simply stop answering.** `CloudConfig.panelUrl`
+(`lib/data/cloud_config.dart`) is a compile-time constant, so every install carries the URL it was
+built with, and that is what the pairing screen prints and what `pairingPanelLink` encodes into the
+QR. Installs are arbitrarily old. `redirect/` therefore serves that path forever, forwarding to
+`panel.iptvs.click` **with the query string intact** — the QR carries `?code=ABCD2345` and the panel
+reads it to prefill the Pair form, so a bare `<meta refresh>` (which drops the query) would turn a
+working shortcut into a blank form. It deploys from its own workflow because it is the only thing
+left needing `pages: write`, and it changes roughly never.
+
+**Every origin the panel is served from must be in Supabase's Auth → URL Configuration
+redirect allow-list**, which is exact. Two consequences: a missing entry breaks sign-in outright,
+and — the reason never to widen it to a wildcard — that allow-list is what stops a **forked copy**
+of this panel, standing at an attacker's own domain, from completing a magic-link flow against this
+project. The Supabase URL and anon key are public by design; the allow-list is the control.
+
+Supabase values come from repo **Variables** (`SUPABASE_URL`, `SUPABASE_ANON_KEY`), the site's
+canonical origin from `SITE_URL`; the deploys need `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` **Secrets** and skip themselves when those are absent, so a fork publishes
+nothing and fails nothing. Scope the token to Pages:Edit on this account — never a global key — and
+keep secrets out of any `pull_request_target` workflow. `wrangler` is a lockfile-pinned
+devDependency rather than an `npx wrangler@4` resolving a fresh minor at run time: everything else
+in this repo's CI is pinned, and a deploy credential is the wrong place to make an exception.
+
+`PANEL_BASE=/` now that the panel owns an origin; `/iptvs/` was a GitHub Pages *project page*
+artefact. The base path is baked into the bundle and `import.meta.env.BASE_URL` is what
+`emailRedirectTo` is composed from, so it has to match the origin it is served at.
 
 ### Xtream detection on an M3U source (suggest, never convert)
 
