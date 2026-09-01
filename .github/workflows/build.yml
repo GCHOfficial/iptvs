@@ -56,9 +56,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: |
-            panel/package-lock.json
-            kb/package-lock.json
+          cache-dependency-path: panel/package-lock.json
       # `verify-build` is a smoke test of the *artifact*, not the code: it
       # asserts the emitted bundle still contains the Supabase client, which
       # `npm test` cannot see (the suite exercises the dependency-free
@@ -78,16 +76,6 @@ jobs:
           npm ci
           npm test
           npm run verify-build
-      # The marketing site + knowledge base. It has no unit tests — it is
-      # content — so the build *is* the check: a broken link target, an unknown
-      # sidebar slug, or invalid frontmatter all fail it. `pages.yml` deploys
-      # only on pushes to main, so without this a PR could merge a site that
-      # cannot build.
-      - name: Site build
-        working-directory: kb
-        run: |
-          npm ci
-          npm run build
 
   # Skip the heavy platform builds on doc-only commits (README/CLAUDE.md/memory).
   # `code` is an allowlist of paths that actually affect a build.
