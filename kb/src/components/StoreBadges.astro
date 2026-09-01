@@ -1,10 +1,24 @@
 ---
-// Download badges for the landing page.
+// Download links for the landing page.
 //
 // A store's URL is a fact about a published listing, not about this repo, so
 // each is passed in from the page rather than hardcoded here — and a badge with
-// no URL yet simply doesn't render, so this ships before the listings are live
+// no URL yet simply doesn't render, so this ships before a listing is live
 // without showing anyone a dead link.
+//
+// **These are deliberately not store badges, and carry no store logos.** The
+// official Google Play badge artwork was tried and removed: it is 811x241 of
+// art inside an 880x572 canvas, so matching its visible height to these buttons
+// meant a box twice their height, and it never sat right. Redrawing the Play
+// triangle instead — which an earlier version did — is the one thing Google's
+// guidelines actually forbid, so that is not the fallback either.
+//
+// What is left is the honest option: name the store in plain text, which is
+// ordinary nominative trademark use, and pair it with a neutral glyph that
+// belongs to nobody. The Microsoft mark went the same way for the same reason.
+// GitHub's Invertocat stays — GitHub's brand guidelines explicitly permit it
+// for linking to GitHub, and it is the only one of the three that is licensed
+// for this use.
 interface Props {
   play?: string;
   microsoft?: string;
@@ -17,33 +31,26 @@ const { play, microsoft, github } = Astro.props;
 <div class="store-badges">
   {
     play && (
-      /* Google's official artwork. The badge pixels are untouched — their
-         guidelines forbid redrawing or altering it, and proportional scaling is
-         the only change allowed — but the supplied 880x572 file is cropped to
-         the badge itself (811x241). That is not an alteration: the surrounding
-         transparency was never the required clear space, since the file only
-         carried 34px of it horizontally against a 1/4-of-height rule that wants
-         ~60px. Clear space is provided by `.store-badge-image`'s margin
-         instead, which is both correct and layout-controllable.
-
-         Rendered at 40px tall — above the 28px minimum, and the right visual
-         weight beside the text buttons. Served straight from `public/`, not
-         through image optimisation, so nothing recompresses the artwork. */
-      <a class="store-badge-image" href={play}>
-        <img
-          src="/store/google-play-badge.png"
-          alt="Get it on Google Play"
-          width="135"
-          height="40"
-        />
+      <a class="store-badge" href={play}>
+        {/* A phone — the platform, not the storefront. */}
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6" y="2" width="12" height="20" rx="2.5" />
+          <path d="M10.5 18.5h3" />
+        </svg>
+        <span class="store-badge-line">
+          <span class="store-badge-lead">Get it on</span>
+          <span class="store-badge-name">Google Play</span>
+        </span>
       </a>
     )
   }
   {
     microsoft && (
       <a class="store-badge" href={microsoft}>
-        <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
-          <path d="M2 3.6 10.4 2.5v8.6H2V3.6Zm0 16.8 8.4 1.1v-8.5H2v7.4Zm9.6 1.3L22 23V12.6H11.6v9.1Zm0-19.4v9.2H22V1l-10.4 1.3Z" />
+        {/* A desktop display, for the same reason. */}
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.5" y="4" width="19" height="13" rx="2" />
+          <path d="M8.5 21h7M12 17v4" />
         </svg>
         <span class="store-badge-line">
           <span class="store-badge-lead">Get it from</span>
@@ -66,3 +73,12 @@ const { play, microsoft, github } = Astro.props;
     )
   }
 </div>
+
+{
+  (play || microsoft) && (
+    <p class="store-trademarks">
+      Google Play is a trademark of Google LLC. Microsoft Store is a trademark of
+      the Microsoft group of companies.
+    </p>
+  )
+}
