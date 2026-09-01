@@ -133,3 +133,15 @@
   font-size: 0.95rem;
   font-weight: 600;
 }
+
+/* The Ko-fi link reuses the badge shape so the page has one button vocabulary,
+ * but sits under its own heading rather than in the download row — asking for
+ * money next to "get the app" reads as a price. The accent tints the heart
+ * only, never the whole button. */
+.support-badge {
+  margin-top: 0.5rem;
+}
+
+.support-badge svg {
+  color: var(--sl-color-text-accent);
+}

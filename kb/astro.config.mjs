@@ -50,6 +50,14 @@ export default defineConfig({
           label: 'GitHub',
           href: 'https://github.com/GCHOfficial/iptvs',
         },
+        // In the header rather than only on the landing page, so it is reachable
+        // from a knowledge-base article too — which is where someone the app has
+        // just helped actually is.
+        {
+          icon: 'heart',
+          label: 'Support on Ko-fi',
+          href: 'https://ko-fi.com/georgecosminhanta',
+        },
       ],
       customCss: ['./src/styles/brand.css'],
       // Matches the app and the panel rather than Starlight's defaults; the

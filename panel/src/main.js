@@ -14,6 +14,15 @@ import {
   MIN_PASSPHRASE_LENGTH,
 } from './passphrase.js';
 
+// The knowledge base, on its own origin (see docs/cloud-sync.md "Hosting").
+// A plain cross-origin link is unaffected by the panel's CSP — `default-src`
+// governs what the page *loads*, not where a link points — so this needs no
+// policy change. `rel="noopener"` regardless: the panel is a page you are
+// signed into, and a new tab it opens should not get a handle back to it.
+const SITE_URL = 'https://iptvs.click';
+const helpLink = (label = 'Help') =>
+  `<a href="${SITE_URL}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+
 const MAX_PROFILE_NAME_LENGTH = 256;
 const MAX_METADATA_FIELD_LENGTH = 1024;
 const MAX_DEVICE_LABEL_LENGTH = 256;
@@ -107,6 +116,7 @@ async function render() {
         ${(profiles ?? []).map((p) =>
           `<option value="${p.id}" ${p.id === currentProfileId ? 'selected' : ''}>${esc(p.name || 'Profile')}</option>`).join('')}
       </select>
+      <span class="bar-help">${helpLink('Help')}</span>
       <button id="logout" class="ghost">Sign out</button>
     </header>
     <main id="view"></main>`;
@@ -176,6 +186,8 @@ function renderLogin() {
       </form>
       <p id="msg" class="muted"></p>
       <p class="legal-links">
+        ${helpLink('Help')}
+        <span aria-hidden="true"> · </span>
         <a href="${import.meta.env.BASE_URL}privacy.html">Privacy</a>
         <span aria-hidden="true"> · </span>
         <a href="${import.meta.env.BASE_URL}support.html">Support</a>

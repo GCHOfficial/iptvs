@@ -31,6 +31,9 @@ a:hover { color: #c4bdff; }
 }
 .bar nav { display: flex; gap: 6px; flex: 1; flex-wrap: wrap; }
 .bar > button { flex-shrink: 0; }
+/* Sits with the header's controls, not inside the tab nav — it leaves the
+   panel, so it is not one of the places you can be. */
+.bar-help { flex-shrink: 0; white-space: nowrap; font-size: 14px; }
 .profile-select { width: auto; flex-shrink: 0; max-width: 180px; }
 
 .brand {
