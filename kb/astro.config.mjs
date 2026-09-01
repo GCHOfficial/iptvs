@@ -12,7 +12,7 @@ import starlight from '@astrojs/starlight';
 //
 // `site` feeds canonical URLs and the sitemap, so it has to be the real origin.
 // Set SITE_URL in CI; the fallback only keeps a local `npm run build` working.
-const site = process.env.SITE_URL ?? 'https://example.invalid';
+const site = process.env.SITE_URL ?? 'https://iptvs.click';
 
 export default defineConfig({
   site,

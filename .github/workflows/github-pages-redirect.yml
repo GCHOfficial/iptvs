@@ -1,0 +1,46 @@
+name: Deploy github.io redirect
+
+# Publishes `redirect/` — two static files — to GitHub Pages, where the panel
+# used to live.
+#
+# It is a separate workflow from pages.yml on purpose. This is the only thing in
+# the repo that still needs `pages: write`, and it changes roughly never; keeping
+# it here means the Cloudflare deploys don't carry that permission, and a push
+# that touches the panel or the site doesn't redeploy this.
+#
+# Why it exists at all: `CloudConfig.panelUrl` is a compile-time constant, so
+# every shipped install carries the github.io URL it was built with, and that is
+# what the pairing screen prints and encodes into its QR. Installs are
+# arbitrarily old, so the URL can never simply stop answering. See
+# redirect/index.html.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'redirect/**'
+      - '.github/workflows/github-pages-redirect.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages-redirect
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy redirect
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: redirect
+      - id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

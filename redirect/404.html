@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iptvs sources has moved</title>
+    <meta name="robots" content="noindex" />
+    <!--
+      The panel used to live here, at gchofficial.github.io/iptvs/. It now lives
+      at panel.iptvs.click, and this page exists only so that already-shipped
+      app builds keep working.
+
+      `CloudConfig.panelUrl` (lib/data/cloud_config.dart) is a compile-time
+      constant, so every install carries whatever URL it was built with — and it
+      is what the pairing screen prints and encodes into its QR code. Installs
+      are arbitrarily old, so this URL can never simply stop answering.
+
+      The query string is the whole point: the QR encodes `?code=ABCD2345`, and
+      the panel reads that to prefill its Pair form. A <meta refresh> would drop
+      it and silently turn a working shortcut into a blank form, so the redirect
+      is scripted and the meta tag below is only a no-JS backstop.
+
+      `location.replace` rather than `location.href` so this page does not land
+      in history — Back from the panel should return to the app, not bounce
+      through here forever.
+    -->
+    <noscript><meta http-equiv="refresh" content="0; url=https://panel.iptvs.click/" /></noscript>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0e0f13;
+        color: #e7e9ee;
+        font: 15px/1.6 Inter, system-ui, sans-serif;
+        text-align: center;
+        padding: 24px;
+      }
+      a { color: #a99fff; }
+      p { margin: 0 0 8px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>The iptvs source panel has moved.</p>
+      <p><a id="go" href="https://panel.iptvs.click/">Continue to panel.iptvs.click</a></p>
+    </main>
+    <script>
+      (function () {
+        var target = 'https://panel.iptvs.click/' + location.search + location.hash;
+        document.getElementById('go').href = target;
+        location.replace(target);
+      })();
+    </script>
+  </body>
+</html>
