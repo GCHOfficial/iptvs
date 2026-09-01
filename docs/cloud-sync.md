@@ -430,6 +430,24 @@ credential leaks off the screen. The panel's `console.error` sites are held to t
 they log code + scrubbed message, never the raw error object, because `details`/`hint` would carry
 the offending row into a browser console that is one screen-share away from public.
 
+**The one exception to "reduce everything else to generic text" is a 429**, because it is the only
+failure the user can act on — and on the sign-in form it is the only one that occurs in normal
+operation. Magic-link sends are throttled twice: a *per-address* cooldown ("you can only request
+this after N seconds") and the *project-wide* email send quota ("email rate limit exceeded"), which
+is shared across every address. `friendlyError` matches the message **and** `status`/`code`
+(`over_email_send_rate_limit` / `over_request_rate_limit` — server-controlled enums, never payload
+data), names the wait when GoTrue names one, and otherwise says to wait a few minutes. It reads
+"Something went wrong." otherwise, which is what a real user saw when the project quota ran out:
+they read it as a panel bug, re-submitted ~60 times in eleven minutes, and tried a second mailbox —
+which cannot help, since the quota is not per address. The sign-in form also locks its submit
+button for the duration of the request, so a double-tap can neither spend quota twice nor race
+GoTrue's user insert into a `users_email_partial_key` duplicate-key 500 (observed once).
+
+Note that the quota itself is a **dashboard** setting, not a code one: Supabase's built-in email
+service is capped at a couple of sends per hour for the whole project and is explicitly not for
+production. Raising it means configuring custom SMTP under **Auth → Emails → SMTP Settings** and
+then raising **Auth → Rate Limits → email sent**.
+
 > **Never add `alter table … force row level security`.** It looks like obvious hardening and it
 > would break the system. The five RPC-only tables have **zero** policies by design, and every
 > `SECURITY DEFINER` RPC runs as `postgres` — which is also the table owner. `FORCE` subjects the

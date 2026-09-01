@@ -236,6 +236,44 @@ export function scrubUrls(str) {
 // the raw message (it can include table/policy names) — just say "not allowed".
 const PERMISSION_ERROR_RE = /permission denied|row-level security|not allowed|rls/i;
 
+// ── rate limits ───────────────────────────────────────────────────────────────
+//
+// A 429 is the one failure class on this screen the user can actually act on,
+// and it is the *only* thing that reaches the sign-in form in normal operation:
+// magic-link sends are throttled twice over — a per-address cooldown
+// ("For security purposes, you can only request this after N seconds") and the
+// project-wide email send quota ("email rate limit exceeded"), which is shared
+// by every address, and is why someone who tries a second mailbox to work
+// around it sees exactly the same failure.
+//
+// Both used to land in the "Something went wrong." bucket, which reads as a bug
+// in the panel rather than as "wait". A real user took it that way and
+// re-submitted ~60 times in eleven minutes, burning the very quota that was
+// blocking them — so this says which kind it is and that waiting is the fix.
+//
+// Matched on the message *and* on `status`/`code`, because GoTrue's wording is
+// not a contract. `code` values are `over_email_send_rate_limit` /
+// `over_request_rate_limit`; both are server-controlled enum-ish strings, never
+// payload data, so keying off them leaks nothing.
+const RATE_LIMIT_ERROR_RE = /rate limit|too many requests|only request this after/i;
+
+/// Seconds named by GoTrue's per-address cooldown message, when it names one.
+/// Bounded to something a person would wait out — a wild number means the
+/// wording changed under us, and a wrong countdown is worse than none.
+function retryAfterSeconds(message) {
+  const m = /only request this after (\d{1,4}) seconds?/i.exec(message);
+  if (!m) return null;
+  const seconds = Number(m[1]);
+  return Number.isInteger(seconds) && seconds > 0 && seconds <= 3600 ? seconds : null;
+}
+
+function isRateLimited(error, message) {
+  if (RATE_LIMIT_ERROR_RE.test(message)) return true;
+  const status = error?.status ?? error?.statusCode;
+  if (status === 429 || status === '429') return true;
+  return typeof error?.code === 'string' && error.code.includes('rate_limit');
+}
+
 /// Turns a Supabase error into a safe string to display to the user. Always
 /// call `console.error(error)` at the call site first for debugging — this
 /// function intentionally never surfaces `error.details` or `error.hint`,
@@ -245,6 +283,11 @@ export function friendlyError(error) {
   let out;
   if (message.startsWith('iptvs: ')) {
     out = message; // server-controlled, safe to show verbatim
+  } else if (isRateLimited(error, message)) {
+    const seconds = retryAfterSeconds(message);
+    out = seconds
+      ? `Too many attempts. Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`
+      : 'Too many sign-in emails have been requested. Wait a few minutes and try again — sending more now will not help.';
   } else if (PERMISSION_ERROR_RE.test(message)) {
     out = 'Not allowed.';
   } else {
