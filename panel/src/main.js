@@ -2,7 +2,7 @@
 // panel is framed (the meta CSP cannot enforce `frame-ancestors`).
 import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
-import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, splitFields, stashPairingCode, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
+import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, sessionIdentityChanged, splitFields, stashPairingCode, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
 import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
@@ -60,9 +60,17 @@ for (const evt of ['click', 'keydown', 'input']) {
   document.addEventListener(evt, () => secrets.touchActivity(), { capture: true, passive: true });
 }
 
-// Re-render whenever auth changes (login, logout, magic-link return).
+// Re-render whenever the signed-in *identity* changes (login, logout,
+// magic-link return, another tab switching accounts) — and deliberately never
+// on the same account being re-announced. supabase-js re-emits `SIGNED_IN` on
+// every hidden -> visible transition and `TOKEN_REFRESHED` on its refresh
+// ticker; rebuilding the app there threw away the open sub-view (the source
+// editor, the metadata form, a half-typed pairing code) every time the user
+// switched browser tabs or minimised the window. See `sessionIdentityChanged`.
 supabase.auth.onAuthStateChange((_event, s) => {
+  const changed = sessionIdentityChanged(session, s);
   session = s;
+  if (!changed) return;
   profiles = null; // reload per session
   secrets.lock(); // never carry an unlocked CK across an auth change
   render();

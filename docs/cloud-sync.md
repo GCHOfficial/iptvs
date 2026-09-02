@@ -742,6 +742,35 @@ in this repo's CI is pinned, and a deploy credential is the wrong place to make 
 artefact. The base path is baked into the bundle and `import.meta.env.BASE_URL` is what
 `emailRedirectTo` is composed from, so it has to match the origin it is served at.
 
+### The panel re-renders on a change of identity, never on an auth *event*
+
+`render()` rebuilds the whole app shell and the active tab's body, and the panel's sub-views —
+the source editor, the metadata form, the Pair form with a code half-typed into it — are states
+*inside* a tab with nothing persisting them. So every extra `render()` is a user's work thrown
+away, and the auth handler was firing one on every event supabase-js emits.
+
+It emits more than sign-ins. `_onVisibilityChanged` -> `_recoverAndRefresh` notifies all
+subscribers with `SIGNED_IN` on **every** hidden -> visible transition, and the refresh ticker
+emits `TOKEN_REFRESHED` on its own schedule. The panel reset `profiles`, locked the CK and
+re-rendered on each one: switching to another browser tab and back — copying a credential in from
+somewhere else, which is the panel's whole job — dropped the half-filled source editor back to the
+Sources list and re-locked an E2EE profile.
+
+`sessionIdentityChanged` (`panel/src/validate.js`, pinned by
+`panel/test/session_identity.test.js`) gates the handler on the **user id** and nothing else, so
+the resets keep every transition that is really one — signing in, signing out, another tab
+switching accounts under the same `localStorage` — and skip the re-announcements. The panel calls
+no `updateUser`, so the id is the whole identity. `session` is still updated on the skipped events;
+only the DOM is left alone.
+
+`secrets.lock()` carries the same rule internally: it notifies the lock handler (which re-renders)
+only when something was actually unlocked. It is called unconditionally from several places, and a
+lock that changed no state should not cost the user their open form.
+
+Load-time double rendering is unaffected and still deliberate: `INITIAL_SESSION` arrives with the
+prior session as `null`, so it renders, and `getSession().then` renders again — which is why the
+pairing-code stash is [read on render and consumed only on a successful claim](#the-qr-shortcut).
+
 ### Xtream detection on an M3U source (suggest, never convert)
 
 The add/edit form detects an Xtream `get.php` shape in an M3U playlist URL
