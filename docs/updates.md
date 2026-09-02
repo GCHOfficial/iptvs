@@ -49,6 +49,24 @@ anything non-404 goes back through retry. Re-runs converge: an existing release 
 body never overwrites an existing release's notes on the edit path. `--verify-tag` keeps a
 manual dispatch from minting a release for a tag that was never pushed.
 
+## Discord announcement
+
+The last step of the publish job posts the release to Discord (`DISCORD_RELEASE_WEBHOOK` repo
+secret; the step is skipped when it is absent, so forks neither post nor fail). Three things
+about it are deliberate:
+
+- **It runs after `gh release upload`, not before.** An announcement that lands before the
+  assets exist points people at a release with nothing attached, and the upload is the step
+  most likely to need a retry.
+- **It reuses `body.md`** — the same Gemini changelog that becomes the release notes and feeds
+  the in-app update dialog — so the three never disagree. That file is empty whenever the
+  changelog step failed open, which is handled rather than posting a blank embed.
+- **It is fail-open and payload-safe.** The release is already published by the time it runs, so
+  a Discord outage logs a warning instead of turning a successful release red. The description
+  is truncated to Discord's 4096-character embed cap (a longer changelog would otherwise get the
+  *whole payload* rejected), and the JSON is built with `jq --arg` so markdown quotes, newlines
+  and backslashes cannot break or inject into it.
+
 GitHub-direct builds expose a Stable/Beta selector. Stable uses GitHub's latest
 normal release; Beta selects the highest signed, non-draft release including
 prereleases. Development, Google Play, and Microsoft Store builds do not run or

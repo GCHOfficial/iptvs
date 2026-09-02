@@ -203,6 +203,11 @@ jobs:
     environment: release
     permissions:
       contents: write
+    # `secrets` is not available in a step-level `if`, so the presence check is
+    # lifted here and read back as a plain string. A fork, or this repo before
+    # the webhook is configured, simply skips the announce step.
+    env:
+      HAS_DISCORD: ${{ secrets.DISCORD_RELEASE_WEBHOOK != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -457,3 +462,79 @@ jobs:
           fi
 
           retry gh release upload "$RELEASE_TAG" dist/* --clobber
+
+      # Announce the finished release in Discord.
+      #
+      # Deliberately the **last** step, after the assets are uploaded: an
+      # announcement that arrives before the downloads exist sends people to a
+      # release with nothing attached, and the upload is the step most likely to
+      # need a retry.
+      #
+      # Reuses `body.md` — the same Gemini changelog that becomes the release
+      # notes and feeds the in-app update dialog — so the three never disagree.
+      # That file is empty when the changelog step failed open, which is handled
+      # rather than posting a blank embed.
+      - name: Announce in Discord
+        if: env.HAS_DISCORD == 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          RELEASE_TAG: v${{ needs.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_TRACK: ${{ needs.version.outputs.track }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          url="https://github.com/$REPO/releases/tag/$RELEASE_TAG"
+
+          # Discord caps an embed description at 4096 characters and rejects the
+          # whole payload if it is longer — so truncate on a character budget,
+          # not on trust that a changelog stays short. 3900 leaves room for the
+          # notice appended below.
+          notes=""
+          if [ -s body.md ]; then
+            notes=$(head -c 3900 body.md)
+            if [ "$(wc -c < body.md)" -gt 3900 ]; then
+              notes="$notes"$'\n\n…truncated — see the full notes on GitHub.'
+            fi
+          else
+            notes="See the release page for details."
+          fi
+
+          if [ "$RELEASE_TRACK" = beta ]; then
+            title="iptvs $RELEASE_VERSION (beta)"
+            colour=16098851   # amber — a prerelease should not look routine
+          else
+            title="iptvs $RELEASE_VERSION"
+            colour=8088310    # the brand accent, #7b6cf6
+          fi
+
+          # `jq` builds the JSON so the changelog's markdown — quotes, newlines,
+          # backslashes — cannot break the payload or inject fields.
+          jq -n \
+            --arg title "$title" \
+            --arg url "$url" \
+            --arg notes "$notes" \
+            --argjson colour "$colour" \
+            '{
+              username: "iptvs releases",
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $notes,
+                color: $colour
+              }]
+            }' > payload.json
+
+          # Fail-open: the release is already published and uploaded by this
+          # point, so a Discord outage must not turn a successful release red.
+          # `-s` and no URL echo keep the webhook out of the log (Actions masks
+          # it as a secret regardless).
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' \
+            --data @payload.json "$DISCORD_WEBHOOK" || echo 000)
+
+          case "$code" in
+            2*) echo "Announced $RELEASE_TAG in Discord (HTTP $code)." ;;
+            *)  echo "::warning::Discord announcement failed (HTTP $code). The release itself is published." ;;
+          esac
