@@ -228,7 +228,19 @@ reference and are not settable in the manifest.
   builds; Store-managed updates own that lifecycle.
 - Keep the GitHub ZIP/direct updater as a separate `githubDirect` channel.
 
-The public Store support and privacy contact is `gchofficial@gmail.com`.
+The public Store support and privacy contact is `support@iptvs.click`, received
+through Resend inbound on the domain's MX record. The served pages
+(`panel/public/{privacy,support,delete-account}.html`) already use it.
+
+**The Partner Center and Play Console contact fields are set separately and must
+be changed there to match** — a listing still pointing at the old address is not
+wrong, just stale, but the two should not drift. Do it with the next submission
+rather than mid-review.
+
+Resend inbound delivers to a **webhook**, not a mailbox: an address with nothing
+consuming it accepts mail and drops it. Confirm forwarding or a handler is live
+before relying on this as the public support contact — the failure mode is
+silent, and this address is on a privacy policy.
 
 ### Build and submission procedure
 
