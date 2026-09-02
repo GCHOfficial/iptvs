@@ -51,7 +51,21 @@ The Supabase URL + **anon/publishable** key ship in the app and the panel (safe 
 access is gated only by RLS). The `service_role` key must never appear in any client or this
 repo. Devices authenticate as **anonymous** Supabase users with **no direct table writes** (every
 write policy requires `is_real_user()`); they gain read access only after a real account claims
-their pairing code (`claim_pairing`). The optional **push** is the one device→cloud write path
+their pairing code (`claim_pairing`).
+
+**An anonymous user is created only when the user opts in, never on the boot path.**
+`CloudSync.ensureAnonSession()` creates a server-side account, so it is called from exactly two
+places — opening the Cloud sync screen, and `requestPairingCode()`. The profile picker used to
+call it too, which meant every install that reached the picker minted an anonymous user whether or
+not it ever went near cloud sync: measured at ~1,900 anonymous users against **62** devices that
+actually paired, growing ~50/day, and every one of them counts toward the project's monthly active
+users. It now asks `CloudSync.hasSession` instead, which touches no network and creates nothing.
+**That is not a weaker check:** a device with no session cannot be paired, because pairing only
+happens through `requestPairingCode()`, which creates the session and persists it to the keychain —
+so "no session" is a definitive *not paired*, not an unanswered question, and `pairingKnown` stays
+true. If a session is somehow lost the old pairing is unreachable anyway (a fresh anonymous user is
+a different device to the server), so treating that as unpaired is also correct. Keep new boot-path
+code on `hasSession`; reach for `ensureAnonSession()` only behind a deliberate user action. The optional **push** is the one device→cloud write path
 and goes through the `push_sources`/`push_metadata` `SECURITY DEFINER` RPCs, which are
 owner-scoped via `current_device_owner()`: an *unpaired* anonymous caller has no owner and is
 rejected, and a payload can't touch another account's rows. **How that is enforced changed in

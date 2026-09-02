@@ -141,8 +141,19 @@ class _ProfilePickScreenState extends State<ProfilePickScreen> {
     final sync = _sync;
     if (sync != null) {
       try {
-        await sync.ensureAnonSession();
-        isPaired = await sync.isPaired();
+        // Deliberately does **not** create a session. This runs on the boot
+        // path, for every install, and `ensureAnonSession()` here minted an
+        // anonymous cloud account for each one — whether or not the user ever
+        // opened Cloud sync. Opening that screen is what opts a device in.
+        //
+        // Skipping it loses nothing: a device with no session cannot be paired
+        // (pairing goes through `requestPairingCode`, which creates one and
+        // persists it), so `hasSession == false` *is* the answer, and
+        // `pairingKnown` stays true because we know it definitively rather than
+        // having failed to ask.
+        if (sync.hasSession) {
+          isPaired = await sync.isPaired();
+        }
         pairingKnown = true;
         if (isPaired) {
           cloudProfiles = await sync.listProfiles();
