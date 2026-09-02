@@ -105,6 +105,26 @@ jobs:
           flutter pub get
           flutter build windows --debug
 
+      # Same key as build.yml's Gradle cache, deliberately: these two jobs build
+      # the same Android app with the same dependencies, so CodeQL can restore
+      # what the build job already populated.
+      #
+      # Without it this job resolved every plugin from the network on every run,
+      # and a plugins.gradle.org hiccup failed the whole analysis — CodeQL
+      # reports that as "configuration error", which reads like a workflow bug
+      # rather than the transient it is. Caching does not make the network
+      # infallible, but it removes most of the requests that can fail.
+      - name: Cache Gradle
+        if: matrix.language == 'java-kotlin'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Build Android (Kotlin)
         if: matrix.language == 'java-kotlin'
         run: |
