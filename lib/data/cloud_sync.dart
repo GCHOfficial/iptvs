@@ -478,7 +478,28 @@ class CloudSync {
   /// The stable anonymous identity of this device, if a session exists.
   String? get deviceId => _client.auth.currentUser?.id;
 
+  /// Whether a persisted anonymous session already exists.
+  ///
+  /// Purely local: no network, and it never *creates* one — which is the whole
+  /// point. **A device that has no session cannot be paired**, because pairing
+  /// only ever happens through [requestPairingCode], which calls
+  /// [ensureAnonSession] first, and the session is persisted to the keychain.
+  /// So this is a definitive "not paired" that costs nothing, and callers on
+  /// the boot path can use it instead of creating an account to ask.
+  ///
+  /// (If the session is somehow lost, the old pairing is unreachable anyway —
+  /// a fresh anonymous user is a different device to the server — so treating
+  /// that as unpaired is also correct.)
+  bool get hasSession => _client.auth.currentSession != null;
+
   /// Ensure the device has a (persisted) anonymous session to act under.
+  ///
+  /// **Creates a cloud account on the server**, so call it only where the user
+  /// has opted into cloud sync — opening the Cloud sync screen, or requesting a
+  /// pairing code. It used to be called from the profile picker on the boot
+  /// path, which meant every install that reached the picker minted an
+  /// anonymous user whether or not it ever went near the feature: ~1,900 of
+  /// them against 62 devices that actually paired. See [hasSession].
   Future<void> ensureAnonSession() async {
     if (_client.auth.currentSession == null) {
       await _client.auth.signInAnonymously();
