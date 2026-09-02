@@ -39,15 +39,18 @@ export function touchActivity() {
   if (session) armIdle();
 }
 
-// Zero the key material and drop the session. Idempotent.
+// Zero the key material and drop the session. Idempotent — including the
+// notification: the handler re-renders the whole panel, so firing it when
+// nothing was unlocked discards the open sub-view for no state change at all.
 export function lock() {
+  const wasUnlocked = session !== null;
   if (session?.key) session.key.fill(0);
   session = null;
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
   }
-  if (onLockChange) onLockChange();
+  if (wasUnlocked && onLockChange) onLockChange();
 }
 
 function setSession(profileId, key, ckVersion) {

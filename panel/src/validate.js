@@ -546,3 +546,21 @@ export function clearStashedPairingCode(storage = pairingStorage()) {
     // Nothing to do: an unremovable stash still expires on its own TTL.
   }
 }
+
+/// Whether an `onAuthStateChange` event is an actual change of signed-in
+/// identity rather than the same account being re-announced.
+///
+/// supabase-js re-emits `SIGNED_IN` on **every** hidden -> visible transition
+/// (`_onVisibilityChanged` -> `_recoverAndRefresh` notifies all subscribers with
+/// the recovered session) and `TOKEN_REFRESHED` on its refresh ticker. Treating
+/// those as auth changes made the panel rebuild itself every time the user
+/// switched browser tabs or minimised the window, dropping whatever sub-view was
+/// open — the source editor, the metadata form, a half-typed pairing code — back
+/// to the tab's list, and locking the content key with it. Copying a credential
+/// from another tab is exactly the workflow that hit it.
+///
+/// Comparing user ids (and nothing else) keeps every real transition: signing
+/// in, signing out, and another tab switching accounts under the same storage.
+export function sessionIdentityChanged(prev, next) {
+  return (prev?.user?.id ?? null) !== (next?.user?.id ?? null);
+}

@@ -539,6 +539,14 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   `maxLinkLength`, because **`QrValidator.validate` reports `valid` for a payload that then throws
   in the painter** — `_calculateTypeNumberFromData` walks versions 1..39 and returns the largest
   when nothing fits rather than failing.
+- **The panel re-renders on a change of signed-in *identity*, never on an auth event.**
+  supabase-js re-emits `SIGNED_IN` on every hidden→visible transition and `TOKEN_REFRESHED` on its
+  refresh ticker; `render()` rebuilds the tab body, and the panel's sub-views (source editor,
+  metadata form, a half-typed Pair form) live only there — so the old handler threw the user's open
+  form away, and re-locked the CK, every time they switched browser tabs. `sessionIdentityChanged`
+  (`panel/src/validate.js`) gates it on the user id; `secrets.lock()` likewise notifies only when
+  something was really unlocked. Read [docs/cloud-sync.md](docs/cloud-sync.md) before adding a
+  `render()` to any listener.
 - **A device is named at pairing time, and RPC overloads here are arity-distinct with no
   `DEFAULT`.** The device sends a platform-derived suggestion (`request_pairing(p_label)` →
   `pairings.suggested_label`); the panel's Pair form sends an optional name
