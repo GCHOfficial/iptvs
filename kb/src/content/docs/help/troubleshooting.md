@@ -69,5 +69,17 @@ failed and when.
 The log is redacted — provider URLs, usernames and passwords are stripped before
 anything is written — so it is safe to share. Skim it before sending anyway.
 
-Then [open an issue](https://github.com/GCHOfficial/iptvs/issues) with the log,
-what you did, and what happened.
+Then bring it somewhere with the log, what you did, and what happened:
+
+- **[Discord](https://discord.gg/Eh2BMVRJT)** or
+  **[Telegram](https://t.me/+l_fENZkpwDw4MTU0)** — quickest, and someone may
+  have hit the same provider quirk already.
+- **[GitHub issues](https://github.com/GCHOfficial/iptvs/issues)** — best for
+  anything reproducible, since it does not get lost in a chat scroll.
+- **<support@iptvs.click>** — if you would rather not post in public.
+
+:::caution
+Whichever you choose, **never paste your provider username, password, MAC
+address or playlist URL**. Nobody needs them to help, and a chat log is
+searchable. The exported diagnostics deliberately strip them for you.
+:::

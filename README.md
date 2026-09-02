@@ -136,7 +136,16 @@ controls, and troubleshooting. It is an [Astro Starlight](https://starlight.astr
 site living in [`kb/`](kb/); the pages are plain Markdown, so corrections are welcome as
 pull requests.
 
-## Support
+## Community and support
+
+- **Discord** — <https://discord.gg/Eh2BMVRJT>
+- **Telegram** — <https://t.me/+l_fENZkpwDw4MTU0>
+- **Issues** — [GitHub issues](https://github.com/GCHOfficial/iptvs/issues) for anything reproducible
+- **Email** — <support@iptvs.click>
+
+Please don't post provider usernames, passwords, MAC addresses or playlist URLs
+anywhere — nobody needs them to help, and the app's exported diagnostics already
+strip them.
 
 iptvs is free and GPLv3, with no ads, no tracking, and no account needed to use it.
 If you would like to support development: **<https://ko-fi.com/georgecosminhanta>**.
