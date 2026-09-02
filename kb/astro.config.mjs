@@ -50,6 +50,18 @@ export default defineConfig({
           label: 'GitHub',
           href: 'https://github.com/GCHOfficial/iptvs',
         },
+        // Community first: someone reading a guide that did not answer their
+        // question wants a person, and these are the two places to find one.
+        {
+          icon: 'discord',
+          label: 'Discord',
+          href: 'https://discord.gg/Eh2BMVRJT',
+        },
+        {
+          icon: 'telegram',
+          label: 'Telegram',
+          href: 'https://t.me/+l_fENZkpwDw4MTU0',
+        },
         // In the header rather than only on the landing page, so it is reachable
         // from a knowledge-base article too — which is where someone the app has
         // just helped actually is.
