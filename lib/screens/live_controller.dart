@@ -145,9 +145,15 @@ class LiveController extends ChangeNotifier {
     } catch (e) {
       if (_disposed || gen != _loadGeneration) return;
       final message = sourceLoadErrorMessage(e);
+      // The friendly message is a bucket — several unrelated failures land in
+      // the same one, so a support export of nothing but these lines cannot
+      // tell a provider's HTTP 403 from a closed client. The exception's own
+      // text carries the status and the URL, so it goes in redacted, exactly
+      // as the EPG refresh already records its failures.
       DiagnosticsLog.instance.add(
         'library',
-        'live source load failed reason=${e.runtimeType} message=$message',
+        'live source load failed reason=${e.runtimeType} message=$message '
+            'detail=${redactText(e.toString())}',
       );
       _set(() {
         error = message;

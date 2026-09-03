@@ -263,10 +263,12 @@ class MediaTabController extends ChangeNotifier {
     } catch (e) {
       final message = sourceLoadErrorMessage(e);
       if (_disposed || gen != _loadGeneration) return;
+      // See LiveController.load: the friendly message is a bucket, so the
+      // exception's own text (status + URL) goes in redacted beside it.
       DiagnosticsLog.instance.add(
         'library',
         '${kind.name} source load failed reason=${e.runtimeType} '
-            'message=$message',
+            'message=$message detail=${redactText(e.toString())}',
       );
       _set(() {
         error = message;

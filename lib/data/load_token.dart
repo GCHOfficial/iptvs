@@ -1,11 +1,20 @@
 /// Cooperative cancellation for a repository load.
 ///
-/// Additive to the controllers' generation guards (`LiveController`,
-/// `MediaTabController`): the generation guard stops a stale result from
-/// being *published* to the UI; this token stops a stale in-flight call from
-/// *writing* to the cache or feeding more EPG batches once a newer call has
-/// superseded it. Deliberately dumb — no streams, no listeners, just a flag a
-/// newer call can flip on the exact instance an older call is holding.
+/// Two independent users, and they cancel for different reasons:
+///
+///  * `LibraryRepository.loadToken`, set by `LiveController`/
+///    `MediaTabController` and additive to their generation guards. The
+///    generation guard stops a stale result from being *published* to the UI;
+///    this token stops a stale call from **overwriting a populated cache** —
+///    note *overwriting*, not writing: a superseded load may still seed an
+///    empty cache, because refusing to write at all left a slow device unable
+///    to ever obtain a first one. See `LibraryRepository._loadChannels`.
+///  * `EpgIngestCoordinator`'s own tokens, which it mints and cancels to hold
+///    one guide refresh at a time app-wide. Those are what stop a superseded
+///    refresh feeding more EPG batches. `loadToken` never reaches that path.
+///
+/// Deliberately dumb — no streams, no listeners, just a flag a newer call can
+/// flip on the exact instance an older call is holding.
 class LoadToken {
   bool _cancelled = false;
 

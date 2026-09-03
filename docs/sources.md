@@ -330,6 +330,21 @@ That is what makes it an upgrade rather than a new source that happens to look t
 - **`source_settings_screen`'s "Upgrade to Xtream" tile** — shown when `couldBeXtreamPanel`, probes
   on tap (never on screen open), converts only on a real authentication, then prompts to push.
 
+The load-time path costs more than one request when the source is a **large playlist**, and it is
+worth knowing why. On success it saves and re-runs `_loadActive`, which builds a new
+`LibraryRepository`; `ChannelListScreen.didUpdateWidget` then disposes the old controllers, which
+cancels the in-flight load's `LoadToken`. A 66 MB playlist on a low-end TV box takes ~55 s to fetch
+and parse, so the probe reliably kills the very first load of exactly the source it is trying to
+improve. That is survivable only because a superseded load now **seeds an empty cache** rather than
+discarding its catalog (CLAUDE.md, "Async publishes are generation-guarded"); before that, such a
+source could never obtain a first cache at all.
+
+The same-id upgrade is also why a superseded load may never *overwrite* a populated cache. The
+converted config deliberately keeps the source id, so an M3U load still in flight can outlive the
+conversion — and writing playlist-shaped rows under a source that is now Xtream leaves
+`XtreamSource.resolve` falling back to `channel.id` for the stream id, i.e. every channel silently
+unplayable with a fresh `synced_at` and no age check to heal it.
+
 ### Cloud-managed sources are skipped at load time
 
 `pullSources` replaces every cloud-managed source wholesale from its cloud row (`store.setAll`),

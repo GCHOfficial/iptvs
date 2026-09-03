@@ -353,11 +353,29 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `notifyListeners` site). Pinned by `test/media_tab_controller_test.dart` and
   `test/live_controller_test.dart` — keep new async publish paths behind these guards.
   Additive to (never instead of) the generation guard: a `LoadToken`
-  (`lib/data/load_token.dart`) per generation stops a superseded load from *writing* to the
-  cache or feeding more EPG batches (the generation guard only stops the UI publish). It is
+  (`lib/data/load_token.dart`) per generation stops a superseded load from **overwriting a
+  populated cache** (the generation guard only stops the UI publish). It is
   delivered via the settable `LibraryRepository.loadToken` field — set in the same synchronous
   prologue as the call, read into a local before the method's first `await` — not a method
   parameter, because the pinned tests' `_GatedRepo` overrides would break on any signature change.
+  **Overwriting, not writing: a superseded load still *seeds an empty* cache**
+  (`db.replaceLibrary`/`replaceMediaLibrary`'s `onlyIfAbsent`, whose predicate is evaluated
+  *inside* the write transaction and is the exact complement of the matching cache-read gate).
+  Refusing the write outright is how a device gets permanently stuck, and it is a field report,
+  not a hypothesis: a 66 MB playlist costs ~55 s on a low-end TV box (29 s download + 26 s
+  isolate parse), every repository rebuild cancelled the load — the load-time M3U→Xtream probe
+  alone does one per app start — and the finished catalog was discarded, so the cache stayed
+  empty and the next attempt paid the full 55 s again, forever. Overwriting stays barred because
+  the channel cache has **no age check** (anything written stands until a forced refresh),
+  commit order is not fetch order, and `upgradeM3uToXtream` keeps the source id — so a late M3U
+  write can land playlist-shaped rows under a source that is now Xtream, whose `resolve` falls
+  back to `channel.id`, silently unplaying every channel. `loadMoreMedia` keeps the plain skip:
+  it guards page bookkeeping, not freshness, and returns early when there is no cache to seed.
+  A superseded load also schedules **no** EPG refresh — `EpgIngestCoordinator` is last-start-wins,
+  so a late one would take the slot from the correct refresh already running. `loadToken` does
+  not reach the EPG batch path at all; the coordinator mints its own tokens for that. Pinned by
+  `test/epg_batch_cancel_test.dart` and the "replaceLibrary onlyIfAbsent" group in
+  `test/persistence_test.dart`.
 - **Large provider payloads are ingested one-pass off the main isolate.** Xtream/Stalker
   catalogs ≥256 KB go bytes-in→typed-list-out through top-level workers
   (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels`) — the
