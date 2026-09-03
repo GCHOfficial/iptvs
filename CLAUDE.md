@@ -358,6 +358,12 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   delivered via the settable `LibraryRepository.loadToken` field — set in the same synchronous
   prologue as the call, read into a local before the method's first `await` — not a method
   parameter, because the pinned tests' `_GatedRepo` overrides would break on any signature change.
+  **A settable field is inherited unless a caller claims it**, and the repository is shared: the
+  movie and series `MediaTabController`s are built over one, each cancels only its own token, and
+  `dispose` cancels one outright. So every caller sets `loadToken` in its own prologue — including
+  the non-controller ones, `MediaDetailsSheet`'s season/episode drill-downs, which set it to
+  **null** (nothing can supersede a load writing to its own `(kind, parentId)` key) rather than
+  inheriting a token that may already be cancelled. Pinned by `test/media_details_episode_test.dart`.
   **Overwriting, not writing: a superseded load still *seeds an empty* cache**
   (`db.replaceLibrary`/`replaceMediaLibrary`'s `onlyIfAbsent`, whose predicate is evaluated
   *inside* the write transaction and is the exact complement of the matching cache-read gate).
