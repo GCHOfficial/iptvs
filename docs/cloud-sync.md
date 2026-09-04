@@ -783,6 +783,52 @@ about a URL shape and converting on it blind could break a working source. The a
 that verifies. Full rationale, including why `no-cors` doesn't help and why a server-side probe
 was deferred, is in **[sources.md](sources.md)** ("Why the web panel suggests and the app proves").
 
+**It is drawn as a `.callout`, not a `.hint`, and that is a correctness point rather than a taste
+one.** The app's automatic load-time upgrade *skips cloud-managed sources* — a pull would revert
+the conversion — so for a source managed here this prompt is the only one the user realistically
+gets. As a muted line with a ghost button it read as decoration, and a field report paid for it: a
+panel-managed playlist whose provider refused `get.php` with `HTTP 884`, while the same host's
+`player_api.php` authenticated seconds earlier, stayed an M3U indefinitely. The callout says both
+what is gained and that devices will not do it for a managed source. Don't quietly demote it back.
+
+### Every masked field in the panel has a reveal toggle
+
+`passwordFieldHtml` (`panel/src/validate.js`) renders a masked `<input>` inside a `.pw` wrapper
+with a Show/Hide button positioned **inside the box, at its trailing end** — where `TvTextField`
+puts its own toggle in the app, rather than as a separate control beside the field. The input
+reserves the space with `padding-right` and the button carries a `min-width`, so "Show" and "Hide"
+occupy an identical box; without that the gutter would fit only one of the two words and the
+longer state would sit over the value. It stays a word rather than an eye glyph: the panel's only
+existing icon buttons are the ↑/↓ arrows, and an eye emoji renders in colour and inconsistently
+across platforms on a dark UI. `passwordFieldHtml` is the **only** way the panel emits a masked
+input: the source form's
+`password: true` fields go through `sourceFieldHtml`, and the Security tab's six passphrase fields
+(enable, unlock, and the rotate form's new/confirm/current) call it directly. `passphrase.test.js`
+asserts the literal `type="password"` appears nowhere in `main.js`, which is what stops the next
+masked field being added without a toggle.
+
+Two reasons, and the second is sharper than the first. The app has had this since `TvTextField`
+grew its own toggle, so this is parity — but the panel also **fills these in for you**:
+"Switch to Xtream" lifts the password out of a pasted `get.php` link, and the passphrase generator
+writes a generated phrase into both fields. A row of dots is not something anyone can check, and a
+sync passphrase in particular is the one string a user must copy down correctly or lose access to
+their own credentials.
+
+**`setPasswordReveal` is an absolute set, not a flip, and that is load-bearing.**
+`wirePassphraseGenerator` already revealed generated phrases by assigning `p1.type = 'text'`
+directly. Left that way beside a toggle, the button would read "Show" over an already-visible
+field and the next click would *hide* it while announcing the opposite — so the generator now goes
+through `forcePasswordReveal`, the same path a click takes. `togglePasswordReveal` is the thin
+flip on top. Both are pinned by `source_field.test.js`, and `passphrase.test.js` asserts the raw
+`.type = 'text'` assignment has not come back.
+
+The helpers are pure and live in `validate.js` rather than `main.js` so `node --test` can exercise
+them without a DOM — which is also why `esc` moved there. The click handler is **delegated from
+`app`**, which outlives every render (the views replace `app.innerHTML`, not the element), so it
+covers the source form — whose fields are rebuilt on every kind change, including the one the
+switch performs — and the Security forms without either wiring anything. Revealed state lives only
+in the DOM: each re-render starts masked again, and nothing about it is stored, synced, or sent.
+
 ## Profile PINs
 
 A profile can require **four digits** before a device switches into it. The whole feature is one

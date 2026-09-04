@@ -358,6 +358,18 @@ So the load-time path checks `CloudSync.managedSourceIds` and **fails closed to 
 skipping is a source that stays M3U until the user asks; the cost of guessing wrong is that loop.
 The settings-screen tile is how a managed source gets there, explicitly, followed by a push.
 
+**"Until the user asks" is doing more work than it looks, and the panel now says so.** For a source
+managed from the panel, nothing on the device converts it on its own, so the panel's own suggestion
+is realistically the only prompt the user ever sees. It shipped as a muted `.hint` with a ghost
+button and read as decoration; a field report is what showed the cost. A panel-managed playlist
+pointed at a provider that answered `HTTP 884` on `get.php` while its `player_api.php`
+authenticated normally seconds earlier stayed an M3U indefinitely — the one conversion that would
+have routed around the refused endpoint was the one nothing was allowed to perform. It is now a
+`.callout` (accent-tinted box, real heading, `primary` button) that states both the gain and the
+fact that devices will not do this for a managed source. The panel still only ever *suggests* — it
+cannot verify a provider, for the reasons in "Why the web panel suggests and the app proves" — so the
+caveat about setting Kind back to `m3u` stays beside it.
+
 The push side needs nothing: `sources.kind` is a plain `check (kind in (...))` column with no
 immutability trigger, `splitFields` sends `host` broad and `username`/`password` as secrets, and
 the stale `playlistUrl` secret is preserved server-side (absent secret → preserve) but inert, since
