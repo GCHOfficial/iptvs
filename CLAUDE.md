@@ -433,7 +433,21 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   regardless of length (the stream id/filename stays), which `redactUrl`'s query-focused redaction
   doesn't touch. Stalker additionally uses `redactStalkerDiagnostic` /
   `_redactUrl` for MAC/Bearer tokens. The diagnostics log is user-exportable — assume anything
-  you log may be shared for support.
+  you log may be shared for support. **Redaction is not a reason to log nothing**: a failure line
+  must name the *source* (`repo.source.name`) and carry the exception type plus its redacted text
+  (`detail=`), because `sourceLoadErrorMessage` is a deliberately coarse bucket and an export of
+  those alone could not tell an `HTTP 403` from a closed client — nor, on a four-source install,
+  say which source failed.
+- **A provider that answered with a status gets that status quoted back at the user.**
+  `sourceLoadErrorMessage` reads `HTTP <nnn>` out of the thrown message and maps 401/403/407 to
+  credentials, 404/410 to the URL, 429 to rate-limiting, and **everything else to the provider** —
+  including codes outside the standard range, since a real report arrived as `HTTP 884`. The status
+  is printed on purpose: the URL beside it is already redacted, so the number leaks nothing, and
+  attributing a refusal to the provider stops the old generic "check its details and try again"
+  sending users to re-type credentials that a `player_api.php` call had authenticated seconds
+  earlier. The keyword path stays for status-less failures — `{"user_info":{"auth":0}}` arrives as
+  HTTP 200 and only `XtreamSource.connect` knows it failed. Pinned by
+  `test/source_load_error_test.dart`.
 - **HTTP timeouts.** All `HttpClient`s set `connectionTimeout` (TCP handshake only). For the
   response, use `response.readBytes()` and `.timeout(kHttpReadTimeout)` on `request.close()`
   (both in `lib/data/net.dart`) — `connectionTimeout` does **not** cover a server that connects

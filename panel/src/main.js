@@ -2,7 +2,7 @@
 // panel is framed (the meta CSP cannot enforce `frame-ancestors`).
 import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
-import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, sessionIdentityChanged, splitFields, stashPairingCode, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
+import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
 import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
@@ -150,9 +150,37 @@ const navButton = (id, label) =>
   `<button data-tab="${id}" class="${tab === id ? 'active' : ''}">${label}</button>`;
 
 const view = () => document.getElementById('view');
-const esc = (s) =>
-  String(s ?? '').replace(/[&<>"]/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/// The reveal button and human label belonging to a masked input, or nulls.
+const revealControls = (input) => {
+  const wrapper = input?.closest?.('.pw') ?? null;
+  return {
+    button: wrapper?.querySelector('.reveal') ?? null,
+    // `<label>Sync passphrase<span class="pw">…` — the label's own text node.
+    label: wrapper?.closest('label')?.firstChild?.textContent?.trim() ?? 'password',
+  };
+};
+
+/// Forces one masked input visible, through the same path a click takes so the
+/// button beside it cannot fall out of step. See `setPasswordReveal`.
+const forcePasswordReveal = (input) => {
+  const { button, label } = revealControls(input);
+  setPasswordReveal(input, button, label, true);
+};
+
+// Every reveal toggle in the panel, handled once. Delegated from `app` — which
+// outlives every render, since the views replace `app.innerHTML` rather than
+// the element — so this covers the source form (whose fields are rebuilt on
+// each kind change, including the one "Switch to Xtream" performs) and the
+// Security tab's passphrase forms without either having to wire anything.
+// Revealed state lives only in the DOM, so every re-render starts masked again.
+app.addEventListener('click', (e) => {
+  const button = e.target.closest?.('.pw .reveal');
+  if (!button) return;
+  const input = button.closest('.pw')?.querySelector('input');
+  if (!input) return;
+  togglePasswordReveal(input, button, revealControls(input).label);
+});
 
 // Log a failure for debugging WITHOUT leaking what the UI deliberately refuses
 // to show. `console.error(error)` on a Supabase error object prints `details`
@@ -360,14 +388,7 @@ function editSource(existing, nextPos = 0, decoded = null) {
     return existing?.fields?.[f.key] ?? '';
   };
   const fieldsHtml = () =>
-    KIND_FIELDS[kind]
-      .map(
-        (f) => `
-        <label>${esc(f.label)}
-          <input name="${f.key}" type="${f.password ? 'password' : 'text'}"
-            value="${esc(prefill(f))}" ${f.required ? 'required' : ''} />
-        </label>`)
-      .join('');
+    KIND_FIELDS[kind].map((f) => sourceFieldHtml(f, prefill(f))).join('');
 
   view().innerHTML = `
     <form id="form" class="form">
@@ -394,6 +415,16 @@ function editSource(existing, nextPos = 0, decoded = null) {
   // xtreamCredentialsFromPlaylistUrl), so this asks rather than rewrites, and
   // the user can switch the kind straight back if the panel turns out not to
   // serve `player_api.php`.
+  //
+  // Drawn as a callout rather than the muted hint it used to be, because for a
+  // source managed here this prompt is the only one the user will ever get:
+  // the app's automatic load-time upgrade **skips cloud-managed sources**
+  // (docs/sources.md, "Cloud-managed sources are skipped at load time"), since
+  // a pull would revert the conversion. A field report ran into exactly that —
+  // a panel-managed playlist whose provider refused `get.php` outright while
+  // its `player_api.php` answered fine, left as an M3U indefinitely because
+  // nothing on the device was allowed to convert it and the suggestion here
+  // read as decoration.
   const syncXtreamHint = () => {
     const box = document.getElementById('xtream-hint');
     if (!box) return;
@@ -406,11 +437,19 @@ function editSource(existing, nextPos = 0, decoded = null) {
       return;
     }
     box.innerHTML = `
-      <p class="muted hint">This looks like an Xtream panel link. As an Xtream
-        source it also gives <strong>Movies, Series and the subscription
-        expiry</strong>, which a playlist can't carry.
-        <button type="button" id="use-xtream" class="ghost">Switch to Xtream</button>
-      </p>`;
+      <div class="callout">
+        <strong>This looks like an Xtream panel link</strong>
+        <p>As an Xtream source it also gives <strong>Movies, Series and the
+          subscription expiry</strong>, which a playlist can't carry — and it
+          asks the panel's API instead of the playlist endpoint, which some
+          providers refuse.</p>
+        <p>Sources managed here are not converted automatically on your
+          devices, so this is the place to do it.</p>
+        <button type="button" id="use-xtream" class="primary">Switch to Xtream</button>
+        <p class="muted">Filled in from the link you pasted. If the provider
+          turns out not to serve <code>player_api.php</code>, set Kind back to
+          <code>m3u</code>.</p>
+      </div>`;
     document.getElementById('use-xtream').onclick = () => {
       kind = 'xtream';
       view().querySelector('[name=kind]').value = 'xtream';
@@ -868,9 +907,9 @@ function renderSecurityDisabled(name) {
       <h3>Enable end-to-end encryption</h3>
       <p class="warn">${esc(PASSPHRASE_LOSS_WARNING)}</p>
       ${passphraseGeneratorMarkup()}
-      <label>Sync passphrase<input type="password" name="p1" autocomplete="new-password" /></label>
+      ${passwordFieldHtml({ name: 'p1', label: 'Sync passphrase', autocomplete: 'new-password' })}
       <p data-strength class="strength"></p>
-      <label>Confirm passphrase<input type="password" name="p2" autocomplete="new-password" /></label>
+      ${passwordFieldHtml({ name: 'p2', label: 'Confirm passphrase', autocomplete: 'new-password' })}
       <div class="form-actions"><button class="primary">Enable encryption</button></div>
     </form>`;
   const enableCanSubmit = wirePassphraseGenerator(document.getElementById('enable'));
@@ -897,7 +936,7 @@ function renderSecurityLocked(name) {
     unlock it for this browser session so you can view and edit credentials. The
     passphrase is never sent to the server.</p>
     <form id="unlock" class="form">
-      <label>Sync passphrase<input type="password" name="p" autocomplete="current-password" /></label>
+      ${passwordFieldHtml({ name: 'p', label: 'Sync passphrase', autocomplete: 'current-password' })}
       <div class="form-actions"><button class="primary">Unlock</button></div>
     </form>`;
   document.getElementById('unlock').onsubmit = async (e) => {
@@ -931,9 +970,9 @@ function renderSecurityUnlocked(name) {
       <h3>Change passphrase</h3>
       <p class="warn">${esc(PASSPHRASE_LOSS_WARNING)}</p>
       ${passphraseGeneratorMarkup()}
-      <label>New passphrase<input type="password" name="p1" autocomplete="new-password" /></label>
+      ${passwordFieldHtml({ name: 'p1', label: 'New passphrase', autocomplete: 'new-password' })}
       <p data-strength class="strength"></p>
-      <label>Confirm new passphrase<input type="password" name="p2" autocomplete="new-password" /></label>
+      ${passwordFieldHtml({ name: 'p2', label: 'Confirm new passphrase', autocomplete: 'new-password' })}
       <div class="form-actions"><button class="primary">Change passphrase</button></div>
     </form>
 
@@ -942,7 +981,7 @@ function renderSecurityUnlocked(name) {
       <p class="muted">Mint a fresh content key and re-encrypt every credential under it. Use this
       after a device is revoked or a passphrase may have leaked — old ciphertext and old device keys
       stop working. Re-enter your current passphrase to re-wrap the new key.</p>
-      <label>Current passphrase<input type="password" name="p" autocomplete="current-password" /></label>
+      ${passwordFieldHtml({ name: 'p', label: 'Current passphrase', autocomplete: 'current-password' })}
       <div class="form-actions"><button class="primary">Rotate content key</button></div>
     </form>
 
@@ -1046,8 +1085,8 @@ function wirePassphraseGenerator(form) {
     // are being asked to save.
     p1.value = phrase;
     p2.value = phrase;
-    p1.type = 'text';
-    p2.type = 'text';
+    forcePasswordReveal(p1);
+    forcePasswordReveal(p2);
     out.hidden = false;
     savedBox.checked = false;
     generated = true;

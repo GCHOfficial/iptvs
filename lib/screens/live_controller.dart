@@ -145,14 +145,17 @@ class LiveController extends ChangeNotifier {
     } catch (e) {
       if (_disposed || gen != _loadGeneration) return;
       final message = sourceLoadErrorMessage(e);
-      // The friendly message is a bucket — several unrelated failures land in
-      // the same one, so a support export of nothing but these lines cannot
-      // tell a provider's HTTP 403 from a closed client. The exception's own
-      // text carries the status and the URL, so it goes in redacted, exactly
-      // as the EPG refresh already records its failures.
+      // Three things a failure report needs and this line used to carry none
+      // of: *which* source (the success line beside it has always named one,
+      // and an install with four configured sources made two different
+      // failures unattributable), the exception type, and the exception's own
+      // text — redacted, exactly as the EPG refresh already records its
+      // failures. The friendly message is a bucket, so on its own it cannot
+      // tell a provider's HTTP 403 from a closed client.
       DiagnosticsLog.instance.add(
         'library',
-        'live source load failed reason=${e.runtimeType} message=$message '
+        'live source load failed source=${repo.source.name} '
+            'reason=${e.runtimeType} message=$message '
             'detail=${redactText(e.toString())}',
       );
       _set(() {

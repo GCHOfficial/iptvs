@@ -167,7 +167,20 @@ String sourceLoadErrorMessage(Object error) {
   if (error is HttpWorkloadException) {
     return 'The source returned more data than the app can safely load.';
   }
-  final message = error.toString().toLowerCase();
+  final raw = error.toString();
+  // A provider that answered with a status told us whose problem this is, and
+  // the old message threw that away: every `HTTP nnn` fell through to "check
+  // its details and try again", which sent users to re-type credentials that
+  // were demonstrably fine. Read from the raw string — the sources throw
+  // `HTTP <status> fetching/from <redacted url>`, and lowercasing first would
+  // still match, but the status itself must not be lowercased into a URL's own
+  // digits. The space and the capitals are what keep `http://host:8080/…` out.
+  final status = int.tryParse(
+    RegExp(r'\bHTTP (\d{3,})\b').firstMatch(raw)?.group(1) ?? '',
+  );
+  if (status != null) return _httpStatusMessage(status);
+
+  final message = raw.toLowerCase();
   if (message.contains('unauthorized') ||
       message.contains('forbidden') ||
       message.contains('invalid credential') ||
@@ -175,6 +188,36 @@ String sourceLoadErrorMessage(Object error) {
     return 'The source rejected the saved credentials. Check the source details.';
   }
   return 'The source could not be loaded. Check its details and try again.';
+}
+
+/// The user-facing half of [sourceLoadErrorMessage] for a provider that
+/// answered with an HTTP status.
+///
+/// The status is printed deliberately: it is not a secret (the URL beside it is
+/// already redacted), it is the single most useful thing a support report can
+/// carry, and providers return codes outside the standard range — a real field
+/// report arrived as `HTTP 884` — which no wording can anticipate. Anything
+/// unrecognised is therefore attributed to the provider rather than to the
+/// user's settings, because a response *came back*: the host resolved, the
+/// connection succeeded, and the server chose to refuse.
+String _httpStatusMessage(int status) {
+  switch (status) {
+    case 401:
+    case 403:
+    case 407:
+      return 'The provider rejected these credentials (HTTP $status). '
+          'Check the source details.';
+    case 404:
+    case 410:
+      return 'The provider has no such address (HTTP $status). '
+          'Check the URL in the source details.';
+    case 429:
+      return 'The provider is rate-limiting this device (HTTP $status). '
+          'Wait a moment and try again.';
+    default:
+      return 'The provider refused this request (HTTP $status). '
+          'That came from their server, not your settings — try again shortly.';
+  }
 }
 
 /// One non-resetting deadline spanning request creation, headers, redirects,

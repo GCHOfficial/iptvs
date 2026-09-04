@@ -564,3 +564,91 @@ export function clearStashedPairingCode(storage = pairingStorage()) {
 export function sessionIdentityChanged(prev, next) {
   return (prev?.user?.id ?? null) !== (next?.user?.id ?? null);
 }
+
+/// HTML-escapes text for interpolation into a text node or a quoted attribute.
+///
+/// Lives here rather than in `main.js` so the pure renderers below can be
+/// exercised by `node --test`, which has no DOM.
+export const esc = (s) =>
+  String(s ?? '').replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/// One control of the source form, as HTML.
+///
+/// A `password: true` field gets a **reveal toggle** beside it. The panel
+/// masks the Xtream password, and the one moment a user most needs to read it
+/// back is the moment it was filled in for them — "Switch to Xtream" lifts the
+/// credentials straight out of a `get.php` link, and a row of dots is not
+/// something anyone can check. The app has had this since `TvTextField` gained
+/// its own toggle; this is the panel catching up.
+///
+/// Revealed state deliberately lives only in the DOM: the form re-renders on
+/// every kind change, which resets it to masked, and nothing about it is
+/// stored or synced.
+export function sourceFieldHtml(field, value) {
+  if (field.password) {
+    return passwordFieldHtml({
+      name: field.key,
+      label: field.label,
+      value,
+      required: field.required,
+    });
+  }
+  const required = field.required ? ' required' : '';
+  return (
+    `<label>${esc(field.label)}` +
+    `<input name="${esc(field.key)}" type="text" value="${esc(value)}"${required} />` +
+    `</label>`
+  );
+}
+
+/// A masked `<input>` with its reveal toggle, as a complete `<label>`.
+///
+/// Used by [sourceFieldHtml] and by the Security tab's passphrase forms, which
+/// is why it takes `autocomplete`: those fields must keep their
+/// `new-password` / `current-password` hints so a password manager still
+/// offers to store and fill them.
+export function passwordFieldHtml({ name, label, value = '', autocomplete, required = false }) {
+  const attrs = [
+    `name="${esc(name)}"`,
+    'type="password"',
+    `value="${esc(value)}"`,
+    autocomplete ? `autocomplete="${esc(autocomplete)}"` : '',
+    required ? 'required' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return (
+    `<label>${esc(label)}` +
+    `<span class="pw"><input ${attrs} />` +
+    `<button type="button" class="ghost reveal" aria-pressed="false"` +
+    ` aria-label="Show ${esc(label)}">Show</button>` +
+    `</span></label>`
+  );
+}
+
+/// Moves one masked field to [revealed], keeping the button's text and its
+/// `aria-pressed` / `aria-label` in step with the input's `type`.
+///
+/// Written as an absolute set rather than only a toggle because something
+/// other than a click also reveals these: `wirePassphraseGenerator` flips a
+/// generated passphrase to plain text so the user can read what they are being
+/// asked to save. Doing that directly would leave the button reading "Show"
+/// over an already-visible field, and the next click would then *hide* it while
+/// announcing the opposite. A null [button] is allowed so a caller can drive an
+/// input that has no toggle beside it.
+export function setPasswordReveal(input, button, label, revealed) {
+  input.type = revealed ? 'text' : 'password';
+  if (button) {
+    button.textContent = revealed ? 'Hide' : 'Show';
+    button.setAttribute('aria-pressed', String(revealed));
+    button.setAttribute('aria-label', `${revealed ? 'Hide' : 'Show'} ${label}`);
+  }
+  return revealed;
+}
+
+/// [setPasswordReveal] to the opposite of the input's current state. Split from
+/// the click handler so the transition is testable without a browser.
+export function togglePasswordReveal(input, button, label) {
+  return setPasswordReveal(input, button, label, input.type === 'password');
+}
