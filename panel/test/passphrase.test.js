@@ -166,7 +166,14 @@ test('both passphrase forms include the generator and a strength meter', () => {
     const form = main.slice(start, main.indexOf('</form>', start));
     assert.match(form, /passphraseGeneratorMarkup\(\)/, `#${id} is missing the generator`);
     assert.match(form, /data-strength/, `#${id} is missing the strength meter`);
-    assert.match(form, /name="p1"/, `#${id} is missing the passphrase field`);
+    // Rendered through the shared helper rather than as a literal
+    // `<input type="password">`, which is what gives the field its reveal
+    // toggle. See the "no raw masked input" test below.
+    assert.match(
+      form,
+      /passwordFieldHtml\(\{[^}]*name: 'p1'/,
+      `#${id} is missing the passphrase field`,
+    );
   }
   // Both submit handlers must consult the "I have saved this" gate, or a
   // generated phrase could be committed before the user has written it down.
@@ -184,4 +191,28 @@ test('passphraseStrength scores rise monotonically with quality', () => {
   for (let i = 1; i < scores.length; i++) {
     assert.ok(scores[i] >= scores[i - 1], `score dropped at step ${i}: ${scores}`);
   }
+});
+
+test('every masked field in the panel goes through passwordFieldHtml', () => {
+  // The reveal toggle is part of the renderer, so a hand-rolled
+  // `<input type="password">` is a field the user cannot read back — which is
+  // exactly what the passphrase forms were before. Pinning the absence of the
+  // literal is what stops the next masked field being added without one.
+  const main = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8');
+  assert.doesNotMatch(main, /type="password"/);
+  // And the helper is genuinely in use for them.
+  assert.ok(
+    [...main.matchAll(/passwordFieldHtml\(\{/g)].length >= 6,
+    'expected every passphrase field to render through passwordFieldHtml',
+  );
+});
+
+test('the generator reveals through setPasswordReveal, never a raw type flip', () => {
+  // A direct `p1.type = "text"` leaves the toggle beside it reading "Show"
+  // over a visible field, and the next click then hides it while announcing
+  // the opposite.
+  const main = readFileSync(fileURLToPath(new URL('../src/main.js', import.meta.url)), 'utf8');
+  assert.doesNotMatch(main, /\.type = 'text'/);
+  assert.match(main, /forcePasswordReveal\(p1\)/);
+  assert.match(main, /forcePasswordReveal\(p2\)/);
 });

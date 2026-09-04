@@ -128,6 +128,55 @@ input, select {
   border: 1px solid color-mix(in srgb, #e5a04d 40%, transparent);
 }
 
+/* An actionable suggestion inside a form. Deliberately louder than `.hint`:
+   the M3U -> Xtream prompt is the only one a cloud-managed source ever gets,
+   because the app's automatic upgrade skips those (docs/sources.md). */
+.callout {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.callout strong { font-weight: 600; }
+.callout > strong { font-size: 14px; }
+.callout p { margin: 0; }
+.callout .muted { font-size: 12px; }
+.callout code {
+  background: var(--panel-hi);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.92em;
+}
+
+/* A masked field with its reveal toggle sitting *inside* the box, at the end —
+   the same place `TvTextField` puts its own toggle in the app.
+   `padding-right` on the input reserves the space, and the button carries a
+   `min-width` so "Show" and "Hide" occupy an identical box: without it the
+   reserved gutter would only fit one of the two words and the longer state
+   would sit over the value. */
+.pw { position: relative; display: block; }
+.pw input { padding-right: 60px; }
+.pw .reveal {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 46px;
+  padding: 4px 6px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--panel-hi);
+  color: var(--text-lo);
+}
+.pw .reveal:hover { background: var(--panel-hi); color: var(--text); }
+
 /* Vertical separation between stacked forms (Security tab). */
 .form.section, .danger-zone.section { margin-top: 28px; }
 .form.section h3, .danger-zone.section h3 { margin: 0; }
