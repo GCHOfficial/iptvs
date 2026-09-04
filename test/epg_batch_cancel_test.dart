@@ -1,8 +1,10 @@
 // Tests for the LoadToken cancellation path introduced alongside streamed EPG
 // batches: parseXmltvBatched stops yielding once its token is cancelled,
 // AppDatabase.replaceEpgStream rolls back a cancelled feed instead of
-// committing a half-fed guide, and LibraryRepository skips a stale
-// channel-cache write when its token was cancelled mid-load.
+// committing a half-fed guide, and LibraryRepository refuses to *overwrite* a
+// populated channel cache when its token was cancelled mid-load — while still
+// seeding an empty one, which is what keeps a slow device from being stuck
+// without a cache forever.
 
 import 'dart:io';
 
@@ -136,10 +138,12 @@ void main() {
     String dbPath() => '${tempDir.path}/iptv.db';
 
     test(
-      'a token cancelled between the fetch and the cache write skips the stale write',
+      'a token cancelled between the fetch and the cache write does not '
+      'clobber an existing cache',
       () async {
         final db = await AppDatabase.openAt(dbPath());
-        // Seed a prior cache the stale write must not clobber.
+        // The seed is the load-bearing part of this test: a superseded load is
+        // only barred from writing because there is already something to lose.
         await db.replaceLibrary(
           'fake',
           'Fake',
@@ -161,6 +165,47 @@ void main() {
         // but the cache write itself was skipped.
         expect(snapshot.channels.map((c) => c.id), ['new']);
         expect((await db.readChannels('fake')).map((c) => c.id), ['old']);
+        await db.close();
+      },
+    );
+
+    test(
+      'a token cancelled before anything is cached still seeds the empty cache',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        // No seed this time. A superseded load that finds nothing cached must
+        // write, or a source whose cold load is slower than the user's patience
+        // can never obtain a first cache and pays the full fetch every attempt.
+        final token = LoadToken();
+        final source = _CancelingSource(tokenToCancel: token);
+        final repo = LibraryRepository(source: source, db: db);
+        repo.loadToken = token;
+
+        final snapshot = await repo.load(forceRefresh: true);
+
+        expect(snapshot.channels.map((c) => c.id), ['new']);
+        expect((await db.readChannels('fake')).map((c) => c.id), ['new']);
+        expect(await db.lastSynced('fake'), isNotNull);
+        await db.close();
+      },
+    );
+
+    test(
+      'a superseded load schedules no EPG refresh',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        final token = LoadToken();
+        final source = _CancelingSource(tokenToCancel: token);
+        final repo = LibraryRepository(source: source, db: db);
+        repo.loadToken = token;
+
+        await repo.load(forceRefresh: true);
+
+        // The load that cancelled this one schedules its own, and the ingest
+        // coordinator is last-start-wins — a late refresh from here would take
+        // the slot from the correct one.
+        expect(repo.pendingEpgRefresh, isNull);
+        expect(await db.lastEpgSynced('fake'), isNull);
         await db.close();
       },
     );

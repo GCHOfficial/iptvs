@@ -1539,20 +1539,41 @@ class _MediaDetailsSheetState extends State<MediaDetailsSheet> {
     }
   }
 
+  /// Clears the repository's cancellation token for the drill-down about to
+  /// run, in the synchronous prologue the field's contract requires.
+  ///
+  /// These loads are the sheet's own, and they are the only `loadMedia` callers
+  /// that are not a [MediaTabController]. Every controller path sets
+  /// `repo.loadToken` immediately before its own call; the sheet set nothing,
+  /// so it inherited whatever was left on the shared repository — and it *is*
+  /// shared: the movie and series controllers are built over one
+  /// [LibraryRepository] and each cancels only its own token, while
+  /// `MediaTabController.dispose` cancels one outright. So a season or episode
+  /// fetch could begin already-cancelled, through no act of its own, and
+  /// quietly decline to cache its result: a drill-down that re-hit the provider
+  /// on every open.
+  ///
+  /// Null rather than a token of its own, deliberately. A token would only earn
+  /// its keep if something could supersede these loads, and nothing can — they
+  /// write to their own `(kind, parentId)` cache key, which no other caller
+  /// touches, so there is no staler writer to lose a race to.
+  void _clearInheritedLoadToken() => widget.repo.loadToken = null;
+
   Future<List<MediaItem>>? _loadSeasonsIfNeeded() {
     if (_item.kind != ContentKind.series) return null;
+    _clearInheritedLoadToken();
     return widget.repo
         .loadMedia(ContentKind.season, parent: _item)
         .then((snapshot) => snapshot.items);
   }
 
   Future<List<MediaItem>> _episodes(MediaItem season) =>
-      _episodeFutures.putIfAbsent(
-        season.id,
-        () => widget.repo
+      _episodeFutures.putIfAbsent(season.id, () {
+        _clearInheritedLoadToken();
+        return widget.repo
             .loadMedia(ContentKind.episode, parent: season)
-            .then((snapshot) => snapshot.items),
-      );
+            .then((snapshot) => snapshot.items);
+      });
 
   Future<ExternalMetadata?> _loadMetadata() =>
       widget.repo.cachedExternalMetadata(_item, 'tmdb');

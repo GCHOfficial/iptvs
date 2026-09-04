@@ -94,8 +94,11 @@ class LibraryRepository {
   /// [loadMoreMedia] call, additive to the controllers' `_loadGeneration`
   /// guards (see CLAUDE.md "Async publishes are generation-guarded"): the
   /// generation guard stops a stale result from being *published*; this token
-  /// stops a stale call from *writing* to the cache or feeding more EPG
-  /// batches once a newer call has superseded it.
+  /// stops a stale call from **overwriting a populated cache** once a newer
+  /// call has superseded it. It does *not* stop the write outright — a
+  /// superseded load may still seed an *empty* cache (`_loadChannels`,
+  /// `loadMedia`), and it does not reach the EPG batch path at all, which is
+  /// cancelled by `EpgIngestCoordinator`'s own tokens instead.
   ///
   /// This is a plain settable field rather than a parameter on those methods
   /// on purpose: [LibraryRepository] is subclassed by Completer-gated test
@@ -153,7 +156,15 @@ class LibraryRepository {
     // status line reads that to say "updating guide", and a guide that was
     // already fresh would otherwise flash the message for one frame on every
     // load.
-    if (await _epgNeedsRefresh(forceRefresh)) {
+    //
+    // A *superseded* load skips it outright. The load that cancelled this one
+    // schedules its own, and `EpgIngestCoordinator` is last-start-wins — so a
+    // late refresh from a stale load would take the slot *from* the correct one
+    // already running, and match guides against the channel list this load
+    // fetched rather than the one now cached. Nothing is lost by skipping:
+    // `epg_synced_at` is only advanced by a refresh that actually landed, so
+    // the next load still finds the guide stale and re-runs it.
+    if (!(token?.isCancelled ?? false) && await _epgNeedsRefresh(forceRefresh)) {
       unawaited(
         _scheduleEpgRefresh(snapshot.channels, forceRefresh: forceRefresh),
       );
@@ -219,25 +230,70 @@ class LibraryRepository {
     final categories = await source.categories();
     final channels = await source.channels();
     providerWatch.stop();
-    if (token?.isCancelled ?? false) {
-      // Superseded by a newer load — the controller has already (or will)
-      // discard this snapshot by generation, so skip the stale cache write
-      // and leave the previous cache intact for the next read.
-      return LibrarySnapshot(
-        categories: categories,
-        channels: channels,
-        fromCache: false,
-        syncedAt: DateTime.now(),
+    // A superseded load must never *overwrite* a cached catalog — but it must
+    // still be allowed to **seed an empty one**, and the whole point of this
+    // branch is the difference between the two.
+    //
+    // Overwriting is genuinely unsafe, for two reasons that outlive the
+    // controller's generation guard (which only stops the UI publish). The
+    // channel cache has no age check — `_loadChannels` above gates on "is there
+    // a cache", nothing more — so whatever lands here stands until an explicit
+    // forced refresh. And commit order is not fetch order: a slow superseded
+    // load can land *after* the fast one that replaced it, stamping older rows
+    // with a newer `synced_at`. Worse, `upgradeM3uToXtream` deliberately keeps
+    // the source id, so an in-flight M3U load can outlive the upgrade and write
+    // playlist-shaped rows under a source that is now Xtream — whose `resolve`
+    // falls back to `channel.id` for the stream id, i.e. every channel silently
+    // unplayable, permanently.
+    //
+    // Refusing to write *at all*, though, is how a device gets stuck, and that
+    // is a real field report rather than a hypothetical: on a low-end TV box a
+    // 66 MB playlist costs ~55 s (29 s download + 26 s isolate parse), and
+    // every rebuild of the repository — the load-time M3U→Xtream probe alone
+    // does one per app start — cancelled the load and threw the finished
+    // catalog away. The cache stayed empty, so the next attempt paid the full
+    // 55 s again, forever. A complete catalog is strictly better than none.
+    //
+    // `onlyIfAbsent` settles both orders with no sequencing and no identity on
+    // the token: the stale writer commits only while there is nothing to lose,
+    // and a fresh catalog that already landed makes it a no-op.
+    final superseded = token?.isCancelled ?? false;
+    final databaseWatch = Stopwatch()..start();
+    var wrote = false;
+    try {
+      wrote = await db.replaceLibrary(
+        source.id,
+        source.name,
+        categories,
+        channels,
+        onlyIfAbsent: superseded,
+      );
+    } catch (error) {
+      // A supersede correlates with teardown, so the connection may be closing
+      // under us. Losing the seed is acceptable; failing the load is not.
+      if (!superseded) rethrow;
+      DiagnosticsLog.instance.add(
+        'library',
+        'superseded seed for ${source.id} failed: ${error.runtimeType}',
       );
     }
-    final databaseWatch = Stopwatch()..start();
-    await db.replaceLibrary(source.id, source.name, categories, channels);
     databaseWatch.stop();
-    DiagnosticsLog.instance.recordIngestion(
-      scope: 'source:${source.id}',
-      providerDuration: providerWatch.elapsed,
-      databaseDuration: databaseWatch.elapsed,
-    );
+    if (wrote) {
+      DiagnosticsLog.instance.recordIngestion(
+        scope: 'source:${source.id}',
+        providerDuration: providerWatch.elapsed,
+        databaseDuration: databaseWatch.elapsed,
+      );
+    } else {
+      // The field report's worst property was silence: ~55 s of work left
+      // nothing whatsoever in the exported log.
+      DiagnosticsLog.instance.add(
+        'library',
+        'superseded load for ${source.id}: ${channels.length} channels fetched '
+            'in ${providerWatch.elapsed.inMilliseconds} ms, not written '
+            '(cache already populated)',
+      );
+    }
     return LibrarySnapshot(
       categories: categories,
       channels: channels,
@@ -466,31 +522,30 @@ class LibraryRepository {
             fetched.items,
             action: 'load-child',
           );
-    if (token?.isCancelled ?? false) {
-      // Superseded by a newer load — skip the stale cache write; the
-      // previous cache stays intact for the next read.
-      return MediaLibrarySnapshot(
-        kind: kind,
+    // Seed-but-never-overwrite, exactly as `_loadChannels` does and for the
+    // same reasons — read the long comment there. The media cache has the same
+    // shape of trap: `loadMedia`'s gate above asks only whether a cache exists.
+    final superseded = token?.isCancelled ?? false;
+    try {
+      await db.replaceMediaLibrary(
+        source.id,
+        kind,
+        categories,
+        fetchedItems,
         categoryId: categoryId,
         parentId: parentId,
-        categories: categories,
-        items: await _mergeCachedMetadata(fetchedItems),
-        fromCache: false,
-        syncedAt: DateTime.now(),
         loadedPages: fetched.loadedPages,
         totalPages: fetched.totalPages,
+        onlyIfAbsent: superseded,
+      );
+    } catch (error) {
+      if (!superseded) rethrow;
+      DiagnosticsLog.instance.add(
+        'library',
+        'superseded ${kind.name} seed for ${source.id} failed: '
+            '${error.runtimeType}',
       );
     }
-    await db.replaceMediaLibrary(
-      source.id,
-      kind,
-      categories,
-      fetchedItems,
-      categoryId: categoryId,
-      parentId: parentId,
-      loadedPages: fetched.loadedPages,
-      totalPages: fetched.totalPages,
-    );
     return MediaLibrarySnapshot(
       kind: kind,
       categoryId: categoryId,
@@ -640,6 +695,14 @@ class LibraryRepository {
     if (token?.isCancelled ?? false) {
       // Superseded by a newer load — skip the stale append; the prior sync
       // state (loadedPages/totalPages) stays intact for the next read.
+      //
+      // Deliberately *not* the seed-when-absent treatment `_loadChannels` and
+      // `loadMedia` now get. This is a page-bookkeeping guard, not a
+      // cache-freshness one: `appendMediaItems` writes back `loadedPages`/
+      // `totalPages` read at the top of this method, so a late append lands
+      // stale paging state over whatever replaced it. And "no cache" cannot
+      // hold here anyway — this method returns early when `sync == null`, so
+      // there is never an empty cache to seed.
       return MediaLibrarySnapshot(
         kind: kind,
         categoryId: categoryId,

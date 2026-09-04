@@ -1531,7 +1531,12 @@ class AppDatabase {
     return double.tryParse(value.toString());
   }
 
-  Future<void> replaceMediaLibrary(
+  /// [onlyIfAbsent] behaves exactly as it does on [replaceLibrary]: seed an
+  /// empty cache, never overwrite a populated one, decided inside the
+  /// transaction. The predicate mirrors [mediaSyncState] + a non-empty
+  /// [readMediaItems] for the same `(kind, categoryId, parentId)` key, because
+  /// that pair is `LibraryRepository.loadMedia`'s cache-read gate.
+  Future<bool> replaceMediaLibrary(
     String sourceId,
     ContentKind kind,
     List<MediaCategory> categories,
@@ -1540,11 +1545,24 @@ class AppDatabase {
     String? parentId,
     int loadedPages = 1,
     int totalPages = 1,
+    bool onlyIfAbsent = false,
   }) async {
     final protectedExtras = [
       for (final item in items) await protectSecretLocators(item.extra, _vault),
     ];
+    var wrote = true;
     await _db.transaction((txn) async {
+      if (onlyIfAbsent &&
+          await _hasMediaCache(
+            txn,
+            sourceId,
+            kind,
+            categoryId: categoryId,
+            parentId: parentId,
+          )) {
+        wrote = false;
+        return;
+      }
       if (categoryId == null && parentId == null) {
         await txn.delete(
           'media_categories',
@@ -1618,6 +1636,55 @@ class AppDatabase {
       }, conflictAlgorithm: ConflictAlgorithm.replace);
       await batch.commit(noResult: true);
     });
+    return wrote;
+  }
+
+  /// Whether `(kind, categoryId, parentId)` has a media cache [loadMedia] would
+  /// serve. Mirrors [mediaSyncState]'s two-tier lookup — the exact
+  /// `media_page_state` key first, then the whole-kind `media_sync` row, which
+  /// only answers for the unfiltered view — paired with at least one matching
+  /// `media_items` row, the same two conditions the read gate applies.
+  static Future<bool> _hasMediaCache(
+    DatabaseExecutor txn,
+    String sourceId,
+    ContentKind kind, {
+    String? categoryId,
+    String? parentId,
+  }) async {
+    final pageRows = await txn.query(
+      'media_page_state',
+      where: 'source_id = ? AND kind = ? AND parent_id = ? AND category_id = ?',
+      whereArgs: [sourceId, kind.name, parentId ?? '', categoryId ?? ''],
+      limit: 1,
+    );
+    if (pageRows.isEmpty) {
+      if (categoryId != null || parentId != null) return false;
+      final syncRows = await txn.query(
+        'media_sync',
+        where: 'source_id = ? AND kind = ?',
+        whereArgs: [sourceId, kind.name],
+        limit: 1,
+      );
+      if (syncRows.isEmpty) return false;
+    }
+    final where = StringBuffer('source_id = ? AND kind = ?');
+    final args = <Object?>[sourceId, kind.name];
+    if (categoryId != null) {
+      where.write(' AND category_id = ?');
+      args.add(categoryId);
+    }
+    if (parentId != null) {
+      where.write(' AND parent_id = ?');
+      args.add(parentId);
+    }
+    final itemRows = await txn.query(
+      'media_items',
+      columns: ['id'],
+      where: where.toString(),
+      whereArgs: args,
+      limit: 1,
+    );
+    return itemRows.isNotEmpty;
   }
 
   Future<void> appendMediaItems(
@@ -1940,13 +2007,32 @@ class AppDatabase {
   );
 
   /// Replace all cached channels/categories for a source in one transaction.
-  Future<void> replaceLibrary(
+  ///
+  /// With [onlyIfAbsent] the replace becomes a **seed**: it commits only when
+  /// this source has no catalog a read would serve, and the returned bool says
+  /// whether it wrote. `LibraryRepository._loadChannels` uses that to let a
+  /// *superseded* load fill an empty cache without ever overwriting a populated
+  /// one — see the long comment there for why the two cases differ.
+  ///
+  /// The predicate is evaluated **inside the transaction** (so the answer
+  /// cannot change between the test and the write) and is the exact complement
+  /// of `_loadChannels`'s cache-read gate: `synced_at` non-null *and* at least
+  /// one channel row. Any other test produces a source that reads as "no cache"
+  /// yet refuses to be seeded — permanently, because the channel cache has no
+  /// age check.
+  Future<bool> replaceLibrary(
     String sourceId,
     String name,
     List<Category> categories,
-    List<Channel> channels,
-  ) async {
+    List<Channel> channels, {
+    bool onlyIfAbsent = false,
+  }) async {
+    var wrote = true;
     await _db.transaction((txn) async {
+      if (onlyIfAbsent && await _hasChannelCache(txn, sourceId)) {
+        wrote = false;
+        return;
+      }
       await txn.delete(
         'categories',
         where: 'source_id = ?',
@@ -2000,6 +2086,28 @@ class AppDatabase {
         });
       }
     });
+    return wrote;
+  }
+
+  /// Whether [sourceId] has a channel catalog `_loadChannels` would serve.
+  /// Both halves are required: the `sources` row and the channel rows are
+  /// written in the same transaction, but an interrupted older build, a
+  /// half-migrated file, or a future writer could leave one without the other,
+  /// and the read gate treats either absence as "no cache".
+  static Future<bool> _hasChannelCache(
+    DatabaseExecutor txn,
+    String sourceId,
+  ) async {
+    final syncedRows = await txn.rawQuery(
+      'SELECT COUNT(*) AS n FROM sources WHERE id = ? AND synced_at IS NOT NULL',
+      [sourceId],
+    );
+    if (((syncedRows.first['n'] as int?) ?? 0) == 0) return false;
+    final channelRows = await txn.rawQuery(
+      'SELECT EXISTS(SELECT 1 FROM channels WHERE source_id = ?) AS n',
+      [sourceId],
+    );
+    return ((channelRows.first['n'] as int?) ?? 0) != 0;
   }
 
   // ── EPG ───────────────────────────────────────────────────────────────────

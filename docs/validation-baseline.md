@@ -225,6 +225,33 @@ earlier workloads in the same test process.
 | Xtream series JSON | 50,000 | 6.65 MB | 47 ms | Cumulative |
 | Stalker channel JSON | 50,000 | 10.63 MB | 57 ms | Cumulative |
 
+### Field data point: M3U on a low-end television
+
+The host numbers above understate the M3U cold path by two orders of magnitude on
+real set-top hardware, which is worth recording because a design decision rests on
+it. From a user's exported diagnostics (2026-09-03), on an Android TV box
+reporting `television=true`, `960x540 dpr 2.00`:
+
+| Stage | Evidence in the export | Duration |
+|---|---|---:|
+| Playlist download | `[http:playlist] compressed_bytes=66418882 decoded_bytes=66418882` (uncompressed) | ~29 s |
+| `compute()` decode + parse | gap to `[parse:m3u] rejected_rows=0` | 22–26 s |
+| **Total cold load** | | **~55 s** |
+
+Compare the 250k-channel host row: 42.51 MB parsed in 493 ms. The same class of
+work here is a ~53x larger wall-clock cost for a 1.6x larger input — the parse is
+CPU-bound on a slow SoC, and the isolate hop copies the whole buffer.
+
+This is the measurement behind the "a superseded load still seeds an empty cache"
+rule (CLAUDE.md, "Async publishes are generation-guarded"): at 55 s, essentially
+any repository rebuild — including the once-per-app-start M3U→Xtream probe —
+cancels the load, and discarding the catalog meant the cache never got populated
+and the next attempt paid the 55 s again.
+
+Not yet measured on that device, and worth a soak: peak RSS while the 66 MB
+buffer, the isolate's copy of it, and the resulting channel list are all live at
+once.
+
 SQLite baseline with 50,000 channels and 100,000 programmes:
 
 | Operation | Duration (as recorded) | After sealed locators |

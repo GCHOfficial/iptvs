@@ -636,6 +636,159 @@ void main() {
     });
   });
 
+  group('AppDatabase.replaceLibrary onlyIfAbsent', () {
+    const cats = [Category(id: 'c1', title: 'News')];
+    const seeded = [Channel(id: 'old', name: 'Old', categoryId: 'c1')];
+    const fresh = [Channel(id: 'new', name: 'New', categoryId: 'c1')];
+
+    test('writes and reports true when nothing is cached', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final wrote = await db.replaceLibrary(
+        'src1',
+        'Src',
+        cats,
+        fresh,
+        onlyIfAbsent: true,
+      );
+      expect(wrote, isTrue);
+      expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
+      expect(await db.lastSynced('src1'), isNotNull);
+      await db.close();
+    });
+
+    test('leaves a populated cache untouched and reports false', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'Src', cats, seeded);
+      final before = await db.lastSynced('src1');
+
+      final wrote = await db.replaceLibrary(
+        'src1',
+        'Src renamed',
+        const [Category(id: 'c2', title: 'Sport')],
+        fresh,
+        onlyIfAbsent: true,
+      );
+
+      expect(wrote, isFalse);
+      expect((await db.readChannels('src1')).map((c) => c.id), ['old']);
+      expect((await db.readCategories('src1')).map((c) => c.id), ['c1']);
+      expect(await db.lastSynced('src1'), before);
+      await db.close();
+    });
+
+    test('a catalog under a different source id does not block the seed', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('other', 'Other', cats, seeded);
+
+      expect(
+        await db.replaceLibrary('src1', 'Src', cats, fresh,
+            onlyIfAbsent: true),
+        isTrue,
+      );
+      expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
+      expect((await db.readChannels('other')).map((c) => c.id), ['old']);
+      await db.close();
+    });
+
+    test('seeds when synced_at is set but no channel rows survive', () async {
+      // The boundary that makes the guard the exact complement of
+      // `_loadChannels`'s read gate. That gate needs *both* a `synced_at` and
+      // at least one row, so a source with only the former reads as "no cache"
+      // — and a guard testing just `synced_at` would refuse to seed it,
+      // permanently, since the channel cache has no age check to heal it.
+      final db = await AppDatabase.openAt(dbPath());
+      await db.replaceLibrary('src1', 'Src', cats, seeded);
+      await db.replaceLibrary('src1', 'Src', cats, const []);
+      expect(await db.lastSynced('src1'), isNotNull);
+      expect(await db.readChannels('src1'), isEmpty);
+
+      final wrote = await db.replaceLibrary(
+        'src1',
+        'Src',
+        cats,
+        fresh,
+        onlyIfAbsent: true,
+      );
+
+      expect(wrote, isTrue);
+      expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
+      await db.close();
+    });
+
+    test('the media mirror seeds per (kind, category, parent) key', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      // The stored `category_id` comes from the item itself (`_mediaItemRow`),
+      // not from the `categoryId` argument — and `readMediaItems`, which is
+      // what `loadMedia`'s cache gate uses, filters on the stored column. So a
+      // fixture whose items carry no category would read as "nothing cached"
+      // for every key, which is the honest answer rather than a guard bug.
+      const movie = MediaItem(
+        id: 'm1',
+        title: 'One',
+        kind: ContentKind.movie,
+        categoryId: 'a',
+      );
+      const other = MediaItem(
+        id: 'm2',
+        title: 'Two',
+        kind: ContentKind.movie,
+        categoryId: 'b',
+      );
+      const alsoInA = MediaItem(
+        id: 'm3',
+        title: 'Three',
+        kind: ContentKind.movie,
+        categoryId: 'a',
+      );
+
+      expect(
+        await db.replaceMediaLibrary(
+          'src1',
+          ContentKind.movie,
+          const [],
+          const [movie],
+          categoryId: 'a',
+          onlyIfAbsent: true,
+        ),
+        isTrue,
+      );
+      // A different category is a different cache key, so it still seeds.
+      expect(
+        await db.replaceMediaLibrary(
+          'src1',
+          ContentKind.movie,
+          const [],
+          const [other],
+          categoryId: 'b',
+          onlyIfAbsent: true,
+        ),
+        isTrue,
+      );
+      // The first key is now populated and must not be overwritten.
+      expect(
+        await db.replaceMediaLibrary(
+          'src1',
+          ContentKind.movie,
+          const [],
+          const [alsoInA],
+          categoryId: 'a',
+          onlyIfAbsent: true,
+        ),
+        isFalse,
+      );
+
+      expect(
+        (await db.readMediaItems(
+          'src1',
+          ContentKind.movie,
+          categoryId: 'a',
+        )).map((i) => i.id),
+        ['m1'],
+      );
+      await db.close();
+    });
+  });
+
   group('AppDatabase channels', () {
     test('persists a channel catch-up window across replaceLibrary', () async {
       final db = await AppDatabase.openAt(dbPath());
