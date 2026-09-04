@@ -267,8 +267,9 @@ class MediaTabController extends ChangeNotifier {
       // exception's own text (status + URL) goes in redacted beside it.
       DiagnosticsLog.instance.add(
         'library',
-        '${kind.name} source load failed reason=${e.runtimeType} '
-            'message=$message detail=${redactText(e.toString())}',
+        '${kind.name} source load failed source=${repo.source.name} '
+            'reason=${e.runtimeType} message=$message '
+            'detail=${redactText(e.toString())}',
       );
       _set(() {
         error = message;
