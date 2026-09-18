@@ -11,9 +11,9 @@
     "verify-build": "npm run build && node scripts/check-bundle.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.112.4"
+    "@supabase/supabase-js": "^2.116.0"
   },
   "devDependencies": {
-    "vite": "^8.2.2"
+    "vite": "^8.3.0"
   }
 }
