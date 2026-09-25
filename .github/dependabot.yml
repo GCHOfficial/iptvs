@@ -31,6 +31,23 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # The marketing site + knowledge base (kb/: Astro/Starlight, deployed with
+  # wrangler). It was missing from this file, so it only ever received security
+  # *alerts* — never the version PRs that would have prevented them (alert #4
+  # was a stale `sharp` nested under wrangler -> miniflare while the site's own
+  # `sharp` was already fixed). Grouped like the panel.
+  - package-ecosystem: "npm"
+    directory: "/kb"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(kb)"
+    groups:
+      kb-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # GitHub Actions used by the build/release workflows — all bumps in one PR.
   - package-ecosystem: "github-actions"
     directory: "/"
