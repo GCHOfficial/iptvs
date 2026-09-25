@@ -263,14 +263,19 @@ class StalkerSource
   }
 
   @override
-  Future<List<Category>> categories() async {
+  Future<List<Category>> categories() async => [
+    for (final g in await _fetchGenres())
+      Category(id: '${g['id']}', title: '${g['title']}'),
+  ];
+
+  Future<List<Map<String, dynamic>>> _fetchGenres() async {
     final r = await _call({'type': 'itv', 'action': 'get_genres'});
     final js = r['js'];
     if (js is! List) return const [];
-    return js
-        .map((e) => Map<String, dynamic>.from(e))
-        .map((g) => Category(id: '${g['id']}', title: '${g['title']}'))
-        .toList();
+    return [
+      for (final e in js)
+        if (e is Map) Map<String, dynamic>.from(e),
+    ];
   }
 
   @override
@@ -925,12 +930,16 @@ class StalkerSource
     // "expiry shows unknown", with no way to tell a payload that never carried
     // a date from one carrying it under a name this parser doesn't know.
     if (mainInfo != null) {
-      _debug('expiry unknown from=get_main_info '
-          '${describeStalkerExpiryPayload(mainInfo)}');
+      _debug(
+        'expiry unknown from=get_main_info '
+        '${describeStalkerExpiryPayload(mainInfo)}',
+      );
     }
     if (profile != null) {
-      _debug('expiry unknown from=get_profile '
-          '${describeStalkerExpiryPayload(profile)}');
+      _debug(
+        'expiry unknown from=get_profile '
+        '${describeStalkerExpiryPayload(profile)}',
+      );
     }
     if (mainInfo == null && profile == null) {
       _debug('expiry unknown: no account payload was readable');
@@ -954,7 +963,7 @@ class StalkerSource
       final channels = debugApi != null
           ? await _fetchAllChannelsViaCall()
           : await _fetchAllChannelsFromBytes();
-      if (channels.isNotEmpty) return channels;
+      if (channels.isNotEmpty) return _withCensoredGenres(channels);
     } on StalkerException catch (e) {
       // Some portals only expose ITV through paginated get_ordered_list.
       _debug(
@@ -970,6 +979,60 @@ class StalkerSource
       );
     }
     return _fetchChannelsWithOrderedList();
+  }
+
+  /// Adds the channels of adult ("censored") genres that `get_all_channels`
+  /// left out.
+  ///
+  /// Ministra marks adult genres `censored: 1`, and many portals drop those
+  /// genres' channels from `get_all_channels` — a MAG box keeps them behind
+  /// its parental PIN and fetches them per genre. The same portals do return
+  /// them from `get_ordered_list` for that genre, so this asks for exactly
+  /// those genres and nothing else: one extra request per adult genre, and
+  /// none when the portal already included them. A genre is treated as adult
+  /// when the portal flags it or when its title says so (portals that never
+  /// set the flag still name the genre "Adult"/"XXX"/"18+").
+  ///
+  /// Fails soft: a backfill that errors keeps the catalog it already has, since
+  /// losing every channel over the adult genres would be the worse outcome.
+  Future<List<Channel>> _withCensoredGenres(List<Channel> channels) async {
+    final List<Map<String, dynamic>> genres;
+    try {
+      genres = await _fetchGenres();
+    } on Exception catch (e) {
+      _debug('censored genres: get_genres failed: ${e.runtimeType}');
+      return channels;
+    }
+    final populated = {for (final c in channels) c.categoryId};
+    final missing = [
+      for (final g in genres)
+        if (isCensoredStalkerGenre(g) && !populated.contains('${g['id']}'))
+          '${g['id']}',
+    ];
+    if (missing.isEmpty) return channels;
+    final seen = {for (final c in channels) c.id};
+    final out = [...channels];
+    var added = 0;
+    for (final genre in missing) {
+      try {
+        final rows = await _getOrderedList(type: 'itv', genre: genre);
+        for (final row in rows) {
+          row.putIfAbsent('tv_genre_id', () => genre);
+          final channel = _mapChannel(row);
+          if (seen.add(channel.id)) {
+            out.add(channel);
+            added++;
+          }
+        }
+      } on Exception catch (e) {
+        _debug('censored genre backfill failed: ${e.runtimeType}');
+      }
+    }
+    DiagnosticsLog.instance.add(
+      'parse:stalker',
+      'censored_genres=${missing.length} backfilled_channels=$added',
+    );
+    return out;
   }
 
   /// [debugApi]-backed path: the override already returns decoded `js`, so
@@ -2586,4 +2649,18 @@ _ingestStalkerChannels(Uint8List bytes) {
     portalErrorMessage: null,
     rejectedRows: list.length - channels.length,
   );
+}
+
+final _adultGenreTitle = RegExp(
+  r'adult|xxx|porn|erotic|\b18\s*\+|\+\s*18\b',
+  caseSensitive: false,
+);
+
+/// Whether a Stalker `get_genres` row is an adult genre: flagged `censored`
+/// by the portal, or titled like one.
+@visibleForTesting
+bool isCensoredStalkerGenre(Map<String, dynamic> genre) {
+  final flag = genre['censored'];
+  if (flag == true || flag == 1 || flag == '1' || flag == 'true') return true;
+  return _adultGenreTitle.hasMatch('${genre['title'] ?? ''}');
 }

@@ -21,9 +21,10 @@ on:
 # it can: the Windows-runner C++ (GDI overlay, HDR badges), the Android Kotlin
 # (native HDR player / preview engine), and the workflow YAML.
 #
-# java-kotlin needs a CodeQL CLI that accepts the app's Kotlin (2.4.10).
-# Support landed in CLI 2.26.2 / codeql-bundle-v2.26.2 — an older CLI aborts
-# with "Kotlin version 2.4.10 is too recent" and fails the whole analysis.
+# java-kotlin needs a CodeQL CLI that accepts the app's Kotlin (2.4.20).
+# Support landed in CLI 2.27.1 / codeql-bundle-v2.27.1 (its extractor vendors
+# kotlin-compiler 2.4.20) — an older CLI aborts with "Kotlin version 2.4.20 is
+# too recent" and fails the whole analysis.
 #
 # **The `codeql-action` refs below are pinned to a SHA, not to a floating tag,
 # so the bundle version is fixed by that pin** — bumping Kotlin without also
@@ -31,8 +32,9 @@ on:
 # the bundle a candidate SHA actually ships before pinning it:
 #   gh api repos/github/codeql-action/contents/src/defaults.json?ref=<sha> \
 #     --jq '.content' | base64 -d
-# The current pin ships codeql-bundle-v2.26.2. Kotlin 2.4.0 -> 2.4.10
-# (deps#155) is exactly the upgrade that required moving off the 2.26.1 pin.
+# The current pin (v4.38.2) ships codeql-bundle-v2.27.1. Kotlin 2.4.0 -> 2.4.10
+# (deps#155) and then 2.4.10 -> 2.4.20 (deps#220) are each exactly the kind of
+# upgrade that required moving the pin.
 #
 # Not covered:
 #   - javascript-typescript: web/ is only Flutter's generated bootstrap (no source).
@@ -72,7 +74,7 @@ jobs:
           # (android/app/libs/libmpv-dovi.aar); other languages don't need it.
           lfs: ${{ matrix.language == 'java-kotlin' }}
 
-      - uses: github/codeql-action/init@bce182f857edf1feab116e9795a3393d21977282 # v4
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -92,7 +94,7 @@ jobs:
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Build Windows (C++)
         if: matrix.language == 'c-cpp'
@@ -131,6 +133,6 @@ jobs:
           flutter pub get
           flutter build apk --debug --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 
-      - uses: github/codeql-action/analyze@bce182f857edf1feab116e9795a3393d21977282 # v4
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: "/language:${{ matrix.language }}"

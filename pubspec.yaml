@@ -43,11 +43,11 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.6
   xml: ^7.0.1
-  flutter_secure_storage: ^11.0.0
+  flutter_secure_storage: ^11.2.0
   crypto: ^3.0.7
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
-  cached_network_image: ^4.0.0
+  cached_network_image: ^4.0.2
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1
