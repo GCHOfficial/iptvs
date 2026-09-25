@@ -191,7 +191,17 @@ void main() {
   Future<void> unmount(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox());
     await tester.runAsync(() => db.epgIngest.cancelAndWait());
-    await tester.pump();
+    // A query issued under the fake clock while real-async work (a favorite
+    // write, the background guide ingest) holds sqflite's lock arms sqflite's
+    // 10 s lock-*warning* timer (`setLockWarningInfo`) in the fake zone, where
+    // nothing ever fires or cancels it. The race — e.g. `epgChanged` →
+    // `nowNext` landing while OK's favorite write is in flight — is
+    // timing-dependent: lost, it failed "A Timer is still pending" on CI while
+    // passing locally. Step the fake clock past it: the tree is gone, so
+    // nothing else is scheduled, and at worst the warning prints once. Don't
+    // drain with `runAsync` here instead — that lets a media tab's poster
+    // loads run for real and hit the absent path_provider plugin.
+    await tester.pump(const Duration(seconds: 11));
   }
 
   String focusLabel() => focusRouteKey(FocusManager.instance.primaryFocus);
@@ -962,7 +972,11 @@ void main() {
     final replacementRepo = LibraryRepository(source: _ManySource(), db: db);
     await tester.pumpWidget(
       MaterialApp(
-        home: ChannelListScreen(repo: replacementRepo, config: config, store: store),
+        home: ChannelListScreen(
+          repo: replacementRepo,
+          config: config,
+          store: store,
+        ),
       ),
     );
     await pumpUntil(tester, find.text('Channel 0'));
