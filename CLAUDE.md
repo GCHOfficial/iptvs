@@ -10,7 +10,7 @@ doc before working in its area**, and update doc + this file together when behav
 - [docs/android-signing.md](docs/android-signing.md) — signing-compromise evidence, package-identity recovery decision, protected release-key setup, and APK certificate gates.
 - [docs/store-publishing.md](docs/store-publishing.md) — Android/Play and Windows/Microsoft Store identities, signing roles, packaging, channel-specific updater ownership, and the per-release submission procedure. Scoped to what a *future* release needs; the completed one-time launch checklists and certification evidence were moved to a gitignored `docs/private/` record.
 - [docs/ios.md](docs/ios.md) — **player implemented, nothing shipped to users yet.** The iOS scope: why the App Store is deliberately skipped, AltStore Classic sideloading (worldwide, $0, 7-day expiry) and its source manifest, and the player — a **single full-hybrid release** (no staged mpv-only tier): a presented `IptvsPlayerViewController` owning an `AVPlayerLayer` (default engine, real HDR/PiP/AirPlay) with libmpv via `media_kit` as the fallback for containers AVFoundation refuses (always SDR on iOS). Compiles, `swift test`, and simulator builds are green; on-device validation (real HDR, real provider headers) is still outstanding. The audio-session blocker is resolved via a git-pin to media_kit's unreleased `iosManageAudioSession` (upstream cadence has stalled — assume a git-pin, not a release, is the long-term posture). AltStore PAL and tvOS are out of scope, with the PAL rejection recorded as a revisitable decision.
-- [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
+- [docs/sources.md](docs/sources.md) — the provider layer's intricate corners: Stalker adult ("censored") genres that `get_all_channels` omits, multiple EPG guides per source (the claim rules that decide which guide serves a channel, and why a row union would be wrong), how each provider obtains a subscription expiry (Stalker's authorize-before-asking ordering, field/format coverage, the far-future sentinel and its phone-number trap, the shape-only diagnostics), the device-local expiry cache and its staleness rules, and the M3U→Xtream upgrade — where it runs, why cloud-managed sources are skipped, and why the web panel suggests while only the app can prove.
 - [docs/tv-navigation.md](docs/tv-navigation.md) — the D-pad/focus system: selection models, the Back ladder, `TvTextField`/`FocusableCard` internals, the EPG grid cursor.
 - [docs/player.md](docs/player.md) — the playback stack: Android dual-engine + HDR, Windows native surface, iOS native surface (implemented, on-device validation pending), the shared-engine preview handoff, auto-reconnect, PiP.
 - [docs/cloud-sync.md](docs/cloud-sync.md) — the Supabase panel, pairing, the RLS security model, cloud + device-side profiles.
@@ -121,7 +121,8 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   by tests). `Source.subscriptionExpiry()` feeds the sources screen's expiry badge as an explicit
   dated/unlimited/unknown value (never collapse unlimited into unknown); shared parsing lives in
   `expiry.dart` — **read [docs/sources.md](docs/sources.md) before touching expiry or the
-  M3U→Xtream upgrade.** Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
+  M3U→Xtream upgrade.** Stalker also backfills adult ("censored") genres that
+  `get_all_channels` omits, via per-genre `get_ordered_list` (docs/sources.md). Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
   handshake **+ `get_profile`**, before `account_info` — `_call` only guarantees the handshake, and
   the sources screen builds a fresh source per card, which is why the badge read unknown on every
   portal). A far-future sentinel is **unlimited**, but only when written as a date — a bare number
@@ -269,7 +270,10 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `Source.resolveArchive`). `diagnostics_screen.dart` views/exports the in-memory log;
   `profile_pick_screen.dart` is the boot-time profile picker.
 - **`lib/widgets/`** — shared widgets: `focusable_card.dart` and `tv_text_field.dart` (central to
-  TV navigation — see docs/tv-navigation.md), `profile_avatar.dart`, `favorite_controls.dart`,
+  TV navigation — see docs/tv-navigation.md), `app_bar_action.dart` (AppBar actions are icon +
+  **label** on the wide layout — every TV, where a remote can't hover a tooltip — and icon-only
+  with a tooltip below it; use it rather than a bare `IconButton` for AppBar actions),
+  `profile_avatar.dart`, `favorite_controls.dart`,
   `release_notes_view.dart` (dependency-free changelog renderer used by the update dialog), and
   `image_utils.dart` (all network images go through `cached_network_image` with display-sized
   decode — don't add bare `Image.network`). **Pass `memCacheWidth` alone, never both dimensions:**

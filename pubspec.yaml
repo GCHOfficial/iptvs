@@ -37,17 +37,17 @@ dependencies:
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
-  sqflite: ^2.4.3
-  sqflite_common_ffi: ^2.4.2
+  sqflite: ^2.4.4
+  sqflite_common_ffi: ^2.4.3
   sqlite3_flutter_libs: ^0.6.0+eol
   path: ^1.9.1
   path_provider: ^2.1.6
   xml: ^7.0.1
-  flutter_secure_storage: ^11.0.0
+  flutter_secure_storage: ^11.2.0
   crypto: ^3.0.7
   supabase_flutter: ^2.15.4
   url_launcher: ^6.3.2
-  cached_network_image: ^4.0.0
+  cached_network_image: ^4.0.2
   package_info_plus: ^10.2.1
   cryptography: ^2.9.0
   timezone: ^0.11.1

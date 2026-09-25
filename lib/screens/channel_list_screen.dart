@@ -14,6 +14,7 @@ import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
 import '../theme.dart';
+import '../widgets/app_bar_action.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/routed_focus_node.dart';
 import '../player/ios_engine.dart';
@@ -1623,9 +1624,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: playRepo.source.name,
         bufferPreset: _bufferPresetForChannel(channel),
         initialAspectLabel: _configForChannel(channel).aspectModeLabel,
-        onAspectChanged: (label) => unawaited(
-          _persistAspectMode(_configForChannel(channel), label),
-        ),
+        onAspectChanged: (label) =>
+            unawaited(_persistAspectMode(_configForChannel(channel), label)),
         epgNow: epg.now,
         epgNext: epg.next,
         existingPlayer: decision.adoptsEmbeddedPreview ? _preview.player : null,
@@ -2569,23 +2569,23 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                   children: [
                     if (_tab == ContentKind.live &&
                         _previousPlayedLiveChannelId != null)
-                      IconButton(
-                        tooltip: 'Last channel',
-                        icon: const Icon(Icons.swap_horiz_rounded),
+                      AppBarAction(
+                        label: 'Last channel',
+                        icon: Icons.swap_horiz_rounded,
                         onPressed: _zapToPreviousChannel,
                       ),
                     if (widget.onManageSources != null)
-                      IconButton(
-                        tooltip: 'Sources',
-                        icon: const Icon(Icons.dns_outlined),
+                      AppBarAction(
+                        label: 'Sources',
+                        icon: Icons.dns_outlined,
                         onPressed: () {
                           unawaited(_preview.stop());
                           widget.onManageSources?.call();
                         },
                       ),
-                    IconButton(
-                      tooltip: 'Diagnostics',
-                      icon: const Icon(Icons.bug_report_outlined),
+                    AppBarAction(
+                      label: 'Diagnostics',
+                      icon: Icons.bug_report_outlined,
                       onPressed: () async {
                         await _preview.stop();
                         if (!context.mounted) return;
@@ -2600,9 +2600,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                         );
                       },
                     ),
-                    IconButton(
+                    AppBarAction(
+                      label: 'Help',
                       tooltip: 'Help & about',
-                      icon: const Icon(Icons.help_outline),
+                      icon: Icons.help_outline,
                       onPressed: () async {
                         await _preview.stop();
                         if (!context.mounted) return;
@@ -2615,9 +2616,10 @@ class _ChannelListScreenState extends State<ChannelListScreen>
                     ),
                     ListenableBuilder(
                       listenable: _dataListenable,
-                      builder: (context, _) => IconButton(
+                      builder: (context, _) => AppBarAction(
+                        label: 'Refresh',
                         tooltip: 'Refresh from source',
-                        icon: const Icon(Icons.refresh),
+                        icon: Icons.refresh,
                         onPressed:
                             _live.loading ||
                                 (_tab != ContentKind.live &&

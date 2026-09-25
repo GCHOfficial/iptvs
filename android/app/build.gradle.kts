@@ -153,9 +153,9 @@ dependencies {
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
     // compositor switching the panel into HDR — something mpv's GL render path can't
     // do on Android.
-    implementation("androidx.media3:media3-exoplayer:1.11.0")
-    implementation("androidx.media3:media3-exoplayer-hls:1.11.0")
-    implementation("androidx.media3:media3-ui:1.11.0")
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
 
     // libmpv (gpu-next / libplacebo) is the FALLBACK engine, used only when ExoPlayer
     // can't decode the video track — chiefly Dolby Vision Profile 5 (single-layer, no
@@ -171,7 +171,7 @@ dependencies {
 
     // Jetpack Compose for the native HDR player's control overlay. The BOM keeps
     // the androidx.compose.* artifacts on a single, mutually-compatible version.
-    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")

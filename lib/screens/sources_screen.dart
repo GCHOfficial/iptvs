@@ -17,6 +17,7 @@ import '../sources/source_config.dart';
 import '../sources/source.dart';
 import '../sources/m3u_upgrade.dart';
 import '../theme.dart';
+import '../widgets/app_bar_action.dart';
 import '../widgets/focusable_card.dart';
 import '../widgets/tv_text_field.dart';
 import 'cloud_sync_screen.dart';
@@ -210,9 +211,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
       appBar: AppBar(
         title: const Text('Sources'),
         actions: [
-          IconButton(
-            tooltip: 'Profiles',
-            icon: const Icon(Icons.switch_account_outlined),
+          AppBarAction(
+            label: 'Profiles',
+            icon: Icons.switch_account_outlined,
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute(
@@ -228,9 +229,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
             },
           ),
           if (CloudConfig.isConfigured)
-            IconButton(
-              tooltip: 'Cloud sync',
-              icon: const Icon(Icons.cloud_sync_outlined),
+            AppBarAction(
+              label: 'Cloud sync',
+              icon: Icons.cloud_sync_outlined,
               onPressed: () async {
                 await Navigator.of(context).push(
                   MaterialPageRoute(
@@ -242,9 +243,10 @@ class _SourcesScreenState extends State<SourcesScreen> {
                 await _reload();
               },
             ),
-          IconButton(
-            tooltip: 'Metadata',
-            icon: const Icon(Icons.auto_awesome_outlined),
+          AppBarAction(
+            label: 'Metadata',
+            tooltip: 'Posters, ratings and descriptions',
+            icon: Icons.auto_awesome_outlined,
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
                 builder: (_) =>
@@ -252,9 +254,9 @@ class _SourcesScreenState extends State<SourcesScreen> {
               ),
             ),
           ),
-          IconButton(
-            tooltip: 'Privacy & support',
-            icon: const Icon(Icons.info_outline),
+          AppBarAction(
+            label: 'Privacy & support',
+            icon: Icons.info_outline,
             onPressed: () => Navigator.of(
               context,
             ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),

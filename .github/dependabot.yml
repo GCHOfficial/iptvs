@@ -31,6 +31,23 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # The marketing site + knowledge base (kb/: Astro/Starlight, deployed with
+  # wrangler). It was missing from this file, so it only ever received security
+  # *alerts* — never the version PRs that would have prevented them (alert #4
+  # was a stale `sharp` nested under wrangler -> miniflare while the site's own
+  # `sharp` was already fixed). Grouped like the panel.
+  - package-ecosystem: "npm"
+    directory: "/kb"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(kb)"
+    groups:
+      kb-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
   # GitHub Actions used by the build/release workflows — all bumps in one PR.
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -55,14 +72,9 @@ updates:
       gradle-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
-    ignore:
-      # AGP is pinned to 9.2.1 in android/settings.gradle.kts — 9.3 crashes
-      # **release** lint on url_launcher_android (NoSuchMethodError out of
-      # CommentDetector, JDK 17). A grouped minor bump already carried it to
-      # 9.3.1 once and broke the v0.1.44 release build; nothing caught it in
-      # review or CI because `lintVitalAnalyze*` runs on release variants only,
-      # so the smoke APK and every local `--debug` build skip it. Ignoring the
-      # artifact keeps that decision from being undone silently. Remove this
-      # together with the pin once the upstream regression is fixed.
-      - dependency-name: "com.android.tools.build:gradle"
-      - dependency-name: "com.android.application"
+    # AGP is deliberately no longer ignored. It was, on the belief that AGP 9.3
+    # broke release lint; the real cause was running 9.3's lint on JDK 17 (see
+    # android/settings.gradle.kts), and every workflow now runs JDK 21. One
+    # caveat still applies to an AGP bump: `lintVitalAnalyze*` runs on release
+    # variants only, so the PR's debug smoke APK does not exercise it — build a
+    # release APK before merging one.

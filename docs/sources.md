@@ -1,4 +1,4 @@
-# Sources — EPG guides, subscription expiry, and the M3U→Xtream upgrade
+# Sources — EPG guides, subscription expiry, the M3U→Xtream upgrade, and Stalker adult genres
 
 Detail for two provider-layer areas whose rules are summarised in CLAUDE.md: how a subscription
 expiry is obtained per provider, and how an M3U source that is really an Xtream panel gets
@@ -403,3 +403,35 @@ to a validated IP — and, more fundamentally, it means sending provider credent
 in cleartext, which directly contradicts what E2EE exists to guarantee for a profile that has it
 enabled. If it is ever built it needs its own threat model and an explicit decision for E2EE
 profiles, not a rider on a source-handling change.
+
+## Stalker adult ("censored") genres
+
+Ministra marks adult genres `censored: 1` in `get_genres`, and many portals
+leave those genres' channels **out of `get_all_channels`** — a MAG box keeps
+them behind its parental PIN and fetches them per genre. The same portals
+answer `get_ordered_list` for that genre normally. Reading `get_all_channels`
+alone therefore produced a source whose adult categories were silently empty
+(a user report: "why don't the adult channels show on my Stalker source?").
+
+`StalkerSource._withCensoredGenres` runs after a successful `get_all_channels`
+and fetches, through `get_ordered_list`, exactly the genres that are adult
+**and** came back with no channels. A genre is adult when the portal flags it
+(`censored` as `1`/`"1"`/`true`) or when its title says so
+(`isCensoredStalkerGenre`: adult/xxx/porn/erotic/18+) — portals that never set
+the flag still name the genre. Properties worth keeping:
+
+- **No cost when the portal already included them**: a populated genre is never
+  re-asked, so a portal that does return its adult channels makes zero extra
+  requests.
+- **Fails soft**: a refused `get_genres` or `get_ordered_list` keeps the catalog
+  already fetched; losing every channel over the adult genres would be worse.
+- **Diagnostics** log `censored_genres=N backfilled_channels=M` under
+  `parse:stalker`, so an export shows whether the backfill ran and found
+  anything.
+- The paginated fallback (`_fetchChannelsWithOrderedList`) needs none of this —
+  it already walks every genre with `get_ordered_list`.
+
+Hiding them again is the user's call, through the per-source category toggles
+in `source_settings_screen` — the app does not filter adult content itself.
+
+Pinned by `test/stalker_censored_genres_test.dart`.
