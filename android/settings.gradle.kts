@@ -36,7 +36,7 @@ plugins {
     // #172 acted on it — reverting a needed dependency upgrade to work around
     // a JDK version mismatch. The give-away is that release lint passes on
     // 9.3.1 under a JDK 21 toolchain, which is what local builds use.
-    id("com.android.application") version "9.3.1" apply false
+    id("com.android.application") version "9.4.1" apply false
     // Declared with `apply false` only to pin the Kotlin version that Flutter's
     // built-in Kotlin (AGP 9+) adopts. KGP is NOT applied to the app module — see
     // the plugins block in app/build.gradle.kts.
