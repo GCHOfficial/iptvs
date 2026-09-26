@@ -125,8 +125,9 @@ jobs:
 
   # Compile non-distributable debug APKs for every Android distribution. These
   # smoke builds catch flavor/manifest identity regressions without exposing a
-  # release or upload key. Distributable artifacts are produced exclusively by
-  # protected workflows with certificate verification.
+  # release or upload key. A final release build signed with the public debug
+  # key runs release lint (see that step). Distributable artifacts are produced
+  # exclusively by protected workflows with certificate verification.
   build-android:
     name: Build Android smoke APK (phone + TV)
     needs: [analyze-test, changes]
@@ -175,6 +176,27 @@ jobs:
         run: flutter build apk --debug --flavor googlePlay --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Verify Google Play identity excludes self-update capability
         run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-googleplay-debug.apk googlePlay
+      # Release lint (`lintVital*`) runs only on release variants, so the debug
+      # builds above never exercise it — and it is exactly what broke once
+      # already: AGP 9.3's lint on JDK 17 crashed the v0.1.44 *release* build
+      # after every PR check had passed. This runs the release workflow's own
+      # command so an AGP/Kotlin/lint regression fails the PR instead of a
+      # release.
+      #
+      # A release task refuses to configure without signing variables, so they
+      # point at the committed *public* debug keystore. The APK this produces is
+      # debug-signed, never uploaded, and could not be published anyway: the
+      # release workflow verifies the certificate against the protected
+      # fingerprint. No secret is involved, so this also runs on fork PRs.
+      - name: Release build (release lint gate, not distributable)
+        env:
+          IPTVS_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
+          IPTVS_ANDROID_KEYSTORE_PASSWORD: android
+          IPTVS_ANDROID_KEY_ALIAS: androiddebugkey
+          IPTVS_ANDROID_KEY_PASSWORD: android
+        run: |
+          flutter build apk --release --flavor githubDirect --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect
+          rm -f build/app/outputs/flutter-apk/app-githubdirect-release.apk
 
   # Windows desktop build. The libplacebo/Dolby-Vision libmpv-2.dll is fetched +
   # hash-verified automatically by windows/CMakeLists.txt at configure time; we

@@ -74,7 +74,7 @@ updates:
         update-types: ["minor", "patch"]
     # AGP is deliberately no longer ignored. It was, on the belief that AGP 9.3
     # broke release lint; the real cause was running 9.3's lint on JDK 17 (see
-    # android/settings.gradle.kts), and every workflow now runs JDK 21. One
-    # caveat still applies to an AGP bump: `lintVitalAnalyze*` runs on release
-    # variants only, so the PR's debug smoke APK does not exercise it — build a
-    # release APK before merging one.
+    # android/settings.gradle.kts), and every workflow now runs JDK 21. Release
+    # lint (`lintVital*`, release variants only) used to be the gap a debug
+    # smoke build could not see; build.yml now runs a non-distributable release
+    # build on every PR, so an AGP bump's PR checks cover it.

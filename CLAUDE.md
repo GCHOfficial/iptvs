@@ -50,7 +50,9 @@ configure time by `windows/CMakeLists.txt`; the Android libdovi AAR comes from *
 (`android/app/libs/libmpv-dovi.aar`), so a clone needs LFS to build Android. The Windows runner
 compiles `/utf-8` (non-ASCII literals trip C4066 under `/WX`). A fixed public debug keystore is
 committed for non-distributable debug builds. Release builds fail closed unless protected signing
-environment variables are present, and the release workflow verifies the resulting certificate;
+environment variables are present, and the release workflow verifies the resulting certificate.
+PR CI also runs one release build signed with that public debug key — solely so release lint
+(`lintVital*`, which debug builds skip; it broke v0.1.44) gates PRs; the APK is deleted, never uploaded;
 see `docs/android-signing.md` before touching package identity or signing.
 Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
 exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
