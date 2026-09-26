@@ -147,7 +147,7 @@ dependencies {
     // is ever reverted, this must go back to 1.18.0 or the build fails
     // `checkAarMetadata`. `androidx.core:core-ktx` is version-aligned with this
     // and follows automatically — it appears in that failure alongside `core`.
-    implementation("androidx.core:core:1.19.0")
+    implementation("androidx.core:core:1.19.1")
 
     // ExoPlayer/Media3 is the DEFAULT native-player engine: MediaCodec hardware
     // decode feeding a SurfaceView gives true HDR (HDR10/HDR10+/HLG/DV-P8) with the
