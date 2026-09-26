@@ -111,6 +111,13 @@ between Play and GitHub-direct installations.
 
 - Debug builds may use `android/app/debug.keystore` and are non-distributable.
 - The normal build workflow compiles a debug smoke APK and does not upload it.
+  It also runs one `githubDirect` **release** build, only so release lint
+  (`lintVital*`, which debug builds skip) gates every PR. That build gets the
+  signing variables pointed explicitly at the public `debug.keystore`, and the
+  APK is deleted, never uploaded. This is not a fallback: the release config
+  still refuses to configure without all four variables, and a debug-signed
+  APK cannot be published because the release workflow's certificate check
+  rejects it. Keep it that way: never give that step a real key.
 - Release builds never fall back to the debug signing configuration.
 - A release task fails when any signing environment variable is absent.
 - The release workflow verifies the built APK certificate against a separately
