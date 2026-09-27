@@ -1,7 +1,14 @@
 package com.gchofficial.iptvs.player
 
-/** Exactly one layer consumed by a system/remote Back press. */
-enum class PlayerBackAction { CloseMenu, CloseInfo, HideControls, Exit }
+/**
+ * Exactly one layer consumed by a system/remote Back press.
+ *
+ * [QuickListBack] is the odd rung out: it is not a layer this side can close,
+ * only one to report. Dart owns the quick list's mode stack (`schedule` →
+ * `channels` → `categories` → closed), so the Activity answers it by sending
+ * `zap:back` and lets Dart decide which of those four the press meant.
+ */
+enum class PlayerBackAction { QuickListBack, CloseMenu, CloseInfo, HideControls, Exit }
 
 /**
  * Pure Back-ladder policy shared by key and gesture navigation.
@@ -18,12 +25,21 @@ enum class PlayerBackAction { CloseMenu, CloseInfo, HideControls, Exit }
  * returns before `handleSystemBack` runs, so this function still describes the
  * whole ladder from the moment there is no number to clear. Don't add a
  * `ClearDigits` action to it.
+ *
+ * **The quick list, by contrast, *is* on this ladder** ([quickListOpen], its
+ * top rung), and the difference is exactly the one above: a gesture Back with
+ * the list open has something visible to close, so leaving it out would make
+ * the list uncloseable on a phone using gesture navigation. There is still no
+ * double peel on the key path — [ZapKeyPolicy] claims Back outright while the
+ * list is open, so `handleSystemBack` never runs for that press.
  */
 fun nextPlayerBackAction(
     menuOpen: Boolean,
     infoOpen: Boolean,
     controlsVisible: Boolean,
+    quickListOpen: Boolean = false,
 ): PlayerBackAction = when {
+    quickListOpen -> PlayerBackAction.QuickListBack
     menuOpen -> PlayerBackAction.CloseMenu
     infoOpen -> PlayerBackAction.CloseInfo
     controlsVisible -> PlayerBackAction.HideControls
