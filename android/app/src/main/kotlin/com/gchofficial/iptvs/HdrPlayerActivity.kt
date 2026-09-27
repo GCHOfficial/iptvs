@@ -36,6 +36,7 @@ import com.gchofficial.iptvs.player.PlayerBackGuard
 import com.gchofficial.iptvs.player.PlayerMenu
 import com.gchofficial.iptvs.player.PlayerScreen
 import com.gchofficial.iptvs.player.PlayerUiState
+import com.gchofficial.iptvs.player.QuickListState
 import com.gchofficial.iptvs.player.ReconnectPolicy
 import com.gchofficial.iptvs.player.ResolveAgainReply
 import com.gchofficial.iptvs.player.ResolveGate
@@ -138,6 +139,17 @@ class HdrPlayerActivity : ComponentActivity() {
     // push, so it can only ever be early, never stale.
     private var zapDigitsPendingOptimistic = false
 
+    // Optimistic mirror of "the quick list is on screen", the same shape and
+    // for the same synchronous reason as the digit mirror above: the
+    // authoritative answer arrives on `setQuickList` a frame or two after the
+    // key that asked for it, and the *next* key's meaning turns on it (Left
+    // opens the list, then Left ascends its mode stack). Only the two
+    // unambiguous commands move it — open and close. `zap:back` and
+    // `zap:activate` deliberately do not, because whether either of those
+    // closes the list is a question about a mode stack only Dart holds.
+    // Replaced wholesale by the next push, so it can only ever be early.
+    private var zapQuickListOpenOptimistic = false
+
     // When Dart last reported a zap resolve in flight (`setZapBanner`'s
     // `settling`). While one is, the reconnect watchdog stands down: the
     // stream it would be reconnecting is one Dart is deliberately replacing.
@@ -190,6 +202,7 @@ class HdrPlayerActivity : ComponentActivity() {
             controlsVisible = uiState.controlsVisible,
             digitsPending = uiState.digitBuffer.isNotEmpty() || zapDigitsPendingOptimistic,
             isRepeat = event.repeatCount > 0,
+            quickListOpen = quickListOpen(),
         )
         if (!decision.consumed) return false
         zapConsumedKeyCode = event.keyCode
@@ -204,9 +217,21 @@ class HdrPlayerActivity : ComponentActivity() {
         ) {
             zapDigitsPendingOptimistic = false
         }
+        if (decision.action == ZapKeyAction.OpenList) {
+            zapQuickListOpenOptimistic = true
+        } else if (decision.action == ZapKeyAction.CloseList) {
+            zapQuickListOpenOptimistic = false
+        }
         decision.command?.let { sendZap(it) }
         return true
     }
+
+    /**
+     * Whether the quick list should be treated as open *right now* — Dart's
+     * last push, or the optimistic mirror while its answer is in the air.
+     */
+    private fun quickListOpen(): Boolean =
+        (::uiState.isInitialized && uiState.quickList.open) || zapQuickListOpenOptimistic
 
     /** Outbound half of the zap wire contract (see `MainActivity.requestZap`). */
     private fun sendZap(command: String) {
@@ -225,8 +250,14 @@ class HdrPlayerActivity : ComponentActivity() {
                 menuOpen = uiState.openMenu != PlayerMenu.None,
                 infoOpen = uiState.infoOpen,
                 controlsVisible = uiState.controlsVisible,
+                quickListOpen = quickListOpen(),
             )
         ) {
+            // The list's rungs are Dart's mode stack, not a layer this side
+            // can close. Only the *gesture* Back path reaches this: a key Back
+            // was already claimed by ZapKeyPolicy and sent the same command,
+            // which is why one press can never peel two rungs.
+            PlayerBackAction.QuickListBack -> sendZap("zap:back")
             PlayerBackAction.CloseMenu -> uiState.openMenu = PlayerMenu.None
             PlayerBackAction.CloseInfo -> uiState.infoOpen = false
             PlayerBackAction.HideControls -> uiState.controlsVisible = false
@@ -783,6 +814,34 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     /**
+     * The quick list, pushed by Dart on every controller notification.
+     *
+     * Presentation only, like [applyZapBanner]: Dart owns the rows, the
+     * cursor and the mode stack, and this is the parsed window
+     * ([QuickListState.fromPayload], which never throws). A push with
+     * `open:false` is a **tear-down instruction**, not an absence, so it is
+     * applied exactly like any other.
+     *
+     * Opening it takes the screen from the chrome. That is not cosmetic: the
+     * list claims the D-pad at the Activity boundary whatever the chrome is
+     * doing ([ZapKeyPolicy]), so leaving the control row up would leave a
+     * focused Compose button on screen that no arrow key can walk away from —
+     * the same stranding "Go to live" once caused. Hiding the controls also
+     * closes any open menu and the info panel through the overlay's existing
+     * `controlsVisible` effect.
+     */
+    fun applyQuickList(args: Map<*, *>) {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        val next = QuickListState.fromPayload(args)
+        val wasOpen = uiState.quickList.open
+        uiState.quickList = next
+        zapQuickListOpenOptimistic = next.open
+        if (next.open && !wasOpen) {
+            uiState.controlsVisible = false
+        }
+    }
+
+    /**
      * Applies a settled zap: this Activity keeps playing, on the same surface,
      * with a new locator.
      *
@@ -997,6 +1056,7 @@ class HdrPlayerActivity : ComponentActivity() {
         },
         onBack = { finish() },
         onEnterPip = { enterPip() },
+        onZapCommand = { sendZap(it) },
     )
 
     override fun onStart() {
@@ -1279,7 +1339,8 @@ class HdrPlayerActivity : ComponentActivity() {
          * The live player Activity, while one exists.
          *
          * [MainActivity] routes the inbound zap methods (`zapTo`,
-         * `setZapBanner`) here: they are Dart→native pushes for a *running*
+         * `setZapBanner`, `setQuickList`) here: they are Dart→native pushes
+         * for a *running*
          * player, and a MethodChannel can only be registered once per process
          * — so the channel handler stays in `MainActivity` and forwards, the
          * same shape `logPlaybackDiagnostic` already uses in the other

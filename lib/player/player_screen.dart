@@ -22,6 +22,7 @@ import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
 import 'zap_command.dart';
+import 'zap_quick_list.dart';
 
 /// Buffering/dropped this long before a non-forced live reconnect fires.
 /// Mirrors Android's `ReconnectPolicy.STALL_RECONNECT_MS`.
@@ -1061,6 +1062,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (zap == null) return;
     zap.onStopCurrent = _zapStopCurrent;
     zap.onPlay = _zapPlay;
+    // The one thing the quick list asks the *route* to do: end the live
+    // session so the channel list can open catch-up, which is VOD-shaped and
+    // deliberately never played in place (see
+    // [LiveZapController.pendingCatchup]).
+    zap.onExitRequested = _back;
     zap.addListener(_onZapChanged);
   }
 
@@ -1081,6 +1087,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     setState(() {});
     _zapBannerAtMs = DateTime.now().millisecondsSinceEpoch;
     unawaited(_pushZapBanner());
+    unawaited(_pushQuickList());
   }
 
   /// The cursor's banner, as the Linux native overlay's `iptvs-state` push
@@ -1090,6 +1097,51 @@ class _PlayerScreenState extends State<PlayerScreen>
     final zap = _zap;
     if (zap == null) return null;
     return <String, Object?>{...zap.bannerPayload(), 'atMs': _zapBannerAtMs};
+  }
+
+  /// The quick list as the Linux native overlay's `iptvs-state` push carries
+  /// it — a **sibling** of the `zap` block, not a field inside it, because
+  /// the two describe different things (the banner is the cursor's channel,
+  /// the quick list is a browsable list that may be showing a different
+  /// source's categories entirely) and they carry colliding key names.
+  ///
+  /// Null when this route has no zap session; a closed list is pushed as
+  /// `{open: false, …}` so the Lua side always has something to tear down
+  /// with rather than having to treat "absent" as "close".
+  Map<String, Object?>? _quickListOverlayPayload() =>
+      _zap?.quickListPayload();
+
+  /// The shared Flutter overlay's quick list, or null off any route that
+  /// doesn't zap. The overlay draws it itself from this pure value object —
+  /// the exact arrangement [ZapBannerState] already uses, for the same
+  /// libmpv-free-testability reason.
+  ZapQuickListState? _quickListState() {
+    final zap = _zap;
+    if (zap == null || !_isLive) return null;
+    return zap.quickList;
+  }
+
+  /// Pushes the quick list to a native surface that draws its own chrome.
+  /// Same transport, tolerance and Linux special case as [_pushZapBanner].
+  Future<void> _pushQuickList() async {
+    final zap = _zap;
+    if (zap == null) return;
+    if (_linuxNativeSession != null) {
+      // Already carried by the `iptvs-state` push [_pushZapBanner] sent.
+      return;
+    }
+    if (!(_separateEngineOwnsPlayback || _usesWindowsNativeSurface)) return;
+    try {
+      await _nativeHdrPlayer.invokeMethod<void>(
+        'setQuickList',
+        zap.quickListPayload(),
+      );
+    } on MissingPluginException {
+      // Native half not implemented on this platform/build — expected until
+      // the Kotlin/C++ renderers land against this payload.
+    } catch (error) {
+      _logPlayback('zap quick list push failed: ${_redactPlayback('$error')}');
+    }
   }
 
   /// The Phase 3 counterpart of [_pushZapBanner] for the shared Flutter
@@ -1313,6 +1365,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_usesSharedEmbeddedOverlay) return false;
     return !(_usesWindowsNativeSurface || _separateEngineOwnsPlayback);
   }
+
+  /// Whether the in-player quick list is on screen. While it is, the arrows
+  /// belong to **it** rather than to channel up/down — the list is the thing
+  /// the user is looking at, and nothing may change channel behind it except
+  /// an explicit OK on a row (see [LiveZapController.handleCommand]).
+  bool get _zapListOpen => _zap?.quickListOpen ?? false;
 
   /// A zap keypress deliberately does **not** call [_handlePlaybackInput]:
   /// revealing the chrome on the first Up would hand the second Up to the
@@ -2668,6 +2726,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       reconnecting: _reconnecting,
       hdr10Plus: _hdr10Plus,
       zap: _zapOverlayPayload(),
+      quickList: _quickListOverlayPayload(),
     );
   }
 
@@ -3175,6 +3234,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       favorite: _favorite,
       liveSynced: _liveSynced,
       zap: _zapBannerState(),
+      quickList: _quickListState(),
       dynamicRangeLabel: _dynamicRangeLabel,
       onBack: _back,
       onToggleFavorite: _toggleFavorite,
@@ -3620,8 +3680,18 @@ class _PlayerScreenState extends State<PlayerScreen>
           // today: `_seekBy` early-returns for a live stream, so these were
           // dead keys there.
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            // Left opens the quick list, and once it is open Left is how the
+            // mode stack is climbed back up (schedule → channels →
+            // categories → closed) — the same peel-one-rung shape the live
+            // tab's Back ladder uses, and the mirror of Right descending it.
             if (_zapArrowKeysActive &&
-                _handleZapInput(const ZapCommand(ZapCommandKind.openList))) {
+                _handleZapInput(
+                  ZapCommand(
+                    _zapListOpen
+                        ? ZapCommandKind.back
+                        : ZapCommandKind.openList,
+                  ),
+                )) {
               return;
             }
             _handlePlaybackInput();
@@ -3630,7 +3700,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
             if (_zapArrowKeysActive &&
                 _handleZapInput(
-                  const ZapCommand(ZapCommandKind.previousChannel),
+                  ZapCommand(
+                    _zapListOpen
+                        ? ZapCommandKind.descend
+                        : ZapCommandKind.previousChannel,
+                  ),
                 )) {
               return;
             }
@@ -3675,8 +3749,17 @@ class _PlayerScreenState extends State<PlayerScreen>
             // control is never lost — just contextual, the same way the
             // native overlays hand the arrows to their control rows.
             const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+              // Over an open quick list the arrows move the **cursor**, and
+              // they move it the way it looks: Up is one row up the list
+              // (`zap:move:-1`), not "channel up", which is the next row
+              // *down*. The dedicated CHANNEL_UP/PAGE_UP keys keep their own
+              // list-order meaning — see `_handleQuickListCommand`.
               if (_zapArrowKeysActive &&
-                  _handleZapInput(const ZapCommand(ZapCommandKind.channelUp))) {
+                  _handleZapInput(
+                    _zapListOpen
+                        ? const ZapCommand(ZapCommandKind.move, -1)
+                        : const ZapCommand(ZapCommandKind.channelUp),
+                  )) {
                 return;
               }
               _handlePlaybackInput();
@@ -3685,7 +3768,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             const SingleActivator(LogicalKeyboardKey.arrowDown): () {
               if (_zapArrowKeysActive &&
                   _handleZapInput(
-                    const ZapCommand(ZapCommandKind.channelDown),
+                    _zapListOpen
+                        ? const ZapCommand(ZapCommandKind.move, 1)
+                        : const ZapCommand(ZapCommandKind.channelDown),
                   )) {
                 return;
               }
@@ -3707,6 +3792,18 @@ class _PlayerScreenState extends State<PlayerScreen>
             const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
                 _handleZapInput(
                   const ZapCommand(ZapCommandKind.previousChannel),
+                ),
+            // GUIDE is a dedicated key with no other meaning on this screen,
+            // so — unlike Left — it opens the quick list whether the chrome
+            // is up or not. Pressed again it closes it, because a dedicated
+            // key that does nothing the second time reads as a dead remote.
+            const SingleActivator(LogicalKeyboardKey.guide): () =>
+                _handleZapInput(
+                  ZapCommand(
+                    _zapListOpen
+                        ? ZapCommandKind.closeList
+                        : ZapCommandKind.openList,
+                  ),
                 ),
             for (final entry in kDigitEntryKeys.entries)
               SingleActivator(entry.key): () => _handleZapInput(

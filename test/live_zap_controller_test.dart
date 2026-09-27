@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/buffer_preset.dart';
 import 'package:iptvs/player/live_zap_controller.dart';
 import 'package:iptvs/player/zap_command.dart';
+import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 
@@ -90,6 +92,36 @@ class _FakeCatalog implements ZapCatalog {
 
   @override
   void log(String note) => logs.add(note);
+
+  // ── Quick list ───────────────────────────────────────────────────────────
+
+  /// Categories the top mode serves, and the channels behind each id.
+  List<ZapCategoryRow> categories = const [];
+  Map<String, List<ZapEntry>> channelsByCategory = {};
+  Map<String, List<Programme>> scheduleByChannel = {};
+
+  /// Held open so a test can keep a quick-list fetch in flight.
+  Completer<void>? listGate;
+  bool categoriesThrow = false;
+
+  @override
+  Future<List<ZapCategoryRow>> quickListCategories() async {
+    await listGate?.future;
+    if (categoriesThrow) throw StateError('no categories');
+    return categories;
+  }
+
+  @override
+  Future<List<ZapEntry>> quickListChannels(ZapCategoryRow category) async {
+    await listGate?.future;
+    return channelsByCategory[category.id] ?? const [];
+  }
+
+  @override
+  Future<List<Programme>> quickListSchedule(ZapEntry entry) async {
+    await listGate?.future;
+    return scheduleByChannel[entry.channelId] ?? const [];
+  }
 }
 
 /// Records what the player surface was asked to do, in order — the stop/play
@@ -531,18 +563,477 @@ void main() {
   });
 
   group('quick-list commands', () {
-    test('are not consumed yet, so a surface keeps its own behaviour', () {
-      // Phase 6 wires these; until then Left must fall through rather than
-      // swallow the key into a no-op.
+    test('move and descend are only this controller keys once open', () {
+      // With no list up, a cursor move and a descend are not zap commands at
+      // all — the surface keeps whatever those keys already did.
       final controller = _controller();
       addTearDown(controller.dispose);
-      for (final kind in const [
-        ZapCommandKind.openList,
-        ZapCommandKind.closeList,
-        ZapCommandKind.move,
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.move, 1)),
+        isFalse,
+      );
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.descend)),
+        isFalse,
+      );
+      // Open/close are always consumed: a close key handed on to mean
+      // something else is the surprise this avoids.
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.closeList)),
+        isTrue,
+      );
+      expect(
+        controller.handleCommand(const ZapCommand(ZapCommandKind.openList)),
+        isTrue,
+      );
+      expect(controller.quickListOpen, isTrue);
+    });
+
+    test('while open, every arrow-shaped command is consumed', () {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      for (final command in const [
+        ZapCommand(ZapCommandKind.move, 1),
+        ZapCommand(ZapCommandKind.descend),
+        ZapCommand(ZapCommandKind.back),
+        ZapCommand(ZapCommandKind.channelUp),
+        ZapCommand(ZapCommandKind.channelDown),
+        ZapCommand(ZapCommandKind.previousChannel),
+        ZapCommand(ZapCommandKind.activate),
       ]) {
-        expect(controller.handleCommand(ZapCommand(kind, 1)), isFalse);
+        expect(
+          controller.handleCommand(command),
+          isTrue,
+          reason: '$command must not fall through to the surface',
+        );
       }
+    });
+  });
+
+  group('quick list', () {
+    test('opens on the channels mode, cursor on the playing channel', () {
+      final controller = _controller(initialIndex: 1);
+      addTearDown(controller.dispose);
+      expect(controller.quickList, same(ZapQuickListState.closed));
+
+      controller.openQuickList();
+      final state = controller.quickList;
+      expect(state.open, isTrue);
+      expect(state.mode, ZapQuickListMode.channels);
+      expect(state.selectedIndex, 1);
+      expect(state.total, 3);
+      expect(state.rows[1].playing, isTrue);
+      expect(state.rows[1].selected, isTrue);
+      expect(state.rows[0].label, '1 · Channel a');
+    });
+
+    test('cursor clamps at both ends — it never wraps', () {
+      // Deliberately unlike the player's Up/Down. `zap:move` carries an
+      // arbitrary delta, so a page key wrapping a long list would be a jump
+      // the opposite key cannot undo.
+      final controller = _controller(initialIndex: 1);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+
+      controller.moveQuickList(-5);
+      expect(controller.quickList.selectedIndex, 0);
+      controller.moveQuickList(99);
+      expect(controller.quickList.selectedIndex, 2);
+    });
+
+    test('the dedicated channel keys move the cursor in list order', () {
+      final controller = _controller(initialIndex: 0);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      controller.handleCommand(const ZapCommand(ZapCommandKind.channelUp));
+      expect(controller.quickList.selectedIndex, 1);
+      controller.handleCommand(const ZapCommand(ZapCommandKind.channelDown));
+      expect(controller.quickList.selectedIndex, 0);
+      // …and none of it played anything.
+      expect(controller.playing.channelId, 'a');
+      expect(controller.zapped, isFalse);
+    });
+
+    test('OK on a channel zaps to it immediately and closes', () async {
+      final surface = _Surface();
+      final controller = _controller(initialIndex: 0);
+      addTearDown(controller.dispose);
+      surface.attach(controller);
+      controller.openQuickList();
+      controller.moveQuickList(2);
+      controller.activateQuickList();
+      expect(controller.quickListOpen, isFalse, reason: 'closes on activate');
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, 'c');
+      expect(surface.events, ['stop', 'changed c', 'play c']);
+    });
+
+    test('Back climbs the stack one rung per press, then closes', () async {
+      final catalog = _FakeCatalog()
+        ..categories = const [
+          ZapCategoryRow(id: '', title: 'All channels'),
+          ZapCategoryRow(id: 'news', title: 'News'),
+        ];
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      catalog.scheduleByChannel['a'] = [
+        Programme(
+          channelId: 'a',
+          title: 'Breakfast',
+          start: DateTime.now().subtract(const Duration(hours: 2)),
+          stop: DateTime.now().subtract(const Duration(hours: 1)),
+        ),
+      ];
+
+      controller.openQuickList();
+      controller.descendQuickList(); // channels → schedule
+      await Future<void>.delayed(_past);
+      expect(controller.quickListMode, ZapQuickListMode.schedule);
+
+      controller.quickListBack();
+      expect(controller.quickListMode, ZapQuickListMode.channels);
+
+      controller.quickListBack(); // channels → categories
+      await Future<void>.delayed(_past);
+      expect(controller.quickListMode, ZapQuickListMode.categories);
+      expect(controller.quickList.rows.length, 2);
+
+      controller.quickListBack(); // top rung → closed
+      expect(controller.quickListOpen, isFalse);
+    });
+
+    test('the categories mode opens pre-selected on the current range', () async {
+      final catalog = _FakeCatalog()
+        ..categories = const [
+          ZapCategoryRow(id: '', title: 'All channels'),
+          ZapCategoryRow(id: 'news', title: 'News'),
+          ZapCategoryRow(id: 'sport', title: 'Sport'),
+        ];
+      final controller = LiveZapController(
+        entries: zapEntriesOf(
+          [_channel('a', number: 1)],
+          config: _config('src'),
+          sourceName: 'Src',
+        ),
+        initialIndex: 0,
+        catalog: catalog,
+        rangeCategoryId: 'sport',
+        rangeLabel: 'Sport',
+        settleDelay: _settle,
+        digitCommitDelay: _digits,
+        messageDuration: _digits,
+      );
+      addTearDown(controller.dispose);
+      expect(controller.rangeLabel, 'Sport');
+
+      controller.openQuickList();
+      controller.quickListBack();
+      await Future<void>.delayed(_past);
+      expect(controller.quickList.selectedIndex, 2);
+      expect(controller.quickList.rows[2].playing, isTrue);
+    });
+
+    test('picking a category re-ranges Up/Down too', () async {
+      final config = _config('src');
+      final catalog = _FakeCatalog()
+        ..categories = const [ZapCategoryRow(id: 'news', title: 'News')];
+      catalog.channelsByCategory['news'] = zapEntriesOf(
+        [_channel('n1', number: 10), _channel('b', number: 2)],
+        config: config,
+        sourceName: 'Src',
+      );
+      final controller = _controller(catalog: catalog, config: config);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+
+      await controller.applyQuickListCategory(
+        const ZapCategoryRow(id: 'news', title: 'News'),
+      );
+      expect(controller.quickListMode, ZapQuickListMode.channels);
+      expect(controller.rangeCategoryId, 'news');
+      expect(controller.rangeLabel, 'News');
+      expect(controller.entries.length, 2);
+      expect(controller.quickList.heading, 'News');
+      // The playing channel ('a') isn't in the new range, so the cursor
+      // starts at the top — and Up/Down now walk the *new* list.
+      expect(controller.index, 0);
+      controller.channelUp();
+      expect(controller.current.channelId, 'b');
+    });
+
+    test('a re-range that still contains the playing channel keeps it', () async {
+      final config = _config('src');
+      final catalog = _FakeCatalog();
+      catalog.channelsByCategory['news'] = zapEntriesOf(
+        [_channel('x'), _channel('a', number: 1)],
+        config: config,
+        sourceName: config.label,
+      );
+      final controller = _controller(catalog: catalog, config: config);
+      addTearDown(controller.dispose);
+      await controller.applyQuickListCategory(
+        const ZapCategoryRow(id: 'news', title: 'News'),
+      );
+      expect(controller.playing.channelId, 'a');
+      expect(controller.playingIndex, 1);
+      expect(controller.index, 1);
+    });
+
+    test('an empty category is refused, not applied', () async {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      await controller.applyQuickListCategory(
+        const ZapCategoryRow(id: 'empty', title: 'Empty'),
+      );
+      expect(controller.entries.length, 3, reason: 'range untouched');
+      expect(controller.message, 'No channels in Empty');
+    });
+
+    test('a superseded fetch never publishes', () async {
+      final catalog = _FakeCatalog()
+        ..categories = const [ZapCategoryRow(id: 'a', title: 'A')];
+      final gate = Completer<void>();
+      catalog.listGate = gate;
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+
+      controller.openQuickList();
+      controller.quickListBack(); // starts the categories fetch
+      controller.closeQuickList(); // supersedes it
+      gate.complete();
+      await Future<void>.delayed(_past);
+      expect(controller.quickListOpen, isFalse);
+      expect(controller.quickList, same(ZapQuickListState.closed));
+    });
+
+    test('a failed fetch degrades to an empty list, never a throw', () async {
+      final catalog = _FakeCatalog()..categoriesThrow = true;
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      controller.quickListBack();
+      await Future<void>.delayed(_past);
+      expect(controller.quickListMode, ZapQuickListMode.categories);
+      expect(controller.quickList.total, 0);
+      expect(controller.quickList.emptyLabel, 'No categories');
+    });
+  });
+
+  group('quick list — schedule and catch-up', () {
+    List<Programme> dayFor(String channelId) {
+      final now = DateTime.now();
+      return [
+        Programme(
+          channelId: channelId,
+          title: 'Earlier',
+          start: now.subtract(const Duration(hours: 3)),
+          stop: now.subtract(const Duration(hours: 2)),
+        ),
+        Programme(
+          channelId: channelId,
+          title: 'On now',
+          start: now.subtract(const Duration(minutes: 10)),
+          stop: now.add(const Duration(minutes: 50)),
+        ),
+        Programme(
+          channelId: channelId,
+          title: 'Later',
+          start: now.add(const Duration(minutes: 50)),
+          stop: now.add(const Duration(hours: 2)),
+        ),
+      ];
+    }
+
+    test('opens on what is airing now, with preformatted labels', () async {
+      final catalog = _FakeCatalog();
+      catalog.scheduleByChannel['a'] = dayFor('a');
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      controller.descendQuickList();
+      await Future<void>.delayed(_past);
+
+      final state = controller.quickList;
+      expect(state.mode, ZapQuickListMode.schedule);
+      expect(state.heading, 'Channel a');
+      expect(state.selectedIndex, 1);
+      expect(state.rows[1].live, isTrue);
+      expect(state.rows[1].badge, 'ON NOW');
+      expect(state.rows[0].past, isTrue);
+      expect(state.rows[2].past, isFalse);
+      expect(
+        state.rows[0].secondary,
+        zapTimeRangeLabel(
+          catalog.scheduleByChannel['a']![0].start,
+          catalog.scheduleByChannel['a']![0].stop,
+        ),
+      );
+    });
+
+    test('a past programme is catch-up only on an archive channel', () async {
+      final catalog = _FakeCatalog();
+      catalog.scheduleByChannel['a'] = dayFor('a');
+      // No archive: the past row is inert as catch-up, and OK plays live.
+      final plain = _controller(catalog: catalog);
+      addTearDown(plain.dispose);
+      plain.openQuickList();
+      plain.descendQuickList();
+      await Future<void>.delayed(_past);
+      expect(plain.quickList.rows[0].archive, isFalse);
+      plain.moveQuickList(-1);
+      plain.activateQuickList();
+      expect(plain.pendingCatchup, isNull);
+      expect(plain.quickListOpen, isFalse);
+    });
+
+    test('OK on a past programme of an archive channel ends the session',
+        () async {
+      final catalog = _FakeCatalog();
+      catalog.scheduleByChannel['a'] = dayFor('a');
+      var exits = 0;
+      final controller = _controller(
+        catalog: catalog,
+        channels: [
+          Channel(id: 'a', name: 'Channel a', number: 1, archiveDays: 7),
+          _channel('b', number: 2),
+        ],
+      );
+      addTearDown(controller.dispose);
+      controller.onExitRequested = () => exits++;
+      controller.openQuickList();
+      controller.descendQuickList();
+      await Future<void>.delayed(_past);
+      controller.moveQuickList(-1); // the past row
+      expect(controller.quickList.rows[0].archive, isTrue);
+      expect(controller.quickList.rows[0].badge, 'CATCH-UP');
+      controller.activateQuickList();
+
+      expect(exits, 1);
+      expect(controller.quickListOpen, isFalse);
+      expect(controller.pendingCatchup, isNotNull);
+      expect(controller.pendingCatchup!.programme.title, 'Earlier');
+      expect(controller.pendingCatchup!.entry.channelId, 'a');
+    });
+
+    test('OK on the current programme plays the channel live', () async {
+      final catalog = _FakeCatalog();
+      catalog.scheduleByChannel['b'] = dayFor('b');
+      final scheduled = _controller(catalog: catalog, initialIndex: 0);
+      addTearDown(scheduled.dispose);
+      final events = _Surface()..attach(scheduled);
+      scheduled.openQuickList();
+      scheduled.moveQuickList(1); // channel 'b'
+      scheduled.descendQuickList();
+      await Future<void>.delayed(_past);
+      expect(scheduled.quickList.selectedIndex, 1, reason: 'the live row');
+      scheduled.activateQuickList();
+      await Future<void>.delayed(_past);
+      expect(scheduled.playing.channelId, 'b');
+      expect(events.events, ['stop', 'changed b', 'play b']);
+      expect(scheduled.pendingCatchup, isNull);
+    });
+  });
+
+  group('quick list — digits and windowing', () {
+    test('a typed number moves the cursor instead of zapping', () async {
+      final controller = _controller();
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      controller.appendDigit(3);
+      controller.commitDigits();
+      expect(controller.quickList.selectedIndex, 2);
+      // Nothing played: the list is on screen so the pick is confirmed by OK.
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, 'a');
+      expect(controller.zapped, isFalse);
+    });
+
+    test('a miss reports, and other modes drop the buffer', () async {
+      final catalog = _FakeCatalog()
+        ..categories = const [ZapCategoryRow(id: '', title: 'All channels')];
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+      controller.appendDigit(9);
+      controller.commitDigits();
+      expect(controller.message, 'No channel 9');
+
+      controller.quickListBack();
+      await Future<void>.delayed(_past);
+      controller.appendDigit(1);
+      controller.commitDigits();
+      expect(controller.quickList.selectedIndex, 0);
+      expect(controller.digitBuffer, isEmpty);
+    });
+
+    test('a 250k range publishes a bounded window that holds the cursor', () {
+      final config = _config('src');
+      final controller = LiveZapController(
+        entries: zapEntriesOf(
+          List.generate(250000, (i) => _channel('c$i', number: i + 1)),
+          config: config,
+          sourceName: 'Src',
+        ),
+        initialIndex: 123456,
+        catalog: _FakeCatalog(),
+        settleDelay: _settle,
+        digitCommitDelay: _digits,
+        messageDuration: _digits,
+      );
+      addTearDown(controller.dispose);
+      controller.openQuickList();
+
+      final state = controller.quickList;
+      expect(state.total, 250000);
+      expect(state.rows.length, kZapWindowRows);
+      expect(state.selectedIndex, 123456);
+      expect(state.windowStart, 123456 - kZapWindowRows ~/ 2);
+      expect(state.selectedInWindow, kZapWindowRows ~/ 2);
+      expect(state.rows.first.index, state.windowStart);
+      expect(state.rows[state.selectedInWindow].selected, isTrue);
+
+      // Both ends clamp the window rather than the cursor.
+      controller.moveQuickList(-250000);
+      expect(controller.quickList.windowStart, 0);
+      expect(controller.quickList.selectedInWindow, 0);
+      controller.moveQuickList(250000);
+      final end = controller.quickList;
+      expect(end.selectedIndex, 249999);
+      expect(end.windowStart, 250000 - kZapWindowRows);
+      expect(end.selectedInWindow, kZapWindowRows - 1);
+    });
+
+    test('the payload is the frozen shape the natives render', () {
+      final controller = _controller(initialIndex: 1);
+      addTearDown(controller.dispose);
+      expect(controller.quickListPayload()['open'], isFalse);
+
+      controller.openQuickList();
+      final payload = controller.quickListPayload();
+      expect(payload['open'], isTrue);
+      expect(payload['mode'], 'channels');
+      expect(payload['heading'], 'Channels');
+      expect(payload['selectedIndex'], 1);
+      expect(payload['windowStart'], 0);
+      expect(payload['total'], 3);
+      expect(payload['loading'], isFalse);
+      expect(payload['revision'], isA<int>());
+      final rows = payload['rows']! as List<Object?>;
+      expect(rows.length, 3);
+      final row = rows[1]! as Map<String, Object?>;
+      expect(row['index'], 1);
+      expect(row['id'], 'b');
+      expect(row['label'], '2 · Channel b');
+      expect(row['kind'], 'channel');
+      expect(row['selected'], isTrue);
+      expect(row['playing'], isTrue);
+      expect(row['archive'], isFalse);
+      expect(row['past'], isFalse);
+      expect(row['live'], isFalse);
+      // Every value must survive a method-channel/JSON hop.
+      expect(jsonDecode(jsonEncode(payload))['rows'], hasLength(3));
     });
   });
 

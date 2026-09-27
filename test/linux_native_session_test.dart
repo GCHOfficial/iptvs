@@ -1,8 +1,11 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:iptvs/player/buffer_preset.dart';
 import 'package:iptvs/player/linux_native_session.dart';
+import 'package:iptvs/player/live_zap_controller.dart';
 import 'package:iptvs/sources/source.dart';
+import 'package:iptvs/sources/source_config.dart';
 
 void main() {
   group('LinuxNativeSession.buildOverlayStateCommand', () {
@@ -198,6 +201,62 @@ void main() {
       expect(payload['epgNowTitle'], 'News at Ten');
       expect(payload['epgNowStartMs'], 1000);
     });
+
+    test('carries the quick list as a sibling of the zap block, not inside it',
+        () {
+      final controller = LiveZapController(
+        entries: zapEntriesOf(
+          [
+            const Channel(id: 'c1', name: 'BBC One', number: 1),
+            const Channel(id: 'c2', name: 'ITV1', number: 2),
+          ],
+          config: SourceConfig(
+            id: 'src',
+            kind: SourceKind.m3u,
+            label: 'My Provider',
+            fields: const {'playlistUrl': 'https://example.invalid/p.m3u'},
+          ),
+          sourceName: 'My Provider',
+        ),
+        initialIndex: 0,
+        catalog: _NullZapCatalog(),
+        rangeLabel: 'Sport',
+      )..openQuickList();
+      addTearDown(controller.dispose);
+
+      final command = LinuxNativeSession.buildOverlayStateCommand(
+        title: 'BBC One HD',
+        sourceName: 'My Provider',
+        epgNow: null,
+        epgNext: null,
+        canFavorite: true,
+        favorite: false,
+        isLive: true,
+        liveSynced: true,
+        aspectLabel: 'Fill',
+        zap: const <String, Object?>{'channelName': 'BBC One', 'atMs': 1},
+        quickList: controller.quickListPayload(),
+      );
+
+      final payload = jsonDecode(command[3] as String) as Map<String, dynamic>;
+      // A sibling, for the same reason `zap` is nested: the two describe
+      // different things and their key names would collide.
+      final list = payload['quickList'] as Map<String, dynamic>;
+      expect(payload.containsKey('zap'), isTrue);
+      expect((payload['zap'] as Map<String, dynamic>).containsKey('rows'),
+          isFalse);
+      expect(list['open'], isTrue);
+      expect(list['mode'], 'channels');
+      expect(list['heading'], 'Sport');
+      expect(list['total'], 2);
+      expect(list['selectedIndex'], 0);
+      expect(list['windowStart'], 0);
+      final rows = list['rows'] as List<dynamic>;
+      expect(rows, hasLength(2));
+      expect((rows[0] as Map<String, dynamic>)['label'], '1 · BBC One');
+      expect((rows[0] as Map<String, dynamic>)['selected'], isTrue);
+      expect((rows[0] as Map<String, dynamic>)['playing'], isTrue);
+    });
   });
 
   group('LinuxNativeSession.buildHeaderFieldsCommand', () {
@@ -268,4 +327,34 @@ void main() {
       expect(updated, cached);
     });
   });
+}
+
+/// The quick-list payload above is built purely from state the controller
+/// already holds, so this catalog never has to answer anything.
+class _NullZapCatalog implements ZapCatalog {
+  @override
+  Future<StreamInfo> resolve(ZapEntry entry) async =>
+      throw UnimplementedError();
+  @override
+  ({Programme? now, Programme? next}) epgFor(ZapEntry entry) =>
+      (now: null, next: null);
+  @override
+  bool isFavorite(ZapEntry entry) => false;
+  @override
+  Future<void> setFavorite(ZapEntry entry, bool value) async {}
+  @override
+  String? aspectLabelFor(ZapEntry entry) => null;
+  @override
+  Future<void> persistAspect(ZapEntry entry, String label) async {}
+  @override
+  BufferPreset bufferPresetFor(ZapEntry entry) => BufferPreset.normal;
+  @override
+  void log(String note) {}
+  @override
+  Future<List<ZapCategoryRow>> quickListCategories() async => const [];
+  @override
+  Future<List<ZapEntry>> quickListChannels(ZapCategoryRow category) async =>
+      const [];
+  @override
+  Future<List<Programme>> quickListSchedule(ZapEntry entry) async => const [];
 }

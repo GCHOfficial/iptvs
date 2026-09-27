@@ -16,6 +16,10 @@ enum class ZapKeyAction {
     ChannelDown,
     PreviousChannel,
     OpenList,
+    CloseList,
+    MoveUp,
+    MoveDown,
+    Descend,
     Digit,
     Activate,
     Back,
@@ -35,6 +39,13 @@ data class ZapKeyDecision(val action: ZapKeyAction, val digit: Int = -1) {
             ZapKeyAction.ChannelDown -> "zap:down"
             ZapKeyAction.PreviousChannel -> "zap:prev"
             ZapKeyAction.OpenList -> "zap:list"
+            ZapKeyAction.CloseList -> "zap:close"
+            // The arrows move the *highlight*, so Up is one row back up the
+            // list — the opposite sign to the channel keys beside them, which
+            // keep meaning "the next channel", i.e. the next row down.
+            ZapKeyAction.MoveUp -> "zap:move:-1"
+            ZapKeyAction.MoveDown -> "zap:move:1"
+            ZapKeyAction.Descend -> "zap:descend"
             ZapKeyAction.Digit -> "zap:digit:$digit"
             ZapKeyAction.Activate -> "zap:activate"
             ZapKeyAction.Back -> "zap:back"
@@ -86,17 +97,18 @@ object ZapKeyPolicy {
     const val KEYCODE_LAST_CHANNEL = 229
 
     /**
-     * Whether the quick list exists yet.
+     * Whether the quick list exists.
      *
-     * Dart answers `zap:list` with "not consumed" until Phase 6 wires the
-     * quick list, and `dispatchKeyEvent` cannot wait for that answer — it has
-     * to return synchronously. So rather than consume Left and GUIDE into a
-     * silent no-op (Left's present job, revealing the chrome, would simply
-     * stop working), this flag keeps them out of the policy entirely until the
-     * list is real. Phase 6 flips it; the behaviour on both settings is
-     * already pinned by `ZapKeyPolicyTest`.
+     * **True since Phase 6b.** It was false while Dart answered `zap:list`
+     * "not consumed": `dispatchKeyEvent` cannot wait for that answer — it has
+     * to return synchronously — so claiming Left and `GUIDE` into a decided
+     * no-op would have silently broken Left's other job (revealing the
+     * chrome) rather than merely doing nothing new. Dart now consumes the
+     * whole quick-list vocabulary and this Activity renders it, so both keys
+     * are the policy's. The flag stays as the one switch that takes the
+     * feature back out, and `ZapKeyPolicyTest` still pins both settings.
      */
-    const val QUICK_LIST_ENABLED = false
+    const val QUICK_LIST_ENABLED = true
 
     /**
      * @param keyCode the `android.view.KeyEvent` key code.
@@ -111,6 +123,12 @@ object ZapKeyPolicy {
      *   buffer, which is recoverable; waiting on a reply would mean returning
      *   "not consumed" for a key that is about to be consumed, which is not.
      * @param isRepeat `KeyEvent.repeatCount > 0`.
+     * @param quickListOpen the quick list is on screen. Read from the
+     *   Activity's parsed [QuickListState] plus the same shape of optimistic
+     *   mirror [digitsPending] uses, and for the same synchronous reason.
+     *   While it is open the list **owns the arrows whatever the chrome is
+     *   doing** — the chrome gate exists to leave the control row its keys,
+     *   and the list has already taken the screen from the control row.
      */
     fun decide(
         keyCode: Int,
@@ -118,6 +136,7 @@ object ZapKeyPolicy {
         controlsVisible: Boolean,
         digitsPending: Boolean,
         isRepeat: Boolean,
+        quickListOpen: Boolean = false,
         quickListEnabled: Boolean = QUICK_LIST_ENABLED,
     ): ZapKeyDecision {
         if (!isLive) return ZapKeyDecision.none
@@ -143,10 +162,15 @@ object ZapKeyPolicy {
                 } else {
                     ZapKeyDecision(ZapKeyAction.PreviousChannel)
                 }
+            // The one key that toggles: a dedicated GUIDE button is
+            // unambiguous, so it opens and closes the list whether the chrome
+            // is up or not.
             KEYCODE_GUIDE -> return if (!quickListEnabled) {
                 ZapKeyDecision.none
             } else if (isRepeat) {
                 ZapKeyDecision.swallow
+            } else if (quickListOpen) {
+                ZapKeyDecision(ZapKeyAction.CloseList)
             } else {
                 ZapKeyDecision(ZapKeyAction.OpenList)
             }
@@ -170,6 +194,41 @@ object ZapKeyPolicy {
                     } else {
                         ZapKeyDecision(ZapKeyAction.Back)
                     }
+            }
+        }
+
+        // With the list on screen it owns the D-pad outright, **chrome or no
+        // chrome**: it is drawn over the control row, the arrows move a cursor
+        // that has nothing to do with focus traversal, and Back peels one rung
+        // off its mode stack before the player's own ladder can see the press
+        // (`nextPlayerBackAction`, which the Activity only reaches once this
+        // returns "not consumed"). Every rung is Dart's to walk — this sends
+        // the key, never the destination.
+        if (quickListEnabled && quickListOpen) {
+            return when (keyCode) {
+                // Repeats pass through: holding an arrow is how a long list is
+                // scanned, and the cursor clamps at both ends rather than
+                // wrapping, so a held key settles instead of flapping.
+                KEYCODE_DPAD_UP -> ZapKeyDecision(ZapKeyAction.MoveUp)
+                KEYCODE_DPAD_DOWN -> ZapKeyDecision(ZapKeyAction.MoveDown)
+                KEYCODE_DPAD_LEFT, KEYCODE_BACK -> if (isRepeat) {
+                    ZapKeyDecision.swallow
+                } else {
+                    ZapKeyDecision(ZapKeyAction.Back)
+                }
+                KEYCODE_DPAD_RIGHT -> if (isRepeat) {
+                    ZapKeyDecision.swallow
+                } else {
+                    ZapKeyDecision(ZapKeyAction.Descend)
+                }
+                KEYCODE_DPAD_CENTER, KEYCODE_ENTER, KEYCODE_NUMPAD_ENTER -> if (isRepeat) {
+                    ZapKeyDecision.swallow
+                } else {
+                    ZapKeyDecision(ZapKeyAction.Activate)
+                }
+                // Everything else keeps its ordinary meaning: the list is a
+                // readout over a running player, not a modal.
+                else -> ZapKeyDecision.none
             }
         }
 

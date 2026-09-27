@@ -18,13 +18,18 @@ class ZapKeyPolicyTest {
         controlsVisible: Boolean = false,
         digitsPending: Boolean = false,
         isRepeat: Boolean = false,
-        quickListEnabled: Boolean = false,
+        quickListOpen: Boolean = false,
+        // Defaults to the shipped setting, so every case below describes the
+        // policy as it actually runs; the cases that pin the off state pass
+        // `quickListEnabled = false` explicitly.
+        quickListEnabled: Boolean = ZapKeyPolicy.QUICK_LIST_ENABLED,
     ) = ZapKeyPolicy.decide(
         keyCode = keyCode,
         isLive = isLive,
         controlsVisible = controlsVisible,
         digitsPending = digitsPending,
         isRepeat = isRepeat,
+        quickListOpen = quickListOpen,
         quickListEnabled = quickListEnabled,
     )
 
@@ -218,30 +223,168 @@ class ZapKeyPolicyTest {
     }
 
     @Test
-    fun `the quick list is off until Phase 6, and Left stays the chrome's`() {
-        // Dart answers `zap:list` "not consumed", and dispatchKeyEvent cannot
-        // wait for that — so Left must not be claimed into a silent no-op.
-        assertFalse(ZapKeyPolicy.QUICK_LIST_ENABLED)
-        assertEquals(ZapKeyAction.None, decide(ZapKeyPolicy.KEYCODE_DPAD_LEFT).action)
-        assertEquals(ZapKeyAction.None, decide(ZapKeyPolicy.KEYCODE_GUIDE).action)
-
-        // Phase 6 flips one constant; the behaviour behind it is pinned now.
+    fun `the quick list is on, and Left opens it only with the chrome hidden`() {
+        assertTrue(ZapKeyPolicy.QUICK_LIST_ENABLED)
+        assertEquals(ZapKeyAction.OpenList, decide(ZapKeyPolicy.KEYCODE_DPAD_LEFT).action)
+        // GUIDE is a dedicated key, so it is unambiguous with the chrome up.
+        assertEquals(ZapKeyAction.OpenList, decide(ZapKeyPolicy.KEYCODE_GUIDE).action)
         assertEquals(
             ZapKeyAction.OpenList,
-            decide(ZapKeyPolicy.KEYCODE_DPAD_LEFT, quickListEnabled = true).action,
+            decide(ZapKeyPolicy.KEYCODE_GUIDE, controlsVisible = true).action,
         )
-        assertEquals(
-            ZapKeyAction.OpenList,
-            decide(ZapKeyPolicy.KEYCODE_GUIDE, quickListEnabled = true).action,
-        )
+        // Left is contested: with the bars up it belongs to the control row.
         assertEquals(
             ZapKeyAction.None,
+            decide(ZapKeyPolicy.KEYCODE_DPAD_LEFT, controlsVisible = true).action,
+        )
+        // Holding either re-opens nothing.
+        assertEquals(
+            ZapKeyAction.Swallow,
+            decide(ZapKeyPolicy.KEYCODE_DPAD_LEFT, isRepeat = true).action,
+        )
+        assertEquals(
+            ZapKeyAction.Swallow,
+            decide(ZapKeyPolicy.KEYCODE_GUIDE, isRepeat = true).action,
+        )
+    }
+
+    @Test
+    fun `the off switch still takes the quick list back out`() {
+        // The one constant that removes the feature: with it false, Left and
+        // GUIDE fall through and keep the jobs they had before Phase 6 rather
+        // than becoming decided no-ops.
+        for (open in listOf(false, true)) {
+            assertEquals(
+                ZapKeyAction.None,
+                decide(
+                    ZapKeyPolicy.KEYCODE_DPAD_LEFT,
+                    quickListOpen = open,
+                    quickListEnabled = false,
+                ).action,
+            )
+            assertEquals(
+                ZapKeyAction.None,
+                decide(
+                    ZapKeyPolicy.KEYCODE_GUIDE,
+                    quickListOpen = open,
+                    quickListEnabled = false,
+                ).action,
+            )
+        }
+        // And with it off the arrows keep their pre-Phase-6 meanings even if
+        // something claimed the list was open.
+        assertEquals(
+            ZapKeyAction.ChannelUp,
             decide(
-                ZapKeyPolicy.KEYCODE_DPAD_LEFT,
-                controlsVisible = true,
-                quickListEnabled = true,
+                ZapKeyPolicy.KEYCODE_DPAD_UP,
+                quickListOpen = true,
+                quickListEnabled = false,
             ).action,
         )
+    }
+
+    @Test
+    fun `GUIDE toggles the list, chrome or no chrome`() {
+        for (visible in listOf(false, true)) {
+            assertEquals(
+                ZapKeyAction.OpenList,
+                decide(
+                    ZapKeyPolicy.KEYCODE_GUIDE,
+                    controlsVisible = visible,
+                    quickListOpen = false,
+                ).action,
+            )
+            assertEquals(
+                ZapKeyAction.CloseList,
+                decide(
+                    ZapKeyPolicy.KEYCODE_GUIDE,
+                    controlsVisible = visible,
+                    quickListOpen = true,
+                ).action,
+            )
+        }
+    }
+
+    @Test
+    fun `with the list open the arrows move the cursor, chrome or no chrome`() {
+        for (visible in listOf(false, true)) {
+            fun open(code: Int, repeat: Boolean = false) = decide(
+                code,
+                controlsVisible = visible,
+                quickListOpen = true,
+                isRepeat = repeat,
+            )
+            // Up moves the *highlight* up — the opposite sign to the channel
+            // keys, which keep meaning "the next channel".
+            assertEquals("zap:move:-1", open(ZapKeyPolicy.KEYCODE_DPAD_UP).command)
+            assertEquals("zap:move:1", open(ZapKeyPolicy.KEYCODE_DPAD_DOWN).command)
+            assertEquals(ZapKeyAction.Back, open(ZapKeyPolicy.KEYCODE_DPAD_LEFT).action)
+            assertEquals(ZapKeyAction.Descend, open(ZapKeyPolicy.KEYCODE_DPAD_RIGHT).action)
+            for (ok in listOf(
+                ZapKeyPolicy.KEYCODE_DPAD_CENTER,
+                ZapKeyPolicy.KEYCODE_ENTER,
+                ZapKeyPolicy.KEYCODE_NUMPAD_ENTER,
+            )) {
+                assertEquals(ZapKeyAction.Activate, open(ok).action)
+            }
+            // Back peels one rung off Dart's mode stack, ahead of the
+            // player's own ladder — with no digit buffer behind it.
+            assertEquals(ZapKeyAction.Back, open(ZapKeyPolicy.KEYCODE_BACK).action)
+
+            // A held arrow scans the list (the cursor clamps, so it settles);
+            // the one-shot keys are swallowed.
+            assertEquals(
+                ZapKeyAction.MoveDown,
+                open(ZapKeyPolicy.KEYCODE_DPAD_DOWN, repeat = true).action,
+            )
+            for (code in listOf(
+                ZapKeyPolicy.KEYCODE_DPAD_LEFT,
+                ZapKeyPolicy.KEYCODE_DPAD_RIGHT,
+                ZapKeyPolicy.KEYCODE_DPAD_CENTER,
+                ZapKeyPolicy.KEYCODE_BACK,
+            )) {
+                assertEquals(ZapKeyAction.Swallow, open(code, repeat = true).action)
+            }
+        }
+    }
+
+    @Test
+    fun `the dedicated keys keep their own meaning with the list open`() {
+        // `zap:up`/`zap:down` mean "the next channel" in both states; Dart
+        // reads them as one row in list order while the list is up. Digits
+        // likewise stay digits — Dart moves the cursor with them.
+        assertEquals(
+            ZapKeyAction.ChannelUp,
+            decide(ZapKeyPolicy.KEYCODE_CHANNEL_UP, quickListOpen = true).action,
+        )
+        assertEquals(
+            ZapKeyAction.ChannelDown,
+            decide(ZapKeyPolicy.KEYCODE_PAGE_DOWN, quickListOpen = true).action,
+        )
+        assertEquals(
+            ZapKeyAction.PreviousChannel,
+            decide(ZapKeyPolicy.KEYCODE_LAST_CHANNEL, quickListOpen = true).action,
+        )
+        val digit = decide(KEYCODE_5, quickListOpen = true)
+        assertEquals(ZapKeyAction.Digit, digit.action)
+        assertEquals(5, digit.digit)
+        // And nothing at all is claimed on VOD, list flag or not.
+        assertEquals(
+            ZapKeyAction.None,
+            decide(ZapKeyPolicy.KEYCODE_DPAD_UP, isLive = false, quickListOpen = true).action,
+        )
+    }
+
+    @Test
+    fun `an unrelated key is still not claimed with the list open`() {
+        // The list is a readout over a running player, not a modal: volume
+        // and the media keys keep working while it is up.
+        for (code in listOf(24, 25, 85, 126, 127)) {
+            assertEquals(
+                ZapKeyAction.None,
+                decide(code, quickListOpen = true).action,
+            )
+        }
     }
 
     @Test
@@ -253,6 +396,10 @@ class ZapKeyPolicyTest {
         assertEquals("zap:down", ZapKeyDecision(ZapKeyAction.ChannelDown).command)
         assertEquals("zap:prev", ZapKeyDecision(ZapKeyAction.PreviousChannel).command)
         assertEquals("zap:list", ZapKeyDecision(ZapKeyAction.OpenList).command)
+        assertEquals("zap:close", ZapKeyDecision(ZapKeyAction.CloseList).command)
+        assertEquals("zap:move:-1", ZapKeyDecision(ZapKeyAction.MoveUp).command)
+        assertEquals("zap:move:1", ZapKeyDecision(ZapKeyAction.MoveDown).command)
+        assertEquals("zap:descend", ZapKeyDecision(ZapKeyAction.Descend).command)
         assertEquals("zap:activate", ZapKeyDecision(ZapKeyAction.Activate).command)
         assertEquals("zap:back", ZapKeyDecision(ZapKeyAction.Back).command)
         assertEquals("zap:digit:4", ZapKeyDecision(ZapKeyAction.Digit, 4).command)

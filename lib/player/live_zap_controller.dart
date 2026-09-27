@@ -21,6 +21,7 @@ import '../sources/source.dart';
 import '../sources/source_config.dart';
 import 'buffer_preset.dart';
 import 'zap_command.dart';
+import 'zap_quick_list.dart';
 
 /// How long the cursor must rest before the settled channel is resolved and
 /// played.
@@ -100,6 +101,51 @@ abstract class ZapCatalog {
   /// A credential-free diagnostics note. Implementations route it to
   /// `DiagnosticsLog`; **never** pass a locator, a header or a logo URL.
   void log(String note);
+
+  // ── Quick list (Phase 6) ─────────────────────────────────────────────────
+  //
+  // Three reads and nothing else. The controller never learns *how* a range
+  // is shaped — whether these rows came from one provider's category list or
+  // from the cross-source Favorites view grouped by owning source is entirely
+  // the host's business, exactly as it already is for the launch range.
+
+  /// The quick list's top mode: the categories this session's launch range
+  /// can be re-ranged to, in catalog order, led by the range's "everything"
+  /// row (id `''`).
+  Future<List<ZapCategoryRow>> quickListCategories();
+
+  /// The channels of [category] as a **fresh zap range**, in catalog order.
+  /// An empty answer is refused by the controller rather than applied — a
+  /// session with no entries has no channel to be on.
+  Future<List<ZapEntry>> quickListChannels(ZapCategoryRow category);
+
+  /// [entry]'s cached guide for **today** (local midnight to midnight), in
+  /// start order. Empty when the source has no guide for it.
+  Future<List<Programme>> quickListSchedule(ZapEntry entry);
+}
+
+/// One row of the quick list's [ZapQuickListMode.categories] mode.
+///
+/// Deliberately not `Category`: a cross-source Favorites range has no
+/// provider categories at all, and its top mode lists *sources* instead (see
+/// docs/player.md "The quick list (Phase 6)"). Both shapes are just an
+/// id and a title to everything downstream.
+@immutable
+class ZapCategoryRow {
+  const ZapCategoryRow({required this.id, required this.title});
+
+  /// `''` is the mode's "everything" row — "All channels" on a single-source
+  /// range, "Favorites · All sources" on the cross-source one. Never a
+  /// provider category id.
+  final String id;
+  final String title;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ZapCategoryRow && other.id == id && other.title == title;
+
+  @override
+  int get hashCode => Object.hash(id, title);
 }
 
 /// The live zap state machine for one fullscreen session.
@@ -114,6 +160,8 @@ class LiveZapController extends ChangeNotifier {
     required List<ZapEntry> entries,
     required int initialIndex,
     required this.catalog,
+    String rangeCategoryId = '',
+    String rangeLabel = 'Channels',
     this.settleDelay = kZapSettleDelay,
     this.digitCommitDelay = kDigitEntryCommitDelay,
     this.messageDuration = kZapMessageDuration,
@@ -126,7 +174,10 @@ class LiveZapController extends ChangeNotifier {
        assert(initialIndex >= 0 && initialIndex < entries.length),
        _index = initialIndex,
        _playingIndex = initialIndex,
-       _launchIndex = initialIndex;
+       _playingEntry = entries[initialIndex],
+       _launchEntry = entries[initialIndex],
+       _rangeCatId = rangeCategoryId,
+       _rangeCatLabel = rangeLabel;
 
   final ZapCatalog catalog;
   final Duration settleDelay;
@@ -137,11 +188,28 @@ class LiveZapController extends ChangeNotifier {
   final Duration digitCommitDelay;
   final Duration messageDuration;
 
-  final List<ZapEntry> _entries;
+  /// **Not final: the quick list can re-range a live session.** Picking a
+  /// different category in the quick list replaces the list Up/Down walks —
+  /// that is the whole point of offering categories in the player, and the
+  /// alternative (a quick list that can only jump inside the launch range)
+  /// would make the range a thing the user can never change without leaving
+  /// the player. See [applyQuickListCategory].
+  List<ZapEntry> _entries;
   int _index;
+
+  /// The playing channel's index in the **current** range, or `-1` when a
+  /// re-range left it outside — it is still what is on screen either way,
+  /// which is why [_playingEntry] rather than this index is the authority.
   int _playingIndex;
-  int? _previousIndex;
-  final int _launchIndex;
+  ZapEntry _playingEntry;
+
+  /// "Last channel" is a *channel*, not an index: a re-range renumbers
+  /// everything, and recalling row 7 of a list the user has since replaced
+  /// would zap somewhere arbitrary.
+  ZapEntry? _previousEntry;
+  final ZapEntry _launchEntry;
+  String _rangeCatId;
+  String _rangeCatLabel;
   int _zapCount = 0;
   bool _disposed = false;
 
@@ -186,9 +254,14 @@ class LiveZapController extends ChangeNotifier {
   ZapEntry get current => _entries[_index];
 
   /// The entry that is actually playing right now.
-  ZapEntry get playing => _entries[_playingIndex];
+  ZapEntry get playing => _playingEntry;
 
-  ZapEntry get launchEntry => _entries[_launchIndex];
+  ZapEntry get launchEntry => _launchEntry;
+
+  /// The category id the current range reflects (`''` = the range's
+  /// "everything" row), and its display title.
+  String get rangeCategoryId => _rangeCatId;
+  String get rangeLabel => _rangeCatLabel;
 
   /// How many channel changes this session has actually played. Non-zero means
   /// the caller must not resume a preview onto the launch channel on return.
@@ -274,6 +347,13 @@ class LiveZapController extends ChangeNotifier {
   /// Applies one member of the shared vocabulary. Returns whether it was
   /// consumed, so a surface can fall through to its ordinary key handling.
   bool handleCommand(ZapCommand command) {
+    // **While the quick list is open it owns navigation.** Nothing here can
+    // change channel except an explicit OK on a row: a list on screen that
+    // the user is reading must not have channels changing behind it, and the
+    // dedicated channel keys would otherwise mean one thing on the video and
+    // another over the list. They keep their meaning — "the next/previous
+    // channel in list order" — applied to the cursor instead of to playback.
+    if (_listOpen) return _handleQuickListCommand(command);
     switch (command.kind) {
       case ZapCommandKind.channelUp:
         channelUp();
@@ -303,11 +383,68 @@ class LiveZapController extends ChangeNotifier {
         unawaited(setFavorite(command.value == 1));
         return true;
       case ZapCommandKind.openList:
+        openQuickList();
+        return true;
       case ZapCommandKind.closeList:
+        // Closed already: consumed all the same, so a surface's close key is
+        // never handed on to mean something else.
+        return true;
+      case ZapCommandKind.descend:
       case ZapCommandKind.move:
-        // Quick list — Phase 6. Not consumed yet, so the surface keeps its
-        // present behaviour rather than swallowing the key into a no-op.
+        // Only meaningful over an open list; with none open they are not this
+        // controller's keys, so the surface keeps its ordinary behaviour.
         return false;
+    }
+  }
+
+  bool _handleQuickListCommand(ZapCommand command) {
+    switch (command.kind) {
+      case ZapCommandKind.openList:
+        return true;
+      case ZapCommandKind.closeList:
+        closeQuickList();
+        return true;
+      case ZapCommandKind.move:
+        moveQuickList(command.value);
+        return true;
+      // The dedicated channel keys move the cursor by one row **in list
+      // order** — `channelUp` is "the next channel", which is the next row
+      // *down*, exactly as it is for playback (see [channelUp]).
+      case ZapCommandKind.channelUp:
+        moveQuickList(1);
+        return true;
+      case ZapCommandKind.channelDown:
+        moveQuickList(-1);
+        return true;
+      case ZapCommandKind.activate:
+        if (_digitBuffer.isNotEmpty) {
+          commitDigits();
+          return true;
+        }
+        activateQuickList();
+        return true;
+      case ZapCommandKind.descend:
+        descendQuickList();
+        return true;
+      case ZapCommandKind.back:
+        if (_digitBuffer.isNotEmpty) {
+          clearDigits();
+          return true;
+        }
+        quickListBack();
+        return true;
+      case ZapCommandKind.digit:
+        appendDigit(command.value);
+        return true;
+      case ZapCommandKind.previousChannel:
+        // Consumed and inert: recall is a channel change, and the list is
+        // open precisely because the user is choosing one deliberately.
+        return true;
+      case ZapCommandKind.favorite:
+        // Still absolute, still about the **playing** channel — the star on
+        // the chrome behind the list, not the row under the cursor.
+        unawaited(setFavorite(command.value == 1));
+        return true;
     }
   }
 
@@ -321,11 +458,17 @@ class LiveZapController extends ChangeNotifier {
   void channelDown() =>
       _moveTo((_index - 1 + _entries.length) % _entries.length);
 
-  /// Classic "last channel" recall. No-op until two channels have played.
+  /// Classic "last channel" recall. No-op until two channels have played —
+  /// and also a no-op when the previous channel isn't in the current range
+  /// any more (the quick list re-ranged away from it), because there is no
+  /// cursor position to move to and silently widening the range behind the
+  /// user's back would be worse than doing nothing.
   void previousChannel() {
-    final target = _previousIndex;
-    if (target == null || target == _index) return;
-    _moveTo(target);
+    final target = _previousEntry;
+    if (target == null) return;
+    final index = _indexOfEntry(target);
+    if (index < 0 || index == _index) return;
+    _moveTo(index);
   }
 
   void appendDigit(int digit) {
@@ -357,6 +500,23 @@ class LiveZapController extends ChangeNotifier {
       return;
     }
     final target = _entries.indexWhere((e) => e.number == number);
+    // With the quick list open a typed number **moves the cursor**, it does
+    // not zap: the list is on screen so the user can see and confirm what
+    // they picked, and jumping playback out from under an open list is the
+    // one thing the list exists to avoid. Only the channels mode can act on a
+    // channel number at all; in the other two the buffer is simply dropped.
+    if (_listOpen) {
+      if (_listMode != ZapQuickListMode.channels) {
+        _notify();
+        return;
+      }
+      if (target < 0) {
+        _showMessage('No channel $number');
+        return;
+      }
+      _setQuickListCursor(target);
+      return;
+    }
     if (target < 0) {
       _showMessage('No channel $number');
       return;
@@ -380,6 +540,407 @@ class LiveZapController extends ChangeNotifier {
   /// Commits a pending cursor move now (used by OK and by teardown paths that
   /// must not leave a half-applied zap behind).
   void commitPendingMove() => _settleTimer.flush();
+
+  // ── Quick list (Phase 6) ───────────────────────────────────────────────
+  //
+  // A **mode stack** over one list widget, not a three-column panel:
+  // categories → channels → one channel's schedule for today. Right/OK
+  // descends, Left/Back ascends, Back at the top closes. The cursor is a
+  // plain integer per mode and rows are never focus targets, which is the
+  // same selection model the live tab and the EPG grid use and for the same
+  // reason (docs/tv-navigation.md) — an off-screen row in a lazily built list
+  // cannot be focused, and this list is routinely 250k rows long.
+
+  bool _listOpen = false;
+  ZapQuickListMode _listMode = ZapQuickListMode.channels;
+
+  /// Monotonic, bumped by every mode change, open and close. A fetch that
+  /// comes back against a stale generation is dropped — the same
+  /// generation-guard rule `MediaTabController`/`LiveController` follow
+  /// (CLAUDE.md, "Async publishes are generation-guarded").
+  int _listGeneration = 0;
+  bool _listLoading = false;
+  String? _listEmptyLabel;
+
+  List<ZapCategoryRow> _categories = const [];
+  int _categoryCursor = 0;
+
+  /// The channels mode's cursor is an index into [_entries] — the live zap
+  /// range itself, never a copy of it.
+  int _channelCursor = 0;
+
+  ZapEntry? _scheduleEntry;
+  List<Programme> _schedule = const [];
+  int _scheduleCursor = 0;
+
+  ({ZapEntry entry, Programme programme})? _pendingCatchup;
+
+  /// Asks the host to end the fullscreen session. Wired by `PlayerScreen` to
+  /// its own back action, and used for exactly one thing: leaving live for
+  /// catch-up (see [pendingCatchup]).
+  void Function()? onExitRequested;
+
+  bool get quickListOpen => _listOpen;
+  ZapQuickListMode get quickListMode => _listMode;
+
+  /// Set when OK landed on a **past** programme of an archive channel. The
+  /// host reads it after its route pops and opens catch-up through its own
+  /// existing path.
+  ///
+  /// Catch-up deliberately does **not** play in place. It is VOD-shaped — a
+  /// seek bar, no live reconnect watchdog, its own iOS engine key, no zap
+  /// range — so playing it on the live route would mean reconfiguring the
+  /// watchdog, the overlay, the dynamic-range escalation and the native
+  /// surface mid-session, which is the "the surface never changes on a zap"
+  /// invariant stood on its head. Ending the session and reopening through
+  /// the channel list's shipped `_playCatchup` costs one route transition and
+  /// reuses a path that already works on every platform.
+  ({ZapEntry entry, Programme programme})? get pendingCatchup =>
+      _pendingCatchup;
+
+  /// Opens on the **channels** mode, cursor on the channel actually playing.
+  ///
+  /// Channels rather than categories because that is the rung the user wants
+  /// nine times out of ten, and because it is the only one that needs no
+  /// fetch at all — the range is already in hand, so the list draws on the
+  /// same frame as the keypress.
+  void openQuickList() {
+    if (_listOpen) return;
+    _listOpen = true;
+    _listGeneration++;
+    _listLoading = false;
+    _listEmptyLabel = null;
+    _listMode = ZapQuickListMode.channels;
+    _channelCursor = _playingIndex >= 0 ? _playingIndex : _index;
+    _notify();
+  }
+
+  void closeQuickList() {
+    if (!_listOpen) return;
+    _listOpen = false;
+    // Bumped so a fetch still in flight can never publish into a closed list
+    // (or, worse, into the next one the user opens).
+    _listGeneration++;
+    _listLoading = false;
+    _listEmptyLabel = null;
+    _scheduleEntry = null;
+    _schedule = const [];
+    _notify();
+  }
+
+  /// One rung up the stack; at the top it closes.
+  void quickListBack() {
+    if (!_listOpen) return;
+    switch (_listMode) {
+      case ZapQuickListMode.schedule:
+        _listGeneration++;
+        _listLoading = false;
+        _listEmptyLabel = null;
+        _scheduleEntry = null;
+        _schedule = const [];
+        _listMode = ZapQuickListMode.channels;
+        _notify();
+      case ZapQuickListMode.channels:
+        unawaited(_openCategories());
+      case ZapQuickListMode.categories:
+        closeQuickList();
+    }
+  }
+
+  /// One rung down the stack. OK and Right agree everywhere except the
+  /// channels mode, where OK *plays* and Right opens the schedule.
+  void descendQuickList() {
+    if (!_listOpen) return;
+    switch (_listMode) {
+      case ZapQuickListMode.categories:
+        activateQuickList();
+      case ZapQuickListMode.channels:
+        if (_entries.isEmpty) return;
+        unawaited(_openSchedule(_entries[_channelCursor]));
+      case ZapQuickListMode.schedule:
+        activateQuickList();
+    }
+  }
+
+  /// Moves the cursor by [delta] rows, **clamped, never wrapped**.
+  ///
+  /// Unlike the player's Up/Down (which wrap, because there is nothing to
+  /// escape to on a bare video — docs/tv-navigation.md "In-player
+  /// navigation"), a list on screen has visible ends, and `zap:move` carries
+  /// an arbitrary signed delta so a page key can move by a screenful: wrapping
+  /// a 250k-row list on a PageDown would be a jump the user cannot undo by
+  /// pressing the opposite key.
+  void moveQuickList(int delta) {
+    if (!_listOpen || delta == 0) return;
+    _setQuickListCursor(_quickListCursor + delta);
+  }
+
+  void _setQuickListCursor(int target) {
+    final total = _quickListTotal;
+    if (total == 0) return;
+    final clamped = target < 0
+        ? 0
+        : target > total - 1
+        ? total - 1
+        : target;
+    if (clamped == _quickListCursor) return;
+    switch (_listMode) {
+      case ZapQuickListMode.categories:
+        _categoryCursor = clamped;
+      case ZapQuickListMode.channels:
+        _channelCursor = clamped;
+      case ZapQuickListMode.schedule:
+        _scheduleCursor = clamped;
+    }
+    _notify();
+  }
+
+  /// OK on the selected row.
+  void activateQuickList() {
+    if (!_listOpen || _listLoading) return;
+    switch (_listMode) {
+      case ZapQuickListMode.categories:
+        if (_categories.isEmpty) return;
+        unawaited(applyQuickListCategory(_categories[_categoryCursor]));
+      case ZapQuickListMode.channels:
+        if (_entries.isEmpty) return;
+        final target = _channelCursor;
+        closeQuickList();
+        // A deliberate, specific destination, exactly like a typed channel
+        // number: it commits at once rather than waiting out the settle
+        // window, which exists to coalesce a *scan*.
+        _moveTo(target, immediate: true);
+      case ZapQuickListMode.schedule:
+        _activateScheduleRow();
+    }
+  }
+
+  void _activateScheduleRow() {
+    final entry = _scheduleEntry;
+    if (entry == null || _schedule.isEmpty) return;
+    final programme = _schedule[_scheduleCursor];
+    final past = !programme.stop.isAfter(DateTime.now());
+    if (past && entry.channel.hasArchive) {
+      _pendingCatchup = (entry: entry, programme: programme);
+      catalog.log(
+        'zap quick list catch-up source=${entry.sourceName} '
+        'channel=${entry.name} programme=${programme.title}',
+      );
+      closeQuickList();
+      onExitRequested?.call();
+      return;
+    }
+    // Current or future programme (or a channel with no archive): the only
+    // thing there is to play is the channel, live.
+    final index = _indexOfEntry(entry);
+    closeQuickList();
+    if (index < 0) return;
+    _moveTo(index, immediate: true);
+  }
+
+  /// Re-ranges the session to [category] and drops back into the channels
+  /// mode on it.
+  ///
+  /// **This changes the Up/Down range too, deliberately.** The quick list is
+  /// the only way to change the range without leaving the player, and a list
+  /// that could move the cursor somewhere Up/Down then refuses to follow
+  /// would be two cursors over two different lists — the exact
+  /// "which list am I in" confusion the single selection model exists to
+  /// avoid. An **empty** category is refused instead of applied: a session
+  /// with no entries has no channel to be on, and the range the user can
+  /// still see is better than none.
+  Future<void> applyQuickListCategory(ZapCategoryRow category) async {
+    final generation = ++_listGeneration;
+    _listLoading = true;
+    _listEmptyLabel = null;
+    _notify();
+    List<ZapEntry> rows;
+    try {
+      rows = await catalog.quickListChannels(category);
+    } catch (error) {
+      catalog.log('zap quick list channels failed: ${error.runtimeType}');
+      rows = const [];
+    }
+    if (_disposed || generation != _listGeneration) return;
+    _listLoading = false;
+    if (rows.isEmpty) {
+      _showMessage('No channels in ${category.title}');
+      return;
+    }
+    _entries = rows;
+    _rangeCatId = category.id;
+    _rangeCatLabel = category.title;
+    _playingIndex = _indexOfEntry(_playingEntry);
+    _index = _playingIndex >= 0 ? _playingIndex : 0;
+    _channelCursor = _index;
+    _listMode = ZapQuickListMode.channels;
+    catalog.log(
+      'zap quick list re-range category=${category.title} rows=${rows.length}',
+    );
+    _notify();
+  }
+
+  Future<void> _openCategories() async {
+    final generation = ++_listGeneration;
+    _listMode = ZapQuickListMode.categories;
+    _listLoading = true;
+    _listEmptyLabel = null;
+    _notify();
+    List<ZapCategoryRow> rows;
+    try {
+      rows = await catalog.quickListCategories();
+    } catch (error) {
+      catalog.log('zap quick list categories failed: ${error.runtimeType}');
+      rows = const [];
+    }
+    if (_disposed || generation != _listGeneration) return;
+    _categories = rows;
+    _listLoading = false;
+    _listEmptyLabel = rows.isEmpty ? 'No categories' : null;
+    final current = rows.indexWhere((row) => row.id == _rangeCatId);
+    _categoryCursor = current < 0 ? 0 : current;
+    _notify();
+  }
+
+  Future<void> _openSchedule(ZapEntry entry) async {
+    final generation = ++_listGeneration;
+    _listMode = ZapQuickListMode.schedule;
+    _scheduleEntry = entry;
+    _schedule = const [];
+    _scheduleCursor = 0;
+    _listLoading = true;
+    _listEmptyLabel = null;
+    _notify();
+    List<Programme> rows;
+    try {
+      rows = await catalog.quickListSchedule(entry);
+    } catch (error) {
+      catalog.log('zap quick list schedule failed: ${error.runtimeType}');
+      rows = const [];
+    }
+    if (_disposed || generation != _listGeneration) return;
+    _schedule = rows;
+    _listLoading = false;
+    _listEmptyLabel = rows.isEmpty ? 'No guide for today' : null;
+    // Opens on what is airing now — the row the user is looking at the video
+    // of — falling back to the first of the day.
+    final now = DateTime.now();
+    final airing = rows.indexWhere(
+      (p) => !p.start.isAfter(now) && p.stop.isAfter(now),
+    );
+    _scheduleCursor = airing < 0 ? 0 : airing;
+    _notify();
+  }
+
+  int get _quickListTotal => switch (_listMode) {
+    ZapQuickListMode.categories => _categories.length,
+    ZapQuickListMode.channels => _entries.length,
+    ZapQuickListMode.schedule => _schedule.length,
+  };
+
+  int get _quickListCursor => switch (_listMode) {
+    ZapQuickListMode.categories => _categoryCursor,
+    ZapQuickListMode.channels => _channelCursor,
+    ZapQuickListMode.schedule => _scheduleCursor,
+  };
+
+  /// The quick list as one immutable snapshot — the Flutter overlay's input
+  /// and, through [ZapQuickListState.toPayload], the `setQuickList` wire
+  /// payload. Built fresh on read; nothing caches it, because every field is
+  /// derived from state the controller already holds.
+  ZapQuickListState get quickList {
+    if (!_listOpen) return ZapQuickListState.closed;
+    final total = _quickListTotal;
+    final cursor = total == 0 ? 0 : _quickListCursor;
+    final start = zapWindowStart(total: total, selected: cursor);
+    final end = total < start + kZapWindowRows ? total : start + kZapWindowRows;
+    return ZapQuickListState(
+      open: true,
+      mode: _listMode,
+      heading: switch (_listMode) {
+        ZapQuickListMode.categories => playing.sourceName,
+        ZapQuickListMode.channels => _rangeCatLabel,
+        ZapQuickListMode.schedule => _scheduleEntry?.name ?? '',
+      },
+      rows: [
+        for (var i = start; i < end; i++) _quickListRow(i, selected: i == cursor),
+      ],
+      selectedIndex: cursor,
+      windowStart: start,
+      total: total,
+      loading: _listLoading,
+      emptyLabel: _listLoading ? null : _listEmptyLabel,
+      revision: _bannerRevision,
+    );
+  }
+
+  /// The `setQuickList` payload. A no-op-shaped `{open: false, …}` while the
+  /// list is closed, so a surface always has something to tear down with.
+  Map<String, Object?> quickListPayload() => quickList.toPayload();
+
+  ZapQuickListRow _quickListRow(int index, {required bool selected}) {
+    switch (_listMode) {
+      case ZapQuickListMode.categories:
+        final row = _categories[index];
+        return ZapQuickListRow(
+          index: index,
+          id: row.id,
+          label: row.title,
+          kind: ZapQuickListRowKind.category,
+          selected: selected,
+          playing: row.id == _rangeCatId,
+        );
+      case ZapQuickListMode.channels:
+        final entry = _entries[index];
+        final guide = catalog.epgFor(entry);
+        final number = entry.number;
+        return ZapQuickListRow(
+          index: index,
+          id: entry.channelId,
+          label: number == null ? entry.name : '$number · ${entry.name}',
+          kind: ZapQuickListRowKind.channel,
+          // The now-playing line the design asks for, falling back to the
+          // owning source — which on a cross-source Favorites range is the
+          // one thing that tells two identically named rows apart.
+          secondary: guide.now?.title ?? entry.sourceName,
+          selected: selected,
+          playing: entry == _playingEntry,
+        );
+      case ZapQuickListMode.schedule:
+        final programme = _schedule[index];
+        final now = DateTime.now();
+        final past = !programme.stop.isAfter(now);
+        final live = !programme.start.isAfter(now) && !past;
+        final archive =
+            past && (_scheduleEntry?.channel.hasArchive ?? false);
+        return ZapQuickListRow(
+          index: index,
+          id: '${programme.start.millisecondsSinceEpoch}',
+          label: programme.title,
+          kind: ZapQuickListRowKind.programme,
+          secondary: zapTimeRangeLabel(programme.start, programme.stop),
+          badge: live
+              ? 'ON NOW'
+              : archive
+              ? 'CATCH-UP'
+              : null,
+          selected: selected,
+          archive: archive,
+          past: past,
+          live: live,
+        );
+    }
+  }
+
+  /// Index of [entry] in the current range, or -1. O(n) and deliberately only
+  /// called on a re-range or a recall — the lazy range materialises a
+  /// `ZapEntry` per probe, so this must never reach a per-keypress path.
+  int _indexOfEntry(ZapEntry entry) {
+    for (var i = 0; i < _entries.length; i++) {
+      if (_entries[i] == entry) return i;
+    }
+    return -1;
+  }
 
   // ── Resolve ────────────────────────────────────────────────────────────────
 
@@ -435,7 +996,11 @@ class LiveZapController extends ChangeNotifier {
         _resettleWanted = false;
         final target = _index;
         if (target == _playingIndex) break;
-        final entry = _entries[target];
+        // The list this index belongs to, captured with it: the quick list
+        // can re-range the session while a settle is in flight, and `target`
+        // then means a different row (or none) in the new range.
+        final list = _entries;
+        final entry = list[target];
         // A reconnect re-resolve in flight describes the channel we are
         // leaving; discard its outcome rather than let it reload behind us.
         // (The HTTP call itself can't be cancelled — the same tolerance
@@ -467,8 +1032,16 @@ class LiveZapController extends ChangeNotifier {
           await _revertFailedZap(entry, failure);
           continue;
         }
-        _previousIndex = _playingIndex;
-        _playingIndex = target;
+        _previousEntry = _playingEntry;
+        // `_playingEntry` is the authority; the index is only re-derived —
+        // at O(n), and only on the rare re-range-during-settle race — when
+        // the range moved under us. Getting it wrong would draw the
+        // "playing" marker on the wrong quick-list row and open the list on
+        // it.
+        _playingIndex = identical(list, _entries)
+            ? target
+            : _indexOfEntry(entry);
+        _playingEntry = entry;
         _zapCount++;
         onChannelChanged?.call(entry);
         await onPlay?.call(stream, entry);
@@ -482,7 +1055,7 @@ class LiveZapController extends ChangeNotifier {
   /// A failed zap has already stopped the previous stream, so reporting is not
   /// enough — the channel the user was watching has to be brought back.
   Future<void> _revertFailedZap(ZapEntry attempted, Object? error) async {
-    _index = _playingIndex;
+    if (_playingIndex >= 0) _index = _playingIndex;
     _showMessage("Couldn't play ${attempted.name}");
     try {
       final restored = await catalog.resolve(playing);
@@ -535,6 +1108,7 @@ class LiveZapController extends ChangeNotifier {
     onStopCurrent = null;
     onPlay = null;
     onChannelChanged = null;
+    onExitRequested = null;
     super.dispose();
   }
 }
