@@ -52,6 +52,11 @@ private:
   // push, its 3 s auto-hide, and the session-teardown reset.
   void UpdateZapBanner(const flutter::EncodableValue *args);
   void HideZapBanner();
+  // The `setQuickList` push: the browsable list the same key ring drives
+  // (docs/player.md "The quick list"). `open: false` is a tear-down
+  // instruction, not an absence.
+  void UpdateQuickList(const flutter::EncodableValue *args);
+  // Session teardown for both — the banner, its timer, and the quick list.
   void ResetZapBanner();
   void SetNativeWindowFullscreen(bool fullscreen);
   void SetNativeWindowMiniPlayer(bool mini);

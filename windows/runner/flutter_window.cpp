@@ -23,6 +23,7 @@
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
 #include "zap_key_policy.h"
+#include "zap_quick_list_state.h"
 
 // The zap key policy mirrors its virtual-key codes rather than including
 // <windows.h>, so it can be read (and, if this runner ever grows a C++ test
@@ -43,6 +44,10 @@ static_assert(iptvs::kZapVkDigit0 == '0', "digit-0 mirror");
 static_assert(iptvs::kZapVkDigit9 == '9', "digit-9 mirror");
 static_assert(iptvs::kZapVkNumpad0 == VK_NUMPAD0, "VK_NUMPAD0 mirror");
 static_assert(iptvs::kZapVkNumpad9 == VK_NUMPAD9, "VK_NUMPAD9 mirror");
+// The quick list's guide key is a plain letter, not a `VK_*`: Win32 has no
+// virtual-key code for a remote's GUIDE at all (see kZapVkGuide). Asserted
+// here anyway, so the mirror is checked the same way as the rest.
+static_assert(iptvs::kZapVkGuide == 'G', "guide-key mirror");
 
 FlutterWindow::FlutterWindow(const flutter::DartProject &project)
     : project_(project) {}
@@ -299,6 +304,15 @@ struct NativeZapState {
 
 NativeZapState g_native_zap_state;
 
+// The in-player quick list, as the last `setQuickList` push described it
+// (docs/player.md "The quick list"). Parsed into a Win32-free value type
+// (`zap_quick_list_state.h`) so the windowing arithmetic this renderer depends
+// on can be reasoned about — and compiled — without a Win32 toolchain.
+//
+// Dart owns the list, the cursor and the mode stack; this is a view. Nothing
+// here is ever mutated by a key press, only replaced by the next push.
+iptvs::QuickListState g_native_quick_list;
+
 // Mirror of the chrome's visibility for the free functions in this namespace
 // (the authority is FlutterWindow::native_controls_visible_, which writes this
 // in ShowNativeControls). The overlay window can be visible while the chrome
@@ -325,6 +339,13 @@ bool ZapDigitsPending() {
   return !g_native_zap_state.digits.empty() || g_native_zap_digits_optimistic;
 }
 
+// Whether the quick list is on screen. `open` is Dart's instruction and the
+// only input — a closed list is still pushed, so an absent field cannot be
+// read as "leave it up".
+bool QuickListShown() {
+  return g_native_control_state.is_live && g_native_quick_list.open;
+}
+
 // Whether the banner has anything to acknowledge. A half-typed number and a
 // transient note outlive the plain 3 s timer on purpose: both are
 // mid-interaction states, and hiding them would take the feedback away while
@@ -333,6 +354,15 @@ bool ZapDigitsPending() {
 // sites, same as on both of those.
 bool ZapBannerShown() {
   const NativeZapState &z = g_native_zap_state;
+  // **The banner yields to the list.** Both sit in the lower-left and both
+  // describe the cursor's channel, so drawn together they would print it
+  // twice, from two different cursors — the same rule Dart's
+  // `_zapBannerVisible` applies to the shared Flutter overlay. Enforced here
+  // rather than at the call sites because the paint, the clip region and the
+  // overlay's own visibility all have to agree about it.
+  if (QuickListShown()) {
+    return false;
+  }
   return g_native_control_state.is_live && z.has_banner &&
          (z.visible || !z.digits.empty() || !z.message.empty());
 }
@@ -349,6 +379,7 @@ bool ShowsChannelIdentity() {
 
 void ResetNativeZapState() {
   g_native_zap_state = NativeZapState{};
+  g_native_quick_list = iptvs::QuickListState{};
   g_native_zap_digits_optimistic = false;
 }
 
@@ -1119,6 +1150,30 @@ constexpr int kNativeZapBannerRadius = 12;
 constexpr int kNativeInfoPanelRadius = 12;
 constexpr int kNativeMenuRadius = 16;
 
+// The in-player quick list, drawn as a **mode of the existing list menu**:
+// same background, same radius, same header height, same padding, same fonts
+// — only the rows differ, because a quick-list row carries a second line, a
+// badge and a playing marker where a track row carries a label. Two panels
+// that look like two different apps is exactly the drift the shared "Go to
+// live"/badge copy rules exist to prevent, and this one shows up beside the
+// audio menu on the same screen.
+constexpr int kNativeQuickListWidth = 360;
+constexpr int kNativeQuickListRowHeight = 46;
+constexpr int kNativeQuickListMaxRows = 9;
+// Left-anchored on the banner's own margin, so the list and the banner it
+// replaces start at the same x.
+constexpr int kNativeQuickListMarginX = kNativeZapBannerMarginX;
+// The panel is banded **between where the bars would be**, whether they are on
+// screen or not: the chrome can be revealed over an open list (a mouse move
+// does it), and a panel that jumped when the bars appeared would move the
+// cursor's row out from under the eye. It also keeps the panel clear of both
+// bars' own alpha normalization, which must not run twice over one pixel.
+constexpr int kNativeQuickListMarginTop = kNativeTopControlsHeight + 10;
+constexpr int kNativeQuickListMarginBottom =
+    kNativeBottomControlsHeightLiveEpg + 10;
+// Below this there is no room for a legible panel, and it is not drawn at all.
+constexpr int kNativeQuickListMinWidth = 180;
+
 void DrawTextWithFont(HDC hdc, const std::wstring &text, RECT rect, UINT format,
                       HFONT font, COLORREF color) {
   HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
@@ -1782,8 +1837,13 @@ void DrawSlider(HDC hdc, const RECT &track, double ratio, int thumb_radius) {
 
 // Draws a pill badge ending at [right_edge]; returns the horizontal space it
 // consumed (badge width + trailing gap) so callers can stack badges leftward.
+// [aa] is false for a badge drawn inside a floating panel, whose background
+// GDI has just laid down with its alpha still at 0 — the antialiased
+// compositor would read that as transparent and blend into nothing. Same
+// split as FillRoundRectMaybeAA, which is declared below this and so cannot
+// be called from here.
 int DrawBadge(HDC hdc, int right_edge, int center_y, const std::wstring &text,
-              COLORREF bg, COLORREF fg) {
+              COLORREF bg, COLORREF fg, bool aa = true) {
   HFONT font = UiFont(11, FW_BOLD);
   HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
   SIZE size{};
@@ -1793,7 +1853,11 @@ int DrawBadge(HDC hdc, int right_edge, int center_y, const std::wstring &text,
   const int width = size.cx + 18;
   const RECT badge =
       RectFrom(right_edge - width, center_y - 11, right_edge, center_y + 11);
-  FillRoundRectAA(hdc, badge, 7, bg);
+  if (aa) {
+    FillRoundRectAA(hdc, badge, 7, bg);
+  } else {
+    FillRoundRect(hdc, badge, 7, bg);
+  }
   DrawTextWithFont(hdc, text, badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                    font, fg);
   DeleteObject(font);
@@ -2229,6 +2293,268 @@ void PaintListMenu(HDC hdc, const RECT &rect) {
   DeleteObject(label_font);
 }
 
+// How many quick-list rows the panel can draw in [client], before the window
+// it was sent is taken into account.
+int QuickListVisibleRows(const RECT &client) {
+  const int content = RectHeight(client) - kNativeQuickListMarginTop -
+                      kNativeQuickListMarginBottom - kNativeMenuHeaderHeight -
+                      kNativeMenuPadding;
+  return iptvs::QuickListVisibleRowCount(content, kNativeQuickListRowHeight,
+                                         kNativeQuickListMaxRows);
+}
+
+// The rows actually drawn, as [start, start + count) into the pushed window.
+//
+// Two levels of windowing, both deliberate: Dart cuts ~40 rows out of a range
+// that is routinely the whole catalog, and this cuts what fits on screen out
+// of those. `QuickListVisibleStart` is the same centre-and-clamp arithmetic
+// Dart's `zapWindowStart` uses, so the cursor is always inside the slice — a
+// slice that missed it would draw a list with no visible selection, which on
+// a remote is indistinguishable from a frozen screen.
+void QuickListSlice(const RECT &client, int *start, int *count) {
+  const int rows = static_cast<int>(g_native_quick_list.rows.size());
+  const int visible = std::min(QuickListVisibleRows(client), rows);
+  const int selected = MaxInt(0, g_native_quick_list.SelectedInWindow());
+  *count = visible;
+  *start = iptvs::QuickListVisibleStart(rows, selected, visible);
+}
+
+// Where the panel sits. Empty when the window is too small to hold it — every
+// caller checks, and nothing may paint or clip to an empty rect (the alpha
+// normalizer does not bounds-check, so what this returns must always be
+// inside the client area).
+RECT QuickListRect(const RECT &client) {
+  const int width =
+      std::min(kNativeQuickListWidth,
+               RectWidth(client) - kNativeQuickListMarginX * 2);
+  if (width < kNativeQuickListMinWidth) {
+    return RectFrom(0, 0, 0, 0);
+  }
+  int rows = QuickListVisibleRows(client);
+  const int pushed = static_cast<int>(g_native_quick_list.rows.size());
+  if (pushed > 0) {
+    rows = std::min(rows, pushed);
+  } else {
+    // Loading, or an empty list: one row's worth of space for the label that
+    // stands in for the rows.
+    rows = 1;
+  }
+  const int height = kNativeMenuHeaderHeight +
+                     rows * kNativeQuickListRowHeight + kNativeMenuPadding;
+  const int top = kNativeQuickListMarginTop;
+  if (top + height > static_cast<int>(client.bottom)) {
+    return RectFrom(0, 0, 0, 0);
+  }
+  return RectFrom(kNativeQuickListMarginX, top,
+                  kNativeQuickListMarginX + width, top + height);
+}
+
+// One quick-list row. [row_rect] is the full-width slot; the row draws its own
+// highlight inside it.
+//
+// Everything here is plain GDI (`FillRoundRect`, `DrawText`) rather than the
+// antialiased compositor, because this is a floating panel: its background
+// was written by GDI with the alpha byte still at 0, and blending against
+// that reads the destination as transparent (see FillRoundRectMaybeAA). The
+// panel's alpha is fixed up once, at the end of PaintQuickList.
+void DrawQuickListRow(HDC hdc, const RECT &row_rect,
+                      const iptvs::QuickListRow &row) {
+  const bool selected = row.selected;
+  if (selected) {
+    // The same accent fill the list menu gives its active row — this panel is
+    // a mode of that one, and a second selection idiom on the same surface is
+    // how two lists start looking like two different apps.
+    FillRoundRect(hdc, row_rect, 12, kNativeAccentColor);
+  }
+  const int row_top = static_cast<int>(row_rect.top);
+  const int row_bottom = static_cast<int>(row_rect.bottom);
+  const int center_y = (row_top + row_bottom) / 2;
+  int left = static_cast<int>(row_rect.left) + 12;
+  int right = static_cast<int>(row_rect.right) - 12;
+
+  if (row.playing) {
+    // The channel actually playing, which is not necessarily the selected one
+    // — the whole reason the cursor and the playing channel are two different
+    // things in `LiveZapController`.
+    const RECT marker = RectFrom(left, center_y - 9, left + 16, center_y + 9);
+    HFONT icon_font = UiFont(13, FW_NORMAL, L"Segoe MDL2 Assets");
+    DrawTextWithFont(hdc, L"\xE768", marker,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, icon_font,
+                     selected ? RGB(255, 255, 255) : kNativeAccentColor);
+    DeleteObject(icon_font);
+    left += 20;
+  }
+
+  if (!row.badge.empty()) {
+    // Final copy from Dart (`ON NOW`, `CATCH-UP`) — never re-derived here, and
+    // never re-worded. Neutral colours, matching the shared Flutter overlay's
+    // `_badge`, so the two surfaces read alike.
+    right -= DrawBadge(hdc, right, center_y, row.badge, RGB(26, 29, 40),
+                       RGB(206, 210, 224), /*aa=*/false);
+  }
+  // **`archive` needs no mark of its own**: `LiveZapController` sets the
+  // badge to `CATCH-UP` for exactly the rows it sets `archive` on, so a
+  // second affordance beside that chip would say the same thing twice — and
+  // this renderer's job is to print Dart's copy, not to add to it.
+  if (right <= left) {
+    return;
+  }
+
+  // A past programme is dimmed, not hidden: it is still playable (catch-up),
+  // and the schedule reads as a day rather than as a list that starts at
+  // "now". `past` is a flag on the wire precisely so this side never has to
+  // compare a timestamp to decide it.
+  const COLORREF label_color =
+      selected ? RGB(255, 255, 255)
+               : (row.past ? kNativeTextLoColor : kNativeTextHiColor);
+  const COLORREF secondary_color =
+      selected ? RGB(226, 224, 255)
+               : (row.past ? RGB(120, 126, 142) : kNativeTextLoColor);
+
+  if (row.secondary.empty()) {
+    HFONT font = UiFont(14, FW_SEMIBOLD);
+    DrawTextWithFont(hdc, row.label, RectFrom(left, row_top, right, row_bottom),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     font, label_color);
+    DeleteObject(font);
+    return;
+  }
+  HFONT font = UiFont(14, FW_SEMIBOLD);
+  DrawTextWithFont(hdc, row.label,
+                   RectFrom(left, center_y - 17, right, center_y + 1),
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                   font, label_color);
+  DeleteObject(font);
+  HFONT secondary_font = UiFont(12, FW_NORMAL);
+  DrawTextWithFont(hdc, row.secondary,
+                   RectFrom(left, center_y + 1, right, center_y + 17),
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                   secondary_font, secondary_color);
+  DeleteObject(secondary_font);
+}
+
+// The quick list itself: a heading, a position readout, and the visible slice
+// of the pushed window. A **readout and a selection model**, never a pointer
+// target (docs/tv-navigation.md) — the keys belong to this surface's own key
+// ring, and the overlay window carries WS_EX_TRANSPARENT while the chrome is
+// down exactly as it does for the banner.
+//
+// Floating panel, so the same FillRoundRect + normalize + mask path the info
+// panel, the list menu and the banner use.
+void PaintQuickList(HDC hdc, uint32_t *pixels, int width, int height,
+                    const RECT &panel) {
+  if (RectWidth(panel) <= 0 || RectHeight(panel) <= 0) {
+    return;
+  }
+  const iptvs::QuickListState &list = g_native_quick_list;
+  FillRoundRect(hdc, panel, kNativeMenuRadius, RGB(8, 9, 14));
+  const int panel_left = static_cast<int>(panel.left);
+  const int panel_top = static_cast<int>(panel.top);
+  const int panel_right = static_cast<int>(panel.right);
+  const int panel_bottom = static_cast<int>(panel.bottom);
+
+  HFONT header_font = UiFont(13, FW_SEMIBOLD);
+  int position_w = 0;
+  if (list.total > 0) {
+    // `selectedIndex` is absolute, so this is the cursor's place in the whole
+    // list, not in the window — the readout the Flutter panel draws too.
+    const std::wstring position = std::to_wstring(list.selected_index + 1) +
+                                  L"/" + std::to_wstring(list.total);
+    position_w = MeasureTextWidth(hdc, position, header_font) + 10;
+    DrawTextWithFont(hdc, position,
+                     RectFrom(panel_right - 16 - position_w, panel_top + 4,
+                              panel_right - 16, panel_top + 32),
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, header_font,
+                     kNativeTextLoColor);
+  }
+  // The heading names the rung above the one on screen (the source, the
+  // category, the channel). No mode glyph beside it: the list menu's own
+  // header on this surface is text, and a third icon font in a panel that has
+  // to stay legible over video buys nothing the words don't already say.
+  DrawTextWithFont(
+      hdc, list.heading,
+      RectFrom(panel_left + 16, panel_top + 4,
+               MaxInt(panel_left + 56, panel_right - 16 - position_w),
+               panel_top + 32),
+      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, header_font,
+      kNativeTextHiColor);
+
+  const int rows_left = panel_left + 10;
+  const int rows_right = panel_right - 10;
+  int y = panel_top + kNativeMenuHeaderHeight;
+
+  if (list.rows.empty()) {
+    // Loading and empty are different answers, and Dart sends the copy for
+    // the second one ("No guide for today", "No channels here") — a renderer
+    // that invented its own would be the fifth wording of the same thing.
+    const std::wstring label =
+        list.loading ? std::wstring(L"Loading\x2026")
+                     : (list.empty_label.empty() ? std::wstring(L"Nothing here")
+                                                 : list.empty_label);
+    DrawTextWithFont(hdc, label,
+                     RectFrom(rows_left + 6, y, rows_right - 6,
+                              y + kNativeQuickListRowHeight),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     header_font, RGB(184, 190, 204));
+    DeleteObject(header_font);
+  } else {
+    DeleteObject(header_font);
+    RECT client = RectFrom(0, 0, width, height);
+    int start = 0;
+    int count = 0;
+    QuickListSlice(client, &start, &count);
+    for (int i = 0; i < count; i++) {
+      const int index = start + i;
+      if (index >= static_cast<int>(list.rows.size())) {
+        break;
+      }
+      DrawQuickListRow(hdc,
+                       RectFrom(rows_left, y, rows_right,
+                                y + kNativeQuickListRowHeight - 4),
+                       list.rows[index]);
+      y += kNativeQuickListRowHeight;
+    }
+    // The scrollbar is drawn against the **full** list, not the pushed
+    // window: `index` is absolute for exactly this reason, so a 250k-row
+    // range shows a thumb that means something.
+    if (list.total > count && count > 0) {
+      const int track_top = panel_top + kNativeMenuHeaderHeight;
+      const int track_bottom = panel_bottom - kNativeMenuPadding;
+      FillRoundRect(hdc,
+                    RectFrom(panel_right - 6, track_top, panel_right - 3,
+                             track_bottom),
+                    4, RGB(39, 43, 58));
+      const double visible_ratio =
+          static_cast<double>(count) / static_cast<double>(list.total);
+      const int thumb_height = MaxInt(
+          24, static_cast<int>((track_bottom - track_top) * visible_ratio));
+      const double scroll_ratio =
+          list.total > 1
+              ? std::clamp(static_cast<double>(list.selected_index) /
+                               static_cast<double>(list.total - 1),
+                           0.0, 1.0)
+              : 0.0;
+      const int thumb_top =
+          track_top + static_cast<int>(
+                          (track_bottom - track_top - thumb_height) *
+                          scroll_ratio);
+      FillRoundRect(hdc,
+                    RectFrom(panel_right - 7, thumb_top, panel_right - 2,
+                             thumb_top + thumb_height),
+                    5, kNativeAccentColor);
+    }
+  }
+
+  // Everything above was GDI, which leaves the alpha byte at 0; the two
+  // passes below read and write the DIB directly, so the batch has to be
+  // flushed first (nothing here calls FillRoundRectAA, which would flush for
+  // itself).
+  GdiFlush();
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, panel,
+                                    RGB(8, 9, 14), 0xFF);
+  ApplyRoundRectAlphaMask(pixels, width, height, panel, kNativeMenuRadius);
+}
+
 void PaintNativeControlBar(HWND hwnd, int control_kind) {
   PAINTSTRUCT paint;
   HDC hdc = BeginPaint(hwnd, &paint);
@@ -2254,11 +2580,20 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // else — no bars, no scrims. Anything the previous paint left behind is
   // still cleared, which is what takes the bars away on the transition.
   if (!g_native_controls_chrome_visible) {
+    // The banner and the quick list are mutually exclusive (ZapBannerShown
+    // yields to the list), but both are handled here rather than as an
+    // either/or: the two rects are different shapes, and the clear-plus-
+    // composite below is driven by the union either way.
     const RECT banner =
         ZapBannerShown() ? ZapBannerRect(rect) : RectFrom(0, 0, 0, 0);
+    const RECT quick_list =
+        QuickListShown() ? QuickListRect(rect) : RectFrom(0, 0, 0, 0);
     std::vector<RECT> current_rects;
     if (RectWidth(banner) > 0 && RectHeight(banner) > 0) {
       current_rects.push_back(banner);
+    }
+    if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
+      current_rects.push_back(quick_list);
     }
     std::vector<RECT> dirty_rects = current_rects;
     dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
@@ -2267,8 +2602,11 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
       ZeroDibRect(pixels, width, height, r);
     }
     SetBkMode(paint_hdc, TRANSPARENT);
-    if (!current_rects.empty()) {
+    if (RectWidth(banner) > 0 && RectHeight(banner) > 0) {
       PaintZapBanner(paint_hdc, pixels, width, height, banner);
+    }
+    if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
+      PaintQuickList(paint_hdc, pixels, width, height, quick_list);
     }
     CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
     buffer.prev_rects = std::move(current_rects);
@@ -2287,6 +2625,15 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   }
   if (HasInfoPanel()) {
     current_rects.push_back(InfoPanelRect(rect));
+  }
+  // The quick list stays up when the chrome is revealed over it (a mouse move
+  // does that) — it is Dart's to close, not the auto-hide's.
+  const RECT quick_list_rect =
+      QuickListShown() ? QuickListRect(rect) : RectFrom(0, 0, 0, 0);
+  const bool draws_quick_list =
+      RectWidth(quick_list_rect) > 0 && RectHeight(quick_list_rect) > 0;
+  if (draws_quick_list) {
+    current_rects.push_back(quick_list_rect);
   }
   // Clear the current rects plus anything the previous paint touched, so a
   // closed menu / shrunk bar is erased from the reused buffer rather than left
@@ -2532,6 +2879,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     ApplyRoundRectAlphaMask(pixels, width, height, info_panel_rect,
                             kNativeInfoPanelRadius);
   }
+  // Painted *after* the bars' and panels' alpha passes, because it runs its
+  // own normalize + corner mask over its rect (PaintQuickList) and a pixel
+  // normalized twice comes back double-darkened. Its band is banded clear of
+  // both bars by construction (kNativeQuickListMarginTop/Bottom), so the two
+  // passes can never meet.
+  if (draws_quick_list) {
+    PaintQuickList(paint_hdc, pixels, width, height, quick_list_rect);
+  }
 
   // Composite only the dirty bands (current + previously-touched control rects,
   // merged), each as a prcDirty sub-update of the layered surface, instead of
@@ -2712,7 +3067,7 @@ bool IsZapKeyPress(UINT message, WPARAM wparam, LPARAM lparam) {
   const bool is_repeat = message == WM_KEYDOWN && IsKeyRepeat(lparam);
   return iptvs::DecideZapKey(static_cast<int>(wparam), ZapActive(),
                              g_native_controls_chrome_visible,
-                             ZapDigitsPending(), is_repeat)
+                             ZapDigitsPending(), is_repeat, QuickListShown())
       .consumed();
 }
 
@@ -3031,7 +3386,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     // `ZapKeyPolicy`.
     const iptvs::ZapKeyDecision zap = iptvs::DecideZapKey(
         static_cast<int>(wparam), ZapActive(), native_controls_visible_,
-        ZapDigitsPending(), IsKeyRepeat(lparam));
+        ZapDigitsPending(), IsKeyRepeat(lparam), QuickListShown());
     if (zap.consumed()) {
       const std::string command = zap.command();
       if (!command.empty()) {
@@ -3515,9 +3870,10 @@ void FlutterWindow::ResizeNativeControls() {
 
 // Whether the overlay *window* should be on screen. Wider than
 // native_controls_visible_, which is the chrome: with the chrome hidden the
-// window is still up while the zap banner has something to say.
+// window is still up while the zap banner has something to say, or while the
+// quick list is open.
 bool FlutterWindow::NativeOverlayTargetVisible() const {
-  return native_controls_visible_ || ZapBannerShown();
+  return native_controls_visible_ || ZapBannerShown() || QuickListShown();
 }
 
 void FlutterWindow::BringNativeControlsToFront() {
@@ -3540,8 +3896,8 @@ void FlutterWindow::UpdateNativeControlsRegion() {
     return;
   }
   if (!native_controls_visible_) {
-    // Chrome hidden: the overlay exists only to carry the zap banner, so the
-    // clip region is the banner's own rect. Without this the banner would be
+    // Chrome hidden: the overlay exists only to carry the zap banner or the
+    // quick list, so the clip region is theirs. Without this they would be
     // clipped away by the bars' region and never appear at all — and anything
     // outside it must stay unpainted, because the region is also what keeps
     // the rest of the window out of the way.
@@ -3556,6 +3912,15 @@ void FlutterWindow::UpdateNativeControlsRegion() {
                                  banner.bottom, kNativeZapBannerRadius * 2,
                                  kNativeZapBannerRadius * 2)
             : CreateRectRgn(0, 0, 0, 0);
+    const RECT quick_list =
+        QuickListShown() ? QuickListRect(rect) : RectFrom(0, 0, 0, 0);
+    if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
+      HRGN list_region = CreateRoundRectRgn(
+          quick_list.left, quick_list.top, quick_list.right, quick_list.bottom,
+          kNativeMenuRadius * 2, kNativeMenuRadius * 2);
+      CombineRgn(banner_region, banner_region, list_region, RGN_OR);
+      DeleteObject(list_region);
+    }
     SetWindowRgn(native_controls_overlay_, banner_region, FALSE);
     native_controls_region_dirty_ = false;
     return;
@@ -3582,6 +3947,18 @@ void FlutterWindow::UpdateNativeControlsRegion() {
                                            panel.bottom, 12, 12);
     CombineRgn(region, region, panel_region, RGN_OR);
     DeleteObject(panel_region);
+  }
+  if (QuickListShown()) {
+    // The chrome can come up over an open list, so the bars' region has to
+    // make room for it too.
+    const RECT quick_list = QuickListRect(rect);
+    if (RectWidth(quick_list) > 0 && RectHeight(quick_list) > 0) {
+      HRGN list_region = CreateRoundRectRgn(
+          quick_list.left, quick_list.top, quick_list.right, quick_list.bottom,
+          kNativeMenuRadius * 2, kNativeMenuRadius * 2);
+      CombineRgn(region, region, list_region, RGN_OR);
+      DeleteObject(list_region);
+    }
   }
   SetWindowRgn(native_controls_overlay_, region, FALSE);
   native_controls_region_dirty_ = false;
@@ -3679,10 +4056,12 @@ void FlutterWindow::ApplyNativeControlsVisibility() {
     UpdateNativeControlsRegion();
   }
   const bool target_visible = NativeOverlayTargetVisible();
-  // While only the banner is drawn the overlay is decoration, not chrome: it
-  // has no hit targets, and swallowing the pointer over its band would stop
-  // a mouse move there from reaching the video surface — whose WM_MOUSEMOVE
-  // is the only thing that reveals the controls.
+  // While only the banner or the quick list is drawn the overlay is
+  // decoration, not chrome: neither has a hit target — the list is a
+  // selection model driven by the key ring, exactly as the shared Flutter
+  // overlay's panel is `IgnorePointer` — and swallowing the pointer over
+  // their band would stop a mouse move there from reaching the video
+  // surface, whose WM_MOUSEMOVE is the only thing that reveals the controls.
   const LONG_PTR ex_style =
       GetWindowLongPtr(native_controls_overlay_, GWL_EXSTYLE);
   const LONG_PTR wanted_ex_style =
@@ -3900,6 +4279,83 @@ void FlutterWindow::UpdateZapBanner(const flutter::EncodableValue *args) {
   InvalidateNativeControls();
 }
 
+// The inbound half of `setQuickList` (docs/player.md "The quick list"), and
+// the one place a wire payload becomes a [iptvs::QuickListState].
+//
+// Everything below the `EncodableValue` unwrapping is Win32-free by design
+// (`zap_quick_list_state.h`): the interesting part of this feature on this
+// surface is the windowing arithmetic, and it is testable without a
+// toolchain, while this adapter is not.
+void FlutterWindow::UpdateQuickList(const flutter::EncodableValue *args) {
+  const bool was_shown = QuickListShown();
+  iptvs::QuickListState next;
+  next.open = EncodableBoolArg(args, "open", false);
+  next.mode = iptvs::QuickListModeFromName(
+      EncodableStdStringArg(args, "mode", "channels"));
+  next.heading = EncodableStringArg(args, "heading", L"");
+  next.selected_index = EncodableIntArg(args, "selectedIndex", 0);
+  next.window_start = EncodableIntArg(args, "windowStart", 0);
+  next.total = EncodableIntArg(args, "total", 0);
+  next.loading = EncodableBoolArg(args, "loading", false);
+  // Optional on the wire: absent while loading or non-empty.
+  next.empty_label = EncodableStringArg(args, "emptyLabel", L"");
+  next.revision = EncodableIntArg(args, "revision", 0);
+  if (args && std::holds_alternative<flutter::EncodableMap>(*args)) {
+    const auto &map = std::get<flutter::EncodableMap>(*args);
+    const auto rows = map.find(flutter::EncodableValue("rows"));
+    if (rows != map.end() &&
+        std::holds_alternative<flutter::EncodableList>(rows->second)) {
+      for (const auto &item : std::get<flutter::EncodableList>(rows->second)) {
+        if (!std::holds_alternative<flutter::EncodableMap>(item)) {
+          continue;
+        }
+        // The existing Encodable*Arg helpers take any value that *holds* a
+        // map, so a row element parses with no second set of helpers.
+        iptvs::QuickListRow row;
+        row.index = EncodableIntArg(&item, "index", 0);
+        row.id = EncodableStdStringArg(&item, "id", "");
+        row.label = EncodableStringArg(&item, "label", L"");
+        row.secondary = EncodableStringArg(&item, "secondary", L"");
+        row.badge = EncodableStringArg(&item, "badge", L"");
+        row.kind = iptvs::QuickListRowKindFromName(
+            EncodableStdStringArg(&item, "kind", "channel"));
+        row.selected = EncodableBoolArg(&item, "selected", false);
+        row.playing = EncodableBoolArg(&item, "playing", false);
+        row.archive = EncodableBoolArg(&item, "archive", false);
+        row.past = EncodableBoolArg(&item, "past", false);
+        row.live = EncodableBoolArg(&item, "live", false);
+        next.rows.push_back(std::move(row));
+      }
+    }
+  }
+  g_native_quick_list = std::move(next);
+
+  const bool is_shown = QuickListShown();
+  if (!was_shown && !is_shown) {
+    // A closed list is pushed on **every** controller notification, i.e. on
+    // every keypress of a held zap. Rebuilding the clip region and asking for
+    // a repaint for each of those would be churn with a known answer.
+    return;
+  }
+  // The panel's height moves with the row count, and the banner it suppresses
+  // has a different rect entirely, so any crossing needs a new region.
+  native_controls_region_dirty_ = true;
+  if (was_shown && !is_shown && !native_controls_visible_) {
+    // Same trap HideZapBanner documents: a layered window keeps whatever was
+    // last composited into it, so taking the overlay down with the list still
+    // on its surface would flash the list for a frame the next time anything
+    // brought the window back. Repaint directly — InvalidateNativeControls
+    // would decline, the overlay's target visibility having just gone false —
+    // and only then let ApplyNativeControlsVisibility hide it.
+    if (native_controls_overlay_) {
+      InvalidateRect(native_controls_overlay_, nullptr, FALSE);
+      UpdateWindow(native_controls_overlay_);
+    }
+  }
+  ApplyNativeControlsVisibility();
+  InvalidateNativeControls();
+}
+
 // The 3 s timer expiring. A half-typed number or a transient note outlives it
 // (ZapBannerShown), so this is a repaint request, not an unconditional hide.
 void FlutterWindow::HideZapBanner() {
@@ -3922,11 +4378,13 @@ void FlutterWindow::HideZapBanner() {
   ApplyNativeControlsVisibility();
 }
 
-// Session teardown. Deliberately *not* called from DestroyNativeControls,
-// which also runs on a fullscreen / mini-player transition (via
-// RecreateNativeControls) — dropping the banner there would leave a held key
-// unacknowledged, and killing the timer without clearing `visible` would
-// leave it up forever.
+// Session teardown for the banner **and the quick list** (ResetNativeZapState
+// clears both — they are one feature's state, and a list left standing after
+// `destroySurface` would hold the overlay window up with nothing behind it).
+// Deliberately *not* called from DestroyNativeControls, which also runs on a
+// fullscreen / mini-player transition (via RecreateNativeControls) — dropping
+// them there would leave a held key unacknowledged, and killing the timer
+// without clearing `visible` would leave the banner up forever.
 void FlutterWindow::ResetZapBanner() {
   KillTimer(GetHandle(), kNativeZapBannerTimer);
   ResetNativeZapState();
@@ -4128,6 +4586,12 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "setZapBanner") {
           UpdateZapBanner(call.arguments());
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "setQuickList") {
+          UpdateQuickList(call.arguments());
           result->Success(flutter::EncodableValue(true));
           return;
         }

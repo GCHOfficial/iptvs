@@ -41,6 +41,18 @@ enum class ZapKeyAction {
   kChannelDown,
   kPreviousChannel,
   kOpenList,
+  kCloseList,
+  // Quick list open: move the cursor by [ZapKeyDecision::delta] rows. Separate
+  // from [kChannelUp]/[kChannelDown] because the two diverge while the list is
+  // on screen — D-pad Up must move the highlight *up*, while CHANNEL_UP still
+  // means "the next channel", which is the next row *down* (docs/player.md,
+  // "While the list is open, it owns navigation").
+  kMove,
+  // Right inside the quick list: one rung *down* the mode stack. Separate from
+  // [kActivate] because in the channels mode OK plays while Right opens that
+  // channel's schedule — giving Right its own string keeps this surface
+  // mode-blind, which it has to be: Dart owns the mode stack.
+  kDescend,
   kDigit,
   kActivate,
   kBack,
@@ -51,6 +63,8 @@ enum class ZapKeyAction {
 struct ZapKeyDecision {
   ZapKeyAction action = ZapKeyAction::kNone;
   int digit = -1;
+  // Signed row delta for [ZapKeyAction::kMove]; unused otherwise.
+  int delta = 0;
 
   // Whether the window procedure must consume this press (return 0).
   bool consumed() const { return action != ZapKeyAction::kNone; }
@@ -65,6 +79,12 @@ struct ZapKeyDecision {
         return "zap:prev";
       case ZapKeyAction::kOpenList:
         return "zap:list";
+      case ZapKeyAction::kCloseList:
+        return "zap:close";
+      case ZapKeyAction::kMove:
+        return "zap:move:" + std::to_string(delta);
+      case ZapKeyAction::kDescend:
+        return "zap:descend";
       case ZapKeyAction::kDigit:
         return "zap:digit:" + std::to_string(digit);
       case ZapKeyAction::kActivate:
@@ -95,17 +115,26 @@ inline constexpr int kZapVkDigit0 = 0x30;  // '0'
 inline constexpr int kZapVkDigit9 = 0x39;  // '9'
 inline constexpr int kZapVkNumpad0 = 0x60; // VK_NUMPAD0
 inline constexpr int kZapVkNumpad9 = 0x69; // VK_NUMPAD9
+// This surface's stand-in for a remote's dedicated `GUIDE` key, which has no
+// Win32 virtual-key code at all — the same stand-in relationship Page
+// Up/Page Down have with CHANNEL_UP/CHANNEL_DOWN above. 'G' was picked
+// because the native HWND surface's other letter shortcuts are F
+// (fullscreen), M (mini-player), I (info) and S (star) and Dart's own
+// `CallbackShortcuts` map binds no other letter, so nothing on this screen
+// loses a key. A real remote reaches the list through Left.
+inline constexpr int kZapVkGuide = 0x47; // 'G'
 
-// Whether the quick list exists yet.
+// Whether the quick list exists.
 //
-// Dart answers `zap:list` with "not consumed" until Phase 6 wires the quick
-// list, and the window procedure cannot wait for that answer — it has to
-// return synchronously. So rather than consume Left into a silent no-op
-// (Left's present job, revealing the chrome, would simply stop working), this
-// flag keeps it out of the policy entirely until the list is real. Phase 6
-// flips it; both settings are already expressed below. Mirrors Kotlin's
-// `ZapKeyPolicy.QUICK_LIST_ENABLED`.
-inline constexpr bool kZapQuickListEnabled = false;
+// This gated Left (and the guide key) out of the policy while Dart answered
+// `zap:list` with "not consumed": the window procedure cannot wait for that
+// answer — it has to return synchronously — so claiming Left into a decided
+// no-op would have silently broken its present job of revealing the chrome.
+// **Dart now consumes the whole quick-list vocabulary** (Phase 6), so this is
+// true; the flag stays as the one switch that turns the rungs below off
+// again, and both settings are still expressed. Mirrors Kotlin's
+// `ZapKeyPolicy.QUICK_LIST_ENABLED`, which Phase 6b flips.
+inline constexpr bool kZapQuickListEnabled = true;
 
 // Returns the digit a key carries, or -1.
 inline int ZapDigitOf(int virtual_key) {
@@ -116,6 +145,16 @@ inline int ZapDigitOf(int virtual_key) {
     return virtual_key - kZapVkNumpad0;
   }
   return -1;
+}
+
+// A cursor move of [delta] rows. Written as a helper rather than an aggregate
+// initialiser so no call site has to remember that `digit` sits between the
+// action and the delta.
+inline ZapKeyDecision ZapMoveDecision(int delta) {
+  ZapKeyDecision decision;
+  decision.action = ZapKeyAction::kMove;
+  decision.delta = delta;
+  return decision;
 }
 
 // @param virtual_key       the `WM_KEYDOWN` wParam.
@@ -138,11 +177,72 @@ inline int ZapDigitOf(int virtual_key) {
 //                          on a reply would mean returning "not consumed" for
 //                          a key that is about to be consumed, which is not.
 // @param is_repeat         `lParam` bit 30 — the key was already down.
+// @param quick_list_open   the quick list is on screen. Read from the native
+//                          mirror of `setQuickList`'s `open` — the same
+//                          synchronous-decision reason `digits_pending` is a
+//                          mirror. While it is set the list **owns
+//                          navigation** (docs/player.md): every arrow means a
+//                          cursor move, not a channel change, and the chrome
+//                          test below no longer applies, because a list on
+//                          screen is unambiguous whether the bars are up or
+//                          not — handing Up to the control row there would
+//                          move two cursors with one press.
 inline ZapKeyDecision DecideZapKey(
     int virtual_key, bool zap_active, bool controls_visible,
-    bool digits_pending, bool is_repeat,
+    bool digits_pending, bool is_repeat, bool quick_list_open,
     bool quick_list_enabled = kZapQuickListEnabled) {
   if (!zap_active) {
+    return ZapKeyDecision{};
+  }
+
+  if (quick_list_open && quick_list_enabled) {
+    const int list_digit = ZapDigitOf(virtual_key);
+    if (list_digit >= 0) {
+      // Digits move the cursor rather than zapping while the list is up, but
+      // that is Dart's rule to apply — the string is the same one, and a held
+      // key must not stack the same number four times either way.
+      return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                       : ZapKeyDecision{ZapKeyAction::kDigit, list_digit};
+    }
+    switch (virtual_key) {
+    case kZapVkUp:
+      // Repeats pass: holding an arrow is how a 250k-row list is scanned, and
+      // the cursor clamps at both ends rather than wrapping.
+      return ZapMoveDecision(-1);
+    case kZapVkDown:
+      return ZapMoveDecision(1);
+    case kZapVkLeft:
+    case kZapVkEscape:
+    case kZapVkBack:
+      // One rung up the mode stack, and at the top it closes. Ahead of the
+      // ordinary Escape/Back branch in `MessageHandler`, because the list's
+      // rungs sit above the player's chrome ladder (docs/tv-navigation.md,
+      // "The in-player quick list").
+      return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                       : ZapKeyDecision{ZapKeyAction::kBack};
+    case kZapVkRight:
+      return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                       : ZapKeyDecision{ZapKeyAction::kDescend};
+    case kZapVkReturn:
+    case kZapVkSelect:
+      return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                       : ZapKeyDecision{ZapKeyAction::kActivate};
+    case kZapVkPrior:
+      // The dedicated keys keep their list-*order* meaning: "the next
+      // channel" is the next row down, exactly as it is for playback.
+      return ZapKeyDecision{ZapKeyAction::kChannelUp};
+    case kZapVkNext:
+      return ZapKeyDecision{ZapKeyAction::kChannelDown};
+    case kZapVkGuide:
+      // A dedicated key that did nothing the second time reads as a dead
+      // remote, so it toggles — the same rule Dart's `guide` binding applies.
+      return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                       : ZapKeyDecision{ZapKeyAction::kCloseList};
+    default:
+      break;
+    }
+    // Everything else keeps its ordinary meaning on this screen: the list is
+    // a readout over the video, not a modal that swallows the keyboard.
     return ZapKeyDecision{};
   }
 
@@ -165,6 +265,12 @@ inline ZapKeyDecision DecideZapKey(
   }
   if (virtual_key == kZapVkNext) {
     return ZapKeyDecision{ZapKeyAction::kChannelDown};
+  }
+  if (virtual_key == kZapVkGuide && quick_list_enabled) {
+    // Unambiguous like the two above, so it opens the list whether the chrome
+    // is up or not — unlike Left, which is contested.
+    return is_repeat ? ZapKeyDecision{ZapKeyAction::kSwallow}
+                     : ZapKeyDecision{ZapKeyAction::kOpenList};
   }
 
   // OK commits a half-typed number early, and Back/Escape clears it — both

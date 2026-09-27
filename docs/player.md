@@ -1021,10 +1021,12 @@ decide whether the ordinary reveal-on-input `PostMessage` should fire.
   ordinary meaning on this screen runs.
 - **The arrows are the contested keys**: claimed only while the chrome is hidden (Up/Down = channel
   up/down; Right = "previous channel", swallowed on repeat so holding it doesn't flap back and
-  forth). Left is reserved for the quick list and gated on `kZapQuickListEnabled` (`false` today,
-  mirroring Android's `QUICK_LIST_ENABLED`) — with it off, Left falls through and keeps its ordinary
-  chrome-reveal job rather than becoming a decided no-op, since the window procedure has to answer
-  synchronously and can't wait for Dart's `zap:list` reply.
+  forth). **Left opens the quick list** (Phase 6c, below), and `kZapQuickListEnabled` is now
+  `true` — it stays as the one switch that takes the list rungs back out of the policy. It exists
+  because the window procedure has to answer synchronously and cannot wait for Dart's `zap:list`
+  reply: while Dart still declined that command, claiming Left would have silently broken its
+  ordinary chrome-reveal job rather than visibly doing nothing. Android's `QUICK_LIST_ENABLED` is
+  still `false` (Phase 6b).
 - **`zap_active` (a live route with a zap controller behind it) is read off a new `zapEnabled` key
   on `setControlState`** (`NativeControlState.zap_enabled`, `ZapActive()`). Without it a live route
   opened with no `LiveZapController` — the EPG grid's own play path — would have its arrows claimed
@@ -1089,6 +1091,120 @@ is why it can't reuse the ordinary control state at all.
   `prepareExit` and `OnDestroy` — genuine session teardown — but **not** from `DestroyNativeControls`,
   which also runs on an ordinary fullscreen/mini-player transition (via `RecreateNativeControls`):
   dropping the banner there would leave a held key's press unacknowledged mid-transition.
+
+### The quick list on the native HWND surface (Phase 6c)
+
+**Implemented.** The GDI overlay renders the frozen `setQuickList` payload (see "The quick list
+(Phase 6 …)" under "Live zapping"), and the key ring gained the open-list half of the frozen
+mapping. Nothing about the transport changed: `setQuickList` is a method call on the existing
+`iptvs/native_hdr_player` channel, beside `setZapBanner`, and the commands go back out on
+`nativeControl` like every other one.
+
+**The payload becomes a Win32-free value type first.** `windows/runner/zap_quick_list_state.h`
+holds `QuickListState`/`QuickListRow`, the two enum parsers, and the two pieces of arithmetic
+worth being sure about — `QuickListVisibleRowCount` (how many rows fit) and
+`QuickListVisibleStart` (which slice of the pushed window to draw). It includes neither
+`<windows.h>` nor a Flutter header, for the same reason `zap_key_policy.h` doesn't: this runner
+has no test harness, and the half that can at least be compiled and asserted on with a plain
+`g++` should be the half where a mistake is invisible. `FlutterWindow::UpdateQuickList` is the
+thin adapter — it reuses the existing `Encodable*Arg` helpers on each row element (they accept
+any value that *holds* a map, so a row needs no second set of helpers) and then hands over.
+
+- **Two levels of windowing.** Dart ships ~40 rows around the cursor out of a range that is
+  routinely the whole catalog; the panel then draws the `kNativeQuickListMaxRows` (9) of those
+  that fit. `QuickListVisibleStart` is the same centre-and-clamp arithmetic as Dart's
+  `zapWindowStart`, so the cursor is always inside the slice — a slice that missed it would draw
+  a list with no visible selection, which on a remote is indistinguishable from a frozen screen.
+  The position readout and the scrollbar are drawn from `selectedIndex`/`total`, which are
+  **absolute**, so a 250k-row range gets a thumb that means something.
+- **It is a mode of the existing list menu**, not a second panel style: same background, radius,
+  header height, padding and fonts as `PaintListMenu`, and the cursor row takes the accent fill
+  that menu gives its active row. Only the row differs, because a quick-list row carries a second
+  line, a badge and a playing marker. It is banded between *where the bars would be*
+  (`kNativeQuickListMarginTop`/`Bottom`, sized off the tallest live-EPG bar) whether they are on
+  screen or not — the chrome can be revealed over an open list by a mouse move, and a panel that
+  jumped when the bars appeared would move the cursor's row out from under the eye. That banding
+  is also what keeps the panel clear of the bars' own alpha normalization, which must never run
+  twice over one pixel.
+- **Rows print Dart's copy and nothing else.** `label`, `secondary` and the `ON NOW`/`CATCH-UP`
+  badge are drawn verbatim; `playing` gets a small play glyph (the playing channel is not
+  necessarily the selected one); `past` dims both lines rather than hiding the row, since a past
+  programme is still playable. **`archive` gets no mark of its own** — `LiveZapController` sets
+  the badge to `CATCH-UP` for exactly the rows it flags `archive`, so a second affordance would
+  say the same thing twice. There is no mode glyph beside the heading either: this surface's list
+  menu has a text header, and the heading already names the rung. `loading` draws "Loading…" and
+  an empty list draws Dart's `emptyLabel` (falling back to "Nothing here" only if it is absent).
+- **Floating-panel alpha path, as always here**: plain `FillRoundRect` throughout (including the
+  badge, which is why `DrawBadge` took an `aa` flag — `FillRoundRectAA` blends against a
+  destination alpha that GDI has not written yet), then `GdiFlush` →
+  `NormalizeNativeControlBitmapAlpha` → `ApplyRoundRectAlphaMask`, exactly like the banner, the
+  info panel and the list menu. Because `PaintQuickList` normalizes its own rect, it is painted
+  **after** the chrome paint's other alpha passes: a pixel normalized twice comes back
+  double-darkened.
+- **The overlay window stays up for it with the chrome hidden**, the same way it does for the
+  banner: `NativeOverlayTargetVisible()` is now
+  `native_controls_visible_ || ZapBannerShown() || QuickListShown()`, and
+  `UpdateNativeControlsRegion` ORs the panel's round-rect into the clip region in *both* branches
+  — with the chrome down (or the list would be clipped away entirely) and with it up (or the bars'
+  region would clip it). **The banner yields to the list**: `ZapBannerShown()` returns false while
+  `QuickListShown()`, enforced inside that predicate rather than at the call sites so the paint,
+  the clip region and the window's visibility cannot disagree. Both sit in the lower-left and both
+  describe the cursor's channel, so drawn together they would print it twice from two cursors —
+  the same rule Dart's `_zapBannerVisible` applies to the shared Flutter overlay.
+- **The list is not a mouse target**, deliberately, and the `WS_EX_TRANSPARENT` rule is unchanged
+  because of it: while only the banner *or* the list is drawn the overlay is decoration, so it
+  keeps that style and a mouse move over its band still reaches the video surface's
+  `WM_MOUSEMOVE` — the only thing that reveals the chrome. That matches the shared Flutter
+  overlay's panel, which is `IgnorePointer` for the same reason, and docs/tv-navigation.md's rule
+  that the list is a selection model driven by the surface's key ring, never a focus (or hit)
+  target. A hit test would also have to answer "which absolute row is this?" for a list whose
+  rows are two levels of window away from the real one.
+- **Closing repaints before hiding.** `UpdateQuickList` reuses `HideZapBanner`'s trap: a layered
+  window keeps whatever was last composited into it, so taking the overlay down with the list
+  still on its surface would flash the list for a frame the next time anything brought the window
+  back. It also returns early when a *closed* list is pushed over a closed list — that is every
+  keypress of a held zap, and rebuilding the clip region for each of those is churn with a known
+  answer. `ResetZapBanner` (session teardown only) clears the list along with the banner.
+- **The back buffer is reused** (`OverlayBackBuffer`) and the panel's rect joins `current_rects`,
+  so it is cleared, composited and — when it closes — erased through the same
+  `CompositeOverlayBands` path everything else on this overlay uses. No new DIB, no new counted
+  resource.
+
+**Key ring, with the list open** (`DecideZapKey`'s new `quick_list_open` argument, read from
+`QuickListShown()` at both call sites — the `MessageHandler` branch and `IsZapKeyPress`, so a
+press that drives the list still suppresses the reveal-on-input post). The whole frozen mapping:
+
+| Key | List closed | List open |
+| --- | --- | --- |
+| Left | `zap:list` (chrome hidden only) | `zap:back` |
+| Right | `zap:prev` (chrome hidden only) | `zap:descend` |
+| Up / Down | `zap:up`/`zap:down` (chrome hidden only) | `zap:move:-1`/`zap:move:1`, repeats allowed |
+| Return / `VK_SELECT` | commits a pending digit buffer, else falls through | `zap:activate` |
+| Escape / Backspace | clears a pending digit buffer, else falls through | `zap:back`, **ahead of the ordinary back branch** |
+| Page Up / Page Down | `zap:up`/`zap:down` | `zap:up`/`zap:down` (list *order*, not cursor direction) |
+| Digits, numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
+| `G` | `zap:list` | `zap:close` |
+
+- **The arrows stop being chrome-gated while the list is open.** They are contested only when the
+  alternative is the control row; with a list on screen they are unambiguous, and handing Up to
+  the control row there would move two cursors with one press. Escape/Back is likewise claimed
+  with the chrome up, because the list's rungs sit *above* the player's chrome ladder
+  (docs/tv-navigation.md).
+- **`G` is this surface's `GUIDE`**, because Win32 has no virtual-key code for a remote's guide
+  key at all — the same stand-in relationship Page Up/Page Down have with
+  `CHANNEL_UP`/`CHANNEL_DOWN`. It was chosen against the keys this screen already uses (F
+  fullscreen, M mini-player, I info, S star, plus Dart's own `CallbackShortcuts` map, which binds
+  no other letter), and it toggles, since a dedicated key that does nothing the second time reads
+  as a dead remote. `kZapVkGuide` is `static_assert`ed against `'G'` beside the `VK_*` mirrors.
+- **Repeat handling follows the closed-list rules**: the cursor arrows repeat (holding one is how
+  a long list is scanned, and the cursor clamps rather than wraps), everything else is swallowed
+  on repeat — consumed, no command — so a held key cannot leak into the overlay's focus ring.
+
+**Not verifiable here:** no Windows toolchain and no HDR display in the development environment,
+so the panel's real geometry over video, the glyph the play marker resolves to, and every key
+above need an on-device pass. The pure halves (`zap_key_policy.h`, `zap_quick_list_state.h`) are
+compiled and asserted on with `g++ -std=c++17 -Wall -Wextra -Werror` as scratch work; there is
+still no committed C++ harness in this runner.
 
 ## Linux
 
@@ -1758,12 +1874,11 @@ see "Shared Flutter overlay banner (Phase 3)" below — this is also what the Wi
 preview→fullscreen surface renders, since it's the same media_kit player), the Windows native HWND
 surface's own key ring and GDI banner (Phase 4, see "Windows" below), and the Linux Lua OSD's own
 per-stream key registration and banner (Phase 5, see "Linux" below). **Phase 6 — the quick list —
-is implemented in Dart, on the shared Flutter overlay and on the Linux Lua OSD** (Phase 6a and
-Phase 6d; see "The quick list (Phase 6)" below, which freezes the `setQuickList` payload the
-Kotlin, C++ and Lua renderers implement against, and "Live zapping — the quick list (Phase 6d)"
-under "Linux" for what the Lua half does with it). Only iOS's zap input and the Kotlin/C++
-renderers remain ahead — every native transport already speaks the wire contract below, so what
-is left is renderers, never new plumbing.
+is implemented on every surface that draws its own overlay** — in Dart and on the shared Flutter
+overlay (6a), on Android (6b), on the Windows native HWND surface (6c, see "The quick list on the
+native HWND surface" under "Windows") and on the Linux Lua OSD (6d, see "Live zapping — the quick
+list (Phase 6d)" under "Linux"); "The quick list (Phase 6)" below freezes the `setQuickList`
+payload every renderer implements against. Only iOS's zap input remains ahead.
 
 ### Ownership: why Dart, not a native-cached list
 
@@ -2071,9 +2186,10 @@ directly (no zap yet this session) shows the plain title until the first Up/Down
 ### The quick list (Phase 6 — Dart side, the shared Flutter overlay, the Linux Lua OSD)
 
 **Implemented in Dart, on the shared Flutter overlay (Phase 6a), on Android (Phase 6b, "Android's
-quick list" below) and on the Linux Lua OSD (Phase 6d, see "Linux" below); the C++ renderer
-implements against the frozen payload below.** The quick list is the browsable list the fullscreen
-live player opens over the video — Left (chrome hidden) or `GUIDE`.
+quick list" below), on the Windows native HWND surface (Phase 6c, "The quick list on the native HWND
+surface" under "Windows") and on the Linux Lua OSD (Phase 6d, under "Linux"), all against the frozen
+payload below.** The quick list is the browsable list the fullscreen live player opens over the
+video — Left (chrome hidden) or `GUIDE`.
 
 #### A mode stack, not a three-column panel
 
