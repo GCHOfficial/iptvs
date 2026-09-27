@@ -465,8 +465,9 @@ apply.
   inside the player — a remote that stops dead at the end of the list reads as broken, not as
   reaching a boundary — so both directions wrap here.
 - **Right is the "previous channel" toggle** (classic last-channel recall; a no-op until two
-  channels have actually played this session). **Left is reserved for the quick list** (Phase 6);
-  today it isn't consumed, so it falls through to the ordinary chrome-reveal behaviour.
+  channels have actually played this session). **Left opens the quick list** — see "The in-player
+  quick list" below — as does the dedicated `GUIDE` key, which (being unambiguous) works whether
+  the chrome is up or not and closes the list on a second press.
 - **Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are live regardless of chrome** —
   unlike the arrows, these have no other meaning on this screen to be ambiguous with.
 - **OK commits a pending digit buffer early**; otherwise it isn't consumed and falls through to the
@@ -497,10 +498,54 @@ apply.
   `overlay_layout_test.lua`'s headless harness. A divergence between them is a navigation rule that
   differs per surface, which is exactly what the shared `parseZapCommand`/`zap:*` vocabulary exists
   to prevent on the Dart side of the wire.
+- **The quick list is the same kind of thing as the banner, only browsable** — one cursor, no
+  focus ring, keys owned by the surface's own policy. Its rungs are below.
 - **The zap banner is a readout, never a focus target.** It never receives focus, is never part of
   any focus ring, and pressing a zap key never reveals the transport chrome to show it — the banner
   itself is the only acknowledgement a keypress gets while the chrome is hidden, on every surface
   that draws one (see CLAUDE.md "The live chrome is one layout on every surface").
+
+### The in-player quick list
+
+Left (live, chrome hidden) or `GUIDE` opens a browsable list over the video. It is a **mode
+stack**, not a three-column panel: `categories` → `channels` (each with a now-playing line) →
+that channel's schedule for today. Right/OK descends, Left/Back ascends, and Back at the top
+closes. Full behaviour, and the frozen `setQuickList` payload every surface renders it from, are
+in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigation model.
+
+- **It is a selection model, and the strictest case of one in the app.** One cursor (an integer
+  per mode), rows that are *not* focus targets, an explicit `itemExtent` so the reveal is exact
+  `index * extent` arithmetic. That is not a stylistic choice here: the channels mode is routinely
+  the whole 250k-channel catalog, Dart ships the surfaces a **window** of ~40 rows around the
+  cursor, and a row outside that window does not exist to focus. The same reason the live tab and
+  the EPG grid are selection models, at a larger scale.
+- **It is a readout, not a focus target** — like the zap banner above. The Flutter overlay's panel
+  holds no `FocusNode` at all and is `IgnorePointer`; the keys belong to the route's own
+  `CallbackShortcuts` (and, on the natives, to their own key rings). Giving a row focus would
+  fight the key policy that already owns the arrows on that surface.
+- **The cursor clamps at both ends; it never wraps.** A deliberate divergence *back* from the
+  player's Up/Down, which wrap: a bare video has no visible ends, a list does, and `zap:move`
+  carries an arbitrary signed delta, so wrapping a 250k-row list on a page key would be a jump the
+  opposite key cannot undo.
+- **D-pad Up moves the highlight up; the dedicated channel keys move by one in list order.**
+  `CHANNEL_UP`/`PAGE_UP` mean "the next channel", which is the next row *down* — the same meaning
+  they have for playback. The arrows therefore send `zap:move:∓1` while the list is open, and the
+  dedicated keys keep sending `zap:up`/`zap:down`. Both rules are decided in Dart; a surface sends
+  the key it was pressed and holds none of the meaning.
+- **The list's own Back rungs sit above the player's chrome ladder**, one peel per press, and are
+  consumed before anything else can see the key:
+
+  0. quick list, `schedule` mode → the **channels** mode;
+  1. quick list, `channels` mode → the **categories** mode;
+  2. quick list, `categories` mode → **closed**;
+  3. …then the player's ordinary ladder (a half-typed digit buffer, then menu → info → hide →
+     exit).
+
+  A half-typed channel number still peels first, exactly as it does with no list open — the digit
+  rung is above these, for the same reason it sits above `nextPlayerBackAction`'s ladder.
+- **Nothing changes channel while the list is up except an explicit OK on a row.** Digits move the
+  cursor instead of zapping, "previous channel" is consumed and inert, and the zap banner hides —
+  a list the user is reading must not have channels changing behind it.
 
 ### Android's key map (`ZapKeyPolicy`, implemented)
 
@@ -521,10 +566,12 @@ Activity boundary `PlayerBackPolicy`/`ReconnectPolicy` already are, pinned by pl
 | OK / Enter / numpad Enter, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
 | Back, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
 
-`QUICK_LIST_ENABLED = false` keeps Left and `GUIDE` out of the policy entirely — a decision made
-here rather than in Dart, because `dispatchKeyEvent` has to answer synchronously and today's Dart
-side answers `zap:list` "not consumed"; claiming the key into a decided no-op would silently break
-Left's present job (revealing the chrome). Flipping the one constant is the whole Phase 6 cutover.
+`QUICK_LIST_ENABLED` gated Left and `GUIDE` out of the policy while Dart answered `zap:list` "not
+consumed" — `dispatchKeyEvent` has to answer synchronously, so claiming the key into a decided
+no-op would have silently broken Left's present job (revealing the chrome). **Dart now consumes
+the whole quick-list vocabulary**, so flipping that constant is the Android half of the Phase 6
+cutover, together with rendering `setQuickList` and sending `zap:move`/`zap:descend` for the
+arrows while the list is open.
 
 A digit-pending Back clears the buffer instead of peeling a chrome layer, but that rung is
 `ZapKeyPolicy`'s alone — it is not added to `nextPlayerBackAction`'s ladder, because it only exists

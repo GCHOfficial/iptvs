@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart' show kDoubleTapMinTime;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/player/player_overlay.dart';
+import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/sources/source.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -41,6 +42,7 @@ void main() {
     VoidCallback? onToggleFavorite,
     VoidCallback? onGoLive,
     ZapBannerState? zap,
+    ZapQuickListState? quickList,
   }) async {
     // Size the whole test surface (not a nested SizedBox) so the overlay fills
     // it and `getCenter` lands on-screen; the width drives the <720 compact
@@ -71,6 +73,7 @@ void main() {
               favorite: favorite,
               liveSynced: liveSynced,
               zap: zap,
+              quickList: quickList,
               dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
               onBack: () {},
               onToggleFavorite: onToggleFavorite ?? () {},
@@ -724,7 +727,183 @@ void main() {
       expect(find.text('Cursor Now'), findsOneWidget);
     });
   });
+
+  // Phase 6: the shared Flutter overlay's render of the quick list
+  // (docs/player.md "The quick list (Phase 6)"). A selection model —
+  // one selected index, rows that are not focus targets, an explicit
+  // itemExtent — drawn from a pure [ZapQuickListState] and nothing else.
+  group('quick list', () {
+    testWidgets('draws the heading, the window and the cursor', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: _quickList(
+          heading: 'Sport',
+          labels: const ['One', 'Two', 'Three'],
+          selectedIndex: 1,
+        ),
+      );
+      expect(find.text('Sport'), findsOneWidget);
+      expect(find.text('One'), findsOneWidget);
+      expect(find.text('Two'), findsOneWidget);
+      expect(find.text('Three'), findsOneWidget);
+      // The position readout is absolute, so a windowed list still says
+      // where in the whole range the cursor is.
+      expect(find.text('2/3'), findsOneWidget);
+    });
+
+    testWidgets('a windowed cursor reports its absolute position', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: _quickList(
+          heading: 'All channels',
+          labels: List.generate(kZapWindowRows, (i) => 'Row ${1200 + i}'),
+          selectedIndex: 1210,
+          windowStart: 1200,
+          total: 250000,
+        ),
+      );
+      expect(find.text('1211/250000'), findsOneWidget);
+      expect(find.text('Row 1210'), findsOneWidget);
+    });
+
+    testWidgets('the rows use one explicit itemExtent', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: _quickList(labels: const ['One', 'Two']),
+      );
+      final list = tester.widget<ListView>(find.byType(ListView));
+      expect(
+        list.itemExtent,
+        isNotNull,
+        reason:
+            'index→offset must be exact — the selection-model rule every '
+            'long D-pad list in this app follows',
+      );
+    });
+
+    testWidgets('never becomes a focus target', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: _quickList(labels: const ['One', 'Two']),
+      );
+      // The list is a readout driven by the route's key bindings, exactly
+      // like the zap banner; a focusable row would fight them.
+      expect(
+        find.descendant(
+          of: find.byType(ListView),
+          matching: find.byType(Focus),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('an empty mode says why, and a loading one spins', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: const ZapQuickListState(
+          open: true,
+          mode: ZapQuickListMode.schedule,
+          heading: 'BBC One',
+          rows: <ZapQuickListRow>[],
+          selectedIndex: 0,
+          windowStart: 0,
+          total: 0,
+          emptyLabel: 'No guide for today',
+        ),
+      );
+      expect(find.text('No guide for today'), findsOneWidget);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: const ZapQuickListState(
+          open: true,
+          mode: ZapQuickListMode.channels,
+          heading: 'All channels',
+          rows: <ZapQuickListRow>[],
+          selectedIndex: 0,
+          windowStart: 0,
+          total: 0,
+          loading: true,
+        ),
+      );
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    });
+
+    testWidgets('a closed list, VOD, and a null list all draw nothing', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        quickList: ZapQuickListState.closed,
+      );
+      expect(find.text('One'), findsNothing);
+
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        quickList: _quickList(labels: const ['One']),
+      );
+      expect(find.text('One'), findsNothing);
+
+      await pumpOverlay(tester, isLive: true);
+      expect(find.byType(ListView), findsNothing);
+    });
+
+    testWidgets('the zap banner yields to the list', (tester) async {
+      // Both live in the lower-left; drawn together they would print the
+      // cursor's channel twice, from two different cursors.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zap: _zap(revision: 1, channelName: 'BBC One', message: 'Hello'),
+        quickList: _quickList(labels: const ['One']),
+      );
+      await tester.pump(const Duration(seconds: 5));
+      final banner = tester.widget<AnimatedOpacity>(
+        find.byType(AnimatedOpacity).first,
+      );
+      expect(banner.opacity, 0);
+    });
+  });
+
 }
+
+ZapQuickListState _quickList({
+  String heading = 'All channels',
+  ZapQuickListMode mode = ZapQuickListMode.channels,
+  List<String> labels = const ['One'],
+  int selectedIndex = 0,
+  int windowStart = 0,
+  int? total,
+}) => ZapQuickListState(
+  open: true,
+  mode: mode,
+  heading: heading,
+  rows: [
+    for (var i = 0; i < labels.length; i++)
+      ZapQuickListRow(
+        index: windowStart + i,
+        id: 'r${windowStart + i}',
+        label: labels[i],
+        kind: ZapQuickListRowKind.channel,
+        selected: windowStart + i == selectedIndex,
+      ),
+  ],
+  selectedIndex: selectedIndex,
+  windowStart: windowStart,
+  total: total ?? labels.length,
+);
 
 ZapBannerState _zap({
   required int revision,

@@ -510,8 +510,9 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
 - **The fullscreen live player has its own key map, live only while chrome is hidden.** Arrows zap
   only when `live && !chromeVisible`: Up = the next higher list index (`index + 1`) and **both
   directions wrap** — a deliberate divergence from the live tab's Up-never-wraps rule, since there
-  is nothing here for Up to escape *to*. Right is the "previous channel" toggle, Left is reserved
-  for the quick list (Phase 6). Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are
+  is nothing here for Up to escape *to*. Right is the "previous channel" toggle, and **Left (or
+  GUIDE) opens the quick list** (Phase 6 — Dart side done). Digits, PageUp/Down, CHANNEL_UP/DOWN
+  and the last-channel key are
   live regardless of chrome, since they're unambiguous; none of the zap keys ever reveal the
   chrome — revealing it on the first Up would hand the second Up to the control row instead of the
   next channel. With chrome visible, Up/Down keep their ordinary volume binding. The digit-entry
@@ -532,9 +533,27 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   bottom-bar banner (`ZapBannerState`, pure — reused by Windows' SDR embedded surface), the Windows
   native HWND surface owns a C++ key ring (`zap_key_policy.h`, a structural mirror of `ZapKeyPolicy`)
   plus its own GDI banner, and the Linux Lua OSD registers its own zap-only key bindings per stream
-  and draws the same banner. Only the quick list (Phase 6) and iOS's zap input remain outstanding.
+  and draws the same banner. Only iOS's zap input, and the three native *renderers* of the quick
+  list, remain outstanding.
   Detail: docs/player.md "Live zapping", "Android native input + banner (Phase 2)", "Windows",
   "Linux"; the key table is in docs/tv-navigation.md "In-player navigation".
+- **The quick list (Phase 6) is a mode stack over one list, not a three-column panel.**
+  categories → channels (each with a now-playing line) → that channel's schedule for **today**;
+  Right/OK descends, Left/Back ascends, Back at the top closes. It opens on the *channels* mode
+  positioned on the playing channel — the only rung that needs no fetch, so it draws on the frame
+  of the keypress. **Picking a category re-ranges the session's Up/Down too** (an empty one is
+  refused rather than applied, since a session with no entries has no channel to be on); on the
+  cross-source Favorites range, whose rows have no provider categories, the top mode lists the
+  **owning sources** instead. OK on a channel zaps to it through the ordinary settle path and
+  closes; OK on a **past** programme of an archive channel does **not** play catch-up in place —
+  catch-up is VOD-shaped, so the controller records `pendingCatchup`, asks the route to close, and
+  the channel list opens it through the shipped `_playCatchup`. While the list is open it owns
+  navigation: nothing changes channel except an explicit OK, digits move the cursor instead of
+  zapping, and the zap banner yields to it. Dart owns cursor, mode and paging; natives get a
+  **window** of ~40 preformatted rows (`setQuickList`, `kZapWindowRows`) and send
+  `zap:list`/`zap:close`/`zap:move:±n`/`zap:activate`/`zap:descend`/`zap:back`. The frozen payload
+  is in docs/player.md "The quick list (Phase 6)"; the selection model and its Back rungs are
+  in docs/tv-navigation.md.
 
 ## Cloud sync + profiles (essentials)
 

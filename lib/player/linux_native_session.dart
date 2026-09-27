@@ -568,6 +568,7 @@ class LinuxNativeSession {
     bool reconnecting = false,
     bool hdr10Plus = false,
     Map<String, Object?>? zap,
+    Map<String, Object?>? quickList,
   }) => command(
     buildOverlayStateCommand(
       title: title,
@@ -582,6 +583,7 @@ class LinuxNativeSession {
       reconnecting: reconnecting,
       hdr10Plus: hdr10Plus,
       zap: zap,
+      quickList: quickList,
     ),
   );
 
@@ -603,6 +605,7 @@ class LinuxNativeSession {
     bool reconnecting = false,
     bool hdr10Plus = false,
     Map<String, Object?>? zap,
+    Map<String, Object?>? quickList,
   }) => [
     'script-message-to',
     'iptvs_overlay',
@@ -642,6 +645,13 @@ class LinuxNativeSession {
       // side can tell "the user just zapped" from "something else changed".
       // This mirrors Kotlin's `PlayerUiState.zapBannerAtMs`.
       'zap': ?zap,
+      // The quick list (`LiveZapController.quickListPayload`), a **sibling**
+      // of `zap` rather than a field inside it: the banner describes the
+      // cursor's channel while the list may be showing another source's
+      // categories entirely, and the two carry colliding key names. Absent
+      // off a non-zapping route; `{open: false, …}` once a session exists,
+      // so the Lua side always has something to tear its own list down with.
+      'quickList': ?quickList,
     }),
   ];
 
