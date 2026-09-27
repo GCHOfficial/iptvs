@@ -14,6 +14,10 @@ import '../widgets/source_error_view.dart';
 import 'live_focus_coordinator.dart';
 import 'live_preview_controller.dart';
 
+// The logo test seam lives beside the image helpers (the player overlay reads
+// it too); re-exported so existing importers of this file keep compiling.
+export '../widgets/image_utils.dart' show debugDisableNetworkChannelLogos;
+
 // ── Shared EPG wording ───────────────────────────────────────────────────────
 // One home for how the current/next programme reads, so the channel list, the
 // wide preview panel, and the phone preview sheet all use the same terms. Change
@@ -107,14 +111,6 @@ double _rowChrome(bool compact) => 6 + (compact ? 12 : 16) + 2;
 /// The channel row height for a list that does ([hasEpg]) or doesn't carry EPG.
 double channelRowExtentFor(bool hasEpg) =>
     hasEpg ? kChannelRowExtentWithEpg : kChannelRowExtentPlain;
-
-/// Test seam: when true, channel logos render their fallback instead of loading
-/// through `CachedNetworkImage`/`flutter_cache_manager`. Widget tests that build
-/// the live list set this so the cache manager's `path_provider` calls and its
-/// cleanup `Timer` (both hostile to `flutter test`) never run. Off in
-/// production.
-@visibleForTesting
-bool debugDisableNetworkChannelLogos = false;
 
 /// Bounded density for wide browsing layouts.
 ///

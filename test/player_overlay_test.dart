@@ -40,6 +40,7 @@ void main() {
     VoidCallback? onToggleFullscreen,
     VoidCallback? onToggleFavorite,
     VoidCallback? onGoLive,
+    ZapBannerState? zap,
   }) async {
     // Size the whole test surface (not a nested SizedBox) so the overlay fills
     // it and `getCenter` lands on-screen; the width drives the <720 compact
@@ -69,6 +70,7 @@ void main() {
               canFavorite: canFavorite,
               favorite: favorite,
               liveSynced: liveSynced,
+              zap: zap,
               dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
               onBack: () {},
               onToggleFavorite: onToggleFavorite ?? () {},
@@ -541,7 +543,212 @@ void main() {
       expect(find.text('SDR'), findsNothing);
     });
   });
+
+  // Phase 3 of in-player live zapping: the shared Flutter overlay's own
+  // render of the zap banner (docs/player.md "Live zapping"). Mirrors the
+  // Kotlin `PlayerControls.kt`/`PlayerUiState.kt` zap-banner tests.
+  group('zap banner', () {
+    testWidgets('chrome hidden, a revision bump shows the card and the '
+        'identity label, not the bars', (tester) async {
+      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      // Let the chrome auto-hide first, with no zap yet.
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.byIcon(Icons.pause), findsNothing);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, channelNumber: 12, channelName: 'BBC One'),
+      );
+      await tester.pump();
+
+      expect(find.text('12 · BBC One'), findsOneWidget);
+      expect(find.byIcon(Icons.pause), findsNothing, reason: 'bars stay down');
+      expect(find.byIcon(Icons.arrow_back), findsNothing);
+    });
+
+    testWidgets('a half-typed digit buffer keeps the banner up without a '
+        'revision bump', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, channelName: 'BBC One'),
+      );
+      // Hides the chrome and lets the plain dwell timer run out.
+      await tester.pump(const Duration(seconds: 5));
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        0.0,
+      );
+
+      // Same revision — no bump — but a digit is now half-typed.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, channelName: 'BBC One', digits: '1'),
+      );
+      await tester.pump();
+
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        1.0,
+      );
+      expect(find.text('1'), findsOneWidget);
+    });
+
+    testWidgets('a transient message keeps the banner up past the dwell '
+        'timer', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, message: "Couldn't play Channel B"),
+      );
+      // Well past both the chrome auto-hide and the plain 3s dwell.
+      await tester.pump(const Duration(seconds: 5));
+
+      expect(find.byIcon(Icons.pause), findsNothing);
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        1.0,
+        reason: 'a transient note outlives the plain timer',
+      );
+      expect(find.text("Couldn't play Channel B"), findsOneWidget);
+    });
+
+    testWidgets('a plain cursor move fades the banner after its own 3s '
+        'dwell timer', (tester) async {
+      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.byIcon(Icons.pause), findsNothing);
+
+      // A cursor move arrives once the chrome is already hidden.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        state: const PlayerState(playing: true),
+        zap: _zap(revision: 1, channelNumber: 12, channelName: 'BBC One'),
+      );
+      await tester.pump();
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        1.0,
+      );
+
+      await tester.pump(const Duration(milliseconds: 2900));
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        1.0,
+        reason: 'still inside the 3s dwell',
+      );
+
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        0.0,
+      );
+    });
+
+    testWidgets('VOD, or a live stream with no zap, renders no banner at '
+        'all', (tester) async {
+      await pumpOverlay(tester, isLive: false, state: const PlayerState(playing: true));
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.byType(AnimatedOpacity), findsNothing);
+
+      // Live but zap == null (VOD/catch-up/no-range shape).
+      await pumpOverlay(tester, isLive: true, state: const PlayerState(playing: true));
+      await tester.pump(const Duration(seconds: 5));
+      expect(find.byType(AnimatedOpacity), findsNothing);
+    });
+
+    testWidgets('chrome visible: no identity run in the bar with only a '
+        'name, one more with a number, and the bar strip stays the playing '
+        'programme', (tester) async {
+      final playing = _programme('Playing Now');
+      final cursor = _programme('Cursor Now', startHour: 21, stopHour: 22);
+
+      // Only a name — nothing the ordinary title doesn't already say — so
+      // `showsIdentity` is false and the bottom bar draws no extra run. The
+      // banner (built off-screen at opacity 0 while chrome is visible) still
+      // carries its own copy, so exactly one match exists.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        epgNow: playing,
+        zap: _zap(revision: 1, channelName: 'BBC One', epgNow: cursor),
+      );
+      expect(find.text('BBC One'), findsOneWidget);
+      expect(find.text('Playing Now'), findsOneWidget);
+
+      // With a number, `showsIdentity` is true: the bottom bar draws its own
+      // run *beside* the banner's, so the label now matches twice.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        epgNow: playing,
+        zap: _zap(
+          revision: 1,
+          channelNumber: 12,
+          channelName: 'BBC One',
+          epgNow: cursor,
+        ),
+      );
+      expect(find.text('12 · BBC One'), findsNWidgets(2));
+      expect(find.text('Playing Now'), findsOneWidget);
+    });
+
+    testWidgets('the banner strip shows the cursor programme while the '
+        'bottom bar strip shows the one actually playing', (tester) async {
+      final playing = _programme('Playing Now');
+      final cursor = _programme('Cursor Now', startHour: 21, stopHour: 22);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        epgNow: playing,
+        zap: _zap(
+          revision: 1,
+          channelNumber: 12,
+          channelName: 'BBC One',
+          epgNow: cursor,
+        ),
+      );
+
+      // Chrome starts visible: the bar shows the *playing* channel's guide.
+      expect(find.text('Playing Now'), findsOneWidget);
+      // The banner already carries the *cursor's* guide — proof the two
+      // never share one strip.
+      expect(find.text('Cursor Now'), findsOneWidget);
+    });
+  });
 }
+
+ZapBannerState _zap({
+  required int revision,
+  int? channelNumber,
+  String channelName = 'BBC One',
+  String? logoUrl,
+  String digits = '',
+  String? message,
+  int position = 0,
+  int total = 0,
+  Programme? epgNow,
+  Programme? epgNext,
+}) => ZapBannerState(
+  revision: revision,
+  channelNumber: channelNumber,
+  channelName: channelName,
+  logoUrl: logoUrl,
+  digits: digits,
+  message: message,
+  position: position,
+  total: total,
+  epgNow: epgNow,
+  epgNext: epgNext,
+);
 
 Programme _programme(String title, {int startHour = 20, int stopHour = 21}) =>
     Programme(
