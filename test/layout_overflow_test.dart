@@ -31,6 +31,7 @@ import 'package:media_kit/media_kit.dart';
 
 import 'package:iptvs/data/app_database.dart' show PlaybackPosition;
 import 'package:iptvs/player/player_overlay.dart';
+import 'package:iptvs/player/zap_quick_list.dart';
 import 'package:iptvs/screens/live_focus_coordinator.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/screens/media_tab_controller.dart'
@@ -620,6 +621,87 @@ void main() {
           // A single frame — the overlay holds a periodic clock timer, and
           // settling would mask nothing here while adding one more thing to
           // manage.
+          await tester.pump();
+
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        });
+      }
+    }
+  });
+
+  group('the quick list fits its rows', () {
+    // Phase 6 of in-player live zapping. The list is a selection model with
+    // an explicit `itemExtent`, so every row is a fixed-height box fed
+    // provider text of arbitrary length — the exact shape that overflowed
+    // the live channel row three times. Swept with the real font, because
+    // `flutter_test`'s default one lays every line out at `1.0 * fontSize`
+    // and hides the whole class of bug.
+    for (final size in const [Size(1256, 720), Size(960, 540), Size(667, 375)]) {
+      for (final textScale in const [1.0, 1.3, 2.0]) {
+        testWidgets('at $size, text scale $textScale', (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+          useWindow(tester, size, textScale);
+
+          final quickList = ZapQuickListState(
+            open: true,
+            mode: ZapQuickListMode.schedule,
+            heading:
+                'A Rather Long Channel Name Broadcasting Live pygjq 1234567',
+            rows: [
+              for (var i = 0; i < 24; i++)
+                ZapQuickListRow(
+                  index: 1200 + i,
+                  id: 'r$i',
+                  label:
+                      '${1200 + i} · A Very Long Programme Or Channel Name '
+                      'That Runs Well Past The Panel pygjq',
+                  kind: ZapQuickListRowKind.programme,
+                  secondary:
+                      '${zapTimeRangeLabel(DateTime(2026, 1, 1, 20), DateTime(2026, 1, 1, 21, 45))} '
+                      '· A long secondary run that also overflows pygjq',
+                  badge: i.isEven ? 'CATCH-UP' : 'ON NOW',
+                  selected: i == 4,
+                  playing: i == 2,
+                  archive: i.isEven,
+                  past: i.isEven,
+                  live: i.isOdd,
+                ),
+            ],
+            selectedIndex: 1204,
+            windowStart: 1200,
+            total: 250000,
+          );
+          final stub = _StubEmbeddedControls();
+          addTearDown(stub.dispose);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: EmbeddedPlayerControls(
+                  controls: stub,
+                  title: 'Channel One',
+                  sourceName: 'Provider Network HD',
+                  epgNow: null,
+                  epgNext: null,
+                  isLive: true,
+                  canFavorite: true,
+                  favorite: false,
+                  liveSynced: true,
+                  quickList: quickList,
+                  aspectLabel: 'Fill',
+                  dynamicRangeLabel: (_) => '',
+                  onBack: () {},
+                  onToggleFavorite: () {},
+                  onPlayPause: () async {},
+                  onGoLive: () async {},
+                  onCycleAspect: () async {},
+                  onToggleFullscreen: () {},
+                ),
+              ),
+            ),
+          );
           await tester.pump();
 
           expect(tester.takeException(), isNull);

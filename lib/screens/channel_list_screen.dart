@@ -1369,10 +1369,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   ///
   /// [explicit] overrides all of it — the EPG grid hands over the list it is
   /// showing, which is what its Up/Down already walks.
-  ({List<ZapEntry> entries, int index}) _zapRangeFor(
-    Channel channel, {
-    List<Channel>? explicit,
-  }) {
+  ({List<ZapEntry> entries, int index, String categoryId, String label})
+  _zapRangeFor(Channel channel, {List<Channel>? explicit}) {
     if (explicit == null && _categoryId == kAllSourcesFavoritesCategoryId) {
       final items = _globalFavorites.items;
       var index = items.indexWhere((item) => identical(item.channel, channel));
@@ -1390,6 +1388,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               ),
           ],
           index: index,
+          categoryId: '',
+          label: 'Favorites · All sources',
         );
       }
     }
@@ -1412,8 +1412,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           sourceName: widget.repo.source.name,
         ),
         index: 0,
+        categoryId: '',
+        label: channel.name,
       );
     }
+    // The quick list's channels-mode heading, and the category its own
+    // categories mode opens pre-selected on. A search fallback and the EPG
+    // grid's explicit list are both "everything" as far as re-ranging goes —
+    // neither is a category the provider knows about, and both are ranges the
+    // user can only have reached deliberately.
+    final ranged = explicit == null && _query.trim().isEmpty;
+    final categoryId = ranged ? (_categoryId ?? '') : '';
     return (
       entries: zapEntriesOf(
         channels,
@@ -1421,6 +1430,42 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         sourceName: widget.repo.source.name,
       ),
       index: index,
+      categoryId: categoryId,
+      label: _categoryTitleFor(categoryId),
+    );
+  }
+
+  /// Display title for a live category id, `''` meaning "All channels" — the
+  /// same wording the sidebar's first row uses.
+  String _categoryTitleFor(String categoryId) {
+    if (categoryId.isEmpty) return 'All channels';
+    for (final category in _liveCategoriesForUi) {
+      if (category.id == categoryId) return category.title;
+    }
+    return 'All channels';
+  }
+
+  /// The active source's channels in one category, in catalog order, with no
+  /// search filter — what the quick list re-ranges a session to.
+  ///
+  /// Deliberately the same rules [_computeVisible] applies (hidden categories
+  /// dropped, a Favorites view ranked by the catalog) minus the query, so a
+  /// range picked in the player is the range the list would have shown.
+  List<Channel> _liveChannelsForCategory(String? categoryId) {
+    final favoritesView = categoryId == kFavoritesCategoryId;
+    final favs = favoritesView ? _favoriteIds(ContentKind.live) : null;
+    final hidden = _hiddenCategories(ContentKind.live);
+    final matched = _live.channels.where((c) {
+      if (favoritesView) return favs!.contains(c.id);
+      if (hidden.contains(c.categoryId)) return false;
+      if (categoryId != null && c.categoryId != categoryId) return false;
+      return true;
+    }).toList(growable: false);
+    if (!favoritesView) return matched;
+    final categoryRanks = catalogRanks(_live.categories.map((c) => c.id));
+    return orderedByCatalog(
+      matched,
+      categoryRank: (c) => rankOf(categoryRanks, c.categoryId),
     );
   }
 
@@ -1446,6 +1491,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     return LiveZapController(
       entries: range.entries,
       initialIndex: range.index,
+      rangeCategoryId: range.categoryId,
+      rangeLabel: range.label,
       catalog: _ChannelListZapCatalog(this),
     )..onChannelChanged = (entry) {
       // Keeps the toolbar's "last channel" target and the post-playback
@@ -1516,6 +1563,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Zapping is not a wide-layout privilege: a phone with a keyboard, and
       // any set-top box that fell to the narrow layout, reach this path too.
       final zap = _zapControllerFor(channel);
+      ({ZapEntry entry, Programme programme})? pendingCatchup;
       try {
         DiagnosticsLog.instance.add(
           'library',
@@ -1568,9 +1616,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           );
         }
       } finally {
+        pendingCatchup = zap.pendingCatchup;
         zap.dispose();
         if (mounted) setState(() => _resolving = false);
       }
+      await _runPendingZapRequest(pendingCatchup);
     }
   }
 
@@ -1646,6 +1696,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // the session *ended* — which is not where it started as soon as the user
     // zaps.
     final zap = _zapControllerFor(channel, explicit: zapChannels);
+    ({ZapEntry entry, Programme programme})? pendingCatchup;
     try {
       DiagnosticsLog.instance.add(
         'library',
@@ -1964,9 +2015,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _preview.adoptedByFullscreen = false;
       // Outlives the route by exactly this block — `PlayerScreen.dispose`
       // unhooks itself, and the return leg above has finished reading it.
+      pendingCatchup = zap.pendingCatchup;
       zap.dispose();
       if (mounted) setState(() => _resolving = false);
     }
+    await _runPendingZapRequest(pendingCatchup);
   }
 
   /// Resolve [channel] and play it fullscreen directly, bypassing the preview
@@ -2163,8 +2216,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   }
 
   /// Resolve a past [programme] to a catch-up stream and open it fullscreen.
-  Future<void> _playCatchup(Channel channel, Programme programme) async {
+  ///
+  /// [repo]/[config] name the **owning** source when the channel isn't the
+  /// active one — a cross-source favorite, or a row the in-player quick list
+  /// picked out of a re-ranged session. Everything about a catch-up open is
+  /// per-owning-source for the same reasons a live open is (resolve, buffer
+  /// preset, stored aspect).
+  Future<void> _playCatchup(
+    Channel channel,
+    Programme programme, {
+    LibraryRepository? repo,
+    SourceConfig? config,
+  }) async {
     if (_resolving) return;
+    final playRepo = repo ?? widget.repo;
+    final playConfig = config ?? _configForChannel(channel);
     setState(() => _resolving = true);
     final navigator = Navigator.of(context);
     final messenger = _messenger;
@@ -2172,22 +2238,21 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       await _preview.pause();
       DiagnosticsLog.instance.add(
         'library',
-        'open catch-up source=${widget.repo.source.name} channel=${channel.name} programme=${programme.title} start=${programme.start.toIso8601String()}',
+        'open catch-up source=${playRepo.source.name} channel=${channel.name} programme=${programme.title} start=${programme.start.toIso8601String()}',
       );
       _notePlayedChannel(channel.id);
-      final stream = await widget.repo.resolveArchive(channel, programme);
+      final stream = await playRepo.resolveArchive(channel, programme);
       if (!mounted) return;
       await navigator.push(
         MaterialPageRoute(
           builder: (_) => PlayerScreen(
             title: '${channel.name} · ${programme.title}',
             stream: stream,
-            sourceName: widget.repo.source.name,
-            bufferPreset: _bufferPresetForChannel(channel),
-            initialAspectLabel: _configForChannel(channel).aspectModeLabel,
-            onAspectChanged: (label) => unawaited(
-              _persistAspectMode(_configForChannel(channel), label),
-            ),
+            sourceName: playRepo.source.name,
+            bufferPreset: bufferPresetFromName(playConfig.bufferPresetName),
+            initialAspectLabel: playConfig.aspectModeLabel,
+            onAspectChanged: (label) =>
+                unawaited(_persistAspectMode(playConfig, label)),
             epgNow: programme,
             // Catch-up is deliberately memoised under its own key rather than
             // the live channel's: an archive URL can be a different container
@@ -2207,6 +2272,26 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     } finally {
       if (mounted) setState(() => _resolving = false);
     }
+  }
+
+  /// Runs whatever the just-closed zap session asked for on its way out.
+  ///
+  /// Today that is exactly one thing: catch-up picked from the in-player
+  /// quick list. The player ends its own live session (the controller calls
+  /// `onExitRequested`) and the request is carried out *here*, after the
+  /// route has popped and the preview return leg has run — see
+  /// [LiveZapController.pendingCatchup] for why catch-up doesn't play in
+  /// place on the live route.
+  Future<void> _runPendingZapRequest(
+    ({ZapEntry entry, Programme programme})? pending,
+  ) async {
+    if (pending == null || !mounted) return;
+    await _playCatchup(
+      pending.entry.channel,
+      pending.programme,
+      repo: _repoFor(pending.entry.config),
+      config: pending.entry.config,
+    );
   }
 
   Future<void> _openMedia(MediaItem item) async {
@@ -3262,4 +3347,95 @@ class _ChannelListZapCatalog implements ZapCatalog {
 
   @override
   void log(String note) => DiagnosticsLog.instance.add('library', note);
+
+  // ── Quick list (Phase 6) ─────────────────────────────────────────────────
+
+  /// Whether this session launched from the cross-source Favorites view.
+  ///
+  /// Read from the *screen*, not the entries: scanning a lazily wrapped
+  /// 250k-channel range to count distinct source ids would materialise the
+  /// whole thing, which is exactly what `zapEntriesOf` exists to avoid.
+  bool get _crossSourceRange =>
+      _screen._categoryId == kAllSourcesFavoritesCategoryId;
+
+  @override
+  Future<List<ZapCategoryRow>> quickListCategories() async {
+    // **The cross-source Favorites range has no provider categories**, so its
+    // top mode lists the thing its rows actually differ by: the source that
+    // owns them. Grouping by source is derived entirely from the rows already
+    // in hand (no query, no provider round trip), it is the only grouping the
+    // view itself draws (the per-row source chip), and narrowing to one
+    // provider's favorites is a range a user can plausibly want. Offering the
+    // *active* source's categories here would be incoherent — most rows in
+    // the range don't belong to it.
+    if (_crossSourceRange) {
+      final labels = <String, String>{};
+      for (final item in _screen._globalFavorites.items) {
+        labels.putIfAbsent(item.sourceId, () => item.sourceLabel);
+      }
+      return [
+        const ZapCategoryRow(id: '', title: 'Favorites · All sources'),
+        for (final entry in labels.entries)
+          ZapCategoryRow(
+            id: '$_kZapSourcePrefix${entry.key}',
+            title: entry.value,
+          ),
+      ];
+    }
+    return [
+      const ZapCategoryRow(id: '', title: 'All channels'),
+      for (final category in _screen._liveCategoriesForUi)
+        ZapCategoryRow(id: category.id, title: category.title),
+    ];
+  }
+
+  @override
+  Future<List<ZapEntry>> quickListChannels(ZapCategoryRow category) async {
+    final id = category.id;
+    if (id.startsWith(_kZapSourcePrefix) ||
+        id == kAllSourcesFavoritesCategoryId ||
+        (_crossSourceRange && id.isEmpty)) {
+      final wanted = id.startsWith(_kZapSourcePrefix)
+          ? id.substring(_kZapSourcePrefix.length)
+          : null;
+      return [
+        for (final item in _screen._globalFavorites.items)
+          if (wanted == null || item.sourceId == wanted)
+            ZapEntry(
+              channel: item.channel,
+              config: item.config,
+              sourceName: item.sourceLabel,
+            ),
+      ];
+    }
+    return zapEntriesOf(
+      _screen._liveChannelsForCategory(id.isEmpty ? null : id),
+      config: _screen.widget.config,
+      sourceName: _screen.widget.repo.source.name,
+    );
+  }
+
+  @override
+  Future<List<Programme>> quickListSchedule(ZapEntry entry) {
+    // Today, local midnight to midnight. Bounded on purpose: the mode stack
+    // has no day rung, a day is ~30 rows a D-pad can walk end to end, and the
+    // deeper archive is still one `CatchupSheet` away in the channel list.
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day);
+    final repo = _screen._repoFor(entry.config);
+    return repo.db.programmesForChannel(
+      repo.source.id,
+      entry.channelId,
+      from: start,
+      to: start.add(const Duration(days: 1)),
+    );
+  }
 }
+
+/// Prefix marking a quick-list category row that stands for a *source* rather
+/// than a provider category — the cross-source Favorites range's top mode.
+/// A provider category id could in principle collide with any literal, so the
+/// prefix is only ever produced and consumed inside
+/// [_ChannelListZapCatalog], and only for a range that has no provider
+/// categories at all.
+const String _kZapSourcePrefix = 'zapsrc:';

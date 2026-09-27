@@ -1651,9 +1651,11 @@ spine.** **Phases 2 through 5 are now implemented**: Android's native input + ba
 see "Shared Flutter overlay banner (Phase 3)" below — this is also what the Windows SDR
 preview→fullscreen surface renders, since it's the same media_kit player), the Windows native HWND
 surface's own key ring and GDI banner (Phase 4, see "Windows" below), and the Linux Lua OSD's own
-per-stream key registration and banner (Phase 5, see "Linux" below). Only the quick list (Phase 6)
-and iOS's zap input remain ahead — but every native transport already speaks the wire contract
-below, so Phase 6 adds emitters and renderers, never new plumbing.
+per-stream key registration and banner (Phase 5, see "Linux" below). **Phase 6 — the quick list —
+is implemented in Dart and on the shared Flutter overlay** (see "The quick list (Phase 6)" below,
+which freezes the `setQuickList` payload the Kotlin, C++ and Lua renderers implement against).
+Only iOS's zap input, and those three native renderers, remain ahead — every native transport
+already speaks the wire contract below, so what is left is renderers, never new plumbing.
 
 ### Ownership: why Dart, not a native-cached list
 
@@ -1743,12 +1745,14 @@ from every transport:
 - The shared Flutter overlay: its own `CallbackShortcuts` bindings, parsed through the same
   function so a key means the same thing a native string would.
 
-The vocabulary: `zap:up`, `zap:down`, `zap:prev`, `zap:list`/`zap:close` (quick list — Phase 6,
-parsed but not consumed: `handleCommand` returns `false` for them so the surface keeps its present
-behaviour rather than swallowing the key into a no-op), `zap:activate` (commits a pending digit
-buffer early; otherwise not consumed, so OK still means what it always did), `zap:back` (clears a
-half-typed digit buffer — same peel-one-rung shape as the live tab's Back ladder — otherwise not
-consumed), `zap:digit:N`, `zap:move:±N` (quick-list cursor, Phase 6), `favorite:0`/`favorite:1`.
+The vocabulary: `zap:up`, `zap:down`, `zap:prev`, `zap:list`/`zap:close` (open/close the quick
+list), `zap:activate` (OK — the quick list's selected row while it is open, otherwise it commits a
+pending digit buffer early and is not consumed, so OK still means what it always did),
+`zap:descend` (Right inside the quick list; not consumed with none open), `zap:back` (one rung up
+the quick list's mode stack, else clears a half-typed digit buffer — the same peel-one-rung shape
+as the live tab's Back ladder — else not consumed), `zap:digit:N`, `zap:move:±N` (quick-list
+cursor; not consumed with none open), `favorite:0`/`favorite:1`. **Every command's meaning changes
+with the quick list open** — see its table in "The quick list (Phase 6)" below.
 An unrecognised string, or a well-formed prefix with an unusable argument (`zap:digit:x`), parses
 to `null` and is dropped — a command that can't be read is not one to guess at.
 
@@ -1779,6 +1783,10 @@ platform whose native half hasn't landed yet is expected and logged, never fatal
   push**, nested as a `zap` object inside the existing `iptvs-state` command (see "Linux" below)
   rather than as its own message, because IPC to a separate mpv process has no equivalent of a
   second method call.
+- **`setQuickList`** (`LiveZapController.quickListPayload`, pushed by `_pushQuickList` on the same
+  surfaces and with the same tolerance) — the quick list's windowed rows. Linux takes it as a
+  `quickList` **sibling** of `zap` on the `iptvs-state` push, for the same key-collision reason.
+  Frozen key by key in "The quick list (Phase 6)" below.
 
 ### Per-surface apply (today)
 
@@ -1948,6 +1956,191 @@ renders exactly as it did before Phase 2). One consequence worth remembering whe
 channel's **number only appears after the first cursor move** — `channelNumber` is null until a
 `setZapBanner`/`applyZapBanner` push sets it, and none is sent at tune-in, so opening a channel
 directly (no zap yet this session) shows the plain title until the first Up/Down/digit press.
+
+### The quick list (Phase 6 — Dart side + the shared Flutter overlay)
+
+**Implemented in Dart; the Kotlin, C++ and Lua renderers implement against the frozen payload
+below.** The quick list is the browsable list the fullscreen live player opens over the video —
+Left (chrome hidden) or `GUIDE`.
+
+#### A mode stack, not a three-column panel
+
+One list widget showing one of three modes:
+
+| Mode | Rows | Right | OK | Left / Back |
+| --- | --- | --- | --- | --- |
+| `categories` | the range's categories, led by an "everything" row (id `''`) | pick it | pick it | close |
+| `channels` | the current zap range, each with a now-playing secondary line | that channel's schedule | **zap to it** and close | categories |
+| `schedule` | that channel's guide for **today** | play (same as OK) | past + archive → catch-up; otherwise play the channel live | channels |
+
+A column layout was rejected: three lists at once is not legible on a 4:3 GDI overlay or in mpv's
+OSD, and it would need its own cross-pane focus rules on top of the ones docs/tv-navigation.md
+already records. A stack needs one cursor and one rung-per-press rule, which is the shape the Back
+ladder already uses everywhere else in the app.
+
+**It opens on the `channels` mode, cursor on the channel actually playing.** That is the rung the
+user wants nine times out of ten, and it is the only one that needs no fetch at all — the range is
+already in hand, so the list draws on the same frame as the keypress.
+
+#### Re-ranging
+
+Picking a category **replaces the list Up/Down walks**, not just the list on screen. The quick list
+is the only way to change the range without leaving the player, and a cursor that can move
+somewhere Up/Down then refuses to follow would be two cursors over two different lists — exactly
+the "which list am I in" confusion a single selection model exists to avoid. Consequences, all
+deliberate:
+
+- **An empty category is refused, not applied** (a banner message instead). A session with no
+  entries has no channel to be on, and `LiveZapController` asserts a non-empty range.
+- The playing channel is tracked as a **value** (`_playingEntry`), not an index, because a re-range
+  renumbers everything. `playingIndex` becomes `-1` when the new range doesn't contain it; playback
+  is untouched either way.
+- "Last channel" is likewise a channel. Recall is a **no-op** when the previous channel has fallen
+  outside the range — silently widening the range behind the user would be worse than doing
+  nothing.
+- The **channel list's own filter is never touched.** The player does not reach back into the
+  screen it was launched from; the range lives entirely in the session.
+
+**The cross-source Favorites range has no provider categories**, so its top mode lists the
+**owning sources** instead (`Favorites · All sources`, then one row per contributing source). That
+grouping is derived from rows already in hand (no query, no provider round trip), it is the only
+grouping the view itself draws (the per-row source chip), and narrowing to one provider's
+favorites is a range a user can plausibly want. Offering the *active* source's categories there
+would be incoherent — most rows in the range don't belong to it.
+
+#### Catch-up leaves the session; it does not play in place
+
+OK on a **past** programme of a channel with `hasArchive` sets `LiveZapController.pendingCatchup`,
+closes the list and calls `onExitRequested` (wired to `PlayerScreen._back`). The channel list reads
+`zap.pendingCatchup` after its `navigator.push` returns — after the preview return leg, before
+`zap.dispose()` — and opens it through the shipped `_playCatchup`, now taking the **owning**
+repository/config so a cross-source row resolves through its own provider.
+
+Playing catch-up in place was rejected. Catch-up is VOD-shaped — a seek bar, no live reconnect
+watchdog, its own iOS engine key (`catchup:<id>`), no zap range — so switching to it on a live
+route would mean reconfiguring the watchdog, the overlay, the one-shot HDR escalation and the
+native surface mid-session, which is "the surface never changes on a zap" stood on its head.
+Ending the session costs one route transition and reuses a path that already works on every
+platform.
+
+#### While the list is open, it owns navigation
+
+Nothing changes channel except an explicit OK on a row. `handleCommand` routes the whole vocabulary
+through `_handleQuickListCommand` while open:
+
+- `channelUp`/`channelDown` (the **dedicated** keys, `CHANNEL_UP`/`PAGE_UP`/…) move the cursor by
+  one row *in list order* — "the next channel" is the next row down, exactly as it is for playback.
+  The **D-pad arrows** instead send `zap:move:∓1`, because Up on a list on screen must move the
+  highlight up. Both rules live in Dart; the surfaces send the key they were pressed.
+- `previousChannel` is consumed and inert — recall is a channel change, and the list is open
+  precisely because the user is choosing one deliberately.
+- **Digits move the cursor instead of zapping** (channels mode only; dropped in the other two). The
+  list is on screen, so the pick is confirmed by OK rather than applied behind it. A miss still
+  reports "No channel N".
+- `favorite:0|1` still acts on the **playing** channel — the star on the chrome behind the list,
+  not the row under the cursor.
+- The **cursor clamps at both ends; it never wraps.** Deliberately unlike the player's Up/Down
+  (which wrap, because a bare video has nothing to escape to): a list has visible ends, and
+  `zap:move` carries an arbitrary signed delta, so wrapping a 250k-row list on a page key would be
+  a jump the opposite key cannot undo.
+- The **zap banner yields to the list** (`_zapBannerVisible` returns false while it is open). Both
+  live in the lower-left, and drawn together they would print the cursor's channel twice, from two
+  different cursors.
+
+#### Fetches are generation-guarded
+
+`_listGeneration` is bumped by every mode change, open and close; a fetch that returns against a
+stale generation is dropped (CLAUDE.md, "Async publishes are generation-guarded"). A **failed**
+fetch degrades to an empty list with an `emptyLabel`, never a throw — a quick list that can crash
+the player is worse than one that says "No guide for today".
+
+#### The frozen native contract
+
+**Outbound: `setQuickList`** — a method call on `iptvs/native_hdr_player` (Android/iOS and the
+Windows native HWND, alongside `setZapBanner`), and on Linux a **`quickList` sibling object** on
+the existing `iptvs-state` push (a sibling of `zap`, not a field inside it: the two describe
+different things and carry colliding key names). Pushed on every controller notification, through
+the same fire-and-forget, `MissingPluginException`-tolerant path the banner uses. Built by
+`LiveZapController.quickListPayload()` (`ZapQuickListState.toPayload`, `lib/player/zap_quick_list.dart`).
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `open` | bool | Draw the list. **`false` is a tear-down instruction, not an absence** — a closed list is still pushed. |
+| `mode` | string | `categories` \| `channels` \| `schedule`. |
+| `heading` | string | Panel title: the source (categories), the category (channels), the channel (schedule). |
+| `rows` | list | The window — at most `kZapWindowRows` (40) rows, see below. |
+| `selectedIndex` | int | Cursor position, **absolute** (an index into the full list). |
+| `windowStart` | int | Absolute index of `rows[0]`. `windowStart ≤ selectedIndex < windowStart + rows.length` whenever `total > 0`. |
+| `total` | int | Size of the full list. Up to 250k — never shipped, only counted. |
+| `loading` | bool | A fetch is in flight. |
+| `emptyLabel` | string, **optional** | What to draw instead of rows when `total == 0` and nothing is loading. Absent while loading or non-empty. |
+| `revision` | int | Bumped on every change (`LiveZapController.bannerRevision`), so a renderer can restart an animation on a real update rather than an identical re-push. |
+
+Each row:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `index` | int | **Absolute** index in the full list — so a renderer can draw a position readout or scrollbar without windowing maths. |
+| `id` | string | Stable identity within the mode: a category id (`''` = the "everything" row), a channel id, or a programme's start in epoch ms as a decimal string. Opaque; it exists so a pointer/touch tap can name a row rather than an index that may have moved. |
+| `label` | string | The main line — already formatted (`12 · BBC One`). |
+| `kind` | string | `category` \| `channel` \| `programme`. |
+| `secondary` | string, **optional** | The dimmer line: the channel's now-playing title (falling back to its **source name**, which on a cross-source range is what tells two identically named rows apart), or a programme's `HH:mm – HH:mm`. |
+| `badge` | string, **optional** | `ON NOW` \| `CATCH-UP`. |
+| `selected` | bool | The cursor is here. |
+| `playing` | bool | Channels: the channel actually playing. Categories: the category the range currently reflects. |
+| `archive` | bool | Schedule: activating this row starts catch-up. |
+| `past` | bool | Schedule: already ended. |
+| `live` | bool | Schedule: on air now. |
+
+**Every string is final copy.** Times are preformatted (`zapTimeLabel`/`zapTimeRangeLabel`, the same
+`HH:mm` and en dash the live EPG strip uses) and every state a renderer might re-derive from
+timestamps is a flag, so the four renderers cannot disagree the way badge labels and the "Go to
+live" chip once did. A renderer prints; it never formats, never re-derives, never paginates.
+
+**Why a window rather than the whole list:** a launch range is routinely the whole catalog, and
+shipping 250k rows to Kotlin/C++/Lua once per open is not something a set-top box can afford. 40
+is comfortably more than any surface draws at once, so the cursor can be walked — and paged —
+without a round trip in the common case, while the payload stays a few kilobytes at any range
+size. `zapWindowStart` centres the cursor and clamps at both ends; it is pure and pinned at every
+edge by `test/zap_quick_list_test.dart`, because a window that misses the cursor draws a list with
+no visible selection, which on a remote is indistinguishable from a frozen screen.
+
+**Inbound**, through the existing `parseZapCommand` vocabulary (one new string):
+
+| Command | Closed | Open |
+| --- | --- | --- |
+| `zap:list` | open the list (channels mode, on the playing channel) | consumed, no-op |
+| `zap:close` | consumed, no-op | close |
+| `zap:move:±n` | **not consumed** (the surface keeps its own key) | move the cursor by n, clamped |
+| `zap:activate` | commits a pending digit buffer, else not consumed | OK on the selected row (see the mode table) |
+| `zap:descend` (**new**) | **not consumed** | one rung down the stack |
+| `zap:back` | clears a pending digit buffer, else not consumed | one rung up; at the top, close |
+| `zap:up` / `zap:down` | channel up/down | cursor ∓1 **in list order** |
+| `zap:prev` | last-channel recall | consumed, inert |
+| `zap:digit:N` | number entry → zap | number entry → move the cursor (channels mode only) |
+| `favorite:0\|1` | the playing channel | the playing channel (unchanged) |
+
+`zap:descend` is separate from `zap:activate` because the two diverge on exactly one rung — in the
+channels mode OK *plays* while Right opens the schedule — and giving Right its own string keeps
+every surface mode-blind.
+
+#### The shared Flutter overlay's view
+
+`EmbeddedPlayerControls._quickListPanel` draws it from `ZapQuickListState` and nothing else — no
+controller, no repository, no `SourceConfig` — the same arrangement `ZapBannerState` uses, and what
+keeps `player_overlay.dart` and `test/player_overlay_test.dart` libmpv-free. A left-anchored panel
+banded between the top and bottom insets, `AppColors.panel` at 0.96, the info-panel radius.
+
+It is a **selection model and a readout, never a focus target** (docs/tv-navigation.md): rows are
+not focusable, the cursor is one index, and the keys belong to the route's own `CallbackShortcuts`
+— exactly as the zap banner does, and the only arrangement that works over rows windowed out of a
+250k-row range. The row extent is explicit (`kQuickListRowExtent`, 56, scaled with the text scale
+up to 1.6x) so the reveal is exact `index * extent` arithmetic, and the row's text sits in
+`ClipRect` → `OverflowBox` so a `RenderFlex` overflow is structurally impossible whatever the font
+metrics do — the same split the live tab's fixed-extent rows use, swept with the real Inter font in
+`test/layout_overflow_test.dart`. The selection ring is a `foregroundDecoration`, never a laid-out
+border. The panel is `IgnorePointer`, so it can't swallow the background tap the touch Back ladder
+depends on.
 
 ### Shared Flutter overlay banner (Phase 3)
 

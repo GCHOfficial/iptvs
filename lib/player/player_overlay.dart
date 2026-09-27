@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../sources/source.dart';
 import '../theme.dart';
 import '../widgets/image_utils.dart';
+import 'zap_quick_list.dart';
 
 /// The narrow slice of a media_kit [Player] the embedded overlay reads and
 /// drives. Extracted as an interface purely so the overlay can be widget-tested
@@ -150,6 +151,10 @@ class PlayerVideoSurface extends StatefulWidget {
   /// [ZapBannerState].
   final ZapBannerState? zap;
 
+  /// The in-player quick list (Phase 6), or null on any route that doesn't
+  /// zap. See [ZapQuickListState].
+  final ZapQuickListState? quickList;
+
   /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
   /// "4:3"). Rendered as the aspect control's text, exactly as all four native
   /// overlays do — Dart owns the mode sequence (`PlayerScreen._aspectModes`),
@@ -203,6 +208,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.favorite,
     required this.liveSynced,
     this.zap,
+    this.quickList,
     required this.aspectLabel,
     required this.videoFit,
     required this.dynamicRangeLabel,
@@ -316,6 +322,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             favorite: widget.favorite,
             liveSynced: widget.liveSynced,
             zap: widget.zap,
+            quickList: widget.quickList,
             aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
@@ -458,6 +465,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.favorite,
     required this.liveSynced,
     this.zap,
+    this.quickList,
     required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -482,6 +490,10 @@ class EmbeddedPlayerControls extends StatefulWidget {
   /// In-player live-zapping banner state (Phase 3), or null on any route that
   /// doesn't zap. See [ZapBannerState].
   final ZapBannerState? zap;
+
+  /// The in-player quick list (Phase 6), or null on any route that doesn't
+  /// zap. See [ZapQuickListState].
+  final ZapQuickListState? quickList;
 
   /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
   final String aspectLabel;
@@ -906,6 +918,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// silently discarded. See [_scheduleHide].
   bool _menuOpen = false;
 
+  /// Drives the quick list's own scroll — the selection model scrolls itself
+  /// (`index * itemExtent`), it never relies on a row being focusable.
+  final ScrollController _quickListScroll = ScrollController();
+
   /// Resolved at the top of every [build] and read by the layout helpers below,
   /// rather than threaded through eight signatures. Size-invariant (and equal
   /// to the shipped pointer values) whenever `widget.touch` is false.
@@ -940,6 +956,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     if (zap != null &&
         (oldWidget.zap == null || oldWidget.zap!.revision != zap.revision)) {
       _armZapBanner();
+    }
+    final list = widget.quickList;
+    if (list != null && list.open && list != oldWidget.quickList) {
+      // After this frame: the `ListView` may have no clients yet on the frame
+      // the list opens on.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealQuickListRow(),
+      );
     }
   }
 
@@ -1082,6 +1106,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _hideTimer?.cancel();
     _clockTimer?.cancel();
     _zapTimer?.cancel();
+    _quickListScroll.dispose();
     _playingSub?.cancel();
     _tracksSub?.cancel();
     _trackSub?.cancel();
@@ -1139,6 +1164,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           // Touch replaces all three with one full-height column, so the panel
           // is banded between the bars by construction (see [_touchChrome]).
           _zapBanner(),
+          _quickListPanel(context),
           if (!widget.touch) ...[
             if (_visible) ...[_topBar(), _bottomBar(context)],
             if (_showInfo) _infoPanel(),
@@ -1794,6 +1820,11 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   bool get _zapBannerVisible {
     final zap = widget.zap;
     if (zap == null || !widget.isLive || chromeVisible) return false;
+    // The quick list is the acknowledgement while it is up — and it sits in
+    // the same lower-left region. Showing both would print the cursor's
+    // channel twice, in two places, saying two different things (the banner
+    // follows the *zap* cursor, the list its own).
+    if (widget.quickList?.open ?? false) return false;
     return _zapBannerUp || zap.outlivesTimer;
   }
 
@@ -1978,6 +2009,242 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     ),
     child: const Icon(Icons.live_tv_rounded, size: 16, color: AppColors.textLo),
   );
+
+  // ── The quick list (Phase 6 — the shared Flutter overlay's own view) ─────
+  //
+  // A **mode of one list**, drawn from [ZapQuickListState] and nothing else:
+  // no controller, no repository, no `SourceConfig`, exactly as the banner is
+  // drawn from [ZapBannerState] — which is what keeps this file and
+  // `test/player_overlay_test.dart` libmpv-free.
+  //
+  // It is a **selection model, not a focus ring** (docs/tv-navigation.md):
+  // rows are not focus targets, there is one selected index, and the keys are
+  // owned by the route's own `CallbackShortcuts` — the same arrangement the
+  // zap banner has ("a readout, never a focus target"), and the only one that
+  // works over a list whose rows are windowed out of a 250k-row range. The
+  // row extent is explicit so index→offset is exact, exactly as the live
+  // tab's two lists require.
+
+  /// Base height of one quick-list row (title + secondary line), before text
+  /// scaling. The Dart mirror of the live tab's `kChannelRowExtent*`
+  /// constants and, once the native renderers land, of their row metrics.
+  static const double kQuickListRowExtent = 56;
+
+  /// Ceiling on the text scale the row extent follows, matching
+  /// `kMaxLiveTextScale`'s reasoning: past this the row would eat the panel,
+  /// and the text is clipped (never overflowed) instead.
+  static const double kQuickListMaxTextScale = 1.6;
+
+  double get _quickListRowExtent {
+    final scaled = MediaQuery.textScalerOf(context).scale(kQuickListRowExtent);
+    final scale = scaled / kQuickListRowExtent;
+    final clamped = scale < 1
+        ? 1.0
+        : scale > kQuickListMaxTextScale
+        ? kQuickListMaxTextScale
+        : scale;
+    return kQuickListRowExtent * clamped;
+  }
+
+  /// Keeps the cursor on screen. The list is already *windowed* by Dart, so
+  /// this scrolls within the window — `index * extent` arithmetic, never an
+  /// `ensureVisible` on a row that may not be built.
+  void _revealQuickListRow() {
+    final state = widget.quickList;
+    if (state == null || !state.open) return;
+    if (!_quickListScroll.hasClients) return;
+    final offsetIndex = state.selectedInWindow;
+    if (offsetIndex < 0) return;
+    final extent = _quickListRowExtent;
+    final position = _quickListScroll.position;
+    final target = (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
+    final max = position.maxScrollExtent;
+    _quickListScroll.jumpTo(target < 0 ? 0 : (target > max ? max : target));
+  }
+
+  Widget _quickListPanel(BuildContext context) {
+    final state = widget.quickList;
+    // A `Positioned` even with nothing to draw — see [_zapBanner] for why a
+    // single non-positioned child would collapse this whole `Stack`.
+    if (state == null || !state.open || !widget.isLive) {
+      return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
+    }
+    final width = math.min(
+      420.0,
+      MediaQuery.sizeOf(context).width - _barInsets.horizontal - 40,
+    );
+    return Positioned(
+      left: 20 + _barInsets.left,
+      top: 24 + _barInsets.top,
+      bottom: 24 + _barInsets.bottom,
+      width: width,
+      // Never a pointer target: the list is driven by the route's key
+      // bindings, and absorbing taps here would swallow the background
+      // reveal the touch Back ladder depends on.
+      child: IgnorePointer(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.panel.withValues(alpha: 0.96),
+            borderRadius: BorderRadius.circular(AppRadius.tile),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                child: Row(
+                  children: [
+                    Icon(
+                      switch (state.mode) {
+                        ZapQuickListMode.categories => Icons.folder_rounded,
+                        ZapQuickListMode.channels => Icons.live_tv_rounded,
+                        ZapQuickListMode.schedule => Icons.schedule_rounded,
+                      },
+                      size: 18,
+                      color: AppColors.accent,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        state.heading,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.textHi,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    if (state.total > 0)
+                      Text(
+                        '${state.selectedIndex + 1}/${state.total}',
+                        maxLines: 1,
+                        style: const TextStyle(
+                          color: AppColors.textLo,
+                          fontSize: 12,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(child: _quickListBody(state)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _quickListBody(ZapQuickListState state) {
+    if (state.loading && state.rows.isEmpty) {
+      return const Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (state.rows.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Text(
+          state.emptyLabel ?? 'Nothing here',
+          style: const TextStyle(color: AppColors.textLo),
+        ),
+      );
+    }
+    return ListView.builder(
+      controller: _quickListScroll,
+      padding: const EdgeInsets.only(bottom: 10),
+      // Explicit, so the reveal above is exact index arithmetic — the rule
+      // every selection model in this app follows.
+      itemExtent: _quickListRowExtent,
+      itemCount: state.rows.length,
+      itemBuilder: (context, i) => _quickListRowTile(state.rows[i]),
+    );
+  }
+
+  Widget _quickListRowTile(ZapQuickListRow row) {
+    final selected = row.selected;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: Container(
+        decoration: BoxDecoration(
+          color: selected ? AppColors.panelHi : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        // The accent ring is painted over the child, never laid out as a
+        // border — a selection affordance that changes constraints is the
+        // poster-reload bug (docs/tv-navigation.md, `FocusableCard`).
+        foregroundDecoration: selected
+            ? BoxDecoration(
+                border: Border.all(color: AppColors.accent, width: 2),
+                borderRadius: BorderRadius.circular(10),
+              )
+            : null,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        // An unbounded main axis makes a `RenderFlex` overflow structurally
+        // impossible whatever the text metrics do — the same ClipRect +
+        // OverflowBox split the live tab's fixed-extent rows use, and for the
+        // same reason (predicting text height is a hint, never a guarantee).
+        child: ClipRect(
+          child: OverflowBox(
+            minHeight: 0,
+            maxHeight: double.infinity,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              children: [
+                if (row.playing) ...[
+                  const Icon(
+                    Icons.play_arrow_rounded,
+                    size: 16,
+                    color: AppColors.accent,
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        row.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: selected ? Colors.white : AppColors.textHi,
+                          fontSize: 14,
+                          fontWeight: selected
+                              ? FontWeight.w700
+                              : FontWeight.w600,
+                        ),
+                      ),
+                      if (row.secondary case final secondary?)
+                        Text(
+                          secondary,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.textLo,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (row.badge case final badge?) ...[
+                  const SizedBox(width: 8),
+                  _badge(badge),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _timeLabel() => Text(
     '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',

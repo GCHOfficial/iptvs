@@ -46,6 +46,15 @@ enum ZapCommandKind {
   /// OK on the quick list's selected row (or commit the digit buffer).
   activate,
 
+  /// Right inside the quick list — push one mode *onto* its stack.
+  ///
+  /// Separate from [activate] because the two diverge on exactly one rung:
+  /// in the channels mode OK **plays** the channel while Right opens its
+  /// schedule. Giving Right its own string keeps every surface mode-blind —
+  /// a native renderer sends the key it was pressed and Dart, which owns the
+  /// mode stack, decides what that means.
+  descend,
+
   /// Back/Left inside the quick list — pop one mode off its stack.
   back,
 
@@ -93,6 +102,8 @@ ZapCommand? parseZapCommand(String? raw) {
       return const ZapCommand(ZapCommandKind.closeList);
     case 'zap:activate':
       return const ZapCommand(ZapCommandKind.activate);
+    case 'zap:descend':
+      return const ZapCommand(ZapCommandKind.descend);
     case 'zap:back':
       return const ZapCommand(ZapCommandKind.back);
   }
