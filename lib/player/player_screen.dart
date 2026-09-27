@@ -1064,12 +1064,32 @@ class _PlayerScreenState extends State<PlayerScreen>
     zap.addListener(_onZapChanged);
   }
 
+  /// When the zap controller last notified, in epoch milliseconds.
+  ///
+  /// Only the Linux native overlay reads it (through the `zap` block of the
+  /// `iptvs-state` push): it keys the banner's 3 s auto-hide, so each press
+  /// restarts the countdown while an unrelated state push — an aspect cycle,
+  /// the reconnect chip — carries the same stamp and leaves the banner alone.
+  /// Kotlin's `PlayerUiState.zapBannerAtMs` is the same value on the same job.
+  /// 0 means "no zap has happened yet", which the overlay must not draw.
+  int _zapBannerAtMs = 0;
+
   void _onZapChanged() {
     if (!mounted) return;
     // The embedded overlay reads title / EPG / favourite / aspect through the
     // accessors above, so a rebuild is how it follows the cursor.
     setState(() {});
+    _zapBannerAtMs = DateTime.now().millisecondsSinceEpoch;
     unawaited(_pushZapBanner());
+  }
+
+  /// The cursor's banner, as the Linux native overlay's `iptvs-state` push
+  /// carries it. Null when this route has no zap session, which is what keeps
+  /// a non-zapping session's pushes byte-identical to before.
+  Map<String, Object?>? _zapOverlayPayload() {
+    final zap = _zap;
+    if (zap == null) return null;
+    return <String, Object?>{...zap.bannerPayload(), 'atMs': _zapBannerAtMs};
   }
 
   /// Pushes the cursor's presentation to a native surface that draws its own
@@ -1079,6 +1099,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _pushZapBanner() async {
     final zap = _zap;
     if (zap == null) return;
+    // Linux's native surface draws its chrome in mpv's own OSD, not through a
+    // method channel: its banner rides the `iptvs-state` push the Lua overlay
+    // already parses. Checked first because `_separateEngineOwnsPlayback` is
+    // true there too, and `setZapBanner` has no Linux native half to reach.
+    if (_linuxNativeSession != null) {
+      await _pushLinuxOverlayState();
+      return;
+    }
     if (!(_separateEngineOwnsPlayback || _usesWindowsNativeSurface)) return;
     try {
       await _nativeHdrPlayer.invokeMethod<void>(
@@ -2615,6 +2643,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       aspectLabel: kAspectModes[_aspectModeIndex].label,
       reconnecting: _reconnecting,
       hdr10Plus: _hdr10Plus,
+      zap: _zapOverlayPayload(),
     );
   }
 
