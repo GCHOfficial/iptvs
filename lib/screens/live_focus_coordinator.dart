@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 
+import '../player/zap_command.dart'
+    show kDigitEntryCommitDelay, kDigitEntryKeys, kDigitEntryMaxDigits;
 import '../sources/source.dart';
 import '../widgets/routed_focus_node.dart';
 
@@ -665,32 +667,14 @@ class LiveFocusCoordinator extends ChangeNotifier {
   String get digitBuffer => _digitBuffer;
   String _digitBuffer = '';
   Timer? _digitTimer;
-  static const _digitCommitDelay = Duration(milliseconds: 1500);
-  static const _maxDigits = 4;
 
-  // LogicalKeyboardKey overrides == and can't key a const map.
-  static final Map<LogicalKeyboardKey, int> _digitKeys = {
-    LogicalKeyboardKey.digit0: 0,
-    LogicalKeyboardKey.digit1: 1,
-    LogicalKeyboardKey.digit2: 2,
-    LogicalKeyboardKey.digit3: 3,
-    LogicalKeyboardKey.digit4: 4,
-    LogicalKeyboardKey.digit5: 5,
-    LogicalKeyboardKey.digit6: 6,
-    LogicalKeyboardKey.digit7: 7,
-    LogicalKeyboardKey.digit8: 8,
-    LogicalKeyboardKey.digit9: 9,
-    LogicalKeyboardKey.numpad0: 0,
-    LogicalKeyboardKey.numpad1: 1,
-    LogicalKeyboardKey.numpad2: 2,
-    LogicalKeyboardKey.numpad3: 3,
-    LogicalKeyboardKey.numpad4: 4,
-    LogicalKeyboardKey.numpad5: 5,
-    LogicalKeyboardKey.numpad6: 6,
-    LogicalKeyboardKey.numpad7: 7,
-    LogicalKeyboardKey.numpad8: 8,
-    LogicalKeyboardKey.numpad9: 9,
-  };
+  // The buffer's timing, length cap and key map are shared with the in-player
+  // zap controller (`player/zap_command.dart`): typing a channel number on a
+  // remote is the same gesture in both places, and two copies of the timing
+  // would be two behaviours to learn.
+  static const _digitCommitDelay = kDigitEntryCommitDelay;
+  static const _maxDigits = kDigitEntryMaxDigits;
+  static final Map<LogicalKeyboardKey, int> _digitKeys = kDigitEntryKeys;
 
   /// Digits typed on the remote jump to a channel number. Only live while the
   /// channel list holds the D-pad, so a search field never loses its digits.

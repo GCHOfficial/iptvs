@@ -16,10 +16,12 @@ import '../data/net.dart';
 import '../sources/source.dart';
 import 'channel_owner.dart';
 import 'ios_engine.dart';
+import 'live_zap_controller.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
+import 'zap_command.dart';
 
 /// Buffering/dropped this long before a non-forced live reconnect fires.
 /// Mirrors Android's `ReconnectPolicy.STALL_RECONNECT_MS`.
@@ -402,6 +404,19 @@ class PlayerScreen extends StatefulWidget {
   final bool favoriteInitial;
   final Future<void> Function(bool favorite)? onSetFavorite;
 
+  /// In-player live channel zapping. When non-null this route is on a live
+  /// channel that can be changed **without leaving the player**, and the
+  /// controller — not this widget's immutable fields — is the authority for
+  /// which channel that is: title, source name, EPG, favourite state, aspect
+  /// mode, buffering preset and the re-resolve the reconnect watchdog uses all
+  /// read through it (see the `_title` / `_epgNow` / `_freshLiveStream`
+  /// accessors in the state). The widget fields remain the *initial* values
+  /// and the whole answer for VOD / catch-up, which never zap.
+  ///
+  /// Owned by the caller (`channel_list_screen`), which created it from the
+  /// launch list and disposes it when the route pops.
+  final LiveZapController? zap;
+
   /// Re-resolves this live channel's stream fresh from the source. Used by the
   /// live reconnect watchdog and "Go to live": Stalker `create_link` URLs
   /// carry single-use/short-lived `play_token`s, so after a portal-side kill
@@ -460,6 +475,7 @@ class PlayerScreen extends StatefulWidget {
     this.existingPlayer,
     this.existingController,
     this.adoptNativePreview = false,
+    this.zap,
     this.playback,
     this.favoriteInitial = false,
     this.onSetFavorite,
@@ -629,10 +645,56 @@ class _PlayerScreenState extends State<PlayerScreen>
   final List<StreamSubscription<dynamic>> _subs = [];
   String? _error;
   late final bool _isLive = widget.stream.isLive;
+
+  // ── Per-channel state, which zapping makes mutable ──────────────────────────
+  //
+  // Everything below used to be read straight off `widget`, which was correct
+  // while a route meant exactly one channel. With [PlayerScreen.zap] wired, the
+  // channel changes underneath a route that never rebuilds, so each of these
+  // reads the controller when there is one and falls back to the widget field
+  // otherwise (VOD, catch-up, and any live open with no zap range).
+
+  /// The stream currently playing. Starts as `widget.stream` and is replaced by
+  /// each settled zap, so every locator-consuming path (reopen, header options,
+  /// the native payloads) follows the channel on screen.
+  late StreamInfo _stream = widget.stream;
+
+  LiveZapController? get _zap => widget.zap;
+  String get _title => _zap?.title ?? widget.title;
+  String? get _sourceName => _zap?.sourceName ?? widget.sourceName;
+  Programme? get _epgNow => _zap != null ? _zap!.epg.now : widget.epgNow;
+  Programme? get _epgNext => _zap != null ? _zap!.epg.next : widget.epgNext;
+  BufferPreset get _bufferPreset => _zap?.bufferPreset ?? widget.bufferPreset;
+
   // Live-channel favorite state for the overlay star (embedded path); the
   // Android native overlay tracks its own copy and reports back on close.
-  late bool _favorite = widget.favoriteInitial;
-  bool get _canFavorite => _isLive && widget.onSetFavorite != null;
+  late bool _favorite = widget.zap?.isFavorite ?? widget.favoriteInitial;
+  bool get _canFavorite =>
+      _isLive && (widget.zap != null || widget.onSetFavorite != null);
+
+  /// Writes an absolute favourite state for the channel **currently playing**
+  /// — through the zap controller when one exists, so a star pressed after
+  /// three zaps is stored against that channel's own source rather than the
+  /// one the route was launched with.
+  Future<void> _writeFavorite(bool value) async {
+    final zap = _zap;
+    if (zap != null) {
+      await zap.setFavorite(value);
+      return;
+    }
+    await widget.onSetFavorite?.call(value);
+  }
+
+  /// Persists an aspect-mode label against the *owning* source of the channel
+  /// currently playing, for the same reason.
+  void _persistAspectLabel(String label) {
+    final zap = _zap;
+    if (zap != null) {
+      unawaited(zap.persistAspect(label));
+      return;
+    }
+    widget.onAspectChanged?.call(label);
+  }
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
@@ -941,7 +1003,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           'available tracks video=[${video.isEmpty ? 'none' : video}] '
           'audio=[${audio.isEmpty ? 'none' : audio}] '
           'subtitles=[${subtitles.isEmpty ? 'none' : subtitles}] '
-          'externalSubtitles=${widget.stream.subtitles.length}',
+          'externalSubtitles=${_stream.subtitles.length}',
         );
         _syncNativeControlState();
       }),
@@ -983,20 +1045,232 @@ class _PlayerScreenState extends State<PlayerScreen>
     _subs.add(_player.stream.duration.listen((_) => _requestControlSync()));
     _subs.add(_player.stream.volume.listen((_) => _requestControlSync()));
 
+    _wireZapController();
+
     _open();
   }
+
+  // ── Live zapping ───────────────────────────────────────────────────────────
+
+  /// Hands the zap controller the two things only this route can do — stop the
+  /// current stream and play the next one on the surface already in use — and
+  /// subscribes to its cursor so the banner/overlay follow a held key
+  /// immediately, well before the settled channel is resolved.
+  void _wireZapController() {
+    final zap = _zap;
+    if (zap == null) return;
+    zap.onStopCurrent = _zapStopCurrent;
+    zap.onPlay = _zapPlay;
+    zap.addListener(_onZapChanged);
+  }
+
+  void _onZapChanged() {
+    if (!mounted) return;
+    // The embedded overlay reads title / EPG / favourite / aspect through the
+    // accessors above, so a rebuild is how it follows the cursor.
+    setState(() {});
+    unawaited(_pushZapBanner());
+  }
+
+  /// Pushes the cursor's presentation to a native surface that draws its own
+  /// chrome. Fire-and-forget and failure-tolerant: until the Kotlin/C++ halves
+  /// land (Phase 2/4) this method simply isn't implemented natively, and a
+  /// banner that doesn't draw must never break playback.
+  Future<void> _pushZapBanner() async {
+    final zap = _zap;
+    if (zap == null) return;
+    if (!(_separateEngineOwnsPlayback || _usesWindowsNativeSurface)) return;
+    try {
+      await _nativeHdrPlayer.invokeMethod<void>(
+        'setZapBanner',
+        zap.bannerPayload(),
+      );
+    } on MissingPluginException {
+      // Native half not implemented on this platform/build — expected.
+    } catch (error) {
+      _logPlayback('zap banner push failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  /// Frees the provider connection before the next channel is resolved.
+  ///
+  /// Single-connection accounts refuse a second `create_link` while the first
+  /// stream is still open, so this is not an optimisation. The engines that
+  /// own playback out of process stop as part of applying the new locator
+  /// (`zapTo` on Android/iOS, `loadfile … replace` on Linux native), so only
+  /// the surfaces this `_player` actually drives stop here.
+  Future<void> _zapStopCurrent() async {
+    if (_separateEngineOwnsPlayback) return;
+    try {
+      await _player.stop();
+    } catch (error) {
+      _logPlayback('zap stop failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  /// Applies a settled zap on the surface already in use.
+  ///
+  /// **The surface never changes on a zap** (docs/player.md "Live zapping"):
+  /// there is no de-escalation path anywhere, and building one would mean
+  /// killing an mpv process (Linux) or tearing down an HWND (Windows) every
+  /// time the user crossed an HDR/SDR boundary. What *is* re-armed is the
+  /// one-shot embedded→native escalation, so a newly zapped-to HDR channel on
+  /// an embedded surface still gets its single chance at a real HDR surface.
+  Future<void> _zapPlay(StreamInfo stream, ZapEntry entry) async {
+    if (!mounted) return;
+    _stream = stream;
+    _logPlayback(
+      'zap play source=${entry.sourceName} channel=${entry.name} '
+      'id=${entry.channelId}',
+    );
+    // Per-channel presentation. Favourite and aspect are per *owning* source,
+    // which a cross-source zap changes.
+    _favorite = _zap?.isFavorite ?? _favorite;
+    _aspectModeIndex = resolveAspectModeIndex(_zap?.aspectLabel);
+    // A new stream deserves its own single escalation chance, and its own HDR
+    // probe — the flags are otherwise spent for the whole session.
+    _windowsEscalated = false;
+    _linuxEscalated = false;
+    _hdr10Plus = false;
+    _lastVideoParamsLog = null;
+    // The stop above was ours, not a drop: reset every watchdog counter so the
+    // new channel starts on a clean stall clock and full backoff budget.
+    _reconnectAttempt = 0;
+    _lastReconnectMs = 0;
+    _stalledSinceMs = 0;
+    _buffering = false;
+    _liveSynced = true;
+    if (_reconnecting) {
+      _reconnecting = false;
+      _onReconnectingChanged();
+    }
+
+    if (_separateEngineOwnsPlayback && !_usesLinuxNativeSurface) {
+      // Android's Activity / iOS's presented controller own the engine; they
+      // stop, rebuild if the headers or preset changed, and reload.
+      await _invokeNativeZapTo(stream, entry);
+    } else if (_linuxNativeSession != null) {
+      final session = _linuxNativeSession!;
+      await session.command(
+        LinuxNativeSession.buildHeaderFieldsCommand(stream.headers),
+      );
+      await session.command(['set_property', 'force-media-title', entry.name]);
+      await session.command(['loadfile', stream.url, 'replace']);
+      await _pushLinuxOverlayState();
+    } else {
+      // Embedded, and the Windows native HWND — which is this same `_player`
+      // presenting through a `vo` swap, so it reopens exactly the way
+      // `_goToLive` does, on the surface it already holds.
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        for (final option in mpvBufferOptions(_bufferPreset).entries) {
+          try {
+            await platform.setProperty(option.key, option.value);
+          } catch (error) {
+            _logPlayback('warn mpv zap ${option.key} failed: $error');
+          }
+        }
+        if (stream.headers.isNotEmpty) {
+          await _setNativeHeaderOptions(platform, stream.headers);
+        }
+      }
+      await _player.open(
+        Media(
+          stream.url,
+          httpHeaders: stream.headers.isEmpty ? null : stream.headers,
+        ),
+      );
+    }
+    if (!mounted) return;
+    setState(() {});
+    await _syncNativeControlState();
+    await _pushZapBanner();
+  }
+
+  /// The outbound half of the zap wire contract for an engine that owns
+  /// playback out of process. Carries the new locator *and* everything the
+  /// native overlay presents, because a zap changes all of it at once.
+  ///
+  /// Never logged: the payload holds a provider locator and its headers.
+  Future<void> _invokeNativeZapTo(StreamInfo stream, ZapEntry entry) async {
+    try {
+      await _nativeHdrPlayer.invokeMethod<Map<Object?, Object?>>('zapTo', {
+        'url': stream.url,
+        'headers': stream.headers,
+        'title': entry.name,
+        'sourceName': entry.sourceName,
+        if (entry.number != null) 'channelNumber': entry.number,
+        'channelName': entry.name,
+        if (entry.channel.logo != null) 'logoUrl': entry.channel.logo,
+        'isLive': true,
+        'bufferPreset': _bufferPreset.storageName,
+        'aspect': kAspectModes[_aspectModeIndex].label,
+        'canFavorite': _canFavorite,
+        'isFavorite': _favorite,
+        ..._epgPayload(),
+      });
+    } on MissingPluginException {
+      // Phase 2 hasn't landed on this platform yet: the native engine keeps
+      // playing the previous channel rather than the app crashing. Logged so a
+      // report of "the banner moves but the picture doesn't" is readable.
+      _logPlayback('zap unsupported by native player (zapTo not implemented)');
+    } catch (error) {
+      _logPlayback('zap apply failed: ${_redactPlayback('$error')}');
+    }
+  }
+
+  /// Routes one command from the shared zap vocabulary, whichever surface it
+  /// came from. Returns whether the controller consumed it.
+  bool _handleZapCommand(ZapCommand command) {
+    final zap = _zap;
+    if (zap == null || !_isLive) return false;
+    return zap.handleCommand(command);
+  }
+
+  /// Whether the **arrow** keys currently belong to zapping on this surface.
+  ///
+  /// Deliberately narrower than the other zap keys: digits, page and channel
+  /// keys are unambiguous, while arrows are also how a visible overlay is
+  /// navigated. Evaluated at press time, never at build time — the chrome's
+  /// visibility changes without rebuilding this widget.
+  ///
+  /// Excluded on purpose: the Windows native HWND surface (its GDI overlay
+  /// owns its own keyboard ring), any out-of-process engine (its own surface
+  /// has the focus), and Android's embedded fallback, whose stock media_kit
+  /// controls are focus targets a TV D-pad walks with Up/Down — binding the
+  /// arrows there would strand the user on that surface.
+  bool get _zapArrowKeysActive {
+    if (_zap == null || !_isLive) return false;
+    if (!_usesSharedEmbeddedOverlay) return false;
+    if (_usesWindowsNativeSurface || _separateEngineOwnsPlayback) return false;
+    return !(_embeddedSurfaceKey.currentState?.chromeVisible ?? false);
+  }
+
+  /// Whether the unambiguous zap keys (digits, PageUp/Down, CHANNEL_UP/DOWN,
+  /// LAST_CHANNEL) are live — the same surfaces, but regardless of chrome.
+  bool get _zapDirectKeysActive {
+    if (_zap == null || !_isLive) return false;
+    if (!_usesSharedEmbeddedOverlay) return false;
+    return !(_usesWindowsNativeSurface || _separateEngineOwnsPlayback);
+  }
+
+  /// A zap keypress deliberately does **not** call [_handlePlaybackInput]:
+  /// revealing the chrome on the first Up would hand the second Up to the
+  /// control row instead of the next channel, which is the opposite of what
+  /// the key was pressed for. The banner is what acknowledges the press.
+  bool _handleZapInput(ZapCommand command) => _handleZapCommand(command);
 
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
     _showNativeControls(scheduleHide: false);
     _logPlayback(
-      'open live=$_isLive url=${_redactPlayback(widget.stream.url)} '
+      'open live=$_isLive url=${_redactPlayback(_stream.url)} '
       'surface=${_usesWindowsNativeSurface
           ? 'native-windows'
           : _usesLinuxNativeSurface
           ? (widget.preferLinuxNative ? 'linux-native-attempt' : 'linux-embedded')
           : 'embedded'} '
-      'headers=${widget.stream.headers.keys.join(',')} '
+      'headers=${_stream.headers.keys.join(',')} '
       'instance=${identityHashCode(this)} adopted=${widget.existingPlayer != null}',
     );
 
@@ -1027,7 +1301,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       // set this flag (native buys nothing there); they open embedded below,
       // and only escalate to native if the source turns out to be PQ/HLG on
       // Wayland (see `_maybeEscalateLinuxNative`).
-      if (await _startLinuxNativeSession(widget.stream)) return;
+      if (await _startLinuxNativeSession(_stream)) return;
       _logPlayback('native linux player unavailable; using embedded fallback');
     }
 
@@ -1089,8 +1363,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     // headers carry things like a MAG User-Agent for Stalker; empty for plain HLS.
-    if (widget.stream.headers.isNotEmpty && platform is NativePlayer) {
-      await _setNativeHeaderOptions(platform, widget.stream.headers);
+    if (_stream.headers.isNotEmpty && platform is NativePlayer) {
+      await _setNativeHeaderOptions(platform, _stream.headers);
     }
 
     // An adopted player is already open and playing this exact stream — the
@@ -1107,10 +1381,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!canSkipOpen) {
       await _player.open(
         Media(
-          widget.stream.url,
-          httpHeaders: widget.stream.headers.isEmpty
-              ? null
-              : widget.stream.headers,
+          _stream.url,
+          httpHeaders: _stream.headers.isEmpty ? null : _stream.headers,
         ),
       );
     }
@@ -1137,12 +1409,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       final opened = await _nativeHdrPlayer
           .invokeMethod<bool>('open', {
-            'url': widget.stream.url,
-            'title': widget.title,
-            if (widget.sourceName != null) 'sourceName': widget.sourceName,
-            'headers': widget.stream.headers,
-            'isLive': widget.stream.isLive,
-            'bufferPreset': widget.bufferPreset.storageName,
+            'url': _stream.url,
+            'title': _title,
+            if (_sourceName != null) 'sourceName': _sourceName,
+            'headers': _stream.headers,
+            'isLive': _stream.isLive,
+            'bufferPreset': _bufferPreset.storageName,
             // So the native fullscreen player opens on the same mode the rest
             // of the app is in, rather than its own compiled-in default.
             'aspect': kAspectModes[_aspectModeIndex].label,
@@ -1156,7 +1428,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
-            'subtitles': widget.stream.subtitles
+            'subtitles': _stream.subtitles
                 .map(
                   (subtitle) => {
                     'url': subtitle.url,
@@ -1353,6 +1625,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (call.method == 'nativeControl') {
       final command = call.arguments?.toString();
       if (command != null) await _handleNativeControlCommand(command);
+    } else if (call.method == 'nativeZap') {
+      // The inbound half of the zap wire contract. The native surface names a
+      // *command*, never a channel — it holds no list and no cursor (see
+      // `live_zap_controller.dart`), so an unknown or malformed string is
+      // simply dropped rather than guessed at.
+      final args = call.arguments;
+      final raw = args is Map ? args['command']?.toString() : null;
+      final command = parseZapCommand(raw);
+      if (command != null) _handleZapCommand(command);
     } else if (call.method == 'resolveAgain') {
       // Inbound re-resolve for a native watchdog that owns playback out of
       // process (iOS's presented controller): Stalker `create_link` URLs carry
@@ -1413,7 +1694,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final favorite = args['favorite'];
         if (favorite is bool && favorite != _favorite) {
           _favorite = favorite;
-          await widget.onSetFavorite?.call(favorite);
+          await _writeFavorite(favorite);
         }
         // The aspect the user left the native overlay in. Persisted the same
         // way a change made on this side is, so the two surfaces cannot end up
@@ -1423,7 +1704,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           final index = aspectModeIndexOf(aspect);
           if (index >= 0 && index != _aspectModeIndex) {
             _aspectModeIndex = index;
-            widget.onAspectChanged?.call(kAspectModes[index].label);
+            _persistAspectLabel(kAspectModes[index].label);
           }
         }
       }
@@ -1671,12 +1952,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     final platform = _player.platform;
     if (platform is NativePlayer) {
       await _configureNativePlayer(platform, null);
-      if (widget.stream.headers.isNotEmpty) {
-        await _setNativeHeaderOptions(platform, widget.stream.headers);
+      if (_stream.headers.isNotEmpty) {
+        await _setNativeHeaderOptions(platform, _stream.headers);
       }
     }
     if (!mounted) return;
-    final stream = _isLive ? await _freshLiveStream() : widget.stream;
+    final stream = _isLive ? await _freshLiveStream() : _stream;
     if (!mounted) return;
     // Set before open(): the seek runs off the duration stream once the
     // demuxer reports it (a cold seek right after open lands too early).
@@ -1774,12 +2055,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     Duration? resumeOverride,
   }) async {
     final native = await LinuxNativeSession.start(
-      bufferPreset: widget.bufferPreset,
+      bufferPreset: _bufferPreset,
       stream: stream,
-      title: widget.title,
-      sourceName: widget.sourceName,
-      epgNow: widget.epgNow,
-      epgNext: widget.epgNext,
+      title: _title,
+      sourceName: _sourceName,
+      epgNow: _epgNow,
+      epgNext: _epgNext,
       canFavorite: _canFavorite,
       favorite: _favorite,
       liveSynced: _liveSynced,
@@ -1989,8 +2270,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       // wid-before-vo hot-swap of the already-playing player (see
       // _configureNativePlayer's ordering note).
       await _configureNativePlayer(platform, handle);
-      if (widget.stream.headers.isNotEmpty) {
-        await _setNativeHeaderOptions(platform, widget.stream.headers);
+      if (_stream.headers.isNotEmpty) {
+        await _setNativeHeaderOptions(platform, _stream.headers);
       }
     }
     if (!mounted) {
@@ -2004,6 +2285,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _handleLinuxNativeControl(String command) async {
     final session = _linuxNativeSession;
     if (session == null) return;
+    // Same vocabulary as Android's `nativeZap` and the Windows overlay's
+    // `nativeControl` — the Lua OSD emits the identical strings.
+    final zapCommand = parseZapCommand(command);
+    if (zapCommand != null && _handleZapCommand(zapCommand)) return;
     switch (command) {
       case 'back':
         await _exitAndPop();
@@ -2034,7 +2319,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         // 'video-aspect-override' values out of step with a hardcoded label.
         _aspectModeIndex = (_aspectModeIndex + 1) % kAspectModes.length;
         final mode = kAspectModes[_aspectModeIndex];
-        widget.onAspectChanged?.call(mode.label);
+        _persistAspectLabel(mode.label);
         await session.command(['set_property', 'panscan', mode.panscan]);
         // Pushed by every mode, not only Stretch: the cycle has to undo it on
         // the next press.
@@ -2088,6 +2373,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _handleNativeControlCommand(String command) async {
+    // The Windows GDI overlay reuses this existing method for the shared zap
+    // vocabulary rather than adding a second inbound channel surface — one
+    // parser, one meaning, whichever surface sent it.
+    final zapCommand = parseZapCommand(command);
+    if (zapCommand != null && _handleZapCommand(zapCommand)) {
+      await _syncNativeControlState();
+      return;
+    }
     if (command.startsWith('seekPercent:')) {
       final ratio = double.tryParse(command.substring('seekPercent:'.length));
       final duration = _player.state.duration;
@@ -2184,6 +2477,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   // Watchdog: a live stream stuck buffering past the threshold gets reloaded.
   void _pollLiveReconnect() {
     if (!_isLive || !mounted) return;
+    // A settling zap deliberately stopped the stream and is resolving the
+    // next one; reading that as a stall would reconnect the channel the user
+    // has just left. Mirrors Kotlin's `resolveGate.inFlight` early return.
+    if (_zap?.settling ?? false) {
+      _stalledSinceMs = 0;
+      return;
+    }
     if (!_buffering) {
       _stalledSinceMs = 0;
       _reconnectAttempt = 0;
@@ -2249,15 +2549,29 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// provided [PlayerScreen.resolveAgain] (Stalker tokens are single-use — see
   /// its doc), the original resolved stream otherwise or on resolve failure.
   Future<StreamInfo> _freshLiveStream() async {
+    // Zapping makes "this channel" mutable, so the re-resolve has to follow
+    // the channel on screen. A null answer means a zap owns the round trip (or
+    // the resolve failed), which collapses to the pre-existing rule: keep the
+    // locator we already hold.
+    final zap = _zap;
+    if (zap != null) {
+      try {
+        final fresh = await zap.resolveCurrent();
+        if (fresh != null) return fresh;
+      } catch (error) {
+        _logPlayback('re-resolve failed: ${_redactPlayback('$error')}');
+      }
+      return _stream;
+    }
     final resolve = widget.resolveAgain;
-    if (resolve == null) return widget.stream;
+    if (resolve == null) return _stream;
     try {
       final fresh = await resolve();
       if (fresh != null) return fresh;
     } catch (error) {
       _logPlayback('re-resolve failed: ${_redactPlayback('$error')}');
     }
-    return widget.stream;
+    return _stream;
   }
 
   void _onReconnectingChanged() {
@@ -2282,10 +2596,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final session = _linuxNativeSession;
     if (session == null) return;
     await session.updateOverlayState(
-      title: widget.title,
-      sourceName: widget.sourceName,
-      epgNow: widget.epgNow,
-      epgNext: widget.epgNext,
+      title: _title,
+      sourceName: _sourceName,
+      epgNow: _epgNow,
+      epgNext: _epgNext,
       canFavorite: _canFavorite,
       favorite: _favorite,
       isLive: _isLive,
@@ -2335,8 +2649,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// [_persistPlaybackPosition] is a no-op there — so pushing Dart's transport
   /// state would rewrite the lock screen with a stopped player's truth.
   Map<String, Object?> _presentationControlState() => {
-    'title': widget.title,
-    if (widget.sourceName != null) 'sourceName': widget.sourceName,
+    'title': _title,
+    if (_sourceName != null) 'sourceName': _sourceName,
     ..._epgPayload(),
     'isLive': _isLive,
     'liveSynced': _liveSynced,
@@ -2498,7 +2812,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _cycleNativeAspect() async {
     _aspectModeIndex = (_aspectModeIndex + 1) % kAspectModes.length;
-    widget.onAspectChanged?.call(kAspectModes[_aspectModeIndex].label);
+    _persistAspectLabel(kAspectModes[_aspectModeIndex].label);
     // The embedded overlay reads its `aspectLabel` from this index through
     // `PlayerScreen.build`, and `_syncNativeControlState()` below is a no-op
     // off the native surfaces — so without an explicit rebuild the new text
@@ -2553,8 +2867,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   // Live EPG now/next snapshot for the native overlays. Epoch values are passed
   // as doubles (ms) so they survive the MethodChannel without int32 truncation.
   Map<String, Object?> _epgPayload() {
-    final now = widget.epgNow;
-    final next = widget.epgNext;
+    final now = _epgNow;
+    final next = _epgNext;
     return {
       if (now != null) ...{
         'epgNowTitle': now.title,
@@ -2733,7 +3047,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   List<SubtitleTrack> _nativeSubtitleTracks() {
-    final external = widget.stream.subtitles.map(
+    final external = _stream.subtitles.map(
       (subtitle) => SubtitleTrack.uri(
         subtitle.url,
         title: subtitle.label,
@@ -2777,16 +3091,16 @@ class _PlayerScreenState extends State<PlayerScreen>
       key: _embeddedSurfaceKey,
       player: _player,
       controller: _controller,
-      title: widget.title,
-      sourceName: widget.sourceName,
+      title: _title,
+      sourceName: _sourceName,
       aspectLabel: kAspectModes[_aspectModeIndex].label,
       // Windows fullscreen is a window operation the runner owns; media_kit's
       // own toggle is inert here. See [_toggleFullscreenForCurrentSurface].
       onRequestFullscreen: (Platform.isWindows || Platform.isLinux)
           ? () => unawaited(_toggleFullscreenForCurrentSurface())
           : null,
-      epgNow: widget.epgNow,
-      epgNext: widget.epgNext,
+      epgNow: _epgNow,
+      epgNext: _epgNext,
       isLive: _isLive,
       canFavorite: _canFavorite,
       favorite: _favorite,
@@ -2854,7 +3168,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Layered over the base options rather than replacing them: the preset
     // only carries cache depth, and `normal` carries nothing at all so an
     // untouched source runs mpv's own defaults exactly as before.
-    final bufferOptions = mpvBufferOptions(widget.bufferPreset);
+    final bufferOptions = mpvBufferOptions(_bufferPreset);
     final options = _isLive
         ? {...kLiveMpvOptions, ...bufferOptions}
         : <String, String>{
@@ -2870,7 +3184,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // normal" from "the preset never reached the player" — which is exactly the
     // question a buffering report asks.
     _logPlayback(
-      'buffer preset=${widget.bufferPreset.storageName} '
+      'buffer preset=${_bufferPreset.storageName} '
       'mpv=${bufferOptions.isEmpty ? 'defaults' : bufferOptions}',
     );
 
@@ -3046,6 +3360,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void dispose() {
     _logPlayback('player dispose instance=${identityHashCode(this)}');
+    // The zap controller is the *caller's* (it outlives this route long enough
+    // for the channel list to read where the session ended), so unhook rather
+    // than dispose — and unhook the play/stop callbacks too, or a settle that
+    // lands after the pop would reopen a torn-down surface.
+    final zap = _zap;
+    if (zap != null) {
+      zap.removeListener(_onZapChanged);
+      zap.onPlay = null;
+      zap.onStopCurrent = null;
+    }
     if (_lifecycleObserverRegistered) {
       WidgetsBinding.instance.removeObserver(this);
       _lifecycleObserverRegistered = false;
@@ -3154,7 +3478,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_canFavorite) return;
     final next = !_favorite;
     setState(() => _favorite = next);
-    unawaited(widget.onSetFavorite?.call(next));
+    unawaited(_writeFavorite(next));
   }
 
   void _seekBy(int seconds) {
@@ -3174,6 +3498,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       body: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (_handleZapInput(const ZapCommand(ZapCommandKind.back))) return;
             _handlePlaybackInput();
             // Single-press peel on the shared embedded overlay (Linux + Windows
             // SDR): close an open info panel first and consume the press, only
@@ -3190,10 +3515,20 @@ class _PlayerScreenState extends State<PlayerScreen>
             unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.select): () {
+            // A half-typed channel number commits on OK rather than waiting
+            // out its idle timer; only then does OK mean what it always did.
+            if (_handleZapInput(const ZapCommand(ZapCommandKind.activate))) {
+              return;
+            }
             _handlePlaybackInput();
             unawaited(_togglePlayback());
           },
           const SingleActivator(LogicalKeyboardKey.enter): () {
+            // A half-typed channel number commits on OK rather than waiting
+            // out its idle timer; only then does OK mean what it always did.
+            if (_handleZapInput(const ZapCommand(ZapCommandKind.activate))) {
+              return;
+            }
             _handlePlaybackInput();
             unawaited(_togglePlayback());
           },
@@ -3209,11 +3544,26 @@ class _PlayerScreenState extends State<PlayerScreen>
             _handlePlaybackInput();
             _player.pause();
           },
+          // Live + chrome hidden: Left opens the quick list (Phase 6 — not
+          // consumed yet, so it falls through and simply reveals the chrome)
+          // and Right is the "last channel" toggle. Both are free on live
+          // today: `_seekBy` early-returns for a live stream, so these were
+          // dead keys there.
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+            if (_zapArrowKeysActive &&
+                _handleZapInput(const ZapCommand(ZapCommandKind.openList))) {
+              return;
+            }
             _handlePlaybackInput();
             _seekBy(-10);
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+            if (_zapArrowKeysActive &&
+                _handleZapInput(
+                  const ZapCommand(ZapCommandKind.previousChannel),
+                )) {
+              return;
+            }
             _handlePlaybackInput();
             _seekBy(10);
           },
@@ -3250,14 +3600,48 @@ class _PlayerScreenState extends State<PlayerScreen>
               _handlePlaybackInput();
               _embeddedSurfaceKey.currentState?.toggleOverlayFavorite();
             },
+            // Up/Down zap channels on a live stream **only while the chrome
+            // is hidden**; with the bars on screen they stay volume, so the
+            // control is never lost — just contextual, the same way the
+            // native overlays hand the arrows to their control rows.
             const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+              if (_zapArrowKeysActive &&
+                  _handleZapInput(const ZapCommand(ZapCommandKind.channelUp))) {
+                return;
+              }
               _handlePlaybackInput();
               _embeddedSurfaceKey.currentState?.adjustVolume(5);
             },
             const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+              if (_zapArrowKeysActive &&
+                  _handleZapInput(
+                    const ZapCommand(ZapCommandKind.channelDown),
+                  )) {
+                return;
+              }
               _handlePlaybackInput();
               _embeddedSurfaceKey.currentState?.adjustVolume(-5);
             },
+          },
+          // Unambiguous zap keys: a dedicated remote key or a typed number
+          // means one thing whether the chrome is up or not.
+          if (_zapDirectKeysActive) ...{
+            const SingleActivator(LogicalKeyboardKey.channelUp): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
+            const SingleActivator(LogicalKeyboardKey.pageUp): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.channelUp)),
+            const SingleActivator(LogicalKeyboardKey.channelDown): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.channelDown)),
+            const SingleActivator(LogicalKeyboardKey.pageDown): () =>
+                _handleZapInput(const ZapCommand(ZapCommandKind.channelDown)),
+            const SingleActivator(LogicalKeyboardKey.mediaLast): () =>
+                _handleZapInput(
+                  const ZapCommand(ZapCommandKind.previousChannel),
+                ),
+            for (final entry in kDigitEntryKeys.entries)
+              SingleActivator(entry.key): () => _handleZapInput(
+                ZapCommand(ZapCommandKind.digit, entry.value),
+              ),
           },
         },
         child: Listener(
