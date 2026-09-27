@@ -974,6 +974,17 @@ separately, and no `v1`/`v2` split left in this design.
   device reaches on an mpv-routed channel has none. That is deliberate — offering a picker that
   cannot route anything would be worse than its absence — but it means a Stalker user, whose
   extension-less `create_link` locators route to mpv by rule, may never see the control at all.
+- **Deferred: in-player live zapping.** Phase 1 (docs/player.md "Live zapping") is Dart-only; iOS
+  gets no zapping input or banner yet. When it does, the engine-switch rule has to be the
+  cross-engine case of the existing "stop + re-resolve, never pause" rule above: a paused media_kit
+  engine still holds its provider connection, accounts are single-connection, so pausing across a
+  Dart↔Swift handoff on a zap would double-connect exactly like an unpaused different-channel
+  preview would. **A zap whose settled channel selects the *other* engine can't apply in place** —
+  `selectIosEngine` is read once per open, off the widget's own `iosEngineKey`
+  (`crossEngineFullscreen`/`_openLivePlayer`, above), not re-evaluated mid-session — so a zapped-to
+  channel that would route to mpv while the session is on AVPlayer (or vice versa) is not yet
+  handled and needs the full stop-then-reopen path Phase 2 will need on Android/Windows anyway, not
+  a same-surface reopen. Not implemented.
 - **The route sheet is a third auto-hide pin.** AVKit presents it itself, so nothing inside it
   reaches `pokeControls` and the auto-hide timer would otherwise run to completion behind it,
   dropping the viewer back onto a bare picture on dismiss. `PlayerChromeState.routePickerPresenting`

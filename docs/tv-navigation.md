@@ -442,3 +442,48 @@ screen isn't working" report; the bottom detail bar gives the synopsis its own *
 deliberately lightweight (no per-cell `FocusableCard`) and horizontally virtualized to the visible
 window (safe precisely because they aren't focus targets); pinned by `test/epg_grid_test.dart`
 (incl. an overlapping-programme row).
+
+## In-player navigation
+
+The fullscreen live player has its own key map (Phase 1 of live zapping — see
+docs/player.md "Live zapping" for the state machine behind it), separate from every model above
+because it isn't one: there's no focus ring and no D-pad geometry, just a cursor over a snapshot
+list and a set of keys that either move it or don't apply.
+
+- **Arrows zap only when `live && !chromeVisible`.** With the transport chrome on screen Up/Down
+  stay volume and Left/Right stay seek — a live stream's own `_seekBy` is already a no-op, so
+  these were dead keys there before zapping existed, but the chrome being *visible* is still the
+  gate: revealing it on the first arrow press would hand the second press to the control row
+  instead of the next channel, which is the opposite of what was pressed for. None of the zap keys
+  ever reveal the chrome, for the same reason.
+- **Up = the next higher list index (`index + 1`); Down = the previous. Both directions wrap.**
+  This is a **deliberate divergence** from the live tab's selection model, where Up never wraps
+  because it escapes to another pane (category list, favorite star). There is nothing to escape to
+  inside the player — a remote that stops dead at the end of the list reads as broken, not as
+  reaching a boundary — so both directions wrap here.
+- **Right is the "previous channel" toggle** (classic last-channel recall; a no-op until two
+  channels have actually played this session). **Left is reserved for the quick list** (Phase 6);
+  today it isn't consumed, so it falls through to the ordinary chrome-reveal behaviour.
+- **Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are live regardless of chrome** —
+  unlike the arrows, these have no other meaning on this screen to be ambiguous with.
+- **OK commits a pending digit buffer early**; otherwise it isn't consumed and falls through to the
+  ordinary play/pause toggle. **Back/Escape clears a half-typed buffer first**, the same
+  peel-one-rung shape the live tab's own Back ladder uses, before it means anything else on this
+  screen.
+- Arrow zapping is further narrowed to the surfaces the shared Flutter overlay actually draws over
+  (embedded, and Windows' native HWND via its `vo` swap) — never the Windows native HWND's own key
+  ring, never an out-of-process engine (Android/iOS, once Phase 2/4 land), and never Android's
+  embedded fallback, whose stock media_kit controls are focus targets a D-pad walks with Up/Down;
+  binding the arrows there would strand the remote on that surface.
+
+**The digit-entry buffer is one implementation, used in two places.** `kDigitEntryCommitDelay`
+(idle timeout), `kDigitEntryMaxDigits` and the `kDigitEntryKeys` key map live in
+`player/zap_command.dart` and are shared by `LiveFocusCoordinator` (the live tab's own digit entry)
+— typing a channel number on a remote is the same gesture whether the list is on screen or the
+player is fullscreen, and two copies of the timing would be two behaviours to learn. The one
+difference is scope: the live tab's digit entry searches the whole visible list, while the
+in-player buffer searches **only the launch range** — the list Up/Down is already walking. Falling
+back to "the whole source" would land the player on a channel the cursor can't then step away from,
+and the cross-source Favorites launch range has no single "whole source" to fall back to anyway. A
+number no channel in range carries shows "No channel `N`" in the banner and leaves playback
+untouched, exactly like a miss in the live tab.

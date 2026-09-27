@@ -505,6 +505,19 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   favorite state/action. `FocusableCard` consumers should provide a concise
   `semanticsLabel` when visual descendants would otherwise read as a fragmented
   tile.
+- **The fullscreen live player has its own key map, live only while chrome is hidden.** Arrows zap
+  only when `live && !chromeVisible`: Up = the next higher list index (`index + 1`) and **both
+  directions wrap** — a deliberate divergence from the live tab's Up-never-wraps rule, since there
+  is nothing here for Up to escape *to*. Right is the "previous channel" toggle, Left is reserved
+  for the quick list (Phase 6). Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are
+  live regardless of chrome, since they're unambiguous; none of the zap keys ever reveal the
+  chrome — revealing it on the first Up would hand the second Up to the control row instead of the
+  next channel. With chrome visible, Up/Down keep their ordinary volume binding. The digit-entry
+  constants and key map (`kDigitEntryCommitDelay`/`kDigitEntryMaxDigits`/`kDigitEntryKeys`) are
+  shared between `LiveFocusCoordinator` (the live tab) and `player/zap_command.dart` (in-player) —
+  typing a channel number on a remote is the same gesture in both places. A digit match is scoped
+  to the **zap range only** (never the whole source); a miss shows "No channel N" in the banner
+  and leaves playback alone. Detail: docs/player.md "Live zapping".
 
 ## Cloud sync + profiles (essentials)
 
@@ -1007,6 +1020,40 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   state, Flutter lifecycle), any absence is not a veto, and a deferral that outlasts
   `kIosFallbackSurfaceAfter` surfaces Retry rather than waiting silently. Detail: docs/ios.md
   "What routes to which engine", docs/player.md "iOS".
+- **In-player live zapping (channel up/down, previous-channel, digit entry) is Dart-authoritative
+  (Phase 1 — the Dart spine only; Android/Windows/Linux input+banner and the quick list are
+  Phases 2/4/5/6, not yet implemented).** `LiveZapController` (`lib/player/live_zap_controller.dart`)
+  owns the launch-range list, the cursor and the resolve; every native surface is an **input
+  source and a view**, never a second copy of the list — the launch range's ordering rules (the
+  category filter, favourites' catalog order, the cross-source Favorites view's per-row
+  `SourceConfig`) already live in exactly one place, and re-deriving any of them in Kotlin/C++/Lua
+  would be a second place for them to drift into playing provider B's channel through provider A's
+  resolve. Every surface speaks **one command vocabulary**, parsed by `parseZapCommand`
+  (`zap:up|down|prev|list|close|activate|back|digit:N|move:±N`, `favorite:0|1`) —
+  Android's `nativeZap`, Windows' existing `nativeControl`, Linux's existing `iptvs-control`
+  property, and the shared Flutter overlay's own key map, all through the same parser. Outbound:
+  `zapTo` (the settled channel, carries the locator — **never logged**) and `setZapBanner` (the
+  **cursor's** channel, so a held key shows where it's got to; deliberately not routed through the
+  2 Hz `setControlState` coalescer, since a banner has to track every press). A cursor move waits
+  `kZapSettleDelay` (600 ms) before it resolves and plays — a held key costs one `create_link`, not
+  one per channel passed — and the settle is **stop → resolve → play**, because single-connection
+  accounts refuse the new stream while the old one holds the slot; a failed zap reverts the cursor
+  and re-plays the channel that was on screen. **The surface never changes on a zap** — no
+  embedded↔native de-escalation path exists — but the one-shot HDR/PQ escalation is re-armed per
+  zap, since a zapped-to channel deserves its own chance at a real HDR surface.
+  `PlayerScreen.resolveAgain` now re-resolves the channel **on screen** (`zap.resolveCurrent()`,
+  not the route's launch channel), and the reconnect watchdog stands down while `zap.settling` — a
+  settling zap deliberately stopped the stream it would otherwise reconnect. Favourite and aspect
+  writes (including native `RESULT_FAVORITE`/`RESULT_ASPECT`) apply to the **current** entry's
+  *owning* source, which a cross-source zap changes mid-session. Any zap stops the live preview on
+  return (`decidePreviewReturn`) — resuming would show the channel the user navigated away from —
+  and the channel list restores selection to the channel the session actually **ended** on, with
+  the visible filters unchanged. The launch range is a snapshot at open time, wrapped **lazily**
+  (`zapEntriesOf`) so an unfiltered 250k-channel source costs nothing up front: cross-source
+  Favorites contribute their own per-row `SourceConfig`; a search falls back to the whole active
+  source minus hidden categories (a search result has no meaningful "next channel"); otherwise the
+  visible category, in catalog order; the EPG grid hands over the list it is already showing.
+  Detail: docs/player.md "Live zapping".
 
 ## In-app updates (essentials)
 
