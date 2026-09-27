@@ -546,6 +546,46 @@ in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigatio
 - **Nothing changes channel while the list is up except an explicit OK on a row.** Digits move the
   cursor instead of zapping, "previous channel" is consumed and inert, and the zap banner hides —
   a list the user is reading must not have channels changing behind it.
+- **With the list open, the arrows stop being chrome-gated.** They are contested only while the
+  alternative is the transport control row; a list on screen makes them unambiguous, and handing
+  Up to the control row there would move two cursors with one press. The same goes for
+  Back/Escape, which the list claims with the chrome up because its rungs sit above the chrome
+  ladder. That is a property of the list being visible, not of which surface drew it, so every
+  renderer applies it.
+
+### Windows' key map with the list open (`zap_key_policy.h`, implemented)
+
+The native HWND surface's key ring (`windows/runner/zap_key_policy.h`, consulted in
+`FlutterWindow::MessageHandler` before every other key branch, and again in each child `WndProc`
+through `IsZapKeyPress` to decide whether the reveal-on-input post should fire) takes a
+`quick_list_open` argument, read from the native mirror of `setQuickList`'s `open` — a
+synchronous decision, for the same reason `digits_pending` is a mirror. With it set, the whole
+frozen mapping applies:
+
+| Key | List closed | List open |
+| --- | --- | --- |
+| Left | `zap:list` (chrome hidden only) | `zap:back` |
+| Right | `zap:prev` (chrome hidden only) | `zap:descend` |
+| Up / Down | `zap:up` / `zap:down` (chrome hidden only) | `zap:move:-1` / `zap:move:1` |
+| Return / `VK_SELECT` | a pending digit buffer only | `zap:activate` |
+| Escape / Backspace | a pending digit buffer only | `zap:back`, ahead of the ordinary back branch |
+| Page Up / Page Down | `zap:up` / `zap:down` | unchanged — list *order*, not cursor direction |
+| Digits / numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor) |
+| `G` | `zap:list` | `zap:close` |
+
+Repeats: the cursor arrows repeat (holding one is how a long list is scanned, and the cursor
+clamps rather than wraps); every other list key is **swallowed** on repeat — consumed with no
+command, never let through — so a held key cannot leak into the overlay's own focus ring. `G` is
+this surface's stand-in for a remote's `GUIDE`, which has no Win32 virtual-key code at all: the
+same relationship Page Up/Page Down have with `CHANNEL_UP`/`CHANNEL_DOWN`, chosen against the
+letters this screen already uses (F/M/I/S) and toggling, because a dedicated key that does
+nothing the second time reads as a dead remote.
+
+The rendered panel is a readout and a selection model, **never a pointer target**: the overlay
+window keeps `WS_EX_TRANSPARENT` while only the list (or the banner) is drawn, so a mouse move
+over its band still reaches the video surface's `WM_MOUSEMOVE`, which is the only thing that
+reveals the chrome — the same arrangement as the shared Flutter overlay's `IgnorePointer` panel.
+See docs/player.md "The quick list on the native HWND surface (Phase 6c)".
 
 ### Android's key map (`ZapKeyPolicy`, implemented)
 
