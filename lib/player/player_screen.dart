@@ -1224,6 +1224,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _handleZapCommand(ZapCommand command) {
     final zap = _zap;
     if (zap == null || !_isLive) return false;
+    if (command.kind == ZapCommandKind.favorite) {
+      // The native overlay owns its own star and reports the new state; this
+      // side has to follow it, or the *next* `zapTo` payload would push a
+      // stale `isFavorite` back and undo the toggle on the surface that made
+      // it. (The close-time `RESULT_FAVORITE` is the other, idempotent half.)
+      final value = command.value == 1;
+      if (_favorite != value && mounted) setState(() => _favorite = value);
+    }
     return zap.handleCommand(command);
   }
 

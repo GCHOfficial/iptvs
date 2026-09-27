@@ -91,6 +91,23 @@ class ResolveGate {
     }
 
     /**
+     * Drops whatever is in flight **without settling it**, so the next [begin]
+     * succeeds and the abandoned request's outcome is discarded by the usual
+     * token comparison.
+     *
+     * This is what an in-player zap needs. A re-resolve in flight describes
+     * the channel the user is leaving, and its `onFresh` closure ends in
+     * `engine.load(url)` — so letting it settle after the zap has loaded the
+     * next channel would reload the *previous* one on top of it, on the same
+     * surface, with every health flag reading normal. The HTTP call itself
+     * cannot be cancelled; discarding its outcome is the same tolerance the
+     * [TIMEOUT_MS] path already has.
+     */
+    fun abandon() {
+        pending = 0L
+    }
+
+    /**
      * True when [token] is the winner of its request's race — the gate closes
      * and the caller may apply the outcome. False for the loser (a reply that
      * lost to the timeout, a timeout that lost to the reply) and for any token

@@ -8,6 +8,16 @@ enum class PlayerBackAction { CloseMenu, CloseInfo, HideControls, Exit }
  *
  * Keeping this decision outside Compose focus handling prevents one remote key
  * from being interpreted once by a focused control and again by the Activity.
+ *
+ * **There is one rung above this ladder, and it is deliberately not here.** A
+ * half-typed channel number is cleared by Back before any layer is peeled, and
+ * that decision lives in [ZapKeyPolicy] because it is only reachable through
+ * *key* dispatch — a gesture Back has no digit buffer behind it, and a second
+ * copy of the rung here would then peel two layers for one press on the key
+ * path. `HdrPlayerActivity.dispatchKeyEvent` consults [ZapKeyPolicy] first and
+ * returns before `handleSystemBack` runs, so this function still describes the
+ * whole ladder from the moment there is no number to clear. Don't add a
+ * `ClearDigits` action to it.
  */
 fun nextPlayerBackAction(
     menuOpen: Boolean,

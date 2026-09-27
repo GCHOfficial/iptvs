@@ -268,6 +268,37 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
+                // ── Live zapping (Dart → the running player Activity) ────
+                //
+                // Dart owns the channel list, the cursor and the resolve (see
+                // `lib/player/live_zap_controller.dart`); these two are the
+                // only things it asks the native side to *do*. The channel
+                // handler has to live here — a MethodChannel is registered
+                // once per process — so both forward to the live Activity,
+                // the mirror of `logPlaybackDiagnostic` going the other way.
+                //
+                // Both are no-ops with no Activity up: a zap that arrives
+                // after the player closed has nothing to apply, and answering
+                // `false` rather than erroring keeps a late push off Dart's
+                // error path.
+                "zapTo" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val player = HdrPlayerActivity.instance?.get()
+                    if (args == null || player == null) {
+                        result.success(mapOf("engineRebuilt" to false))
+                    } else {
+                        result.success(player.applyZap(args))
+                    }
+                }
+
+                "setZapBanner" -> {
+                    val args = call.arguments as? Map<*, *>
+                    if (args != null) {
+                        HdrPlayerActivity.instance?.get()?.applyZapBanner(args)
+                    }
+                    result.success(true)
+                }
+
                 // Debug-only lifecycle counters for an integration-test soak
                 // (see DebugCounters); empty map in a release build.
                 "debugCounters" -> result.success(DebugCounters.snapshot())
@@ -411,6 +442,19 @@ class MainActivity : FlutterActivity() {
      * **Never pass anything derived from a URL, header or provider reply** —
      * this text is exported verbatim.
      */
+    /**
+     * Inbound half of the zap wire contract: one member of the shared command
+     * vocabulary (`lib/player/zap_command.dart`), sent by
+     * [HdrPlayerActivity]'s key policy.
+     *
+     * Fire-and-forget by design — the native side names a *command*, never a
+     * channel, and holds no cursor to reconcile against a reply.
+     */
+    fun requestZap(command: String) {
+        if (!::nativeHdrChannel.isInitialized) return
+        nativeHdrChannel.invokeMethod("nativeZap", mapOf("command" to command))
+    }
+
     fun logPlaybackDiagnostic(note: String) {
         if (!::nativeHdrChannel.isInitialized) return
         nativeHdrChannel.invokeMethod("nativeDiagnostic", mapOf("note" to note))
