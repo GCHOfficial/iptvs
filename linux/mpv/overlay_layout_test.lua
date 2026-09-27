@@ -361,6 +361,49 @@ favorited_state.favorite = true
 check(find_text(render_with(favorited_state), STAR_FILLED) ~= nil,
   'a favorited channel draws the filled star')
 
+-- ===== 2c. the quick-list button sits immediately left of "Go to live" =======
+--
+-- The slot rule is identical on all four surfaces (docs/player.md, "The quick
+-- list (Phase 6 ...)"): right cluster, immediately LEFT of the "Go to live"
+-- chip, which itself sits left of the favorite star. It exists because the
+-- list used to be keyboard/remote-only -- a pointer had no way to open it.
+-- U+E2B8 format_list_bulleted, spelled in decimal (Lua 5.1 has no \x escape).
+local LIST_GLYPH = '\238\138\184'
+
+local zapping_state = {}
+for k, v in pairs(live_state) do zapping_state[k] = v end
+zapping_state.liveSynced = false
+-- Dart pushes a `quickList` block on every state push of a zapping session,
+-- `open = false` while it is closed. Its presence is what says "this route
+-- zaps"; a VOD or no-zap route carries none.
+zapping_state.quickList = {open = false, mode = 'channels', rows = {},
+  selectedIndex = 0, windowStart = 0, total = 0}
+
+local zap_events = render_with(zapping_state)
+local list_button = find_text(zap_events, LIST_GLYPH)
+local go_live_chip = find_text(zap_events, 'Go to live')
+local zap_star = find_text(zap_events, STAR_BORDER)
+check(list_button ~= nil, 'a zapping live route draws the quick-list button')
+if list_button and go_live_chip then
+  check(math.abs(list_button.y - go_live_chip.y) < 1,
+    'the quick-list button shares the control row with "Go to live"')
+  check(list_button.x < go_live_chip.x,
+    'the quick-list button sits immediately left of "Go to live"')
+end
+if go_live_chip and zap_star then
+  check(go_live_chip.x < zap_star.x,
+    '... and "Go to live" stays left of the favorite star')
+end
+
+check(find_text(render_with(live_state), LIST_GLYPH) == nil,
+  'a live route with no zap session draws no quick-list button')
+check(find_text(render_with({
+  title = 'Some Film',
+  isLive = false,
+  aspectLabel = 'Fit',
+  quickList = {open = false, rows = {}},
+}), LIST_GLYPH) == nil, 'VOD draws no quick-list button, even if pushed one')
+
 -- ===== 3. SDR shows no dynamic-range badge ===================================
 
 local sdr = render_with(live_state, {

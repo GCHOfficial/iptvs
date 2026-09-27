@@ -217,6 +217,16 @@ class MainActivity : FlutterActivity() {
                             HdrPlayerActivity.EXTRA_IS_FAVORITE,
                             args["isFavorite"] as? Boolean ?: false,
                         )
+                        // Whether this route has a LiveZapController behind it.
+                        // Constant for the life of the route, so it rides the
+                        // open Intent rather than a live channel — the Android
+                        // twin of the Windows overlay's `zapEnabled` key on
+                        // setControlState. Fails closed: absent means no zap
+                        // affordance, never a button that does nothing.
+                        putExtra(
+                            HdrPlayerActivity.EXTRA_ZAP_ENABLED,
+                            args["zapEnabled"] as? Boolean ?: false,
+                        )
                         (args["sourceName"] as? String)?.let {
                             putExtra(HdrPlayerActivity.EXTRA_SOURCE_NAME, it)
                         }

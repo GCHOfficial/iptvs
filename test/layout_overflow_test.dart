@@ -604,7 +604,13 @@ void main() {
                   isLive: true,
                   canFavorite: true,
                   favorite: false,
-                  liveSynced: true,
+                  // The widest the control row ever gets: the star, the
+                  // "Go to live" chip and the quick-list button beside it
+                  // are all conditional, and this is the only sweep that
+                  // renders the row with the real font.
+                  liveSynced: false,
+                  zapEnabled: true,
+                  onOpenQuickList: () {},
                   zap: zap,
                   aspectLabel: 'Fill',
                   dynamicRangeLabel: (_) => '',

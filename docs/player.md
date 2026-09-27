@@ -822,11 +822,17 @@ its **current mode label** as a text chip rather than a bare icon — all four n
 and `docs/player.md` already called Dart the single source of truth for that label sequence, so
 the surface owning the truth was the only one not showing it.
 
-**Back/Escape peel + tap-outside parity:** the
-info panel is a non-modal `Positioned`, so it needs an explicit single-press peel to match the
-native overlays' menu→info→hide→exit ladder — `EmbeddedPlayerControlsState.handleBackPeel()` closes
-an open info panel first (consuming the press), and `PlayerScreen`'s Escape binding calls it
-(via `PlayerVideoSurfaceState.handleBackPeel`) before falling through to exit. Tapping the exposed
+**Back/Escape peel + tap-outside parity:** the shared overlay walks the same
+menu→info→hide→exit ladder as the natives — `EmbeddedPlayerControlsState.handleBackPeel()` closes
+an open info panel, else hides visible chrome, and returns false only once there is nothing left,
+and `PlayerScreen`'s Escape binding calls it (via `PlayerVideoSurfaceState.handleBackPeel`) before
+falling through to exit. The hide rung was missing until a Windows beta report: Escape with the
+chrome up left the player outright, two rungs in one press. That binding is also the **one** key
+binding on this route that deliberately does not reveal the chrome first (no
+`_handlePlaybackInput()`), or the hide rung would undo the reveal and the exit rung would be
+unreachable — the Dart twin of the Windows runner's `SuppressesControlsReveal()`. The menu rung
+is the Navigator's here: the track/subtitle/speed menus are modal routes that answer Escape
+themselves, so the press never reaches this binding. Tapping the exposed
 video area also dismisses an open info panel (the panel itself absorbs taps so it isn't re-closed
 by its own hit). Under `touch` (iOS) that same tap carries one rung further — it *hides* visible
 chrome once there is nothing left to peel, and the bars absorb near-misses; see "iOS". The on-screen back-*arrow* button still exits directly (documented parity with the
@@ -1151,8 +1157,8 @@ any value that *holds* a map, so a row needs no second set of helpers) and then 
   the clip region and the window's visibility cannot disagree. Both sit in the lower-left and both
   describe the cursor's channel, so drawn together they would print it twice from two cursors —
   the same rule Dart's `_zapBannerVisible` applies to the shared Flutter overlay.
-- **The list is not a mouse target**, deliberately, and the `WS_EX_TRANSPARENT` rule is unchanged
-  because of it: while only the banner *or* the list is drawn the overlay is decoration, so it
+- **The list *panel* is not a mouse target**, deliberately (the control row's opener below is —
+  that is the distinction), and the `WS_EX_TRANSPARENT` rule is unchanged because of it: while only the banner *or* the list is drawn the overlay is decoration, so it
   keeps that style and a mouse move over its band still reaches the video surface's
   `WM_MOUSEMOVE` — the only thing that reveals the chrome. That matches the shared Flutter
   overlay's panel, which is `IgnorePointer` for the same reason, and docs/tv-navigation.md's rule
@@ -1169,6 +1175,27 @@ any value that *holds* a map, so a row needs no second set of helpers) and then 
   so it is cleared, composited and — when it closes — erased through the same
   `CompositeOverlayBands` path everything else on this overlay uses. No new DIB, no new counted
   resource.
+
+**The control-row opener.** `BottomLayout::quick_list` is the leftmost control of the right
+cluster — **immediately left of "Go to live"** — placed last in a cluster that lays out
+right-to-left. Segoe MDL2 `\xE8FD` ("BulletedList"), the Windows icon set's own name for what
+Android draws as `Icons.AutoMirrored.Filled.List` and the Flutter/Lua overlays draw as Material
+`format_list_bulleted` (U+E2B8): one meaning, each platform's glyph, never one codepoint claimed
+across all four. It is gated on `ZapActive()` — `is_live && zap_enabled`, where `zap_enabled`
+arrives on `setControlState` (this surface has no `open` payload to read it from) — the **same**
+predicate the key ring uses for Left and `G`, so the pointer affordance and the keys can never
+disagree about whether a list exists. Focus order (`FocusableItems`): **quick list → Go to live →
+favourite star → speed/audio/CC → aspect → info → fullscreen**, matching the visual order; it is
+an ordinary focus stop, like the star. Its filled background means focus **or** engaged (the list
+being on screen), the same split the audio/subtitle/info buttons use for their own panels.
+
+**It toggles** (`QuickListToggleCommand` → `zap:list` / `zap:close`), which is the one place this
+surface deliberately differs from Android and Linux. Opening the list stands the chrome down
+there, so their button is off screen while the list is up and can only ever send one command;
+Windows leaves the chrome alone (the panel is banded clear of the bars and the key ring claims
+the arrows either way), so the button stays under the pointer — a visible control whose second
+click does nothing reads as broken. It is also the **only mouse-only way to close the list**,
+since the panel itself is not a hit target; without the toggle a mouse user would need Escape.
 
 **Key ring, with the list open** (`DecideZapKey`'s new `quick_list_open` argument, read from
 `QuickListShown()` at both call sites — the `MessageHandler` branch and `IsZapKeyPress`, so a
@@ -1199,6 +1226,35 @@ press that drives the list still suppresses the reveal-on-input post). The whole
 - **Repeat handling follows the closed-list rules**: the cursor arrows repeat (holding one is how
   a long list is scanned, and the cursor clamps rather than wraps), everything else is swallowed
   on repeat — consumed, no command — so a held key cannot leak into the overlay's focus ring.
+
+### The Escape back ladder on the native HWND surface
+
+**Implemented.** Escape used to call `ShowNativeControls(true)` and send `back` unconditionally,
+so it tore the player down from under an open menu, an open info panel or a control row the user
+had only just revealed. It now peels **menu → info → hide controls → exit**, one rung per press,
+through `windows/runner/player_back_policy.h` — a new Win32-free header (`NextPlayerBackAction`,
+`PlayerBackAction`) that is a structural mirror of Kotlin's `nextPlayerBackAction`. That makes
+**two** Win32-free headers in this runner a plain `g++` can check, beside `zap_key_policy.h` and
+`zap_quick_list_state.h`.
+
+- **It carries no quick-list rung, unlike Kotlin's.** `DecideZapKey` already claims Escape while
+  the list is open (sending `zap:back`, whose rung only Dart's mode stack knows), and this
+  surface has no second Back path — the overlay's Back arrow is an explicit Exit command, not a
+  system Back — whereas Android also reaches its ladder from the gesture-Back dispatcher, which
+  never passes through `ZapKeyPolicy`. Repeating the rung here could only peel two layers for one
+  press. The digit rung sits above the ladder for the same reason.
+- **`controls_visible` is read from `native_controls_visible_`**, the chrome's authority, never
+  from the overlay window's own visibility — that window stays up for the zap banner and the
+  quick list with the chrome down.
+- **Repeats are swallowed** (consumed, no action), matching `HdrPlayerActivity.dispatchKeyEvent`
+  and `DecideZapKey`'s own Escape repeats; passing one on would let Flutter read the press twice.
+- **`SuppressesControlsReveal()` is what makes the ladder possible at all.** Both child window
+  procedures *post* `kNativeVideoSurfaceInputMessage` ahead of the key, and that message calls
+  `ShowNativeControls(true)`; posted messages run in order, so any key whose meaning depends on
+  whether the chrome is up sees it already true. Escape therefore joins the zap keys in
+  suppressing that post — otherwise Escape with the chrome hidden would raise the bars and then
+  hide the bars it had just raised, forever, and never exit. It was safe only while Escape meant
+  one unconditional thing.
 
 **Not verifiable here:** no Windows toolchain and no HDR display in the development environment,
 so the panel's real geometry over video, the glyph the play marker resolves to, and every key
@@ -1519,6 +1575,15 @@ instruction, not an absence, so a closed list is still pushed — `quick_list_bl
 `isLive && type(quickList) == 'table' && quickList.open == true` and everything else in the script
 asks that one function. Every optional key is tolerated missing: a renderer that indexes a nil is
 a player that dies mid-stream, and nothing else in this process would report it.
+
+**The control row's opener.** The cluster also draws the quick-list button in the shared slot —
+immediately left of "Go to live", right-to-left after it in this OSD's own layout pass (see "The
+opener in the control row" under "Live zapping"). It is drawn when `zap_enabled()` holds, which
+reads the **presence** of the `quickList` block (plus `isLive`) rather than a new field: Dart
+pushes the block throughout a zapping session and omits it entirely off one, so the frozen
+contract is unchanged. Its hitbox emits `zap:list`, the same string `g` sends, and mpv's OSD has
+no focus ring for it to join — `g` is the keyboard equivalent, exactly as `s` is the favorite
+star's.
 
 **A second windowing step, with the same arithmetic as the first.** Dart ships a window of at most
 `kZapWindowRows` (40) rows around the cursor; `draw_quick_list` then draws the slice of *those*
@@ -1966,7 +2031,12 @@ from every transport:
   end to end today: `_handleLinuxNativeControl` parses and applies a zap command before falling
   through to its ordinary switch, but nothing in the Lua OSD (Phase 5) sends one yet.
 - The shared Flutter overlay: its own `CallbackShortcuts` bindings, parsed through the same
-  function so a key means the same thing a native string would.
+  function so a key means the same thing a native string would. It binds **both `GUIDE` and `G`**
+  to the quick-list toggle (`PlayerScreen._toggleQuickList`): no PC keyboard has a `GUIDE` key, the
+  Windows native ring and the Lua OSD already stand `G`/`g` in for it, and Windows SDR live is
+  served by *this* overlay — so without it the most common desktop live surface had no guide key
+  at all. `G` collides with nothing: the route binds only `F`, `M`, `I` and `S` besides. The
+  control row's quick-list button is the pointer half of the same command.
 
 The vocabulary: `zap:up`, `zap:down`, `zap:prev`, `zap:list`/`zap:close` (open/close the quick
 list), `zap:activate` (OK — the quick list's selected row while it is open, otherwise it commits a
@@ -2352,12 +2422,61 @@ no visible selection, which on a remote is indistinguishable from a frozen scree
 channels mode OK *plays* while Right opens the schedule — and giving Right its own string keeps
 every surface mode-blind.
 
+#### The opener in the control row — one slot on every surface
+
+Keys are not the only way in. Every surface draws a **quick-list button** in the player's control
+row, in the same slot: **immediately left of the "Go to live" chip**, which itself sits left of the
+favorite star (Kotlin's `RightCluster`, the Windows GDI `BottomLayout::quick_list`, the shared
+Flutter `cluster`, the Lua OSD's right-to-left cluster). Shown only when the stream is **live and
+the route has a zap session**; ordinary control-row button geometry (44x40 r12 / 44 dp, the same as
+every other button in the row); a focus stop like the star wherever the surface has a focus ring.
+The accent tints **nothing** here: it opens a panel rather than carrying state, which is what the
+star's accent means.
+
+**One meaning, each platform's glyph** — a bulleted list: Material `format_list_bulleted` on the
+shared Flutter overlay and in the Lua OSD (U+E2B8, verified against the vendored
+`MaterialIcons-Regular.otf` cmap as `format_list_bulleted_baseline`, like every other glyph in
+that table), `Icons.AutoMirrored.Filled.List` in Compose, Segoe MDL2 `\xE8FD` ("BulletedList") in
+the GDI overlay. Deliberately *not* one codepoint asserted across four icon sets.
+
+**Three of the four only open; Windows toggles.** Android, Linux and the shared Flutter overlay
+send `zap:list` and stand the chrome down as the list opens, so the button is off screen while
+the list is up and can never be pressed twice (the Flutter one is wired to the same
+`_toggleQuickList` handler as `G`, which is why it is described as an opener in practice rather
+than in principle). The Windows GDI button sends `QuickListToggleCommand()` — `zap:list` or
+`zap:close` — because that surface deliberately leaves its chrome up, so the button stays under
+the pointer and is the only mouse-only way to close a panel that is not a hit target. Either way
+the command goes through the one shared vocabulary, so there is one path and one set of rules
+whether it came from a key, a remote or a click.
+
+It exists because the list was otherwise unreachable without a keyboard or a remote — a mouse or a
+finger had no opener at all. Desktop tooltips read **"Channel list (G)"**, naming the key the same
+surfaces bind (see "Live zapping"); touch drops the key hint.
+
+How each surface knows whether to draw it — all four fail closed, so a build that is never told
+simply offers no button: the Flutter overlay takes `zapEnabled` from `PlayerScreen`
+(`_zap != null && _isLive`); **Android** reads `EXTRA_ZAP_ENABLED` on the open Intent, from a new
+`zapEnabled` key on the `open` payload (`widget.zap != null`), applied on the fresh *and* adopted
+state paths; **Windows** reads a `zapEnabled` key on `setControlState` (it has no `open` payload)
+into `NativeControlState::zap_enabled`, and `ZapActive()` is `is_live && zap_enabled`; the **Lua
+OSD** reads the **presence** of the `quickList` block on the `iptvs-state` push (Dart pushes
+`{open: false, …}` throughout a zapping session and nothing at all off one), so the Linux half of
+the frozen contract gained no field. Pinned by
+`test/player_overlay_test.dart` (slot order, absence on VOD/no-zap, the tap) and
+`linux/mpv/overlay_layout_test.lua` (the same three).
+
 #### The shared Flutter overlay's view
 
 `EmbeddedPlayerControls._quickListPanel` draws it from `ZapQuickListState` and nothing else — no
 controller, no repository, no `SourceConfig` — the same arrangement `ZapBannerState` uses, and what
 keeps `player_overlay.dart` and `test/player_overlay_test.dart` libmpv-free. A left-anchored panel
 banded between the top and bottom insets, `AppColors.panel` at 0.96, the info-panel radius.
+
+**Opening it stands the chrome down**, one-shot on the closed→open edge in `didUpdateWidget` —
+the same rule and the same edge-triggering as Android's `applyQuickList` and the Lua OSD's
+`iptvs-state` handler, and for the same reason: the list draws over the bars and claims the
+arrows and Back whatever the chrome is doing, so a control row left up behind it strands the
+D-pad on a button no arrow can walk away from.
 
 It is a **selection model and a readout, never a focus target** (docs/tv-navigation.md): rows are
 not focusable, the cursor is one index, and the keys belong to the route's own `CallbackShortcuts`
@@ -2397,6 +2516,23 @@ live" once caused. For the same reason the root overlay's reveal-on-any-key `onP
 and the touch-to-reveal tap layer both stand down while the list is open. The **banner yields to
 the list** in two places, not one: Dart stops pushing it, and `PlayerUiState.showZapBanner` also
 reads `!quickList.open`, so the two can't disagree across a frame of wire latency.
+
+**The control-row opener.** `RightCluster` draws it immediately left of "Go to live"
+(`Icons.AutoMirrored.Filled.List`, content description "Channel list"), gated on
+`PlayerUiState.showQuickListButton` — `isLive && canZap && !inPip`. `canZap` is seeded from
+`EXTRA_ZAP_ENABLED` on the open Intent, which `MainActivity` fills from Dart's new `zapEnabled`
+key on the `open` payload (`widget.zap != null`), and it is applied on **both** the fresh-state
+and the adopted-state paths — an adopted preview state was born faceless and carries the
+previous session's value. It fails closed: an older Dart build that doesn't send the key simply
+offers no button, never one that does nothing. That last point is the reason for the gate at all
+— a live route opened *without* a controller (the EPG grid's own play path) has Dart decline
+every zap command.
+
+It sends plain **`zap:list`, never `zap:close`** (through the same `PlayerCallbacks.onZapCommand`
+path the pointer-driven quick-list rows use), because `applyQuickList` stands the chrome down on
+the open edge: the button is off screen for as long as the list is up, so a second press is
+impossible and Back is what closes it. Only the Windows GDI button toggles, and only because that
+surface keeps its chrome up — see "The quick list on the native HWND surface (Phase 6c)".
 
 **The key policy** (`ZapKeyPolicy.decide`, now taking `quickListOpen`). With the list open the
 arrows are claimed **regardless of `controlsVisible`** — the chrome gate exists to leave the

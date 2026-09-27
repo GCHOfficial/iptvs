@@ -467,14 +467,30 @@ apply.
 - **Right is the "previous channel" toggle** (classic last-channel recall; a no-op until two
   channels have actually played this session). **Left opens the quick list** — see "The in-player
   quick list" below — as does the dedicated `GUIDE` key, which (being unambiguous) works whether
-  the chrome is up or not and closes the list on a second press. Linux has no `GUIDE` keysym to
-  bind at all, so the Lua OSD stands `g` in for it (see "Linux's key map" below).
+  the chrome is up or not and closes the list on a second press. **No desktop keyboard has a
+  `GUIDE` key, so every desktop surface also binds `G`** with exactly the same toggle semantics:
+  the Windows native key ring, the Lua OSD's `g` (registered per stream like every zap-only key —
+  see "Linux's key map" below), and the shared Flutter overlay's own `LogicalKeyboardKey.keyG`.
+  The Flutter one was the gap: Windows SDR live lands on that overlay, so a PC keyboard there had
+  no guide key at all. It collides with nothing — that key map binds only `F`, `M`, `I` and `S`.
 - **Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are live regardless of chrome** —
   unlike the arrows, these have no other meaning on this screen to be ambiguous with.
 - **OK commits a pending digit buffer early**; otherwise it isn't consumed and falls through to the
   ordinary play/pause toggle. **Back/Escape clears a half-typed buffer first**, the same
   peel-one-rung shape the live tab's own Back ladder uses, before it means anything else on this
   screen.
+- **Back/Escape then peels the in-player ladder one rung per press: menu → info → hide chrome →
+  exit.** Every surface answers that same table (Kotlin's `nextPlayerBackAction`, the Windows GDI
+  overlay, the Lua OSD's `handle_back`) and the shared Flutter overlay now does too:
+  `EmbeddedPlayerControlsState.handleBackPeel` used to close the info panel *only* and return
+  false otherwise, so Escape with the chrome up skipped the hide rung and left the player
+  outright — reported on Windows SDR live, which is exactly the surface that overlay serves. The
+  menu rung is owned by the Navigator there (the track/subtitle/speed menus are modal routes that
+  answer Escape themselves, so the press never reaches the route's binding). Two consequences
+  worth stating: the route's Escape binding is the **one** key binding that deliberately does not
+  reveal the chrome first — revealing it would make the hide rung undo the reveal and the exit
+  rung unreachable — and the on-screen back arrow still exits directly, skipping the ladder, on
+  every surface. Rungs pinned by `test/player_overlay_test.dart`.
 - The shared Flutter overlay's own `CallbackShortcuts` binding covers embedded playback and the
   Windows SDR preview→fullscreen path (the same media_kit `_player`, before any HDR escalation) —
   never the Windows native HWND surface's *own* key ring, and never Android's embedded fallback,
@@ -517,9 +533,22 @@ stack**, not a three-column panel: `categories` → `channels` (each with a now-
 that channel's schedule for today. Right/OK descends, Left/Back ascends, and Back at the top
 closes. Full behaviour, and the frozen `setQuickList` payload every surface renders it from, are
 in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigation model. Rendered
-today by the shared Flutter overlay and by Android's Compose overlay (Phase 6b — the key table
-with the list open is under "Android's key map" below); the Windows GDI and Linux Lua renderers
-are outstanding.
+today by all four surfaces — the shared Flutter overlay, Android's Compose overlay (Phase 6b — the
+key table with the list open is under "Android's key map" below), the Windows GDI overlay (6c) and
+the Linux Lua OSD (6d).
+
+**It also has a pointer/touch opener**: a quick-list button in the player's control row, in one
+slot on every surface — immediately **left of the "Go to live" chip**, which itself sits left of
+the favorite star — drawn only on a live stream with a zap session, at the row's ordinary button
+geometry, tinted by nothing (it opens a panel; it is not a toggle). Pressing it is exactly
+`zap:list` — except on the Windows native HWND surface, where it **toggles**
+(`zap:list`/`zap:close`), because that surface alone keeps its chrome up over an open list and
+the button therefore stays under the pointer. Everywhere else opening the list **stands the
+chrome down** (for the reason in the bullet above), which takes the button off screen and makes
+a second press impossible. Before it the list was keyboard/remote-only: a mouse or a finger had
+no way to open it at all. It is a focus stop like the favorite star wherever the surface has a
+focus ring; the glyph is each platform's own bulleted-list icon (Material
+`format_list_bulleted`, Compose `Icons.AutoMirrored.Filled.List`, Segoe MDL2 `\xE8FD`).
 
 - **It is a selection model, and the strictest case of one in the app.** One cursor (an integer
   per mode), rows that are *not* focus targets, an explicit `itemExtent` so the reveal is exact
@@ -581,10 +610,20 @@ frozen mapping applies:
 | Right | `zap:prev` (chrome hidden only) | `zap:descend` |
 | Up / Down | `zap:up` / `zap:down` (chrome hidden only) | `zap:move:-1` / `zap:move:1` |
 | Return / `VK_SELECT` | a pending digit buffer only | `zap:activate` |
-| Escape / Backspace | a pending digit buffer only | `zap:back`, ahead of the ordinary back branch |
+| Escape / Backspace | a pending digit buffer, else the Back ladder below | `zap:back`, ahead of the ordinary back branch |
 | Page Up / Page Down | `zap:up` / `zap:down` | unchanged — list *order*, not cursor direction |
 | Digits / numpad digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor) |
 | `G` | `zap:list` | `zap:close` |
+
+**Escape below those two rungs is now the ordinary Back ladder, natively**: with no digit buffer
+and no list open it peels **menu → info → hide chrome → exit**, one rung per press
+(`windows/runner/player_back_policy.h`, a Win32-free mirror of Kotlin's
+`nextPlayerBackAction`). It used to exit outright from any state. The ladder deliberately carries
+no quick-list rung — the key ring above already claimed that press — and repeats are swallowed.
+The runner also had to stop the child window procedures' posted reveal message from firing for
+Escape (`SuppressesControlsReveal()`), or a press with the chrome hidden would raise the bars and
+then hide the bars it had just raised, forever. Detail: docs/player.md "The Escape back ladder on
+the native HWND surface".
 
 Repeats: the cursor arrows repeat (holding one is how a long list is scanned, and the cursor
 clamps rather than wraps); every other list key is **swallowed** on repeat — consumed with no
@@ -594,7 +633,15 @@ same relationship Page Up/Page Down have with `CHANNEL_UP`/`CHANNEL_DOWN`, chose
 letters this screen already uses (F/M/I/S) and toggling, because a dedicated key that does
 nothing the second time reads as a dead remote.
 
-The rendered panel is a readout and a selection model, **never a pointer target**: the overlay
+**The control row's focus ring now includes the quick-list opener, leftmost in the right
+cluster**: quick list → "Go to live" → favourite star → speed/audio/CC → aspect → info →
+fullscreen (`FocusableItems`), matching the visual order. It is an ordinary focus stop, exactly
+like the star, and it is the one opener that **toggles** (`zap:list`/`zap:close`) — this surface
+keeps its chrome up over an open list, so the button stays reachable and is the only mouse-only
+way to close a panel that is not a hit target. Every other surface's opener only opens, because
+opening stands their chrome down.
+
+The rendered *panel* is a readout and a selection model, **never a pointer target**: the overlay
 window keeps `WS_EX_TRANSPARENT` while only the list (or the banner) is drawn, so a mouse move
 over its band still reaches the video surface's `WM_MOUSEMOVE`, which is the only thing that
 reveals the chrome — the same arrangement as the shared Flutter overlay's `IgnorePointer` panel.
