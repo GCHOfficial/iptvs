@@ -467,7 +467,8 @@ apply.
 - **Right is the "previous channel" toggle** (classic last-channel recall; a no-op until two
   channels have actually played this session). **Left opens the quick list** — see "The in-player
   quick list" below — as does the dedicated `GUIDE` key, which (being unambiguous) works whether
-  the chrome is up or not and closes the list on a second press.
+  the chrome is up or not and closes the list on a second press. Linux has no `GUIDE` keysym to
+  bind at all, so the Lua OSD stands `g` in for it (see "Linux's key map" below).
 - **Digits, PageUp/Down, CHANNEL_UP/DOWN and the last-channel key are live regardless of chrome** —
   unlike the arrows, these have no other meaning on this screen to be ambiguous with.
 - **OK commits a pending digit buffer early**; otherwise it isn't consumed and falls through to the
@@ -543,6 +544,11 @@ in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigatio
 
   A half-typed channel number still peels first, exactly as it does with no list open — the digit
   rung is above these, for the same reason it sits above `nextPlayerBackAction`'s ladder.
+- **On the surfaces that own a key ring, every arrow is claimed while the list is open, whatever
+  the chrome is doing.** The chrome gate exists because a hidden chrome means the arrows have no
+  other job; an open list gives them one *regardless*, and handing Up back to the volume control
+  mid-walk would be two cursors for one press. Linux implements this today (below); Kotlin and C++
+  implement it when their renderers land.
 - **Nothing changes channel while the list is up except an explicit OK on a row.** Digits move the
   cursor instead of zapping, "previous channel" is consumed and inert, and the zap banner hides —
   a list the user is reading must not have channels changing behind it.
@@ -592,3 +598,37 @@ back to "the whole source" would land the player on a channel the cursor can't t
 and the cross-source Favorites launch range has no single "whole source" to fall back to anyway. A
 number no channel in range carries shows "No channel `N`" in the banner and leaves playback
 untouched, exactly like a miss in the live tab.
+
+### Linux's key map (the Lua OSD, implemented)
+
+`linux/mpv/iptvs_overlay.lua`'s `zap_key_command` is the same rule set again, in mpv's own key
+vocabulary. What is structurally different from Android and Windows is **registration**: mpv's
+forced bindings cannot fall through, so a key this overlay claims is a key mpv can never be given
+back. The keys zapping *takes over* (digits, PageUp/Down, Enter, Backspace, and the quick list's
+`g`) are therefore bound only while the current stream is live (`sync_zap_bindings`), and the keys
+it merely *shares* (`ESC`, the four arrows) stay bound always, with their ordinary behaviour as the
+policy's fallback. That second arrangement is also what makes the quick list need no bookkeeping:
+the policy is consulted per press, so an arrow reverts to seek/volume the instant the pushed
+`quickList.open` goes false.
+
+| Key | Chrome-gated? | List closed | List open |
+| --- | --- | --- | --- |
+| D-pad Left | Yes | opens the list (`zap:list`); repeat swallowed | one rung up (`zap:back`); repeat swallowed |
+| D-pad Right | Yes | previous channel; repeat swallowed | descend (`zap:descend`); repeat swallowed |
+| D-pad Up / Down | Yes | channel up/down; repeats pass | move the highlight ∓1; repeats pass |
+| `PGUP` / `PGDWN` | No | channel up/down | unchanged — "the next channel" is the next row down |
+| Digits, numpad digits | No | number entry | number entry (Dart moves the cursor) |
+| Enter / numpad Enter | No | commits a pending number | activates the selected row |
+| `ESC` / Backspace | No | clears a pending number, else the Back ladder | one rung up, ahead of the ladder |
+| `g` | No | opens the list | closes it |
+
+**While the list is open the chrome gate stops applying to the arrows** — the list is the on-screen
+cursor whether the bars are up or not. Opening the list also stands the chrome down once, on the
+closed→open edge, because the panel draws over the bars and would otherwise bury the transport
+row's buttons under something that has just taken its arrows away.
+
+**`g` is Linux's `GUIDE` key.** Neither X11 nor Wayland has a `GUIDE` keysym, so a letter is the
+only way to offer an opener that works with the chrome up; `g` is unbound in mpv's own defaults
+(unlike `f`/`s`/`i`, which this overlay already claims), and it is registered per stream like every
+other zap-only key, so VOD keeps whatever mpv would do with it. Pinned, with the whole matrix
+above, by `linux/mpv/overlay_layout_test.lua`.

@@ -158,6 +158,38 @@ local function find_text(events, needle)
   return nil
 end
 
+-- The raw event behind a text payload, for the assertions that are about the
+-- *colour* a string was drawn in (a dimmed past programme) rather than where
+-- it landed. `}` anchors the match to the payload, which every text event
+-- appends immediately after its closing brace.
+local function find_event(events, needle)
+  for _, event in ipairs(events) do
+    if event.body:find('}' .. needle, 1, true) then return event end
+  end
+  return nil
+end
+
+local function drawn_in(event, color)
+  return event ~= nil and event.body:find('1c&H' .. color .. '&', 1, true) ~= nil
+end
+
+-- A drawn rect of `color` whose vertical span contains `y` — how the quick
+-- list's selection highlight is found without restating its geometry here.
+local function find_rect_at(events, color, y)
+  for _, event in ipairs(events) do
+    local rect = event.rect
+    if rect and event.body:find('1c&H' .. color .. '&', 1, true)
+      and y >= rect.y1 and y <= rect.y2 then
+      return rect
+    end
+  end
+  return nil
+end
+
+local COLOR_TEXT_HI = 'F8F4F2'
+local COLOR_TEXT_LO = 'B2A39A'
+local COLOR_LINE = '493B35'
+
 local NOW_MS = os.time() * 1000
 local live_state = {
   title = 'CALLE 13 HD',
@@ -508,7 +540,204 @@ if identity_item_bar and identity_next then
     'the identity run sits above the EPG strip in the bar')
 end
 
--- ===== 7. the zap key policy ================================================
+-- ===== 7. the quick list ====================================================
+--
+-- Phase 6d (docs/player.md "The quick list"). The list is the one thing on
+-- this surface that is a *browsable* readout rather than a one-line one, and
+-- every string in it arrives already formatted — so what these scenarios
+-- prove is placement, ordering, state-to-colour and the second windowing
+-- step, which is all this renderer actually decides.
+
+-- `rows` is built from plain tables so a scenario can express exactly the
+-- flags it is about; nothing here tries to be a faithful `ZapQuickListRow`
+-- beyond the keys the renderer reads.
+local function quick_list(overrides)
+  local list = {
+    open = true,
+    mode = 'channels',
+    heading = 'Sports HD',
+    rows = {},
+    selectedIndex = 0,
+    windowStart = 0,
+    total = 0,
+    loading = false,
+    revision = 1,
+  }
+  for k, v in pairs(overrides or {}) do list[k] = v end
+  if list.total == 0 and type(list.rows) == 'table' and #list.rows > 0 then
+    list.total = #list.rows
+  end
+  return list
+end
+
+local function with_quick_list(list, zap_overrides)
+  local out = zap_state(zap_overrides or {})
+  out.quickList = list
+  return out
+end
+
+local channel_rows = {
+  {index = 0, id = 'a', kind = 'channel', label = 'Eurosport 1',
+    secondary = 'Cycling: Giro stage 9'},
+  {index = 1, id = 'b', kind = 'channel', label = 'Eurosport 2',
+    secondary = 'Snooker', badge = 'ON NOW', selected = true},
+  {index = 2, id = 'c', kind = 'channel', label = 'Sky Sports Main',
+    secondary = 'Premier League', playing = true},
+  {index = 3, id = 'd', kind = 'channel', label = 'DAZN 1',
+    secondary = 'Boxing'},
+}
+
+local list_events = render_hidden(with_quick_list(quick_list({
+  rows = channel_rows, selectedIndex = 1,
+})))
+
+check(find_text(list_events, 'Sports HD') ~= nil,
+  'the quick list draws its heading')
+check(find_text(list_events, '2/4') ~= nil,
+  'the heading carries the cursor place in the full list')
+
+local row_a = find_text(list_events, 'Eurosport 1')
+local row_b = find_text(list_events, 'Eurosport 2')
+local row_c = find_text(list_events, 'Sky Sports Main')
+local row_d = find_text(list_events, 'DAZN 1')
+check(row_a and row_b and row_c and row_d, 'every row of the window renders')
+if row_a and row_b and row_c and row_d then
+  check(row_a.y < row_b.y and row_b.y < row_c.y and row_c.y < row_d.y,
+    'the rows render in the order they arrived')
+  check(math.abs(row_a.x - row_b.x) < 1,
+    'the rows share a left edge')
+end
+check(find_text(list_events, 'Snooker') ~= nil,
+  'a row draws its secondary line')
+check(find_text(list_events, 'ON NOW') ~= nil,
+  'a row draws its badge text verbatim')
+
+-- The highlight is a filled row, so it is found as a drawn rect crossing the
+-- selected row's own text — geometry the test never has to restate.
+if row_b and row_a then
+  local highlight = find_rect_at(list_events, COLOR_LINE, row_b.y)
+  check(highlight ~= nil, 'the selected row is highlighted')
+  check(find_rect_at(list_events, COLOR_LINE, row_a.y) == nil,
+    'an unselected row is not')
+  if highlight then
+    check(highlight.x2 - highlight.x1 > 200,
+      'the highlight spans the row, not just its text')
+  end
+end
+check(drawn_in(find_event(list_events, 'Eurosport 1'), COLOR_TEXT_HI),
+  'an unselected live row draws in the ordinary text colour')
+
+-- The playing channel is marked even when the cursor is elsewhere — the two
+-- flags are deliberately separate.
+local PLAY_ARROW = '\238\147\139' -- U+E4CB play_arrow, Lua 5.1 has no \x
+check(find_text(list_events, PLAY_ARROW) ~= nil,
+  'the channel actually playing carries the play marker')
+
+-- ===== 7b. the banner yields to the list ====================================
+
+check(find_text(list_events, '12 · BBC One HD') == nil,
+  'the zap banner does not draw behind an open quick list')
+check(find_text(render_hidden(with_quick_list(quick_list({
+    rows = channel_rows, selectedIndex = 1, open = false,
+  }))), 'Eurosport 1') == nil,
+  'open=false is a tear-down: the list draws nothing')
+check(find_text(render_hidden(with_quick_list(quick_list({
+    rows = channel_rows, open = false,
+  }))), '12 · BBC One HD') ~= nil,
+  'and the banner comes back when it does')
+
+-- A push with no `rows`, `total` or `emptyLabel` at all must still render:
+-- every optional key is tolerated missing.
+check(pcall(render_hidden, with_quick_list({open = true})) == true,
+  'a quick list with nothing but `open` renders rather than throwing')
+
+-- The guide key opens the list with the chrome up, and the list is drawn over
+-- the bars — so opening it stands them down rather than burying the transport
+-- row under a panel that has just taken its arrows away.
+-- A closed push first: the stand-down fires on the closed→open *edge*.
+render_with(with_quick_list(quick_list({rows = channel_rows, open = false})))
+local chrome_then_list = render_with(with_quick_list(quick_list({
+  rows = channel_rows,
+})))
+check(find_text(chrome_then_list, 'Eurosport 1') ~= nil,
+  'the list draws with the chrome nominally up')
+check(find_text(chrome_then_list, 'CALLE 13 HD') == nil,
+  'opening the list stands the chrome down')
+seam.set_chrome_visible(true) -- the push above hid it; later scenarios expect chrome
+
+-- ===== 7c. schedule mode: past rows, archive rows ===========================
+
+local schedule_rows = {
+  {index = 0, id = '1', kind = 'programme', label = 'Breakfast',
+    secondary = '06:00 – 09:00', badge = 'CATCH-UP', past = true,
+    archive = true},
+  {index = 1, id = '2', kind = 'programme', label = 'Pointless',
+    secondary = '17:15 – 18:00', badge = 'ON NOW', live = true,
+    selected = true},
+  {index = 2, id = '3', kind = 'programme', label = 'The Repair Shop',
+    secondary = '18:00 – 19:00'},
+}
+local schedule_events = render_hidden(with_quick_list(quick_list({
+  mode = 'schedule', heading = 'BBC One HD', rows = schedule_rows,
+  selectedIndex = 1,
+})))
+check(find_text(schedule_events, 'CATCH-UP') ~= nil,
+  'a past archive row badges CATCH-UP')
+check(drawn_in(find_event(schedule_events, 'Breakfast'), COLOR_TEXT_LO),
+  'a past programme is dimmed')
+check(drawn_in(find_event(schedule_events, 'The Repair Shop'), COLOR_TEXT_HI),
+  'a future programme is not')
+local HISTORY = '\238\140\148' -- U+E314 history, the archive mark
+check(find_text(schedule_events, HISTORY) ~= nil,
+  'an archive row carries the catch-up mark beside its badge')
+check(find_text(schedule_events, '06:00 – 09:00') ~= nil,
+  'the row prints the range it was given, unformatted by this surface')
+
+-- ===== 7d. empty and loading ================================================
+
+check(find_text(render_hidden(with_quick_list(quick_list({
+    mode = 'schedule', heading = 'BBC One HD',
+    emptyLabel = 'No guide for today',
+  }))), 'No guide for today') ~= nil,
+  'an empty list prints its emptyLabel')
+check(find_text(render_hidden(with_quick_list(quick_list({
+    loading = true,
+  }))), 'Loading…') ~= nil,
+  'a fetch in flight with nothing to show yet says so')
+check(find_text(render_hidden(with_quick_list(quick_list({
+    loading = true, emptyLabel = 'No guide for today',
+  }))), 'No guide for today') == nil,
+  'loading wins over a stale emptyLabel')
+
+-- ===== 7e. the second windowing step ========================================
+--
+-- Dart ships a 40-row window around the cursor; this surface then draws the
+-- slice of it that fits the output. The two use the same centre-and-clamp
+-- arithmetic, and a slice that misses the cursor would draw a list with no
+-- visible selection — indistinguishable, on a remote, from a frozen picture.
+
+local long_rows = {}
+for i = 0, 39 do
+  long_rows[i + 1] = {index = 100 + i, id = tostring(i), kind = 'channel',
+    label = string.format('Channel %02d', i), secondary = 'Something on'}
+end
+local scrolled = render_hidden(with_quick_list(quick_list({
+  rows = long_rows, windowStart = 100, selectedIndex = 130, total = 250000,
+})))
+local cursor_row = find_text(scrolled, 'Channel 30')
+check(cursor_row ~= nil, 'the cursor row is inside the drawn slice')
+check(find_text(scrolled, 'Channel 00') == nil,
+  'the slice scrolled away from the top of the window')
+check(find_text(scrolled, 'Channel 39') ~= nil,
+  'and clamped at its bottom rather than running past it')
+if cursor_row then
+  check(find_rect_at(scrolled, COLOR_LINE, cursor_row.y) ~= nil,
+    'the highlight follows selectedIndex - windowStart into the slice')
+end
+check(find_text(scrolled, '131/250000') ~= nil,
+  'the place readout is the absolute one, not the window\'s')
+
+-- ===== 8. the zap key policy ================================================
 --
 -- The Lua mirror of Kotlin's `ZapKeyPolicy` (pinned there by
 -- `ZapKeyPolicyTest`). Nothing else executes these branches: mpv's key
@@ -519,7 +748,9 @@ local function key(name, is_repeat, opts)
   if opts.isLive == false then
     render_with({title = 'Some Film', isLive = false, aspectLabel = 'Fit'})
   else
-    render_with(zap_state({digits = opts.digits or ''}))
+    local pushed = zap_state({digits = opts.digits or ''})
+    pushed.quickList = opts.list
+    render_with(pushed)
   end
   seam.set_chrome_visible(opts.chromeVisible == true)
   local command, swallow = seam.zap_key_command(name, is_repeat == true)
@@ -530,7 +761,12 @@ end
 check(key('UP') == 'zap:up', 'chrome hidden: UP is the next higher channel')
 check(key('DOWN') == 'zap:down', 'chrome hidden: DOWN is the next lower one')
 check(key('RIGHT') == 'zap:prev', 'chrome hidden: RIGHT is previous-channel')
-check(key('LEFT') == nil, 'LEFT keeps its seek meaning (the quick list is Phase 6)')
+check(key('LEFT') == 'zap:list', 'chrome hidden: LEFT opens the quick list')
+check(key('LEFT', false, {chromeVisible = true}) == nil,
+  'chrome visible: LEFT stays seek')
+local _, left_swallow = key('LEFT', true)
+check(left_swallow == true,
+  'a held LEFT is swallowed rather than re-opening the list')
 check(key('UP', false, {chromeVisible = true}) == nil,
   'chrome visible: UP stays volume')
 check(key('RIGHT', false, {chromeVisible = true}) == nil,
@@ -563,6 +799,62 @@ check(key('BS', false, {digits = '12'}) == 'zap:back',
 
 check(key('UP', false, {isLive = false}) == nil, 'VOD: UP is not a zap key')
 check(key('7', false, {isLive = false}) == nil, 'VOD: digits are not zap keys')
+
+check(key('g') == 'zap:list', 'the guide key opens the list')
+check(key('g', false, {chromeVisible = true}) == 'zap:list',
+  'the guide key is unambiguous: it works with the chrome up too')
+local _, guide_swallow = key('g', true)
+check(guide_swallow == true, 'a held guide key is swallowed')
+check(key('g', false, {isLive = false}) == nil,
+  'VOD: the guide key is not ours (it is not even bound there)')
+
+-- ===== 8b. the key policy with the list open ================================
+--
+-- Every arrow is claimed here regardless of the chrome: the list is the
+-- on-screen cursor, and handing Up back to the volume control mid-walk would
+-- be two cursors for one press. The rungs that peel or commit swallow their
+-- repeats; Up/Down repeat freely, which is how a list is scanned.
+
+local OPEN = quick_list({rows = channel_rows, selectedIndex = 1})
+local function open_key(name, is_repeat, chrome_visible)
+  return key(name, is_repeat, {list = OPEN, chromeVisible = chrome_visible})
+end
+
+check(open_key('UP') == 'zap:move:-1', 'open: UP moves the highlight up')
+check(open_key('DOWN') == 'zap:move:1', 'open: DOWN moves it down')
+check(open_key('UP', true) == 'zap:move:-1',
+  'open: a held UP keeps moving (repeat is how a list is scanned)')
+check(open_key('UP', false, true) == 'zap:move:-1',
+  'open: the list owns the arrows whether the chrome is up or not')
+check(open_key('LEFT') == 'zap:back', 'open: LEFT is one rung up the stack')
+check(open_key('RIGHT') == 'zap:descend', 'open: RIGHT descends')
+local _, open_left_swallow = open_key('LEFT', true)
+check(open_left_swallow == true,
+  'open: a held LEFT is swallowed rather than tearing through the stack')
+local _, open_right_swallow = open_key('RIGHT', true)
+check(open_right_swallow == true,
+  'open: a held RIGHT is swallowed rather than firing a fetch per repeat')
+check(open_key('ENTER') == 'zap:activate',
+  'open: OK activates the selected row with no digits pending')
+check(open_key('KP_ENTER') == 'zap:activate', 'open: the numpad OK too')
+check(open_key('ESC') == 'zap:back',
+  'open: Escape peels a list rung ahead of the Back ladder')
+check(open_key('BS') == 'zap:back', 'open: Backspace does the same')
+check(open_key('PGUP') == 'zap:up',
+  'open: the dedicated channel keys still mean "next channel"')
+check(open_key('PGDWN') == 'zap:down', 'open: and the other way')
+check(open_key('4') == 'zap:digit:4', 'open: a digit still enters a number')
+check(open_key('KP4') == 'zap:digit:4', 'open: from the numpad as well')
+check(open_key('g') == 'zap:close', 'open: the guide key closes the list')
+check(open_key('f') == nil, 'open: an unrelated key is left alone')
+
+-- A closed push is not an open one: the arrows must revert with nothing
+-- unbound (the policy is consulted per press, so the next push is enough).
+local CLOSED = quick_list({rows = channel_rows, open = false})
+check(key('UP', false, {list = CLOSED}) == 'zap:up',
+  'a closed list hands the arrows straight back to channel up/down')
+check(key('LEFT', false, {list = CLOSED}) == 'zap:list',
+  'and LEFT goes back to opening it')
 
 print('')
 if failures > 0 then

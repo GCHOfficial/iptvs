@@ -1350,10 +1350,10 @@ this binding mechanism — without it, holding PGUP to scan channels would behav
 `zap_key_command(key, is_repeat)` is the pure decision function (mirroring `DecideZapKey` and
 `ZapKeyPolicy` field for field): digits/PGUP/PGDOWN act regardless of chrome; a half-typed number's
 Enter/Backspace commit/clear it before their ordinary meaning; the arrows (`UP`/`DOWN`/`RIGHT`) are
-claimed only while the chrome is hidden, with `RIGHT` swallowed on repeat and `LEFT` left alone
-entirely (the quick list is Phase 6 — this is the one place `LEFT` differs from Windows/Android,
-which at least gate it behind a flag; here it simply keeps its ordinary seek meaning, since Lua has
-no equivalent constant to flip later without an extra release).
+claimed only while the chrome is hidden, with `RIGHT` swallowed on repeat. `LEFT` kept its
+ordinary seek meaning until Phase 6d, which gave it the quick list (below) — there was no flag to
+flip here the way Windows and Android have one, because a Lua constant cannot be changed without
+shipping a release anyway.
 
 **No Linux equivalent of `CHANNEL_UP`/`CHANNEL_DOWN`/`LAST_CHANNEL`.** A remote's dedicated channel
 keys, where they exist, arrive to mpv (if at all) as ordinary keysyms with no fixed cross-device
@@ -1387,6 +1387,112 @@ a live `_linuxNativeSession` **first**, ahead of the `setZapBanner` method-chann
 Windows use, and pushes through `_pushLinuxOverlayState()` instead — Linux has no native-side
 `setZapBanner` handler at all; every push, zap or otherwise, goes through the one `iptvs-state`
 command.
+
+### Live zapping — the quick list (Phase 6d)
+
+**Implemented.** The Lua OSD renders the frozen `setQuickList` payload (see "The quick list
+(Phase 6)" under "Live zapping") and owns the keys that drive it, the Lua counterpart of what the
+shared Flutter overlay does in Phase 6a.
+
+**Wire shape.** `quickList` is a **sibling** of `zap` on the existing `iptvs-state` push
+(`LinuxNativeSession.updateOverlayState`'s `quickList` parameter,
+`PlayerScreen._quickListOverlayPayload`), for the same reason `zap` is nested rather than
+flattened: the banner describes the cursor's channel while the list may be showing another
+source's categories entirely, and the two carry colliding key names. `open: false` is a tear-down
+instruction, not an absence, so a closed list is still pushed — `quick_list_block()` reads
+`isLive && type(quickList) == 'table' && quickList.open == true` and everything else in the script
+asks that one function. Every optional key is tolerated missing: a renderer that indexes a nil is
+a player that dies mid-stream, and nothing else in this process would report it.
+
+**A second windowing step, with the same arithmetic as the first.** Dart ships a window of at most
+`kZapWindowRows` (40) rows around the cursor; `draw_quick_list` then draws the slice of *those*
+that fits the output (`floor(available_height / QUICK_LIST_ROW_PX)`, so the visible count follows
+the panel height and the HiDPI `scale` factor rather than being a constant). `quick_list_slice_start`
+is deliberately `zapWindowStart` written again in Lua — centre the cursor, clamp at both ends — so
+the two steps cannot disagree and leave the selection off screen, which on a remote is
+indistinguishable from a frozen picture (the failure docs/tv-navigation.md already records for the
+EPG grid's horizontal reveal). **The highlight follows `selectedIndex - windowStart`, not the
+row's own `selected` flag**, so the highlighted row and the scrolled-to row are one piece of
+arithmetic rather than two that can drift.
+
+**It is a mode of the existing list menu.** The audio/subtitle/speed menu and the quick list are
+the same panel object — `LIST_PANEL` holds the fill (`panelHi`, opaque), the radius, the text
+inset and the track menu's row pitch, and `list_panel_bg` draws both backgrounds — because they
+sit over the same video for the same user. Only the row height is the quick list's own
+(`QUICK_LIST_ROW_PX`, 46: its rows carry a second line). The panel is left-anchored and banded
+between top and bottom margins, matching `EmbeddedPlayerControls._quickListPanel`'s geometry, and
+draws heading (mode glyph + title + an absolute `place/total` readout), then rows.
+
+**Renderers print, never format.** Every string — `12 · BBC One`, `20:00 – 21:00`, `ON NOW`,
+`CATCH-UP` — arrives already formatted, and every state a renderer might re-derive is a flag. The
+Lua half decides placement and colour only: the play glyph for `playing` (which is not necessarily
+`selected` — that separation is the point of two flags), the shared badge pill for `badge`, a
+`history` glyph for `archive` beside it (the badge says what OK will do; the glyph survives a
+narrow panel and reads down a column), and `textLo` instead of `textHi` for `past`. `loading` with
+no rows prints `Loading…`; an empty list prints `emptyLabel`, falling back to `Nothing here` — a
+failed fetch degrades to exactly that, never to an error.
+
+**The banner yields to the list** (`show_zap_banner()` returns false while it is open). Both are
+the cursor's channel and both live in the lower left; drawn together they would print it twice
+from two cursors that need not agree. Dart states the same rule on its own side, so this is
+belt-and-braces — but the Lua overlay decides its own visibility, so the decision has to exist
+here too.
+
+**Opening the list stands the chrome down**, once, on the closed→open edge. Left only opens it
+with the chrome already hidden, but the guide key below is unambiguous and works either way, and
+the list draws *over* the bars — leaving them up would bury the transport row's buttons under a
+panel that has just taken its arrows away. Chrome the user then deliberately reveals over an open
+list stays up, because the stand-down is an edge, not a per-push assertion.
+
+**Keys.** `zap_key_command` gains a whole branch that runs first while the list is open, and every
+arrow is claimed there **regardless of the chrome** — the list is the on-screen cursor, and handing
+Up back to the volume control mid-walk would be two cursors for one press:
+
+| Key | List closed | List open |
+| --- | --- | --- |
+| `LEFT` | `zap:list` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:back`; repeat swallowed |
+| `RIGHT` | `zap:prev` when the chrome is hidden (seek otherwise); repeat swallowed | `zap:descend`; repeat swallowed |
+| `UP` / `DOWN` | `zap:up`/`zap:down` when the chrome is hidden (volume otherwise); repeats pass | `zap:move:-1`/`zap:move:1`; repeats pass |
+| `PGUP` / `PGDWN` | `zap:up`/`zap:down` | unchanged — the dedicated keys still mean "the next channel", which in a list is the next row down (Dart decides that) |
+| `ENTER` / `KP_ENTER` | commits a pending digit buffer | `zap:activate`; repeat swallowed |
+| `ESC` / `BS` | clears a pending digit buffer, else the Back ladder | `zap:back`; repeat swallowed |
+| digits, `KP` digits | `zap:digit:N` | `zap:digit:N` (Dart moves the cursor instead of zapping) |
+| `g` (`QUICK_LIST_KEY`) | `zap:list` | `zap:close` |
+
+The rungs that peel or commit swallow their repeats — holding them would tear through the mode
+stack or fire a fetch per repeat — while Up/Down repeat freely, which is how a list is scanned.
+`ESC`/`BS` land here *ahead* of `handle_back`, so neither peels a chrome layer while the list has
+a rung of its own left to give up, and neither reaches the `ESC quit` line in the generated
+input.conf (a forced script binding outranks it).
+
+**`g` is Linux's `GUIDE` key.** X11 and Wayland have no `GUIDE` keysym, and mpv would have no name
+to bind if they did, so a letter is the only way to offer an opener that works with the chrome up
+as well. `g` is unbound in mpv's built-in input.conf (unlike the neighbours this overlay already
+claims: `f` fullscreen, `s` screenshot, `i` stats), and like every other zap-only key it is
+registered **per stream** by `sync_zap_bindings`, so a VOD session gets whatever mpv would
+otherwise do with it. That per-stream rule is the one thing to keep in mind when adding a key here:
+a forced binding cannot fall through, so a key claimed unconditionally is a key mpv can never be
+given back.
+
+**The arrows need no registration bookkeeping at all.** `LEFT` joined `ESC`/`RIGHT`/`UP`/`DOWN` on
+`bind_zap_key` (fallback: seek back), which consults the policy per press — so an arrow reverts to
+seek/volume the instant the pushed `open` goes false, with nothing to unbind and no state to keep
+in step.
+
+**There is deliberately no optimistic "the list is open now" mirror**, unlike the Windows key
+ring's `digits_pending`. An mpv key binding is asynchronous — it emits and returns, and nothing is
+waiting for a consumed/not-consumed answer — so waiting for Dart's `quickList` push costs one Unix
+socket round trip and nothing else. A mirror, meanwhile, set on a route that has **no**
+`LiveZapController` (where `zap:list` is simply dropped), would claim every arrow into a dead key
+with no push ever coming to clear it. The one visible consequence: on such a route a chrome-hidden
+`LEFT` is swallowed rather than seeking — harmless, because live seek is already a no-op there.
+
+**Pinned by `linux/mpv/overlay_layout_test.lua`** (130 checks): heading, row order, the badge text,
+the play marker, past dimming, the archive mark, the selection highlight found as a drawn rect
+crossing the selected row, the empty/loading bodies, `open: false` drawing nothing, the banner
+yielding, the chrome stand-down, the second windowing step over a 40-row window, and the whole
+open/closed key matrix through the existing `_G.iptvs_overlay_test` seam. Nothing else in the
+suite executes this script.
 
 ## Other platforms / fallback
 
@@ -1652,10 +1758,12 @@ see "Shared Flutter overlay banner (Phase 3)" below — this is also what the Wi
 preview→fullscreen surface renders, since it's the same media_kit player), the Windows native HWND
 surface's own key ring and GDI banner (Phase 4, see "Windows" below), and the Linux Lua OSD's own
 per-stream key registration and banner (Phase 5, see "Linux" below). **Phase 6 — the quick list —
-is implemented in Dart and on the shared Flutter overlay** (see "The quick list (Phase 6)" below,
-which freezes the `setQuickList` payload the Kotlin, C++ and Lua renderers implement against).
-Only iOS's zap input, and those three native renderers, remain ahead — every native transport
-already speaks the wire contract below, so what is left is renderers, never new plumbing.
+is implemented in Dart, on the shared Flutter overlay and on the Linux Lua OSD** (Phase 6a and
+Phase 6d; see "The quick list (Phase 6)" below, which freezes the `setQuickList` payload the
+Kotlin, C++ and Lua renderers implement against, and "Live zapping — the quick list (Phase 6d)"
+under "Linux" for what the Lua half does with it). Only iOS's zap input and the Kotlin/C++
+renderers remain ahead — every native transport already speaks the wire contract below, so what
+is left is renderers, never new plumbing.
 
 ### Ownership: why Dart, not a native-cached list
 
@@ -1957,10 +2065,10 @@ channel's **number only appears after the first cursor move** — `channelNumber
 `setZapBanner`/`applyZapBanner` push sets it, and none is sent at tune-in, so opening a channel
 directly (no zap yet this session) shows the plain title until the first Up/Down/digit press.
 
-### The quick list (Phase 6 — Dart side + the shared Flutter overlay)
+### The quick list (Phase 6 — Dart side, the shared Flutter overlay, the Linux Lua OSD)
 
-**Implemented in Dart; the Kotlin, C++ and Lua renderers implement against the frozen payload
-below.** The quick list is the browsable list the fullscreen live player opens over the video —
+**Implemented in Dart (Phase 6a) and on the Linux Lua OSD (Phase 6d, see "Linux" below); the
+Kotlin and C++ renderers implement against the frozen payload below.** The quick list is the browsable list the fullscreen live player opens over the video —
 Left (chrome hidden) or `GUIDE`.
 
 #### A mode stack, not a three-column panel
