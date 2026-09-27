@@ -2742,6 +2742,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           'selectedSpeedId': _speedId(_player.state.rate),
           'speedOptions': _speedOptionPayload(),
           'aspectLabel': kAspectModes[_aspectModeIndex].label,
+          // Windows' GDI overlay owns its own key ring and has to decide
+          // synchronously whether an arrow belongs to zapping
+          // (`windows/runner/zap_key_policy.h`). Without this it would claim
+          // the arrows on any *live* route — including one opened with no zap
+          // controller, such as the EPG grid's own play path — where Dart
+          // declines the command and the key becomes dead instead of
+          // revealing the chrome.
+          'zapEnabled': widget.zap != null,
           ..._streamInfoPayload(),
         },
       });

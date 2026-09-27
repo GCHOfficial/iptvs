@@ -22,6 +22,27 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
+#include "zap_key_policy.h"
+
+// The zap key policy mirrors its virtual-key codes rather than including
+// <windows.h>, so it can be read (and, if this runner ever grows a C++ test
+// harness, exercised) without a Win32 toolchain. These are the ZapKeyPolicyTest
+// equivalent: a typo in the mirror fails the build instead of shipping a key
+// that silently means nothing.
+static_assert(iptvs::kZapVkBack == VK_BACK, "VK_BACK mirror");
+static_assert(iptvs::kZapVkReturn == VK_RETURN, "VK_RETURN mirror");
+static_assert(iptvs::kZapVkEscape == VK_ESCAPE, "VK_ESCAPE mirror");
+static_assert(iptvs::kZapVkPrior == VK_PRIOR, "VK_PRIOR mirror");
+static_assert(iptvs::kZapVkNext == VK_NEXT, "VK_NEXT mirror");
+static_assert(iptvs::kZapVkLeft == VK_LEFT, "VK_LEFT mirror");
+static_assert(iptvs::kZapVkUp == VK_UP, "VK_UP mirror");
+static_assert(iptvs::kZapVkRight == VK_RIGHT, "VK_RIGHT mirror");
+static_assert(iptvs::kZapVkDown == VK_DOWN, "VK_DOWN mirror");
+static_assert(iptvs::kZapVkSelect == VK_SELECT, "VK_SELECT mirror");
+static_assert(iptvs::kZapVkDigit0 == '0', "digit-0 mirror");
+static_assert(iptvs::kZapVkDigit9 == '9', "digit-9 mirror");
+static_assert(iptvs::kZapVkNumpad0 == VK_NUMPAD0, "VK_NUMPAD0 mirror");
+static_assert(iptvs::kZapVkNumpad9 == VK_NUMPAD9, "VK_NUMPAD9 mirror");
 
 FlutterWindow::FlutterWindow(const flutter::DartProject &project)
     : project_(project) {}
@@ -40,6 +61,13 @@ constexpr UINT kNativeControlCommandMessage = WM_APP + 0x4E;
 constexpr UINT kNativeControlsLayoutMessage = WM_APP + 0x4F;
 constexpr UINT_PTR kNativeControlsHideTimer = 0x5031;
 constexpr UINT_PTR kNativeVideoResyncTimer = 0x5032;
+constexpr UINT_PTR kNativeZapBannerTimer = 0x5033;
+// How long the zap banner stays up after a press. Mirrors Kotlin
+// `ZAP_BANNER_VISIBLE_MS` and the Lua OSD's `ZAP_BANNER_VISIBLE_S`: long
+// enough to read a channel name and its now/next after a single press, short
+// enough not to sit over the picture once the user has stopped zapping. A
+// half-typed number or a transient note outlives it (see ZapBannerShown).
+constexpr UINT kNativeZapBannerVisibleMs = 3000;
 // Verification passes after a discrete window transition (fullscreen /
 // mini-player). The immediate resync in ResizeNativeVideoSurface covers the
 // common case; these re-checks catch an mpv VO window that is (re)created
@@ -55,6 +83,16 @@ constexpr int kNativeBottomControlsHeightVod = 116;
 // Live with an EPG snapshot gets a taller bar: a programme row (title + progress
 // + next) sits where the VOD scrubber would be.
 constexpr int kNativeBottomControlsHeightLiveEpg = 150;
+// The live EPG strip's own height, from its top edge to the bottom of the
+// "Next ·" line. The one number both the bottom bar and the zap banner lay
+// their copy of the strip out against (DrawLiveEpgStrip).
+constexpr int kNativeEpgStripHeight = 64;
+// The channel-identity run ("12 · BBC One"), drawn above the strip. 26 px is
+// Kotlin's `ChannelIdentityRow` and the Lua OSD's `IDENTITY_ROW_PX`.
+constexpr int kNativeIdentityRowHeight = 26;
+// Gap between the identity run and the strip below it (Compose's
+// `Spacer(10.dp)`).
+constexpr int kNativeIdentityRowGap = 10;
 constexpr int kNativeMenuWidth = 300;
 constexpr int kNativeMenuHeaderHeight = 36;
 constexpr int kNativeMenuRowHeight = 40;
@@ -197,6 +235,12 @@ struct NativeControlState {
   std::wstring audio_channels;
   // Active source name (badge).
   std::wstring source_name;
+  // Whether this route has a `LiveZapController` behind it (Windows-only key
+  // on setControlState). The key ring reads it to decide whether the arrows
+  // belong to zapping: a live route opened *without* a controller (the EPG
+  // grid's own play path) must keep them, or Dart would decline the command
+  // and they would become dead keys.
+  bool zap_enabled = false;
   // Live EPG now/next snapshot (epoch ms; 0 = absent).
   std::wstring epg_now_title;
   double epg_now_start_ms = 0.0;
@@ -208,6 +252,105 @@ struct NativeControlState {
 };
 
 NativeControlState g_native_control_state;
+
+// In-player live zapping (docs/player.md "Live zapping").
+//
+// Pushed from Dart on `setZapBanner` — **not** folded into setControlState,
+// whose 2 Hz coalescer would drop presses: a banner has to track every key,
+// not the state a few times a second. Dart owns the channel list and the
+// cursor; every field here is presentation only, and none of them decides
+// anything about playback.
+//
+// It describes the **cursor's** channel, which during a held key is ahead of
+// the one playing — that is the whole point of the banner, and why it cannot
+// reuse `NativeControlState`'s `epg_now_*`/`epg_next_*`, which describe the
+// channel actually on screen.
+struct NativeZapState {
+  // Set by the first push, so a session that never zaps renders exactly as it
+  // did before this existed (the Lua OSD's `zap_block() ~= nil`).
+  bool has_banner = false;
+  bool has_channel_number = false;
+  int channel_number = 0;
+  std::wstring channel_name;
+  // Half-typed channel number.
+  std::wstring digits;
+  // Transient note ("No channel 123", a failed zap). Empty = none.
+  std::wstring message;
+  // True while Dart is stopping/resolving/opening the settled channel. Nothing
+  // draws it; it exists so UpdateNativeControlState can tell a zap's
+  // deliberate stop from a user pause (see the `zap_settling` guard there).
+  bool settling = false;
+  // 1-based cursor position in the launch range, and the range's size.
+  int position = 0;
+  int total = 0;
+  // The **cursor** channel's now/next (epoch ms; 0 = absent).
+  std::wstring epg_now_title;
+  double epg_now_start_ms = 0.0;
+  double epg_now_stop_ms = 0.0;
+  std::wstring epg_next_title;
+  double epg_next_start_ms = 0.0;
+  double epg_next_stop_ms = 0.0;
+  // Within the kNativeZapBannerVisibleMs window since the last push. Owned by
+  // this side, exactly as it is Compose's on Android: Dart says *what* the
+  // banner reads and *that the user pressed something*, never whether it is on
+  // screen.
+  bool visible = false;
+};
+
+NativeZapState g_native_zap_state;
+
+// Mirror of the chrome's visibility for the free functions in this namespace
+// (the authority is FlutterWindow::native_controls_visible_, which writes this
+// in ShowNativeControls). The overlay window can be visible while the chrome
+// is not — that is precisely the zap-banner case — so the paint, the clip
+// region and the key policy all need to tell the two apart.
+bool g_native_controls_chrome_visible = true;
+
+// Set the moment a digit key is dispatched, cleared by the next
+// `setZapBanner`, which carries the authoritative buffer.
+//
+// The round trip to Dart and back is asynchronous, and the very next key — OK
+// to commit, Back to clear — can arrive before the banner does. Without this
+// that key falls through to the chrome and the half-typed number is stranded.
+// Kotlin's `HdrPlayerActivity` keeps the same optimistic flag beside its own
+// mirror, for the same reason.
+bool g_native_zap_digits_optimistic = false;
+
+// A live route with a zap controller behind it.
+bool ZapActive() {
+  return g_native_control_state.is_live && g_native_control_state.zap_enabled;
+}
+
+bool ZapDigitsPending() {
+  return !g_native_zap_state.digits.empty() || g_native_zap_digits_optimistic;
+}
+
+// Whether the banner has anything to acknowledge. A half-typed number and a
+// transient note outlive the plain 3 s timer on purpose: both are
+// mid-interaction states, and hiding them would take the feedback away while
+// the user is still typing. Mirrors Kotlin `showZapBanner` / the Lua OSD's
+// `show_zap_banner`; the "chrome is hidden" half of the gate lives at the call
+// sites, same as on both of those.
+bool ZapBannerShown() {
+  const NativeZapState &z = g_native_zap_state;
+  return g_native_control_state.is_live && z.has_banner &&
+         (z.visible || !z.digits.empty() || !z.message.empty());
+}
+
+// Whether the **bottom bar** draws the identity run: only when it says
+// something the top bar's title does not — a channel number, a half-typed
+// number, or a transient note. Mirrors Kotlin `showsChannelIdentity`, so a
+// session that never zaps keeps the layout it always had.
+bool ShowsChannelIdentity() {
+  const NativeZapState &z = g_native_zap_state;
+  return g_native_control_state.is_live && z.has_banner &&
+         (z.has_channel_number || !z.digits.empty() || !z.message.empty());
+}
+
+void ResetNativeZapState() {
+  g_native_zap_state = NativeZapState{};
+  g_native_zap_digits_optimistic = false;
+}
 
 bool ControlsPinnedByOverlay() {
   return g_native_control_state.open_menu != NativeMenuKind::kNone ||
@@ -311,6 +454,19 @@ int EncodableIntArg(const flutter::EncodableValue *args, const char *key,
     return static_cast<int>(std::get<int64_t>(found->second));
   }
   return fallback;
+}
+
+// Whether [key] is present and non-null. Needed where "absent" and "zero" are
+// different answers — `channelNumber`, which `bannerPayload` omits entirely
+// for a channel the provider gave no number for.
+bool EncodableHasKey(const flutter::EncodableValue *args, const char *key) {
+  if (!args || !std::holds_alternative<flutter::EncodableMap>(*args)) {
+    return false;
+  }
+  const auto &map = std::get<flutter::EncodableMap>(*args);
+  const auto found = map.find(flutter::EncodableValue(key));
+  return found != map.end() &&
+         !std::holds_alternative<std::monostate>(found->second);
 }
 
 bool EncodableBoolArg(const flutter::EncodableValue *args, const char *key,
@@ -938,6 +1094,25 @@ constexpr int kNativeButtonRadius = 12;
 // chip the same way rather than one measuring and the other guessing.
 constexpr int kNativeChipPaddingX = 14;
 
+// The palette the zap banner and the identity run share with Kotlin
+// `PlayerColors` and the Lua OSD's `COLOR` table, named here because those two
+// surfaces draw the same rows and must not drift apart on colour either.
+// `kNativeLiveColor` is this file's existing LIVE-badge red, reused rather
+// than a second red introduced beside it.
+const COLORREF kNativeAccentColor = RGB(123, 108, 246);
+const COLORREF kNativeTextHiColor = RGB(238, 240, 247);
+const COLORREF kNativeTextLoColor = RGB(154, 161, 178);
+const COLORREF kNativeLiveColor = RGB(255, 64, 112);
+const COLORREF kNativeZapBannerBg = RGB(22, 24, 31);
+
+// The zap banner's own geometry, mirroring the Lua OSD's `draw_zap_banner`
+// (which mirrors Compose's `ZapBanner` padding).
+constexpr int kNativeZapBannerMarginX = 20;
+constexpr int kNativeZapBannerMarginBottom = 18;
+constexpr int kNativeZapBannerPadX = 16;
+constexpr int kNativeZapBannerPadY = 12;
+constexpr int kNativeZapBannerRadius = 12;
+
 // The two floating surfaces. Named because their corners are rounded twice —
 // once by GDI's fill, once by [ApplyRoundRectAlphaMask] cutting the alpha —
 // and the two radii have to agree.
@@ -1048,8 +1223,15 @@ bool HasLiveEpg() {
 
 int BottomControlsHeight() {
   if (g_native_control_state.is_live) {
-    return HasLiveEpg() ? kNativeBottomControlsHeightLiveEpg
-                        : kNativeBottomControlsHeightLive;
+    int height = HasLiveEpg() ? kNativeBottomControlsHeightLiveEpg
+                              : kNativeBottomControlsHeightLive;
+    // The identity run adds its own row above the strip, on the same terms as
+    // the strip itself: only when there is something to say (see
+    // ShowsChannelIdentity), so a non-zapping session's bar is unchanged.
+    if (ShowsChannelIdentity()) {
+      height += kNativeIdentityRowHeight + kNativeIdentityRowGap;
+    }
+    return height;
   }
   return kNativeBottomControlsHeightVod;
 }
@@ -1084,12 +1266,15 @@ struct BottomLayout {
   RECT progress; // thin slider track
   RECT position_text;
   RECT duration_text;
-  // Live EPG row (programme title + progress + next), where the scrubber sits.
+  // The zap identity run ("12 · BBC One"), above the strip. Drawn only while
+  // it says something the top bar's title does not.
+  bool has_identity = false;
+  RECT identity;
+  // Live EPG strip (programme title + progress + next), where the scrubber
+  // sits. One band: DrawLiveEpgStrip lays its three rows out inside it, so the
+  // bar and the zap banner cannot end up with two different strips.
   bool has_epg = false;
-  RECT epg_title;
-  RECT epg_time;
-  RECT epg_progress;
-  RECT epg_next;
+  RECT epg;
   bool has_speed = false;
   bool has_audio = false;
   bool has_subtitles = false;
@@ -1190,16 +1375,19 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
         RectFrom(16 + time_w + 12, sy - 3, right - 16 - time_w - 12, sy + 3);
   }
 
+  // The live block sits in the upper part of the (taller) live bar, well clear
+  // of the control row below: the identity run first when there is one, then
+  // the programme strip.
+  int ey = by + 18;
+  l.has_identity = ShowsChannelIdentity();
+  if (l.has_identity) {
+    l.identity = RectFrom(16, ey, MaxInt(20, right - 16),
+                          ey + kNativeIdentityRowHeight);
+    ey += kNativeIdentityRowHeight + kNativeIdentityRowGap;
+  }
   l.has_epg = HasLiveEpg();
   if (l.has_epg) {
-    // Programme row sits in the upper part of the (taller) live bar, well clear
-    // of the control row below: title + time, then progress, then next.
-    const int ey = by + 18;
-    const int time_w = 110;
-    l.epg_title = RectFrom(16, ey, MaxInt(20, right - 16 - time_w - 10), ey + 20);
-    l.epg_time = RectFrom(right - 16 - time_w, ey, right - 16, ey + 20);
-    l.epg_progress = RectFrom(16, ey + 30, right - 16, ey + 30 + 6);
-    l.epg_next = RectFrom(16, ey + 46, right - 16, ey + 46 + 18);
+    l.epg = RectFrom(16, ey, MaxInt(20, right - 16), ey + kNativeEpgStripHeight);
   }
   return l;
 }
@@ -1635,6 +1823,295 @@ std::wstring ShortSpeed(const std::string &id) {
   return number + L"×";
 }
 
+std::wstring TrimmedText(const std::wstring &value) {
+  const wchar_t *kSpace = L" \t\r\n";
+  const size_t begin = value.find_first_not_of(kSpace);
+  if (begin == std::wstring::npos) {
+    return L"";
+  }
+  const size_t end = value.find_last_not_of(kSpace);
+  return value.substr(begin, end - begin + 1);
+}
+
+int MeasureTextWidth(HDC hdc, const std::wstring &text, HFONT font) {
+  HFONT old_font = static_cast<HFONT>(SelectObject(hdc, font));
+  SIZE size{};
+  GetTextExtentPoint32(hdc, text.c_str(), static_cast<int>(text.size()),
+                       &size);
+  SelectObject(hdc, old_font);
+  return static_cast<int>(size.cx);
+}
+
+// `12 · BBC One`, or just the name when the provider gave no number. Falls
+// back to the route's own title when the cursor has no name yet, exactly as
+// Kotlin `channelIdentityLabel()` and the Lua OSD's
+// `channel_identity_label()` do.
+std::wstring ChannelIdentityLabel() {
+  const NativeZapState &z = g_native_zap_state;
+  std::wstring name = TrimmedText(z.channel_name);
+  if (name.empty()) {
+    name = TrimmedText(g_native_control_state.title);
+  }
+  if (name.empty()) {
+    return L"";
+  }
+  if (!z.has_channel_number) {
+    return name;
+  }
+  return std::to_wstring(z.channel_number) + L" \x00B7 " + name;
+}
+
+// [aa] picks between the antialiased compositor and GDI's own aliased fill.
+// The split is not cosmetic: FillRoundRectAA blends against the destination's
+// alpha, which is only correct over pixels this overlay wrote itself (the
+// bars' gradient backdrop). Inside a floating panel the background came from
+// GDI with its alpha still at 0 — NormalizeNativeControlBitmapAlpha fixes that
+// at the very end of the paint — so blending there would read the panel as
+// transparent. Same split PaintListMenu and PaintInfoPanel already make.
+void FillRoundRectMaybeAA(HDC hdc, const RECT &rect, int radius,
+                          COLORREF color, bool aa) {
+  if (aa) {
+    FillRoundRectAA(hdc, rect, radius, color);
+  } else {
+    FillRoundRect(hdc, rect, radius, color);
+  }
+}
+
+// The three-row live EPG strip — programme title with its HH:mm – HH:mm
+// right-aligned opposite it, a thin elapsed-progress bar, then
+// "Next · HH:mm – HH:mm · title" — drawn between [x1] and [x2] with its top
+// edge at [top_y]. Returns the height it consumed.
+//
+// Shared by the bottom bar and the zap banner for exactly the reason Kotlin
+// shares one composable between `BottomBar` and `ZapBanner`, and the Lua OSD
+// one `draw_live_epg_strip`: a channel seen through the banner and the same
+// channel seen with the chrome up must read identically. This is the fifth
+// surface that has to agree about this strip (docs/player.md), and a second
+// copy inside one file would be the easiest of all of them to let drift.
+int DrawLiveEpgStrip(HDC hdc, int x1, int x2, int top_y,
+                     const std::wstring &now_title, double now_start_ms,
+                     double now_stop_ms, const std::wstring &next_title,
+                     double next_start_ms, double next_stop_ms, bool aa) {
+  const int time_w = 110;
+  const int title_right = MaxInt(x1 + 4, x2 - time_w - 10);
+  HFONT title_font = UiFont(17, FW_SEMIBOLD);
+  DrawTextWithFont(hdc, now_title,
+                   RectFrom(x1, top_y, title_right, top_y + 20),
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                   title_font, kNativeTextHiColor);
+  DeleteObject(title_font);
+
+  HFONT meta_font = UiFont(16, FW_SEMIBOLD);
+  const std::wstring range = FormatClockHm(now_start_ms) + L" \x2013 " +
+                             FormatClockHm(now_stop_ms);
+  DrawTextWithFont(hdc, range,
+                   RectFrom(MaxInt(x1, x2 - time_w), top_y, x2, top_y + 20),
+                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE, meta_font,
+                   RGB(184, 190, 204));
+
+  // Programme progress: a thin track + elapsed fill (no thumb).
+  const double span = std::max(1.0, now_stop_ms - now_start_ms);
+  const double progress = std::clamp(
+      (static_cast<double>(NowMs()) - now_start_ms) / span, 0.0, 1.0);
+  const int track_cy = top_y + 33;
+  FillRoundRectMaybeAA(hdc, RectFrom(x1, track_cy - 3, x2, track_cy + 3), 6,
+                       RGB(39, 43, 58), aa);
+  const int fill_x = x1 + static_cast<int>((x2 - x1) * progress);
+  if (fill_x > x1) {
+    FillRoundRectMaybeAA(hdc, RectFrom(x1, track_cy - 3, fill_x, track_cy + 3),
+                         6, kNativeAccentColor, aa);
+  }
+
+  if (!next_title.empty()) {
+    // "Next · HH:mm – HH:mm · title" — the one next-programme format the app
+    // uses (Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
+    // `_liveEpgStrip`, the Lua OSD).
+    const std::wstring next_range = FormatClockHm(next_start_ms) +
+                                    L" \x2013 " + FormatClockHm(next_stop_ms);
+    DrawTextWithFont(hdc, L"Next \x00B7 " + next_range + L" \x00B7 " + next_title,
+                     RectFrom(x1, top_y + 46, x2, top_y + 64),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     meta_font, RGB(184, 190, 204));
+  }
+  DeleteObject(meta_font);
+  return kNativeEpgStripHeight;
+}
+
+// `12 · BBC One`, with the half-typed channel number leading it (accent, and
+// the headline while it exists — mid-entry the number being built is the thing
+// the user is looking at) and either a transient note or the `position/total`
+// place in the launch range trailing it.
+//
+// Shared by the bottom bar and the banner, field for field with Kotlin
+// `ChannelIdentityRow` and the Lua OSD's `draw_channel_identity_row`.
+void DrawChannelIdentityRow(HDC hdc, const RECT &row) {
+  const NativeZapState &z = g_native_zap_state;
+  const std::wstring identity = ChannelIdentityLabel();
+  if (identity.empty() && z.digits.empty() && z.message.empty()) {
+    return;
+  }
+  int x = static_cast<int>(row.left);
+  const int right = static_cast<int>(row.right);
+
+  if (!z.digits.empty()) {
+    HFONT digit_font = UiFont(24, FW_BOLD);
+    const int width = MeasureTextWidth(hdc, z.digits, digit_font);
+    DrawTextWithFont(hdc, z.digits,
+                     RectFrom(x, row.top, x + width, row.bottom),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE, digit_font,
+                     kNativeAccentColor);
+    DeleteObject(digit_font);
+    x += width + 12;
+  }
+
+  // The trailing run is measured first: it is right-anchored, and the identity
+  // between them takes whatever is left (Compose's `weight(1f)`).
+  std::wstring trailing;
+  COLORREF trailing_color = kNativeTextLoColor;
+  if (!z.message.empty()) {
+    trailing = z.message;
+    trailing_color = kNativeLiveColor;
+  } else if (z.position > 0 && z.total > 0) {
+    trailing = std::to_wstring(z.position) + L"/" + std::to_wstring(z.total);
+  }
+  int trailing_w = 0;
+  HFONT trailing_font = UiFont(12, FW_NORMAL);
+  if (!trailing.empty()) {
+    trailing_w = MeasureTextWidth(hdc, trailing, trailing_font) + 8;
+    DrawTextWithFont(hdc, trailing,
+                     RectFrom(MaxInt(x, right - trailing_w), row.top, right,
+                              row.bottom),
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, trailing_font,
+                     trailing_color);
+  }
+  DeleteObject(trailing_font);
+
+  if (!identity.empty()) {
+    HFONT font = UiFont(16, FW_SEMIBOLD);
+    DrawTextWithFont(hdc, identity,
+                     RectFrom(x, row.top, MaxInt(x + 40, right - trailing_w),
+                              row.bottom),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                     font, kNativeTextHiColor);
+    DeleteObject(font);
+  }
+}
+
+// The cursor channel's own guide, which is what the banner shows — not the
+// playing channel's (NativeControlState's `epg_now_*`).
+bool ZapBannerHasEpg() {
+  const NativeZapState &z = g_native_zap_state;
+  return !z.epg_now_title.empty() &&
+         z.epg_now_stop_ms > z.epg_now_start_ms;
+}
+
+// Where the banner sits: the bottom-bar slot, so a channel change lands where
+// the chrome would have said the same thing. Empty when the window is too
+// small to hold it — every caller checks, and nothing paints or clips to an
+// empty rect (NormalizeNativeControlBitmapAlpha does not bounds-check, so the
+// rect this returns must always be inside the client area).
+RECT ZapBannerRect(const RECT &rect) {
+  int content = kNativeIdentityRowHeight;
+  if (ZapBannerHasEpg()) {
+    content += kNativeIdentityRowGap + kNativeEpgStripHeight;
+  }
+  const int panel_height = content + kNativeZapBannerPadY * 2;
+  const int left = kNativeZapBannerMarginX;
+  const int right = static_cast<int>(rect.right) - kNativeZapBannerMarginX;
+  const int bottom =
+      static_cast<int>(rect.bottom) - kNativeZapBannerMarginBottom;
+  const int top = bottom - panel_height;
+  if (right <= left || top < 0) {
+    return RectFrom(0, 0, 0, 0);
+  }
+  return RectFrom(left, top, right, bottom);
+}
+
+// The banner: what a channel change says while the chrome is hidden. It
+// carries the same two pieces the bar's live block does — the identity run and
+// the EPG strip — rather than a layout of its own, so a channel seen through
+// the banner and the same channel seen with the controls up read identically
+// (Kotlin `ZapBanner`, the Lua OSD's `draw_zap_banner`).
+//
+// A floating panel, so it follows the FillRoundRect + normalize +
+// ApplyRoundRectAlphaMask path the info panel and the list menu use, not the
+// bars' antialiased compositor (see FillRoundRectMaybeAA).
+void PaintZapBanner(HDC hdc, uint32_t *pixels, int width, int height,
+                    const RECT &panel) {
+  if (RectWidth(panel) <= 0 || RectHeight(panel) <= 0) {
+    return;
+  }
+  FillRoundRect(hdc, panel, kNativeZapBannerRadius, kNativeZapBannerBg);
+  const int x1 = static_cast<int>(panel.left) + kNativeZapBannerPadX;
+  const int x2 = static_cast<int>(panel.right) - kNativeZapBannerPadX;
+  if (x2 <= x1) {
+    return;
+  }
+  int y = static_cast<int>(panel.top) + kNativeZapBannerPadY;
+  DrawChannelIdentityRow(hdc,
+                         RectFrom(x1, y, x2, y + kNativeIdentityRowHeight));
+  y += kNativeIdentityRowHeight;
+  if (ZapBannerHasEpg()) {
+    const NativeZapState &z = g_native_zap_state;
+    DrawLiveEpgStrip(hdc, x1, x2, y + kNativeIdentityRowGap, z.epg_now_title,
+                     z.epg_now_start_ms, z.epg_now_stop_ms, z.epg_next_title,
+                     z.epg_next_start_ms, z.epg_next_stop_ms, /*aa=*/false);
+  }
+  // Everything above was GDI; the two passes below read and write the DIB's
+  // bits directly. FillRoundRectAA flushes for itself, but this path never
+  // calls it (`aa=false` throughout), so the flush has to be explicit.
+  GdiFlush();
+  NormalizeNativeControlBitmapAlpha(pixels, width, height, panel,
+                                    kNativeZapBannerBg, 0xFF);
+  ApplyRoundRectAlphaMask(pixels, width, height, panel,
+                          kNativeZapBannerRadius);
+}
+
+// Composites the dirty bands of the cached back-buffer onto the layered
+// window, each as a prcDirty sub-update, instead of re-uploading the whole
+// (mostly transparent) surface every paint. Falls back to a plain blit onto
+// [window_hdc] if UpdateLayeredWindowIndirect refuses.
+//
+// Extracted so the chrome paint and the banner-only paint cannot end up with
+// two different compositing paths.
+void CompositeOverlayBands(HWND hwnd, HDC window_hdc, HDC paint_hdc, int width,
+                           int height,
+                           const std::vector<RECT> &dirty_rects) {
+  HDC screen_dc = GetDC(nullptr);
+  SIZE size = {width, height};
+  POINT pt_src = {0, 0};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  const std::vector<RECT> bands = MergeDirtyRects(dirty_rects);
+  bool composited = true;
+  for (RECT band : bands) {
+    band.left = std::max<LONG>(0, band.left);
+    band.top = std::max<LONG>(0, band.top);
+    band.right = std::min<LONG>(width, band.right);
+    band.bottom = std::min<LONG>(height, band.bottom);
+    if (band.right <= band.left || band.bottom <= band.top) {
+      continue;
+    }
+    UPDATELAYEREDWINDOWINFO info = {};
+    info.cbSize = sizeof(info);
+    info.hdcDst = screen_dc;
+    info.pptDst = nullptr; // don't move the window
+    info.psize = &size;
+    info.hdcSrc = paint_hdc;
+    info.pptSrc = &pt_src;
+    info.pblend = &blend;
+    info.dwFlags = ULW_ALPHA;
+    info.prcDirty = &band;
+    if (!UpdateLayeredWindowIndirect(hwnd, &info)) {
+      composited = false;
+      break;
+    }
+  }
+  if (!composited) {
+    BitBlt(window_hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
+  }
+  ReleaseDC(nullptr, screen_dc);
+}
+
 void PaintInfoPanel(HDC hdc, const RECT &rect) {
   const auto rows = InfoRows();
   if (rows.empty()) {
@@ -1771,6 +2248,33 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // aliased `RoundRect`. Scoped, so an early return below cannot leave a
   // dangling buffer pointer behind for the next paint.
   const ScopedOverlayPaintTarget paint_target(pixels, width, height);
+
+  // Chrome hidden: the overlay window is up only to carry the zap banner (see
+  // FlutterWindow::NativeOverlayTargetVisible), so it draws that and nothing
+  // else — no bars, no scrims. Anything the previous paint left behind is
+  // still cleared, which is what takes the bars away on the transition.
+  if (!g_native_controls_chrome_visible) {
+    const RECT banner =
+        ZapBannerShown() ? ZapBannerRect(rect) : RectFrom(0, 0, 0, 0);
+    std::vector<RECT> current_rects;
+    if (RectWidth(banner) > 0 && RectHeight(banner) > 0) {
+      current_rects.push_back(banner);
+    }
+    std::vector<RECT> dirty_rects = current_rects;
+    dirty_rects.insert(dirty_rects.end(), buffer.prev_rects.begin(),
+                       buffer.prev_rects.end());
+    for (const RECT &r : dirty_rects) {
+      ZeroDibRect(pixels, width, height, r);
+    }
+    SetBkMode(paint_hdc, TRANSPARENT);
+    if (!current_rects.empty()) {
+      PaintZapBanner(paint_hdc, pixels, width, height, banner);
+    }
+    CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
+    buffer.prev_rects = std::move(current_rects);
+    EndPaint(hwnd, &paint);
+    return;
+  }
 
   const RECT top = TopControlsRect(rect);
   const RECT bottom = BottomControlsRect(rect);
@@ -1925,47 +2429,19 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DeleteObject(time_font);
   }
 
+  // The identity run and the strip are the same two pieces the zap banner
+  // draws, through the same two functions — see DrawChannelIdentityRow and
+  // DrawLiveEpgStrip.
+  if (l.has_identity) {
+    DrawChannelIdentityRow(paint_hdc, l.identity);
+  }
   if (l.has_epg) {
     const auto &s = g_native_control_state;
-    HFONT epg_title_font = UiFont(17, FW_SEMIBOLD);
-    DrawTextWithFont(paint_hdc, s.epg_now_title, l.epg_title,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                     epg_title_font, RGB(238, 240, 247));
-    HFONT epg_meta_font = UiFont(16, FW_SEMIBOLD);
-    const std::wstring range = FormatClockHm(s.epg_now_start_ms) + L" – " +
-                               FormatClockHm(s.epg_now_stop_ms);
-    DrawTextWithFont(paint_hdc, range, l.epg_time,
-                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE, epg_meta_font,
-                     RGB(184, 190, 204));
-    // Programme progress: a thin track + elapsed fill (no thumb).
-    const double span = std::max(1.0, s.epg_now_stop_ms - s.epg_now_start_ms);
-    const double prog = std::clamp(
-        (static_cast<double>(NowMs()) - s.epg_now_start_ms) / span, 0.0, 1.0);
-    const int ecy = (l.epg_progress.top + l.epg_progress.bottom) / 2;
-    FillRoundRectAA(paint_hdc,
-                    RectFrom(l.epg_progress.left, ecy - 3,
-                             l.epg_progress.right, ecy + 3),
-                    6, RGB(39, 43, 58));
-    const int fill_x =
-        l.epg_progress.left + static_cast<int>(RectWidth(l.epg_progress) * prog);
-    FillRoundRectAA(paint_hdc,
-                    RectFrom(l.epg_progress.left, ecy - 3, fill_x, ecy + 3), 6,
-                    RGB(123, 108, 246));
-    if (!s.epg_next_title.empty()) {
-      // "Next · HH:mm – HH:mm · title" — the one next-programme format the app
-      // uses (Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
-      // `_liveEpgStrip`, the Lua OSD). This overlay was the only one writing
-      // "Next: title (HH:mm - HH:mm)".
-      const std::wstring next_range = FormatClockHm(s.epg_next_start_ms) + L" \x2013 " +
-                                      FormatClockHm(s.epg_next_stop_ms);
-      DrawTextWithFont(paint_hdc,
-                       L"Next \x00B7 " + next_range + L" \x00B7 " + s.epg_next_title,
-                       l.epg_next,
-                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                       epg_meta_font, RGB(184, 190, 204));
-    }
-    DeleteObject(epg_title_font);
-    DeleteObject(epg_meta_font);
+    DrawLiveEpgStrip(paint_hdc, static_cast<int>(l.epg.left),
+                     static_cast<int>(l.epg.right),
+                     static_cast<int>(l.epg.top), s.epg_now_title,
+                     s.epg_now_start_ms, s.epg_now_stop_ms, s.epg_next_title,
+                     s.epg_next_start_ms, s.epg_next_stop_ms, /*aa=*/true);
   }
 
   if (l.has_speed) {
@@ -2060,39 +2536,7 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   // Composite only the dirty bands (current + previously-touched control rects,
   // merged), each as a prcDirty sub-update of the layered surface, instead of
   // re-uploading the whole (mostly transparent) window every paint.
-  HDC screen_dc = GetDC(nullptr);
-  SIZE size = {width, height};
-  POINT pt_src = {0, 0};
-  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-  const std::vector<RECT> bands = MergeDirtyRects(dirty_rects);
-  bool composited = true;
-  for (RECT band : bands) {
-    band.left = std::max<LONG>(0, band.left);
-    band.top = std::max<LONG>(0, band.top);
-    band.right = std::min<LONG>(width, band.right);
-    band.bottom = std::min<LONG>(height, band.bottom);
-    if (band.right <= band.left || band.bottom <= band.top) {
-      continue;
-    }
-    UPDATELAYEREDWINDOWINFO info = {};
-    info.cbSize = sizeof(info);
-    info.hdcDst = screen_dc;
-    info.pptDst = nullptr; // don't move the window
-    info.psize = &size;
-    info.hdcSrc = paint_hdc;
-    info.pptSrc = &pt_src;
-    info.pblend = &blend;
-    info.dwFlags = ULW_ALPHA;
-    info.prcDirty = &band;
-    if (!UpdateLayeredWindowIndirect(hwnd, &info)) {
-      composited = false;
-      break;
-    }
-  }
-  if (!composited) {
-    BitBlt(hdc, 0, 0, width, height, paint_hdc, 0, 0, SRCCOPY);
-  }
-  ReleaseDC(nullptr, screen_dc);
+  CompositeOverlayBands(hwnd, hdc, paint_hdc, width, height, dirty_rects);
 
   // Keep the cached DIB/DC; remember this paint's rects for the next clear.
   buffer.prev_rects = std::move(current_rects);
@@ -2248,6 +2692,30 @@ void EndNativeSliderDrag(HWND hwnd, bool commit, int x) {
               reinterpret_cast<WPARAM>(new std::string(command)), 0);
 }
 
+bool IsKeyRepeat(LPARAM lparam) { return ((lparam >> 30) & 1) != 0; }
+
+// Whether this press belongs to zapping, and so must **not** be treated as the
+// "user activity" that reveals the chrome.
+//
+// Load-bearing, not an optimisation: both child window procedures *post*
+// kNativeVideoSurfaceInputMessage ahead of the key itself, and that message
+// calls ShowNativeControls(true). Posted messages are processed in order, so
+// without this check the chrome would already be up by the time
+// MessageHandler decided the key was an arrow — and the arrows only zap while
+// it is hidden, which means zapping could never start from a remote at all.
+// The key-up is suppressed on the same terms, or the release would reveal what
+// the press deliberately did not.
+bool IsZapKeyPress(UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message != WM_KEYDOWN && message != WM_KEYUP) {
+    return false;
+  }
+  const bool is_repeat = message == WM_KEYDOWN && IsKeyRepeat(lparam);
+  return iptvs::DecideZapKey(static_cast<int>(wparam), ZapActive(),
+                             g_native_controls_chrome_visible,
+                             ZapDigitsPending(), is_repeat)
+      .consumed();
+}
+
 LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
                                        LPARAM lparam) noexcept {
   switch (message) {
@@ -2272,7 +2740,9 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
   case WM_SYSKEYDOWN:
   case WM_SYSKEYUP:
     if (HWND parent = NativeControlsOwner(hwnd)) {
-      PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+      if (!IsZapKeyPress(message, wparam, lparam)) {
+        PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+      }
       PostMessage(parent, message, wparam, lparam);
       return 0;
     }
@@ -2424,7 +2894,9 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
   case WM_SYSKEYDOWN:
   case WM_SYSKEYUP:
     if (HWND parent = GetParent(hwnd)) {
-      PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+      if (!IsZapKeyPress(message, wparam, lparam)) {
+        PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
+      }
       PostMessage(parent, message, wparam, lparam);
       return 0;
     }
@@ -2534,6 +3006,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  ResetZapBanner();
   SetNativeWindowFullscreen(false);
   DestroyNativeControls();
   DestroyNativeVideoSurface();
@@ -2549,6 +3022,31 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
   if (message == WM_KEYDOWN && native_video_surface_ != nullptr) {
+    // In-player live zapping claims its keys before every other branch on
+    // this surface — including the Escape/Back one below, because a
+    // half-typed channel number is the first rung of this screen's Back
+    // ladder (docs/tv-navigation.md "In-player navigation"). One physical
+    // press must not be read once here and again by the overlay's focus ring,
+    // which is the same Activity-boundary placement Android gives
+    // `ZapKeyPolicy`.
+    const iptvs::ZapKeyDecision zap = iptvs::DecideZapKey(
+        static_cast<int>(wparam), ZapActive(), native_controls_visible_,
+        ZapDigitsPending(), IsKeyRepeat(lparam));
+    if (zap.consumed()) {
+      const std::string command = zap.command();
+      if (!command.empty()) {
+        if (zap.action == iptvs::ZapKeyAction::kDigit) {
+          g_native_zap_digits_optimistic = true;
+        }
+        NotifyNativeControlCommand(command);
+      }
+      // Deliberately no ShowNativeControls(true): revealing the chrome on the
+      // first Up would hand the second Up to the control row instead of the
+      // next channel, which is the opposite of what the key was pressed for.
+      // The banner is what acknowledges the press.
+      return 0;
+    }
+
     if (wparam == VK_ESCAPE) {
       ShowNativeControls(true);
       NotifyNativeControlCommand("back");
@@ -2726,6 +3224,11 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       if (--native_video_resync_passes_ <= 0) {
         KillTimer(hwnd, kNativeVideoResyncTimer);
       }
+      return 0;
+    }
+    if (wparam == kNativeZapBannerTimer) {
+      KillTimer(hwnd, kNativeZapBannerTimer);
+      HideZapBanner();
       return 0;
     }
     if (wparam == kNativeControlsHideTimer) {
@@ -3010,8 +3513,15 @@ void FlutterWindow::ResizeNativeControls() {
   BringNativeControlsToFront();
 }
 
+// Whether the overlay *window* should be on screen. Wider than
+// native_controls_visible_, which is the chrome: with the chrome hidden the
+// window is still up while the zap banner has something to say.
+bool FlutterWindow::NativeOverlayTargetVisible() const {
+  return native_controls_visible_ || ZapBannerShown();
+}
+
 void FlutterWindow::BringNativeControlsToFront() {
-  if (!native_controls_visible_) {
+  if (!NativeOverlayTargetVisible()) {
     return;
   }
   if (native_controls_overlay_) {
@@ -3029,6 +3539,28 @@ void FlutterWindow::UpdateNativeControlsRegion() {
   if (RectWidth(rect) <= 0 || RectHeight(rect) <= 0) {
     return;
   }
+  if (!native_controls_visible_) {
+    // Chrome hidden: the overlay exists only to carry the zap banner, so the
+    // clip region is the banner's own rect. Without this the banner would be
+    // clipped away by the bars' region and never appear at all — and anything
+    // outside it must stay unpainted, because the region is also what keeps
+    // the rest of the window out of the way.
+    const RECT banner =
+        ZapBannerShown() ? ZapBannerRect(rect) : RectFrom(0, 0, 0, 0);
+    // CreateRoundRectRgn's last two arguments are the corner *ellipse* size,
+    // i.e. twice the radius — the same conversion FillRoundRect makes, so the
+    // clip follows the painted curve instead of cutting inside it.
+    HRGN banner_region =
+        (RectWidth(banner) > 0 && RectHeight(banner) > 0)
+            ? CreateRoundRectRgn(banner.left, banner.top, banner.right,
+                                 banner.bottom, kNativeZapBannerRadius * 2,
+                                 kNativeZapBannerRadius * 2)
+            : CreateRectRgn(0, 0, 0, 0);
+    SetWindowRgn(native_controls_overlay_, banner_region, FALSE);
+    native_controls_region_dirty_ = false;
+    return;
+  }
+
   const RECT top = TopControlsRect(rect);
   const RECT bottom = BottomControlsRect(rect);
   HRGN region = CreateRectRgn(top.left, top.top, top.right, top.bottom);
@@ -3081,6 +3613,16 @@ bool FlutterWindow::IsCursorOverNativeControls() const {
 void FlutterWindow::ShowNativeControls(bool visible) {
   const bool visibility_changed = native_controls_visible_ != visible;
   native_controls_visible_ = visible;
+  // The free functions in this file's anonymous namespace (the paint, the key
+  // policy) need the chrome's state, and the overlay window's own visibility
+  // no longer answers that question — the zap banner keeps it up with the
+  // chrome down.
+  g_native_controls_chrome_visible = visible;
+  if (visibility_changed) {
+    // The chrome and the banner clip to different regions, so every crossing
+    // has to rebuild it.
+    native_controls_region_dirty_ = true;
+  }
   if (!visible) {
     native_ignore_input_until_ = GetTickCount64() + 650;
     if (g_native_control_state.open_menu != NativeMenuKind::kNone ||
@@ -3099,9 +3641,17 @@ void FlutterWindow::ShowNativeControls(bool visible) {
   const bool currently_visible =
       native_controls_overlay_ &&
       IsWindowVisible(native_controls_overlay_) != FALSE;
-  if (visibility_changed || currently_visible != visible ||
+  if (visibility_changed ||
+      currently_visible != NativeOverlayTargetVisible() ||
       native_controls_region_dirty_) {
     ApplyNativeControlsVisibility();
+  }
+  if (visibility_changed && NativeOverlayTargetVisible()) {
+    // The overlay window stays up across this crossing — the zap banner keeps
+    // it there with the chrome down — so what is composited on it is now the
+    // wrong half, and the region has just been rebuilt to match the other
+    // one. An auto-hide has nothing else that would repaint it.
+    InvalidateNativeControls();
   }
   if (!visible && visibility_changed) {
     if (native_video_surface_) {
@@ -3128,19 +3678,33 @@ void FlutterWindow::ApplyNativeControlsVisibility() {
   if (native_controls_region_dirty_) {
     UpdateNativeControlsRegion();
   }
+  const bool target_visible = NativeOverlayTargetVisible();
+  // While only the banner is drawn the overlay is decoration, not chrome: it
+  // has no hit targets, and swallowing the pointer over its band would stop
+  // a mouse move there from reaching the video surface — whose WM_MOUSEMOVE
+  // is the only thing that reveals the controls.
+  const LONG_PTR ex_style =
+      GetWindowLongPtr(native_controls_overlay_, GWL_EXSTYLE);
+  const LONG_PTR wanted_ex_style =
+      (target_visible && !native_controls_visible_)
+          ? (ex_style | WS_EX_TRANSPARENT)
+          : (ex_style & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+  if (wanted_ex_style != ex_style) {
+    SetWindowLongPtr(native_controls_overlay_, GWL_EXSTYLE, wanted_ex_style);
+  }
   const bool currently_visible =
       IsWindowVisible(native_controls_overlay_) != FALSE;
-  if (currently_visible != native_controls_visible_) {
+  if (currently_visible != target_visible) {
     ShowWindow(native_controls_overlay_,
-               native_controls_visible_ ? SW_SHOWNOACTIVATE : SW_HIDE);
-    if (native_controls_visible_) {
+               target_visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (target_visible) {
       BringNativeControlsToFront();
     }
   }
 }
 
 void FlutterWindow::InvalidateNativeControls(bool include_subtitles) {
-  if (native_controls_visible_ && native_controls_overlay_) {
+  if (NativeOverlayTargetVisible() && native_controls_overlay_) {
     InvalidateRect(native_controls_overlay_, nullptr, FALSE);
     UpdateWindow(native_controls_overlay_);
   }
@@ -3230,6 +3794,8 @@ void FlutterWindow::UpdateNativeControlState(
       args, "audioChannels", g_native_control_state.audio_channels);
   g_native_control_state.source_name =
       EncodableStringArg(args, "sourceName", g_native_control_state.source_name);
+  g_native_control_state.zap_enabled =
+      EncodableBoolArg(args, "zapEnabled", g_native_control_state.zap_enabled);
   // EPG now/next ride along on every setControlState, so default to empty: that
   // clears them for VOD and keeps live in sync.
   g_native_control_state.epg_now_title =
@@ -3266,10 +3832,18 @@ void FlutterWindow::UpdateNativeControlState(
     native_controls_region_dirty_ = true;
   }
 
-  native_controls_pinned_ =
-      !g_native_control_state.playing || ControlsPinnedByOverlay();
+  // A zap deliberately stops the stream between channels (`_zapStopCurrent`),
+  // so `playing` goes false for the length of the settle. Without this the
+  // paused-media reveal below would throw the chrome up on every channel
+  // change — taking the banner down with it (the two are mutually exclusive)
+  // and handing the arrows back to the control row mid-zap, which is the one
+  // moment the user is certainly still holding one.
+  const bool zap_settling = g_native_zap_state.settling && ZapActive();
+  const bool paused = !g_native_control_state.playing && !zap_settling;
+
+  native_controls_pinned_ = paused || ControlsPinnedByOverlay();
   if (native_video_surface_) {
-    if (!g_native_control_state.playing) {
+    if (paused) {
       KillTimer(GetHandle(), kNativeControlsHideTimer);
       ShowNativeControls(true);
     } else if (ControlsPinnedByOverlay()) {
@@ -3280,6 +3854,83 @@ void FlutterWindow::UpdateNativeControlState(
   }
   ApplyNativeControlsVisibility();
   InvalidateNativeControls();
+}
+
+// The inbound half of `setZapBanner` (docs/player.md "Live zapping"). Its own
+// method, never folded into setControlState: that path is coalesced at 2 Hz
+// and a banner has to track every press.
+void FlutterWindow::UpdateZapBanner(const flutter::EncodableValue *args) {
+  NativeZapState &z = g_native_zap_state;
+  z.has_banner = true;
+  // Absent and zero are different answers here: `bannerPayload` omits
+  // `channelNumber` entirely for a channel the provider gave no number for,
+  // and the identity run reads "BBC One" rather than "0 · BBC One" for it.
+  z.has_channel_number = EncodableHasKey(args, "channelNumber");
+  z.channel_number = EncodableIntArg(args, "channelNumber", 0);
+  z.channel_name = EncodableStringArg(args, "channelName", L"");
+  z.digits = EncodableStringArg(args, "digits", L"");
+  z.message = EncodableStringArg(args, "message", L"");
+  z.settling = EncodableBoolArg(args, "settling", false);
+  z.position = EncodableIntArg(args, "position", 0);
+  z.total = EncodableIntArg(args, "total", 0);
+  // Every field defaults to empty rather than to what was there before: the
+  // payload describes the cursor's channel in full, so a channel with no
+  // guide must clear the last one's rather than inherit it.
+  z.epg_now_title = EncodableStringArg(args, "epgNowTitle", L"");
+  z.epg_now_start_ms = EncodableDoubleArg(args, "epgNowStartMs", 0.0);
+  z.epg_now_stop_ms = EncodableDoubleArg(args, "epgNowStopMs", 0.0);
+  z.epg_next_title = EncodableStringArg(args, "epgNextTitle", L"");
+  z.epg_next_start_ms = EncodableDoubleArg(args, "epgNextStartMs", 0.0);
+  z.epg_next_stop_ms = EncodableDoubleArg(args, "epgNextStopMs", 0.0);
+  z.visible = true;
+  // The authoritative buffer has arrived; drop the optimistic mirror the key
+  // ring set when it dispatched the digit.
+  g_native_zap_digits_optimistic = false;
+
+  if (HWND hwnd = GetHandle()) {
+    // Restart rather than stack: each press gets the full window.
+    KillTimer(hwnd, kNativeZapBannerTimer);
+    SetTimer(hwnd, kNativeZapBannerTimer, kNativeZapBannerVisibleMs, nullptr);
+  }
+  // Two reasons at once, both region-invalidating: the banner's own rect grows
+  // and shrinks with whether the cursor channel has a guide, and the bottom
+  // bar's height moves with the identity run (BottomControlsHeight).
+  native_controls_region_dirty_ = true;
+  ApplyNativeControlsVisibility();
+  InvalidateNativeControls();
+}
+
+// The 3 s timer expiring. A half-typed number or a transient note outlives it
+// (ZapBannerShown), so this is a repaint request, not an unconditional hide.
+void FlutterWindow::HideZapBanner() {
+  if (!g_native_zap_state.visible) {
+    return;
+  }
+  g_native_zap_state.visible = false;
+  native_controls_region_dirty_ = true;
+  // Repaint *before* hiding, and directly rather than through
+  // InvalidateNativeControls (which would now decline, the overlay's target
+  // visibility having just gone false). A layered window keeps whatever was
+  // last composited into it, so one hidden with the banner still on its
+  // surface would flash that banner for a frame the next time the chrome came
+  // up. The paint sees ZapBannerShown() already false, so it clears the band
+  // and composites transparency over it.
+  if (native_controls_overlay_) {
+    InvalidateRect(native_controls_overlay_, nullptr, FALSE);
+    UpdateWindow(native_controls_overlay_);
+  }
+  ApplyNativeControlsVisibility();
+}
+
+// Session teardown. Deliberately *not* called from DestroyNativeControls,
+// which also runs on a fullscreen / mini-player transition (via
+// RecreateNativeControls) — dropping the banner there would leave a held key
+// unacknowledged, and killing the timer without clearing `visible` would
+// leave it up forever.
+void FlutterWindow::ResetZapBanner() {
+  KillTimer(GetHandle(), kNativeZapBannerTimer);
+  ResetNativeZapState();
+  native_controls_region_dirty_ = true;
 }
 
 void FlutterWindow::SetNativeWindowFullscreen(bool fullscreen) {
@@ -3421,6 +4072,7 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
         }
 
         if (call.method_name() == "destroySurface") {
+          ResetZapBanner();
           DestroyNativeControls();
           if (native_video_surface_) {
             ShowWindow(native_video_surface_, SW_HIDE);
@@ -3440,6 +4092,7 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
         }
 
         if (call.method_name() == "prepareExit") {
+          ResetZapBanner();
           SetNativeWindowFullscreen(false);
           SetNativeWindowMiniPlayer(false);
           DestroyNativeControls();
@@ -3469,6 +4122,12 @@ void FlutterWindow::RegisterNativeHdrPlayerChannel() {
 
         if (call.method_name() == "setControlState") {
           UpdateNativeControlState(call.arguments());
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+
+        if (call.method_name() == "setZapBanner") {
+          UpdateZapBanner(call.arguments());
           result->Success(flutter::EncodableValue(true));
           return;
         }
