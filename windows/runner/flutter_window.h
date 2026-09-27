@@ -38,6 +38,9 @@ private:
   void ResizeNativeControls();
   void UpdateNativeControlsRegion();
   void BringNativeControlsToFront();
+  // Whether the overlay *window* should be on screen: the chrome, or — with
+  // the chrome hidden — the in-player zap banner.
+  bool NativeOverlayTargetVisible() const;
   void ShowNativeControls(bool visible);
   void ApplyNativeControlsVisibility();
   void InvalidateNativeControls(bool include_subtitles = true);
@@ -45,6 +48,11 @@ private:
   bool IsCursorOverNativeControls() const;
   void NotifyNativeControlCommand(const std::string &command);
   void UpdateNativeControlState(const flutter::EncodableValue *args);
+  // In-player live zapping (docs/player.md "Live zapping"): the `setZapBanner`
+  // push, its 3 s auto-hide, and the session-teardown reset.
+  void UpdateZapBanner(const flutter::EncodableValue *args);
+  void HideZapBanner();
+  void ResetZapBanner();
   void SetNativeWindowFullscreen(bool fullscreen);
   void SetNativeWindowMiniPlayer(bool mini);
   void RegisterNativeHdrPlayerChannel();
