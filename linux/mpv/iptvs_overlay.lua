@@ -96,6 +96,21 @@ local visible = true
 local info_open = false
 local open_menu = nil
 local hide_timer = nil
+-- ===== Zap banner state =====
+-- Pushed inside `iptvs-state` as `state.zap` (see
+-- LinuxNativeSession.buildOverlayStateCommand). It describes the **cursor's**
+-- channel, which during a held key is ahead of the one playing — that is the
+-- whole point of the banner, and why it cannot reuse the top-level
+-- `epgNow*`/`epgNext*` fields, which describe the playing channel.
+--
+-- Visibility is this script's own business, exactly as it is Compose's on
+-- Android (`PlayerUiState.zapBannerVisible`): Dart says *what* the banner
+-- reads and *when the user last pressed something* (`zap.atMs`), never
+-- whether it is on screen.
+local ZAP_BANNER_VISIBLE_S = 3 -- Kotlin ZAP_BANNER_VISIBLE_MS
+local zap_banner_visible = false
+local zap_banner_at = nil
+local zap_banner_timer = nil
 local hitboxes = {}
 -- Seek/volume track bounds computed once per render() and reused by click(),
 -- so the hit-test geometry can never drift from what render() actually drew.
@@ -183,13 +198,32 @@ local function programme_range(start_ms, stop_ms)
     return string.format('%s – %s', hm_ms(start_ms), hm_ms(stop_ms))
 end
 
+-- Normalises the `epgNow*`/`epgNext*` key run into a strip-shaped table, or
+-- nil when there is no current programme to draw. The identical key run
+-- appears twice in the pushed state — once at the top level for the channel
+-- that is *playing*, once inside `zap` for the one the **cursor** is on — so
+-- this is what lets the one strip renderer serve both.
+local function epg_fields(source)
+    if not source then return nil end
+    local now_title = source.epgNowTitle
+    if now_title == nil or now_title == '' then return nil end
+    return {
+        nowTitle = now_title,
+        nowStartMs = source.epgNowStartMs,
+        nowStopMs = source.epgNowStopMs,
+        nextTitle = source.epgNextTitle,
+        nextStartMs = source.epgNextStartMs,
+        nextStopMs = source.epgNextStopMs,
+    }
+end
+
 -- "Next · HH:MM – HH:MM · title", the third row of the live EPG strip. Same
 -- string Kotlin `LiveEpgStrip`, Swift `playerEpgNextLabel`, Dart
 -- `_liveEpgStrip` and the Windows GDI overlay build.
-local function next_programme_line()
-    if not state.epgNextTitle then return nil end
+local function next_programme_line(epg)
+    if not epg or not epg.nextTitle then return nil end
     return string.format('Next · %s · %s',
-        programme_range(state.epgNextStartMs, state.epgNextStopMs), state.epgNextTitle)
+        programme_range(epg.nextStartMs, epg.nextStopMs), epg.nextTitle)
 end
 
 -- Mirrors Dart's `dynamicRangeLabelFrom` (player_screen.dart). `target` is
@@ -490,6 +524,205 @@ local function draw_reconnect_chip(ass, w)
         dcx + dot_r + gap, cy, font_px, COLOR.textHi, esc(text)))
 end
 
+-- The three-row live EPG strip, drawn between `x1` and `x2` with its top edge
+-- at `top_y`: programme title with its HH:MM – HH:MM right-aligned opposite
+-- it, a thin elapsed-progress bar, then "Next · HH:MM – HH:MM · title".
+-- Structural copy of Kotlin `LiveEpgStrip` / iOS `epgStrip` / the Windows GDI
+-- `epg_*` rects / Dart `_liveEpgStrip`. No hitbox: live has nothing to seek.
+--
+-- Shared by the bottom bar and the zap banner for exactly the reason Kotlin
+-- shares its composable between the two — a channel seen through the banner
+-- and the same channel seen with the chrome up must read identically, and
+-- this is the fifth surface that has to agree about this strip. Returns the
+-- height it consumed.
+local STRIP_HEIGHT_PX = 66
+local function draw_live_epg_strip(ass, x1, x2, top_y, epg)
+    local title_cy = top_y + px(18)
+    local track_cy = top_y + px(38)
+    local next_cy = top_y + px(56)
+    local range = programme_range(epg.nowStartMs, epg.nowStopMs)
+    local range_fs = fs(12)
+    local range_w = measure(range, range_fs)
+    local title_max_w = math.max(px(60), (x2 - x1) - range_w - px(12))
+    ass:new_event()
+    ass:append(string.format(
+        '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
+        x1, title_cy, fs(14), COLOR.white,
+        esc(truncate(epg.nowTitle, fs(14), title_max_w))))
+    ass:new_event()
+    ass:append(string.format(
+        '{\\pos(%.2f,%.2f)\\an6\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
+        x2, title_cy, range_fs, COLOR.textLo, esc(range)))
+
+    local strip_h = px(4)
+    rrect(ass, x1, track_cy - strip_h / 2, x2, track_cy + strip_h / 2,
+        COLOR.line, ALPHA.opaque, strip_h / 2)
+    local progress = 0
+    local now_start, now_stop = epg.nowStartMs, epg.nowStopMs
+    if now_start and now_stop and now_stop > now_start then
+        progress = math.min(1, math.max(0,
+            (os.time() * 1000 - now_start) / (now_stop - now_start)))
+    end
+    local fill_x2 = x1 + (x2 - x1) * progress
+    if fill_x2 > x1 then
+        rrect(ass, x1, track_cy - strip_h / 2, fill_x2, track_cy + strip_h / 2,
+            COLOR.accent, ALPHA.opaque, strip_h / 2)
+    end
+
+    local next_line = next_programme_line(epg)
+    if next_line then
+        ass:new_event()
+        ass:append(string.format(
+            '{\\pos(%.2f,%.2f)\\an4\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
+            x1, next_cy, range_fs, COLOR.textLo,
+            esc(truncate(next_line, range_fs, x2 - x1))))
+    end
+    return px(STRIP_HEIGHT_PX)
+end
+
+-- ===== Zap identity + banner =================================================
+
+local function zap_block()
+    local zap = state.zap
+    if type(zap) ~= 'table' then return nil end
+    return zap
+end
+
+local function zap_digits()
+    local zap = zap_block()
+    local digits = zap and zap.digits
+    if type(digits) ~= 'string' then return '' end
+    return digits
+end
+
+local function zap_message()
+    local zap = zap_block()
+    local message = zap and zap.message
+    if type(message) ~= 'string' or message == '' then return nil end
+    return message
+end
+
+-- `12 · BBC One`, or just the name when the provider gave no number. Mirrors
+-- Kotlin `PlayerUiState.channelIdentityLabel()`, including the fall back to
+-- the window title when the cursor has no name of its own.
+local function channel_identity_label()
+    local zap = zap_block()
+    local name = tostring((zap and zap.channelName) or ''):match('^%s*(.-)%s*$')
+    if name == '' then
+        name = tostring(state.title or ''):match('^%s*(.-)%s*$')
+    end
+    if name == '' then return nil end
+    local number = zap and tonumber(zap.channelNumber)
+    if number then
+        return string.format('%d · %s', math.floor(number), name)
+    end
+    return name
+end
+
+-- Whether the **bottom bar** draws the identity run: only when it says
+-- something the top bar's title does not — a channel number, a half-typed
+-- number, or a transient note. Mirrors Kotlin `showsChannelIdentity`, so a
+-- session that never zaps renders exactly as it did before this existed.
+local function shows_channel_identity()
+    if not state.isLive then return false end
+    local zap = zap_block()
+    if not zap then return false end
+    return zap.channelNumber ~= nil or zap_digits() ~= ''
+        or zap_message() ~= nil
+end
+
+-- `12 · BBC One`, with the half-typed channel number leading it (accent, and
+-- larger: mid-entry the number being built is the thing the user is looking
+-- at) and either a transient note or the `position/total` place in the launch
+-- range trailing it. Mirrors Kotlin `ChannelIdentityRow` field for field.
+-- Returns the height it consumed.
+local IDENTITY_ROW_PX = 26
+local function draw_channel_identity_row(ass, x1, x2, top_y)
+    local zap = zap_block() or {}
+    local cy = top_y + px(IDENTITY_ROW_PX) / 2
+    local digits = zap_digits()
+    local x = x1
+    if digits ~= '' then
+        local digit_fs = fs(24)
+        ass:new_event()
+        ass:append(string.format(
+            '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
+            x, cy, digit_fs, COLOR.accent, esc(digits)))
+        x = x + measure(digits, digit_fs) + px(12)
+    end
+
+    -- The trailing run is measured first: it is right-anchored, and the
+    -- identity between them takes whatever is left (Compose's `weight(1f)`).
+    local trailing, trailing_color = zap_message(), COLOR.live
+    if trailing == nil then
+        local position = tonumber(zap.position) or 0
+        local total = tonumber(zap.total) or 0
+        if position > 0 and total > 0 then
+            trailing = string.format('%d/%d',
+                math.floor(position), math.floor(total))
+            trailing_color = COLOR.textLo
+        end
+    end
+    local trailing_fs = fs(12)
+    local trailing_w = 0
+    if trailing then
+        trailing_w = measure(trailing, trailing_fs) + px(8)
+        ass:new_event()
+        ass:append(string.format(
+            '{\\pos(%.2f,%.2f)\\an6\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
+            x2, cy, trailing_fs, trailing_color, esc(trailing)))
+    end
+
+    local identity = channel_identity_label()
+    if identity then
+        local identity_fs = fs(16)
+        ass:new_event()
+        ass:append(string.format(
+            '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
+            x, cy, identity_fs, COLOR.textHi,
+            esc(truncate(identity, identity_fs,
+                math.max(px(40), x2 - trailing_w - x)))))
+    end
+    return px(IDENTITY_ROW_PX)
+end
+
+-- Whether the banner has anything to acknowledge. A half-typed number and a
+-- transient note outlive the plain 3 s timer on purpose — both are
+-- mid-interaction states, and hiding them would take the feedback away while
+-- the user is still typing. Mirrors Kotlin `showZapBanner`; the `not visible`
+-- half of Kotlin's render gate lives at the call site, same as there.
+local function show_zap_banner()
+    if not state.isLive then return false end
+    if not zap_block() then return false end
+    return zap_banner_visible or zap_digits() ~= '' or zap_message() ~= nil
+end
+
+-- The banner: what a channel change says while the chrome is hidden. It sits
+-- in the bottom bar's slot and carries the same two pieces the bar's live
+-- block does — the identity run and the EPG strip — rather than a layout of
+-- its own, so a channel seen through the banner and the same channel seen
+-- with the controls up read identically (Kotlin `ZapBanner`).
+local function draw_zap_banner(ass, w, h)
+    local epg = epg_fields(zap_block())
+    local pad_h = px(16)
+    local pad_v = px(12)
+    local inner_w = w - px(20) * 2 - pad_h * 2
+    local content_h = px(IDENTITY_ROW_PX) + (epg and (px(10) + px(STRIP_HEIGHT_PX)) or 0)
+    local panel_h = content_h + pad_v * 2
+    local x1 = px(20)
+    local x2 = w - px(20)
+    local y2 = h - px(18)
+    local y1 = y2 - panel_h
+    rrect(ass, x1, y1, x2, y2, COLOR.panel, ALPHA.panel, px(12))
+    local inner_x1 = x1 + pad_h
+    local inner_x2 = inner_x1 + inner_w
+    local y = y1 + pad_v
+    y = y + draw_channel_identity_row(ass, inner_x1, inner_x2, y)
+    if epg then
+        draw_live_epg_strip(ass, inner_x1, inner_x2, y + px(10), epg)
+    end
+end
+
 -- Forward declaration — defined after render() (it keys the position ticker
 -- on/off to `visible`, and every visibility change flows through a render()).
 local sync_tick_timer
@@ -504,15 +737,21 @@ local function render()
     geo = {}
 
     if visible then
-    local has_live_epg = state.isLive
-        and state.epgNowTitle ~= nil and state.epgNowTitle ~= ''
+    local live_epg = state.isLive and epg_fields(state) or nil
+    local has_live_epg = live_epg ~= nil
+    -- The identity run is drawn only when it says something the top bar's
+    -- title does not, exactly as on Android — so a session that never zaps
+    -- keeps the layout it always had.
+    local has_identity = shows_channel_identity()
     local top_h = px(96)
     -- Live-with-guide puts a three-row EPG strip where VOD puts one scrubber
     -- row, so the bar grows by the two extra rows — and only then. px(34) keeps
     -- the same gap between the strip and the control row that the old
     -- single-row live layout had. The scrim below follows `bottom_h`, and the
-    -- list menu already anchors to `by`, so both track this for free.
+    -- list menu already anchors to `by`, so both track this for free. The
+    -- identity run adds its own row above the strip on the same terms.
     local bottom_h = px(112) + (has_live_epg and px(34) or 0)
+        + (has_identity and px(IDENTITY_ROW_PX) or 0)
     gradient_bar(ass, 0, 0, w, top_h, true)
     gradient_bar(ass, 0, h - bottom_h, w, h, false)
 
@@ -579,55 +818,16 @@ local function render()
     local position = tonumber(property('time-pos', 0)) or 0
 
     if state.isLive then
-        -- The live EPG strip, where the VOD scrubber sits: programme title with
-        -- its HH:MM – HH:MM right-aligned opposite it, a thin elapsed-progress
-        -- bar, then "Next · HH:MM – HH:MM · title". Structural copy of Kotlin
-        -- `LiveEpgStrip` / iOS `epgStrip` / the Windows GDI `epg_*` rects /
-        -- Dart `_liveEpgStrip`. Dropped entirely with no guide (a bar frozen at
-        -- 0.0 reads as "still loading"); the LIVE pill is unaffected — it is a
-        -- top-bar badge now. No hitbox: live has nothing to seek.
+        -- Live has no scrubber; the channel identity run and the EPG strip go
+        -- where it sits. The strip is dropped entirely with no guide (a bar
+        -- frozen at 0.0 reads as "still loading"); the LIVE pill is unaffected
+        -- — it is a top-bar badge now.
+        local strip_y = by
+        if has_identity then
+            strip_y = strip_y + draw_channel_identity_row(ass, bpad, w - bpad, by)
+        end
         if has_live_epg then
-            local title_cy = by + px(18)
-            local track_cy = by + px(38)
-            local next_cy = by + px(56)
-            local range = programme_range(state.epgNowStartMs, state.epgNowStopMs)
-            local range_fs = fs(12)
-            local range_w = measure(range, range_fs)
-            local title_max_w =
-                math.max(px(60), (w - 2 * bpad) - range_w - px(12))
-            ass:new_event()
-            ass:append(string.format(
-                '{\\pos(%.2f,%.2f)\\an4\\fnInter\\b1\\fs%.2f\\bord0\\1c&H%s&}%s',
-                bpad, title_cy, fs(14), COLOR.white,
-                esc(truncate(state.epgNowTitle, fs(14), title_max_w))))
-            ass:new_event()
-            ass:append(string.format(
-                '{\\pos(%.2f,%.2f)\\an6\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
-                w - bpad, title_cy, range_fs, COLOR.textLo, esc(range)))
-
-            local strip_h = px(4)
-            local track_x1, track_x2 = bpad, w - bpad
-            rrect(ass, track_x1, track_cy - strip_h / 2, track_x2, track_cy + strip_h / 2,
-                COLOR.line, ALPHA.opaque, strip_h / 2)
-            local progress = 0
-            local now_start, now_stop = state.epgNowStartMs, state.epgNowStopMs
-            if now_start and now_stop and now_stop > now_start then
-                progress = math.min(1, math.max(0, (os.time() * 1000 - now_start) / (now_stop - now_start)))
-            end
-            local fill_x2 = track_x1 + (track_x2 - track_x1) * progress
-            if fill_x2 > track_x1 then
-                rrect(ass, track_x1, track_cy - strip_h / 2, fill_x2, track_cy + strip_h / 2,
-                    COLOR.accent, ALPHA.opaque, strip_h / 2)
-            end
-
-            local next_line = next_programme_line()
-            if next_line then
-                ass:new_event()
-                ass:append(string.format(
-                    '{\\pos(%.2f,%.2f)\\an4\\fnInter\\fs%.2f\\bord0\\1c&H%s&}%s',
-                    bpad, next_cy, range_fs, COLOR.textLo,
-                    esc(truncate(next_line, range_fs, w - 2 * bpad))))
-            end
+            draw_live_epg_strip(ass, bpad, w - bpad, strip_y, live_epg)
         end
     else
         local track_x1, track_x2 = bpad, w - bpad
@@ -836,6 +1036,14 @@ local function render()
 
     end
 
+    -- The zap banner is the mutually-exclusive counterpart of the bottom bar:
+    -- drawn only while the chrome is hidden, which is exactly when zapping is
+    -- used and the only time a keypress has nothing else to acknowledge it.
+    -- Same `showZapBanner && !controlsVisible` gate Compose uses.
+    if not visible and show_zap_banner() then
+        draw_zap_banner(ass, w, h)
+    end
+
     -- Above the controls and independent of their visibility, so an active
     -- reconnect stays on screen even after the bars auto-hide.
     if state.reconnecting then
@@ -920,9 +1128,31 @@ local function click()
     end
 end
 
+-- Registered only while the stream is live (see [sync_zap_bindings]), so VOD
+-- keeps every key mpv gives it. Forward-declared: the state message installs
+-- them and they are defined below, after the key policy they route through.
+local sync_zap_bindings
+
 mp.register_script_message('iptvs-state', function(json)
     local decoded = utils.parse_json(json)
     if decoded then state = decoded end
+    -- Each *press* restarts the banner's own countdown; an unrelated state
+    -- push (an aspect cycle, the reconnect chip) carries the same `atMs` and
+    -- must leave the banner exactly as it found it. Dart advances the stamp
+    -- only when the zap controller itself notified — this is the Lua half of
+    -- Kotlin's `LaunchedEffect(state.zapBannerAtMs)`.
+    local zap = state.zap
+    local at = type(zap) == 'table' and tonumber(zap.atMs) or nil
+    if at and at > 0 and at ~= zap_banner_at then
+        zap_banner_at = at
+        zap_banner_visible = true
+        if zap_banner_timer then zap_banner_timer:kill() end
+        zap_banner_timer = mp.add_timeout(ZAP_BANNER_VISIBLE_S, function()
+            zap_banner_visible = false
+            render()
+        end)
+    end
+    sync_zap_bindings()
     render()
 end)
 
@@ -978,23 +1208,156 @@ local function handle_back()
     end
 end
 
+-- ===== Zap key policy ========================================================
+--
+-- The Lua mirror of Kotlin's `ZapKeyPolicy.decide`
+-- (android/.../player/ZapKeyPolicy.kt) — same vocabulary, same gates, same
+-- repeat rules. It decides only *which command to send*: **Dart owns the
+-- channel list and the cursor** (`lib/player/live_zap_controller.dart`), and
+-- this script has never seen either.
+--
+-- Returns (command, swallow). `swallow` is Kotlin's `Swallow`: the key was
+-- ours and must do nothing — a repeat of a key that makes no sense repeated —
+-- as opposed to a key that keeps its ordinary meaning and falls through.
+--
+-- **No zap key ever reveals the chrome.** Revealing it on the first Up would
+-- hand the second Up to the control row instead of the next channel, which is
+-- the opposite of what was pressed for (docs/tv-navigation.md).
+local function zap_key_command(key, is_repeat)
+    if not state.isLive then return nil, false end
+
+    local digit = key:match('^KP(%d)$') or key:match('^(%d)$')
+    if digit then
+        -- A held digit must not stack the same number four times.
+        if is_repeat then return nil, true end
+        return 'zap:digit:' .. digit, false
+    end
+
+    -- Unambiguous by construction: a dedicated key means one thing whether
+    -- the chrome is up or not. Repeats are fine — holding is how a user
+    -- scans, and Dart's 600 ms settle keeps that to one `create_link`.
+    if key == 'PGUP' then return 'zap:up', false end
+    if key == 'PGDWN' then return 'zap:down', false end
+
+    -- OK commits a half-typed number early and Back clears it, both *above*
+    -- their ordinary meanings and only while there is a number to act on —
+    -- Back in particular must fall through to the Back ladder the moment the
+    -- buffer is empty.
+    if zap_digits() ~= '' then
+        if key == 'ENTER' or key == 'KP_ENTER' then
+            if is_repeat then return nil, true end
+            return 'zap:activate', false
+        end
+        if key == 'ESC' or key == 'BS' then
+            if is_repeat then return nil, true end
+            return 'zap:back', false
+        end
+    end
+
+    -- The arrows are the contested keys: with the chrome up they are volume
+    -- and seek, so zapping only claims them while it is hidden.
+    if visible then return nil, false end
+    if key == 'UP' then return 'zap:up', false end
+    if key == 'DOWN' then return 'zap:down', false end
+    if key == 'RIGHT' then
+        -- Holding it would toggle back and forth; one press, one swap.
+        if is_repeat then return nil, true end
+        return 'zap:prev', false
+    end
+    -- LEFT is reserved for the quick list (Phase 6) and keeps its seek
+    -- meaning until then, rather than being consumed into a silent no-op.
+    return nil, false
+end
+
+-- Binds `key` so the zap policy sees it first and its ordinary meaning runs
+-- only when the policy passes. `complex` is what makes a repeat legible here
+-- (mpv hands the handler `event.event` = down/repeat/up), which is the one
+-- thing a plain binding cannot tell us.
+local function bind_zap_key(key, name, fallback, repeatable)
+    local flags = {complex = true}
+    if repeatable then flags.repeatable = true end
+    mp.add_forced_key_binding(key, name, function(event)
+        local kind = type(event) == 'table' and event.event or 'down'
+        if kind == 'up' then return end
+        local command, swallow = zap_key_command(key, kind == 'repeat')
+        if command then
+            emit(command)
+            return
+        end
+        if swallow then return end
+        if fallback then fallback() end
+    end, flags)
+end
+
 mp.add_forced_key_binding('MOUSE_MOVE', 'iptvs-show', show)
 mp.add_forced_key_binding('MBTN_LEFT', 'iptvs-click', click)
-mp.add_forced_key_binding('ESC', 'iptvs-back', handle_back)
 mp.add_forced_key_binding('MBTN_BACK', 'iptvs-back-btn', handle_back)
 mp.add_forced_key_binding('SPACE', 'iptvs-play', function() emit('playPause') end)
 mp.add_forced_key_binding('LEFT', 'iptvs-left', function() emit('seekBack') end, {repeatable = true})
-mp.add_forced_key_binding('RIGHT', 'iptvs-right', function() emit('seekForward') end, {repeatable = true})
 mp.add_forced_key_binding('f', 'iptvs-fullscreen', function() emit('fullscreen') end)
 mp.add_forced_key_binding('m', 'iptvs-mute', function() emit('mute') end)
-mp.add_forced_key_binding('UP', 'iptvs-vol-up', function()
+-- The four keys zapping *shares* with an existing binding stay registered
+-- unconditionally: their fallback is the behaviour they have always had, so
+-- VOD is untouched without any registration bookkeeping.
+bind_zap_key('ESC', 'iptvs-back', handle_back, false)
+bind_zap_key('RIGHT', 'iptvs-right', function() emit('seekForward') end, true)
+bind_zap_key('UP', 'iptvs-vol-up', function()
     mp.commandv('add', 'volume', 5)
     show()
-end, {repeatable = true})
-mp.add_forced_key_binding('DOWN', 'iptvs-vol-down', function()
+end, true)
+bind_zap_key('DOWN', 'iptvs-vol-down', function()
     mp.commandv('add', 'volume', -5)
     show()
-end, {repeatable = true})
+end, true)
+
+-- The keys zapping *takes over* are registered only while the stream is live.
+-- mpv binds the digit row to contrast/brightness/gamma/saturation/volume and
+-- BS to "reset speed", and a forced binding cannot fall through — so a
+-- permanently registered no-op would quietly delete those on VOD, where
+-- zapping does not exist. Registering per stream is the only way "VOD
+-- unchanged" is literally true.
+local zap_only_bound = false
+sync_zap_bindings = function()
+    local wanted = state.isLive == true
+    if wanted == zap_only_bound then return end
+    zap_only_bound = wanted
+    local keys = {
+        {'PGUP', 'iptvs-zap-pgup', true},
+        {'PGDWN', 'iptvs-zap-pgdwn', true},
+        {'ENTER', 'iptvs-zap-enter', false},
+        {'KP_ENTER', 'iptvs-zap-kp-enter', false},
+        {'BS', 'iptvs-zap-bs', false},
+    }
+    for digit = 0, 9 do
+        table.insert(keys, {tostring(digit), 'iptvs-zap-digit-' .. digit, false})
+    end
+    for digit = 0, 9 do
+        table.insert(keys, {'KP' .. digit, 'iptvs-zap-kp-' .. digit, false})
+    end
+    for _, entry in ipairs(keys) do
+        local key, name, repeatable = entry[1], entry[2], entry[3]
+        if wanted then
+            -- BS is the only one with anything to fall back to: it joins the
+            -- Back ladder once there is no half-typed number to clear.
+            bind_zap_key(key, name, key == 'BS' and handle_back or nil, repeatable)
+        else
+            mp.remove_key_binding(name)
+        end
+    end
+end
+
+-- Test seam for `linux/mpv/overlay_layout_test.lua`: mpv's key bindings are
+-- not reachable from the harness, and the key policy is the half of this
+-- feature a layout render cannot exercise. Each mpv script runs in its own
+-- Lua state, so this global is invisible to everything but the harness.
+_G.iptvs_overlay_test = {
+    zap_key_command = zap_key_command,
+    set_chrome_visible = function(value) visible = value end,
+    -- Lets the harness stand where the 3 s timer has already fired, which is
+    -- the only way to prove that a half-typed number keeps the banner up by
+    -- itself (mpv's timers never run under the harness).
+    set_banner_visible = function(value) zap_banner_visible = value end,
+}
 mp.add_forced_key_binding('i', 'iptvs-info', function()
     info_open = not info_open
     open_menu = nil

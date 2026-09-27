@@ -64,6 +64,7 @@ local mp = {
   observe_property = function() end,
   register_script_message = function(name, fn) script_messages[name] = fn end,
   add_forced_key_binding = function() end,
+  remove_key_binding = function() end,
   add_timeout = function() return {kill = function() end} end,
   add_periodic_timer = function()
     local timer = {kill = function() end}
@@ -115,6 +116,26 @@ local function render_with(state, props)
   pending_state = state
   script_messages['iptvs-state']('{}')
   return ass_events
+end
+
+-- The zap banner only ever draws with the chrome *hidden* (it is the bottom
+-- bar's mutually-exclusive counterpart), and the script owns `visible`
+-- itself, so the harness reaches it through the test seam the overlay
+-- exports rather than by faking a key press.
+local seam = _G.iptvs_overlay_test
+local function render_hidden(state, props)
+  seam.set_chrome_visible(false)
+  local events = render_with(state, props)
+  seam.set_chrome_visible(true)
+  return events
+end
+
+-- Each push must carry a *new* `atMs` to restart the banner's countdown; a
+-- repeated stamp is how an unrelated state push leaves the banner alone.
+local next_at_ms = 0
+local function fresh_at_ms()
+  next_at_ms = next_at_ms + 1000
+  return next_at_ms
 end
 
 -- Every text event carries `\pos(x,y)` and its payload after the closing brace.
@@ -342,6 +363,206 @@ local vod = render_with({
 check(find_text(vod, ' / ') ~= nil, 'VOD renders the position / duration label')
 check(find_text(vod, 'LIVE') == nil, 'VOD renders no LIVE pill')
 check(find_text(vod, 'Next · ') == nil, 'VOD renders no EPG strip')
+
+-- ===== 6. the zap banner =====================================================
+--
+-- Phase 5 of in-player live zapping (docs/player.md "Live zapping"). The
+-- banner is the only acknowledgement a keypress gets while the chrome is
+-- hidden, which is exactly when zapping is used — so "does it draw at all"
+-- is the assertion that matters most, and nothing else in the suite can make
+-- it.
+
+local function zap_state(overrides)
+  local zap = {
+    channelNumber = 12,
+    channelName = 'BBC One HD',
+    sourceName = 'CandyCloud',
+    digits = '',
+    settling = false,
+    position = 3,
+    total = 40,
+    atMs = fresh_at_ms(),
+    epgNowTitle = 'Pointless',
+    epgNowStartMs = NOW_MS - 10 * 60 * 1000,
+    epgNowStopMs = NOW_MS + 35 * 60 * 1000,
+    epgNextTitle = 'The Repair Shop',
+    epgNextStartMs = NOW_MS + 35 * 60 * 1000,
+    epgNextStopMs = NOW_MS + 95 * 60 * 1000,
+  }
+  for k, v in pairs(overrides or {}) do zap[k] = v end
+  local out = {}
+  for k, v in pairs(live_state) do out[k] = v end
+  out.zap = zap
+  return out
+end
+
+local banner = render_hidden(zap_state())
+check(find_text(banner, '12 · BBC One HD') ~= nil,
+  'a zap push draws the identity run while the chrome is hidden')
+check(find_text(banner, '3/40') ~= nil,
+  'the banner shows the cursor place in the launch range')
+check(find_text(banner, 'Pointless') ~= nil,
+  'the banner reuses the live EPG strip for the cursor channel')
+check(find_text(banner, 'The Repair Shop') ~= nil,
+  'the banner strip carries the "Next" row too')
+-- The cursor's guide, not the playing channel's: the two key runs are
+-- deliberately separate, and reading the wrong one is how a held key would
+-- print the programme of the channel being left.
+check(find_text(banner, 'Chicago P.D.') == nil,
+  'the banner prints the cursor guide, not the playing channel\'s')
+
+-- With no zap block at all (a session that never zapped) nothing is drawn,
+-- so a non-zapping Linux session looks exactly as it did before Phase 5.
+check(find_text(render_hidden(live_state), 'BBC One HD') == nil,
+  'no zap push → no banner')
+
+-- ===== 6b. VOD never banners ================================================
+
+local vod_zap = zap_state()
+vod_zap.isLive = false
+check(find_text(render_hidden(vod_zap), 'BBC One HD') == nil,
+  'VOD draws no zap banner even with a zap block pushed')
+
+-- ===== 6c. the digit readout ================================================
+--
+-- Mid-entry the number being built is the thing the user is looking at, so it
+-- leads the row in the accent at a larger size (Kotlin `ChannelIdentityRow`).
+-- It also keeps the banner up past the 3 s timer — hiding it would take the
+-- feedback away while the user is still typing — which is why this push
+-- carries no fresh `atMs` at all.
+
+seam.set_banner_visible(false)
+check(find_text(render_hidden(zap_state({atMs = 0})), 'BBC One HD') == nil,
+  'once the 3 s timer has fired the banner is gone')
+
+seam.set_banner_visible(false)
+local digits_events = render_hidden(zap_state({digits = '123', atMs = 0}))
+local digit_item = find_text(digits_events, '123')
+local identity_item = find_text(digits_events, '12 · BBC One HD')
+check(digit_item ~= nil, 'a half-typed number keeps the banner up on its own')
+if digit_item and identity_item then
+  check(digit_item.x < identity_item.x, 'the digits lead the identity run')
+  check(math.abs(digit_item.y - identity_item.y) < 1,
+    'the digits share the identity row')
+end
+if digit_item then
+  local accent_digits = nil
+  for _, event in ipairs(digits_events) do
+    if event.body:find('}123', 1, true) and event.body:find('F66C7B', 1, true) then
+      accent_digits = tonumber(event.body:match('\\fs([%d%.]+)'))
+    end
+  end
+  check(accent_digits ~= nil, 'the digit readout is drawn in the accent')
+  if accent_digits then
+    check(accent_digits > 16, 'the digit readout is larger than the identity')
+  end
+end
+
+-- ===== 6d. a transient note replaces the position readout ===================
+
+seam.set_banner_visible(false)
+local message_events = render_hidden(zap_state({message = 'No channel 999',
+  atMs = 0}))
+check(find_text(message_events, 'No channel 999') ~= nil,
+  'a transient note renders in the banner')
+check(find_text(message_events, '3/40') == nil,
+  'the note takes the position readout\'s slot rather than stacking with it')
+
+-- ===== 6e. the bar's identity run is conditional ============================
+--
+-- With the controls up the identity run is drawn only when it says something
+-- the top bar's title does not — a number, a half-typed number, a note. A
+-- session that never zaps therefore renders byte-identically to before.
+
+local bar_with_identity = render_with(zap_state())
+check(find_text(bar_with_identity, '12 · BBC One HD') ~= nil,
+  'the bottom bar shows the identity run when the cursor has a number')
+
+-- Built by hand rather than through `zap_state`: a nil in an overrides table
+-- is invisible to `pairs`, so "no channel number" cannot be expressed as one.
+local no_identity_state = {}
+for k, v in pairs(live_state) do no_identity_state[k] = v end
+no_identity_state.zap = {
+  channelName = 'BBC One HD',
+  digits = '',
+  position = 3,
+  total = 40,
+  atMs = fresh_at_ms(),
+}
+local bar_without_identity = render_with(no_identity_state)
+check(find_text(bar_without_identity, 'BBC One HD') == nil,
+  'no number, no digits, no note → the bar draws no identity run')
+
+-- The strip grew a row above it; the transport row must still clear it.
+local identity_transport_y = lowest_icon_y(bar_with_identity)
+local identity_next = find_text(bar_with_identity, 'Next · ')
+if identity_transport_y and identity_next then
+  local gap = (identity_transport_y - 22) - identity_next.y
+  check(gap > 12,
+    string.format('the strip clears the transport row with an identity row '
+      .. 'above it (gap %.0fpx)', gap))
+end
+local identity_item_bar = find_text(bar_with_identity, '12 · BBC One HD')
+if identity_item_bar and identity_next then
+  check(identity_item_bar.y < identity_next.y,
+    'the identity run sits above the EPG strip in the bar')
+end
+
+-- ===== 7. the zap key policy ================================================
+--
+-- The Lua mirror of Kotlin's `ZapKeyPolicy` (pinned there by
+-- `ZapKeyPolicyTest`). Nothing else executes these branches: mpv's key
+-- bindings are unreachable from a headless render.
+
+local function key(name, is_repeat, opts)
+  opts = opts or {}
+  if opts.isLive == false then
+    render_with({title = 'Some Film', isLive = false, aspectLabel = 'Fit'})
+  else
+    render_with(zap_state({digits = opts.digits or ''}))
+  end
+  seam.set_chrome_visible(opts.chromeVisible == true)
+  local command, swallow = seam.zap_key_command(name, is_repeat == true)
+  seam.set_chrome_visible(true)
+  return command, swallow
+end
+
+check(key('UP') == 'zap:up', 'chrome hidden: UP is the next higher channel')
+check(key('DOWN') == 'zap:down', 'chrome hidden: DOWN is the next lower one')
+check(key('RIGHT') == 'zap:prev', 'chrome hidden: RIGHT is previous-channel')
+check(key('LEFT') == nil, 'LEFT keeps its seek meaning (the quick list is Phase 6)')
+check(key('UP', false, {chromeVisible = true}) == nil,
+  'chrome visible: UP stays volume')
+check(key('RIGHT', false, {chromeVisible = true}) == nil,
+  'chrome visible: RIGHT stays seek')
+check(key('PGUP', false, {chromeVisible = true}) == 'zap:up',
+  'PGUP zaps whether the chrome is up or not')
+check(key('PGDWN', false, {chromeVisible = true}) == 'zap:down',
+  'PGDWN zaps whether the chrome is up or not')
+check(key('UP', true) == 'zap:up', 'a held UP keeps zapping (that is scanning)')
+local _, right_swallow = key('RIGHT', true)
+check(right_swallow == true, 'a held RIGHT is swallowed, not toggled repeatedly')
+
+check(key('7', false, {chromeVisible = true}) == 'zap:digit:7',
+  'a digit is unambiguous — it zaps with the chrome up too')
+check(key('KP7') == 'zap:digit:7', 'the numpad digits zap as well')
+local digit_command, digit_swallow = key('7', true)
+check(digit_command == nil and digit_swallow == true,
+  'a held digit is swallowed rather than stacked four times')
+
+check(key('ENTER') == nil, 'OK is not ours with no half-typed number')
+check(key('ESC') == nil, 'ESC falls through to the Back ladder with no number')
+check(key('ENTER', false, {digits = '12'}) == 'zap:activate',
+  'OK commits a half-typed number early')
+check(key('KP_ENTER', false, {digits = '12'}) == 'zap:activate',
+  'the numpad OK commits it too')
+check(key('ESC', false, {digits = '12'}) == 'zap:back',
+  'Back clears a half-typed number before the Back ladder sees it')
+check(key('BS', false, {digits = '12'}) == 'zap:back',
+  'Backspace clears it as well')
+
+check(key('UP', false, {isLive = false}) == nil, 'VOD: UP is not a zap key')
+check(key('7', false, {isLive = false}) == nil, 'VOD: digits are not zap keys')
 
 print('')
 if failures > 0 then

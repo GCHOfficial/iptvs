@@ -567,6 +567,7 @@ class LinuxNativeSession {
     required String aspectLabel,
     bool reconnecting = false,
     bool hdr10Plus = false,
+    Map<String, Object?>? zap,
   }) => command(
     buildOverlayStateCommand(
       title: title,
@@ -580,6 +581,7 @@ class LinuxNativeSession {
       aspectLabel: aspectLabel,
       reconnecting: reconnecting,
       hdr10Plus: hdr10Plus,
+      zap: zap,
     ),
   );
 
@@ -600,6 +602,7 @@ class LinuxNativeSession {
     required String aspectLabel,
     bool reconnecting = false,
     bool hdr10Plus = false,
+    Map<String, Object?>? zap,
   }) => [
     'script-message-to',
     'iptvs_overlay',
@@ -627,6 +630,18 @@ class LinuxNativeSession {
         'epgNextStartMs': epgNext.start.millisecondsSinceEpoch,
         'epgNextStopMs': epgNext.stop.millisecondsSinceEpoch,
       },
+      // The zap banner (`LiveZapController.bannerPayload` plus an `atMs`
+      // stamp), nested rather than flattened because it describes the
+      // **cursor's** channel while the fields above describe the one actually
+      // playing — the two carry the same `epgNow*`/`epgNext*` key names and
+      // would silently overwrite each other at the top level.
+      //
+      // `atMs` is what makes the banner's own 3 s timer restart on a press and
+      // *not* on an unrelated state push (an aspect cycle, a reconnect chip):
+      // it advances only when the zap controller itself notified, so the Lua
+      // side can tell "the user just zapped" from "something else changed".
+      // This mirrors Kotlin's `PlayerUiState.zapBannerAtMs`.
+      'zap': ?zap,
     }),
   ];
 
