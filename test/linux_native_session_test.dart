@@ -117,6 +117,87 @@ void main() {
       expect(payload['epgNextStartMs'], 2000);
       expect(payload['epgNextStopMs'], 3000);
     });
+
+    test('omits the zap block entirely on a session that never zaps', () {
+      final command = LinuxNativeSession.buildOverlayStateCommand(
+        title: 'BBC One HD',
+        sourceName: 'My Provider',
+        epgNow: null,
+        epgNext: null,
+        canFavorite: true,
+        favorite: false,
+        isLive: true,
+        liveSynced: true,
+        aspectLabel: 'Fit',
+      );
+
+      final payload = jsonDecode(command[3] as String) as Map<String, dynamic>;
+      // The Lua overlay draws no banner and no identity run without it, so a
+      // non-zapping session renders exactly as it did before Phase 5.
+      expect(payload.containsKey('zap'), isFalse);
+    });
+
+    test('nests the zap banner so the cursor guide cannot overwrite the '
+        'playing channel\'s', () {
+      final playingNow = Programme(
+        channelId: 'c1',
+        start: DateTime.fromMillisecondsSinceEpoch(1000),
+        stop: DateTime.fromMillisecondsSinceEpoch(2000),
+        title: 'News at Ten',
+      );
+
+      final command = LinuxNativeSession.buildOverlayStateCommand(
+        title: 'BBC One HD',
+        sourceName: 'My Provider',
+        epgNow: playingNow,
+        epgNext: null,
+        canFavorite: true,
+        favorite: true,
+        isLive: true,
+        liveSynced: true,
+        aspectLabel: 'Fill',
+        // Shaped exactly like `LiveZapController.bannerPayload()` plus the
+        // `atMs` stamp `player_screen.dart` adds.
+        zap: const <String, Object?>{
+          'channelNumber': 12,
+          'channelName': 'ITV1 HD',
+          'sourceName': 'My Provider',
+          'digits': '12',
+          'message': 'No channel 999',
+          'settling': true,
+          'position': 3,
+          'total': 40,
+          'epgNowTitle': 'Emmerdale',
+          'epgNowStartMs': 5000,
+          'epgNowStopMs': 6000,
+          'epgNextTitle': 'Coronation Street',
+          'epgNextStartMs': 6000,
+          'epgNextStopMs': 7000,
+          'atMs': 1700000000000,
+        },
+      );
+
+      final payload = jsonDecode(command[3] as String) as Map<String, dynamic>;
+      final zap = payload['zap'] as Map<String, dynamic>;
+      expect(zap['channelNumber'], 12);
+      expect(zap['channelName'], 'ITV1 HD');
+      expect(zap['digits'], '12');
+      expect(zap['message'], 'No channel 999');
+      expect(zap['settling'], true);
+      expect(zap['position'], 3);
+      expect(zap['total'], 40);
+      // The banner's 3 s countdown restarts on a change of this stamp, so an
+      // unrelated state push (an aspect cycle, the reconnect chip) leaves the
+      // banner alone — the Lua half of Kotlin's `zapBannerAtMs`.
+      expect(zap['atMs'], 1700000000000);
+      // The whole reason the block is nested: both halves carry the same
+      // `epgNow*` key run, one for the cursor and one for the channel
+      // actually playing. Flattened, a held key would print the programme of
+      // the channel being left.
+      expect(zap['epgNowTitle'], 'Emmerdale');
+      expect(payload['epgNowTitle'], 'News at Ten');
+      expect(payload['epgNowStartMs'], 1000);
+    });
   });
 
   group('LinuxNativeSession.buildHeaderFieldsCommand', () {

@@ -205,12 +205,27 @@ class LiveZapController extends ChangeNotifier {
 
   bool get hasPendingMove => _settleTimer.pending || _index != _playingIndex;
 
+  int _bannerRevision = 0;
+
+  /// Bumped on every notification — the Dart mirror of Kotlin's
+  /// `zapBannerAtMs`. The Flutter overlay's banner restarts its own dwell
+  /// timer whenever this changes, so a held key keeps the banner up rather
+  /// than letting an earlier press's timer expire mid-hold.
+  int get bannerRevision => _bannerRevision;
+
   // ── Presentation, read by PlayerScreen in place of its widget fields ──────
 
   String get title => playing.name;
   String get sourceName => playing.sourceName;
   int? get channelNumber => playing.number;
   ({Programme? now, Programme? next}) get epg => catalog.epgFor(playing);
+
+  /// The **cursor's** now/next — the guide of the channel a held key has got
+  /// to, not the one still on screen. [epg] stays on the playing entry until
+  /// the settle catches up; this is what the zap banner shows instead, so a
+  /// held key's acknowledgement carries its own guide rather than the
+  /// outgoing channel's.
+  ({Programme? now, Programme? next}) get cursorEpg => catalog.epgFor(current);
   bool get isFavorite => catalog.isFavorite(playing);
   String? get aspectLabel => catalog.aspectLabelFor(playing);
   BufferPreset get bufferPreset => catalog.bufferPresetFor(playing);
@@ -506,6 +521,7 @@ class LiveZapController extends ChangeNotifier {
 
   void _notify() {
     if (_disposed) return;
+    _bannerRevision++;
     notifyListeners();
   }
 

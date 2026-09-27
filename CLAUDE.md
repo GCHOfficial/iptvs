@@ -528,9 +528,13 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   `SharedEngine.invalidateFromFullscreen` first. The favorite star reports **both** live (`nativeZap
   favorite:0|1`, so a session that has zapped away updates the right channel) and at close
   (`RESULT_FAVORITE`, the one guaranteed to survive a kill) — both absolute, never a toggle, so they
-  can't disagree. Windows/Linux native input and the quick list remain unimplemented (Phases 4/5/6).
-  Detail: docs/player.md "Live zapping", "Android native input + banner (Phase 2)"; the key table is
-  in docs/tv-navigation.md "In-player navigation".
+  can't disagree. **Phases 3–5 are now implemented too**: the shared Flutter overlay draws its own
+  bottom-bar banner (`ZapBannerState`, pure — reused by Windows' SDR embedded surface), the Windows
+  native HWND surface owns a C++ key ring (`zap_key_policy.h`, a structural mirror of `ZapKeyPolicy`)
+  plus its own GDI banner, and the Linux Lua OSD registers its own zap-only key bindings per stream
+  and draws the same banner. Only the quick list (Phase 6) and iOS's zap input remain outstanding.
+  Detail: docs/player.md "Live zapping", "Android native input + banner (Phase 2)", "Windows",
+  "Linux"; the key table is in docs/tv-navigation.md "In-player navigation".
 
 ## Cloud sync + profiles (essentials)
 
@@ -828,7 +832,15 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   agree — the two Windows surfaces show the same channel to the same user, chosen only by whether
   the stream is HDR. The Lua OSD is pinned by `linux/mpv/overlay_layout_test.lua` (headless ASS
   render, run in CI with `luac5.1 -p`) — the only thing that executes that script outside a
-  Wayland+HDR session.
+  Wayland+HDR session. **The in-player zap banner is a fifth thing all four surfaces must agree
+  on**: an identity run (channel number · name, or an accent digit readout mid-entry, or a transient
+  message/position-of-total), plus the same live EPG strip, in the same bottom-bar slot — reusing the
+  bar's own drawing rather than a layout of its own (`ZapBannerState`/`_zapBanner` in Dart,
+  `PaintZapBanner`/`DrawChannelIdentityRow` in the Windows GDI overlay, `draw_zap_banner` in the Lua
+  OSD, `ZapBanner` in Compose). **The banner shows the cursor's channel and guide; the bottom bar
+  shows the playing one** — a held key's acknowledgement has to be ahead of what is actually on
+  screen, and reading the playing channel's fields there would show yesterday's channel through the
+  banner during a fast scan.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
   control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
   Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
@@ -1118,7 +1130,10 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   three mpv modules `iptvs_overlay.lua` requires, renders a frame per scenario and asserts on the
   emitted ASS events (row order, badge order, the live strip clearing the transport row). Run it with
   `lua linux/mpv/overlay_layout_test.lua` — mpv's dialect is 5.1, and CI runs it plus `luac5.1 -p`.
-  Nothing else in the suite executes that script: it only renders on Wayland+HDR.
+  Nothing else in the suite executes that script: it only renders on Wayland+HDR. It also covers the
+  zap banner (`draw_zap_banner`/`draw_channel_identity_row`) and the key policy
+  (`zap_key_command`), exercised through a test-only seam the module exports rather than by
+  simulating real mpv key dispatch.
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
   every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
   literal `username=…&password=…` pattern when the parser under test doesn't need it.

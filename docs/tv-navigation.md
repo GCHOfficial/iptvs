@@ -445,11 +445,13 @@ window (safe precisely because they aren't focus targets); pinned by `test/epg_g
 
 ## In-player navigation
 
-The fullscreen live player has its own key map — the Dart spine (Phase 1) plus, on Android, a
-native key policy that speaks the same vocabulary (Phase 2, implemented; see docs/player.md "Live
-zapping" for the state machine and "Android native input + banner (Phase 2)" for the native side).
-Separate from every model above because it isn't one: there's no focus ring and no D-pad geometry,
-just a cursor over a snapshot list and a set of keys that either move it or don't apply.
+The fullscreen live player has its own key map — the Dart spine (Phase 1) plus, on Android, Windows
+and Linux, a native key policy that speaks the same vocabulary (Phase 2 Android, Phases 4/5
+Windows/Linux, all implemented; see docs/player.md "Live zapping" for the state machine,
+"Android native input + banner (Phase 2)" for Android, and the "Windows"/"Linux" sections for the
+other two). Separate from every model above because it isn't one: there's no focus ring and no
+D-pad geometry, just a cursor over a snapshot list and a set of keys that either move it or don't
+apply.
 
 - **Arrows zap only when `live && !chromeVisible`.** With the transport chrome on screen Up/Down
   stay volume and Left/Right stay seek — a live stream's own `_seekBy` is already a no-op, so
@@ -471,14 +473,34 @@ just a cursor over a snapshot list and a set of keys that either move it or don'
   ordinary play/pause toggle. **Back/Escape clears a half-typed buffer first**, the same
   peel-one-rung shape the live tab's own Back ladder uses, before it means anything else on this
   screen.
-- The shared Flutter overlay's own `CallbackShortcuts` binding covers embedded playback and
-  Windows' native HWND via its `vo` swap — never the Windows native HWND's own key ring (Phase 4,
-  not yet implemented), and never Android's embedded fallback, whose stock media_kit controls are
-  focus targets a D-pad walks with Up/Down; binding the arrows there would strand the remote on
-  that surface. **Android's own key map is a separate, native implementation of the same rules**
-  (`ZapKeyPolicy`, below) — it doesn't reuse the Dart `CallbackShortcuts` path, because
-  `HdrPlayerActivity` is a self-contained Activity with its own Compose overlay, not a route inside
-  the Flutter engine. iOS has neither yet.
+- The shared Flutter overlay's own `CallbackShortcuts` binding covers embedded playback and the
+  Windows SDR preview→fullscreen path (the same media_kit `_player`, before any HDR escalation) —
+  never the Windows native HWND surface's *own* key ring, and never Android's embedded fallback,
+  whose stock media_kit controls are focus targets a D-pad walks with Up/Down; binding the arrows
+  there would strand the remote on that surface. **Android, Windows and Linux each implement the
+  same rules as a separate, native key policy**, none of them reusing the Dart `CallbackShortcuts`
+  path: `ZapKeyPolicy` (Android — `HdrPlayerActivity` is a self-contained Activity with its own
+  Compose overlay, not a route inside the Flutter engine), `windows/runner/zap_key_policy.h`
+  (consulted in `FlutterWindow::MessageHandler` before every other key branch on the native HWND
+  surface, and again in each child `WndProc` to decide whether the ordinary reveal-on-input post
+  should fire), and the Lua OSD's `zap_key_command` (`sync_zap_bindings` registers the zap-only keys
+  — PGUP/PGDWN, digits, Enter, Backspace — only while the current stream is live, with
+  `complex = true` so a held key repeats). **All three still gate the arrows on `live &&
+  !chromeVisible`, and none of them ever reveals the chrome for a zap key** — the same rule the
+  Dart spine and Android's Phase 2 policy already state above; see docs/player.md "Windows" and
+  "Linux" for what each surface's key ring reads to answer "is the chrome up" and "is a digit
+  pending" synchronously, without a round trip to Dart. iOS has none yet.
+- **The key policy is now four independent implementations of one rule set** — the Dart
+  `CallbackShortcuts` map, Kotlin `ZapKeyPolicy`, C++ `zap_key_policy.h`, and the Lua OSD's
+  `zap_key_command` — pinned respectively by Dart widget/unit tests, `ZapKeyPolicyTest` (JUnit),
+  `static_assert`s against the real `VK_*` constants in `flutter_window.cpp`, and
+  `overlay_layout_test.lua`'s headless harness. A divergence between them is a navigation rule that
+  differs per surface, which is exactly what the shared `parseZapCommand`/`zap:*` vocabulary exists
+  to prevent on the Dart side of the wire.
+- **The zap banner is a readout, never a focus target.** It never receives focus, is never part of
+  any focus ring, and pressing a zap key never reveals the transport chrome to show it — the banner
+  itself is the only acknowledgement a keypress gets while the chrome is hidden, on every surface
+  that draws one (see CLAUDE.md "The live chrome is one layout on every surface").
 
 ### Android's key map (`ZapKeyPolicy`, implemented)
 

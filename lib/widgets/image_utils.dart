@@ -110,3 +110,11 @@ int scaledImageCacheSize(double logicalSize, double devicePixelRatio) {
       (physical / kImageCacheSizeBucket).ceil() * kImageCacheSizeBucket;
   return bucketed.clamp(kImageCacheSizeBucket, 8192);
 }
+
+/// Test seam: when true, channel logos (the live list and the player's zap
+/// banner) render their fallback instead of loading
+/// through `CachedNetworkImage`/`flutter_cache_manager`. Widget tests that build
+/// the live list set this so the cache manager's `path_provider` calls and its
+/// cleanup `Timer` (both hostile to `flutter test`) never run. Off in
+/// production.
+bool debugDisableNetworkChannelLogos = false;
