@@ -994,6 +994,102 @@ into a compact frameless always-on-top window docked bottom-right — draggable 
 (manual `WM_NCLBUTTONDOWN`/`HTCAPTION` from the surface WndProc), resizable via `WS_THICKFRAME`,
 mutually exclusive with fullscreen, restoring the saved placement on exit/`prepareExit`.
 
+### Live zapping (Phase 4 — native HWND key ring + banner)
+
+**Implemented.** The native HWND surface now owns its own key ring and draws its own zap banner,
+mirroring Android's Phase 2 at the same Activity-boundary placement.
+
+**Key ring** (`windows/runner/zap_key_policy.h`). A pure, deliberately **Windows-free** header —
+raw virtual-key codes mirrored as plain `int`s rather than pulled from `<windows.h>`, so it reads
+(and could be unit-tested) without a Win32 toolchain — structurally mirroring
+`android/.../player/ZapKeyPolicy.kt` field for field. `flutter_window.cpp` `static_assert`s every
+mirrored constant against the real `VK_*` at compile time, so a typo fails the build instead of
+shipping a dead key; there is no C++ test harness in this runner. `DecideZapKey` is consulted at
+the top of `FlutterWindow::MessageHandler`'s `WM_KEYDOWN` branch — **before** the existing
+Escape/Back handling, because a half-typed number is the first rung of this screen's Back ladder —
+and again inside both `NativeControlsWndProc` and `NativeVideoSurfaceWndProc` (`IsZapKeyPress`) to
+decide whether the ordinary reveal-on-input `PostMessage` should fire.
+
+- **Digits are unambiguous** and act regardless of chrome visibility; a repeat is swallowed
+  (`kSwallow`, not `kNone`) rather than let through, since a held digit key must not stack the same
+  number four times or leak into the overlay's own key handling.
+- **PGUP/PGDOWN are this surface's `CHANNEL_UP`/`CHANNEL_DOWN` stand-ins** and mean one thing
+  whether the chrome is up or not; repeats pass through (holding scans, and Dart's 600 ms settle
+  collapses that to one `create_link`).
+- **A half-typed number's OK/Back rung sits above the chrome test**: Return/`VK_SELECT` commits it
+  (`kActivate`) and Escape/Backspace clears it (`kBack`) while `digits_pending`, before either key's
+  ordinary meaning on this screen runs.
+- **The arrows are the contested keys**: claimed only while the chrome is hidden (Up/Down = channel
+  up/down; Right = "previous channel", swallowed on repeat so holding it doesn't flap back and
+  forth). Left is reserved for the quick list and gated on `kZapQuickListEnabled` (`false` today,
+  mirroring Android's `QUICK_LIST_ENABLED`) — with it off, Left falls through and keeps its ordinary
+  chrome-reveal job rather than becoming a decided no-op, since the window procedure has to answer
+  synchronously and can't wait for Dart's `zap:list` reply.
+- **`zap_active` (a live route with a zap controller behind it) is read off a new `zapEnabled` key
+  on `setControlState`** (`NativeControlState.zap_enabled`, `ZapActive()`). Without it a live route
+  opened with no `LiveZapController` — the EPG grid's own play path — would have its arrows claimed
+  by a policy that then gets "not consumed" back from Dart, turning them into dead keys instead of
+  the chrome-reveal they'd otherwise do.
+- **`digits_pending` is read from a native mirror**, never a round trip to Dart: `ZapDigitsPending()`
+  checks `g_native_zap_state.digits` (the authoritative buffer from the last `setZapBanner` push)
+  **or** `g_native_zap_digits_optimistic`, a flag set the instant a digit is dispatched and cleared
+  by the next `setZapBanner` — the same optimistic-mirror shape `HdrPlayerActivity` uses, for the
+  same reason (the decision must be synchronous, and the worst a stale mirror can do is let one Back
+  press peel a control layer instead of clearing the buffer).
+- **No zap key reveals the chrome.** `MessageHandler`'s zap branch never calls
+  `ShowNativeControls(true)` — the banner is what acknowledges the press.
+
+**Banner** (`NativeZapState`, `PaintZapBanner`, `DrawChannelIdentityRow`, a shared
+`DrawLiveEpgStrip`). Pushed by the inbound `setZapBanner` method call
+(`FlutterWindow::UpdateZapBanner`) — its own method, **not** folded into `setControlState`'s 2 Hz
+coalescer, because a banner has to track every press. It describes the **cursor's** channel, not the
+playing one (`NativeZapState`'s own `epg_now_*`/`epg_next_*`, never `NativeControlState`'s), which
+is why it can't reuse the ordinary control state at all.
+
+- **`DrawLiveEpgStrip` and `DrawChannelIdentityRow` are shared** between the bottom bar (now via
+  `BottomLayout::identity`/`epg`, replacing four separately-hand-laid-out rects with one strip
+  drawn by one function) and the banner — the fifth surface in this app that has to draw this exact
+  strip identically (docs/player.md counts the others), and a second copy inside one file would be
+  the easiest of all of them to let drift. `DrawLiveEpgStrip` takes an `aa` flag: `true` inside the
+  bars (their gradient backdrop already carries real alpha, so the antialiased compositor
+  `FillRoundRectAA` can blend against it), `false` inside the banner (a floating panel whose
+  background GDI just drew with alpha still at 0 — blending there would read it as transparent, so
+  the banner uses plain `FillRoundRect` + the same normalize-then-mask path the info panel and list
+  menu use). This is the same split `FillRoundRectMaybeAA` already documented for those two panels,
+  just now shared with a third.
+- **The overlay window stays visible with the chrome hidden while the banner has something to say**
+  (`FlutterWindow::NativeOverlayTargetVisible() = native_controls_visible_ || ZapBannerShown()`).
+  `ShowNativeControls`/`ApplyNativeControlsVisibility`/`BringNativeControlsToFront`/
+  `InvalidateNativeControls` all switched from asking `native_controls_visible_` to asking this
+  wider predicate, and `UpdateNativeControlsRegion` clips to the banner's own round-rect
+  (`ZapBannerRect`) rather than the bars' region while the chrome is down — without a region rebuild
+  there the banner would be clipped away by the bars' region and never appear. While only the
+  banner is up the overlay is decoration, not chrome, so it also gets `WS_EX_TRANSPARENT`: it has no
+  hit targets, and without that style a mouse move over its band would never reach the video
+  surface's `WM_MOUSEMOVE`, which is the only thing that reveals the chrome.
+  `ApplyNativeControlsVisibility` sets/clears the style on every crossing.
+- **A zap's own deliberate stop is not read as a user pause.** `UpdateNativeControlState`'s
+  paused-reveal logic used to key on `playing` alone; a zap stops the stream between channels
+  (`_zapStopCurrent`), so without a `zap_settling` guard (`g_native_zap_state.settling && ZapActive()`)
+  every channel change would throw the chrome up mid-zap — taking the banner down with it (the two
+  are mutually exclusive) and handing the arrows back to the control row at the one moment the user
+  is certainly still holding one.
+- **The 3 s dwell timer is a Win32 timer** (`kNativeZapBannerTimer`), restarted (never stacked) on
+  every `setZapBanner` push, mirroring Kotlin's `ZAP_BANNER_VISIBLE_MS` and the Lua OSD's
+  `ZAP_BANNER_VISIBLE_S`. Its expiry (`HideZapBanner`) is a repaint request, not an unconditional
+  hide — a half-typed number or a transient message outlives it (`ZapBannerShown()`), the same
+  `outlivesTimer` rule the Dart banner and the Lua OSD both apply. `HideZapBanner` repaints
+  *directly*, before flipping visibility: a layered window keeps whatever was last composited into
+  it, so hiding it with the banner still on the DIB would flash that banner for one frame the next
+  time the chrome came up.
+- **The banner reuses the existing cached back buffer** (`OverlayBackBuffer`) — no new DIB — and
+  composites through the same `CompositeOverlayBands` helper the ordinary chrome paint uses
+  (extracted from the pre-existing inline code specifically so the two paths can't diverge).
+- **`ResetZapBanner`** clears the native zap state and kills the timer on `destroySurface`,
+  `prepareExit` and `OnDestroy` — genuine session teardown — but **not** from `DestroyNativeControls`,
+  which also runs on an ordinary fullscreen/mini-player transition (via `RecreateNativeControls`):
+  dropping the banner there would leave a held key's press unacknowledged mid-transition.
+
 ## Linux
 
 **The embedded `media_kit`/libmpv surface is the default Linux fullscreen path;
@@ -1227,6 +1323,70 @@ unavailable — including a host mpv below the 0.40 version floor, or an
 unparseable `--version` output — Linux falls back to embedded media_kit/libmpv
 with the equivalent Flutter overlay. That path requests `hwdec=auto-safe` and
 tone-maps HDR to SDR.
+
+### Live zapping (Phase 5 — per-stream key registration + banner)
+
+**Implemented.** `linux/mpv/iptvs_overlay.lua` registers its own zap-only key bindings and draws its
+own banner, the Lua counterpart of Android's Phase 2 and Windows' Phase 4.
+
+**Per-stream registration, not global.** mpv ships default bindings for the digit keys (contrast,
+brightness, gamma, saturation, …) and for Backspace (reset all of those), so a global zap binding
+that shadowed them permanently would break every one of those keys on VOD as a side effect of
+zapping ever having launched. `sync_zap_bindings` — called from the same `on_state`/property-change
+path that already runs on every relevant mpv event — binds and unbinds a fixed key set
+(PGUP/PGDOWN, `0`–`9`/`KP0`–`KP9`, Enter/`KP_ENTER`, Backspace) only while `state.isLive`, and is a
+no-op when the wanted state matches what's already bound (`zap_only_bound`), so it isn't
+re-registering keys on every single overlay tick. **A forced binding can't fall through to mpv's
+own handler if the policy declines it** the way an *unbound* key naturally would — the whole reason
+these keys are scoped to live streams is that a permanent zap-only binding would leave VOD with no
+way to adjust brightness/contrast or reset them at all.
+Four keys zapping only *shares* with an existing binding (`ESC`, `RIGHT`, `UP`, `DOWN` — Back, seek,
+and volume) stay bound at module load regardless of live/VOD, since the shared binding's own
+fallback already runs when the zap policy declines.
+
+**`complex = true` bindings, for repeat.** `bind_zap_key` registers every zap-owned key with
+mpv's `{complex = true}` flag, which is what makes a *held* key deliver repeat events at all through
+this binding mechanism — without it, holding PGUP to scan channels would behave like a single press.
+`zap_key_command(key, is_repeat)` is the pure decision function (mirroring `DecideZapKey` and
+`ZapKeyPolicy` field for field): digits/PGUP/PGDOWN act regardless of chrome; a half-typed number's
+Enter/Backspace commit/clear it before their ordinary meaning; the arrows (`UP`/`DOWN`/`RIGHT`) are
+claimed only while the chrome is hidden, with `RIGHT` swallowed on repeat and `LEFT` left alone
+entirely (the quick list is Phase 6 — this is the one place `LEFT` differs from Windows/Android,
+which at least gate it behind a flag; here it simply keeps its ordinary seek meaning, since Lua has
+no equivalent constant to flip later without an extra release).
+
+**No Linux equivalent of `CHANNEL_UP`/`CHANNEL_DOWN`/`LAST_CHANNEL`.** A remote's dedicated channel
+keys, where they exist, arrive to mpv (if at all) as ordinary keysyms with no fixed cross-device
+mapping the way Android's `KeyEvent` constants give one — so PGUP/PGDOWN are Linux's only bound
+"next/previous channel" keys, matching the desktop-keyboard convention Windows also uses for the
+same pair. There is no "previous channel" toggle key bound at all on this surface today.
+
+**Banner** (`draw_zap_banner`, `draw_channel_identity_row`, sharing `draw_live_epg_strip` with the
+ordinary bottom bar, exactly as the Windows and Dart banners share their own strip-drawing
+functions). Reads `state.zap`, the nested object described under "Wire contract" above — never the
+top-level `epgNow*`/`epgNext*` fields, which describe the *playing* channel. `show_zap_banner()`
+gates on chrome-hidden plus the same `outlivesTimer`-shaped rule (a visible dwell, non-empty digits,
+or a message). The **3 s dwell** (`ZAP_BANNER_VISIBLE_S`) is armed by `state.zap.atMs` changing —
+`sync_zap_bindings`'s caller also compares this stamp against the last one seen and only then resets
+`zap_banner_visible` and (re)starts `mp.add_timeout`, so an unrelated `iptvs-state` push (an aspect
+cycle, a reconnect chip) that happens to arrive while zapping is idle does not restart the timer.
+This is the Lua half of Kotlin's `LaunchedEffect(state.zapBannerAtMs)` and Dart's
+`bannerRevision`-keyed `didUpdateWidget` check — three different mechanisms answering the identical
+question ("did the user just zap, or did something else change?") because each surface's state
+model has no other way to distinguish the two.
+
+**Wire shape.** `LinuxNativeSession.updateOverlayState`'s `zap` parameter (`Map<String, Object?>?`)
+rides the existing `iptvs-state` `script-message-to` command as a **nested object**, not flattened
+alongside the playing channel's own fields — `PlayerScreen._zapOverlayPayload()` builds it from
+`LiveZapController.bannerPayload()` plus an `atMs` stamp
+(`_zapBannerAtMs`, set in `_onZapChanged`). Nesting is load-bearing, not stylistic: the cursor's
+guide and the playing channel's guide share the same key names
+(`epgNowTitle`/`epgNowStartMs`/…), and flattening both into one map would let the cursor's silently
+overwrite the playing channel's or vice versa depending on write order. `_pushZapBanner` checks for
+a live `_linuxNativeSession` **first**, ahead of the `setZapBanner` method-channel path Android/
+Windows use, and pushes through `_pushLinuxOverlayState()` instead — Linux has no native-side
+`setZapBanner` handler at all; every push, zap or otherwise, goes through the one `iptvs-state`
+command.
 
 ## Other platforms / fallback
 
@@ -1486,12 +1646,14 @@ number the instrumentation would still be missing.
 
 In-player channel changes (channel up/down, "previous channel", digit entry, and eventually a
 quick list) without leaving the fullscreen route. **Phase 1 — most of this section — is the Dart
-spine.** **Phase 2, Android native input + banner, is now implemented** — see "Android native
-input + banner (Phase 2)" below. The Windows GDI overlay (Phase 4), the Linux Lua OSD (Phase 5)
-and the quick list (Phase 6) are still ahead; until then the surfaces that actually zap are the
-ones the shared Flutter overlay itself owns (embedded, and Windows' native HWND through its
-ordinary `vo` swap) plus Android's native HDR/mpv engines — but every native transport already
-speaks the wire contract below, so a later phase adds emitters and renderers, never new plumbing.
+spine.** **Phases 2 through 5 are now implemented**: Android's native input + banner (Phase 2, see
+"Android native input + banner (Phase 2)" below), the shared Flutter overlay's own banner (Phase 3,
+see "Shared Flutter overlay banner (Phase 3)" below — this is also what the Windows SDR
+preview→fullscreen surface renders, since it's the same media_kit player), the Windows native HWND
+surface's own key ring and GDI banner (Phase 4, see "Windows" below), and the Linux Lua OSD's own
+per-stream key registration and banner (Phase 5, see "Linux" below). Only the quick list (Phase 6)
+and iOS's zap input remain ahead — but every native transport already speaks the wire contract
+below, so Phase 6 adds emitters and renderers, never new plumbing.
 
 ### Ownership: why Dart, not a native-cached list
 
@@ -1601,15 +1763,22 @@ platform whose native half hasn't landed yet is expected and logged, never fatal
   `epgNextStopMs`). **Never logged** — it's a provider locator plus its headers. On Android,
   `HdrPlayerActivity.applyZap` is the receiving end and replies `{engineRebuilt: bool}` — see
   "Android native input + banner (Phase 2)" below for what it does with the call.
-- **`setZapBanner`** (`LiveZapController.bannerPayload`, pushed by `_pushZapBanner` for the two
-  surfaces that draw their own chrome — the separate-engine platforms and the Windows native HWND)
-  — the **cursor's** channel, not the playing one, so a held key shows the user where it's got to
-  before anything actually resolves: `channelNumber`/`channelName`/`sourceName`/`logoUrl`, `digits`
-  (the pending number buffer), `message` (a transient note — "No channel 123", a failed zap),
-  `settling` (a resolve is in flight or about to be), `position`/`total` (place in the launch
-  range), and the cursor channel's own now/next pair. Deliberately **not** routed through the 2 Hz
-  `setControlState` coalescer that ordinary transport state uses — a banner has to track every
-  press, not the state a few times a second.
+- **`setZapBanner`** (`LiveZapController.bannerPayload`, pushed by `_pushZapBanner` for the surfaces
+  that draw their own chrome — Android/iOS and the Windows native HWND) — the **cursor's** channel,
+  not the playing one, so a held key shows the user where it's got to before anything actually
+  resolves: `channelNumber`/`channelName`/`sourceName`/`logoUrl`, `digits` (the pending number
+  buffer), `message` (a transient note — "No channel 123", a failed zap), `settling` (a resolve is
+  in flight or about to be), `position`/`total` (place in the launch range), and the cursor
+  channel's own now/next pair. Deliberately **not** routed through the 2 Hz `setControlState`
+  coalescer that ordinary transport state uses — a banner has to track every press, not the state a
+  few times a second. Windows receives it through its own `setZapBanner` method call, same as
+  Android. The shared Flutter overlay (embedded, the Windows SDR preview→fullscreen surface, and
+  Linux) instead builds `ZapBannerState`/pushes the payload through its own paths — see "Shared
+  Flutter overlay banner (Phase 3)" and "Linux" below — because those surfaces don't take a wire
+  push to draw their own Dart/Lua widget tree; **Linux is the one exception that still rides a wire
+  push**, nested as a `zap` object inside the existing `iptvs-state` command (see "Linux" below)
+  rather than as its own message, because IPC to a separate mpv process has no equivalent of a
+  second method call.
 
 ### Per-surface apply (today)
 
@@ -1617,8 +1786,8 @@ platform whose native half hasn't landed yet is expected and logged, never fatal
 | --- | --- |
 | Android (`_separateEngineOwnsPlayback`) | Sends `zapTo` (above); `HdrPlayerActivity.applyZap` owns stop+reload — see "Android native input + banner (Phase 2)" below. **Implemented.** |
 | iOS (`_separateEngineOwnsPlayback`) | Sends `zapTo` and returns — the native engine, once wired, owns stop+reload. Not yet implemented. |
-| Linux native mpv session | `set_property http-header-fields`, `set_property force-media-title`, `loadfile <url> replace`, then the ordinary `_pushLinuxOverlayState()` (title/EPG only — not the dedicated zap banner with digits/settling/position, since that's Phase 5) |
-| Embedded, and Windows' native HWND (same `_player`) | Re-applies mpv buffer options and header options on the existing `NativePlayer`, then `_player.open(Media(...))` on the surface already in use — exactly the reopen `_goToLive` already does |
+| Linux native mpv session | `set_property http-header-fields`, `set_property force-media-title`, `loadfile <url> replace`, then `_pushLinuxOverlayState()` — now carrying the nested `zap` banner object too (Phase 5, see "Linux" below), not just title/EPG. **Implemented.** |
+| Embedded, and Windows' native HWND (same `_player`) | Re-applies mpv buffer options and header options on the existing `NativePlayer`, then `_player.open(Media(...))` on the surface already in use — exactly the reopen `_goToLive` already does. Embedded and the Windows SDR preview→fullscreen path additionally rebuild `ZapBannerState` for the shared Flutter overlay (Phase 3); a Windows route escalated to native additionally gets `setZapBanner`/`setControlState{zapEnabled}` and its own key ring (Phase 4). **Implemented.** |
 
 ### Watchdog interaction
 
@@ -1779,6 +1948,66 @@ renders exactly as it did before Phase 2). One consequence worth remembering whe
 channel's **number only appears after the first cursor move** — `channelNumber` is null until a
 `setZapBanner`/`applyZapBanner` push sets it, and none is sent at tune-in, so opening a channel
 directly (no zap yet this session) shows the plain title until the first Up/Down/digit press.
+
+### Shared Flutter overlay banner (Phase 3)
+
+**Implemented.** The embedded surface (and, since it's the same media_kit `_player`, the Windows SDR
+preview→fullscreen path) now draws its own zap banner, in `player_overlay.dart`.
+
+**`ZapBannerState`** is a pure `@immutable` value object — no `LiveZapController`, no
+`SourceConfig` — built fresh by `PlayerScreen._zapBannerState()` from the controller's cursor
+snapshot (`current`, `cursorEpg`, `bannerRevision`, `digitBuffer`, `message`, `index`/`entries`)
+every time the controller notifies. Keeping it pure and dependency-free is what lets this file and
+`test/player_overlay_test.dart` stay libmpv-free, exactly like `EmbeddedControls` does for ordinary
+playback state. `identityLabel` (`12 · BBC One`, or just the name, or null) and `showsIdentity`
+mirror Kotlin's `channelIdentityLabel()`/`showsChannelIdentity` field for field.
+
+**`LiveZapController` grew two members purely for this:** `bannerRevision` (an int bumped in
+`_notify()` on every notification — the Dart mirror of Kotlin's `zapBannerAtMs`) and `cursorEpg`
+(`catalog.epgFor(current)`, the **cursor's** now/next, as opposed to the existing `epg` getter which
+stays on `playing` until the settle catches up). The banner reads `cursorEpg`, never `epg` — that is
+the whole reason a held key's banner can show where it's got to before anything actually resolves.
+
+**Placement and lifecycle**, in `EmbeddedPlayerControlsState`:
+
+- The banner sits in the bottom-bar slot as a small floating card (`AppColors.panel`, r14, the
+  info-panel radius), built from exactly two existing pieces rather than a layout of its own — the
+  shared `_zapIdentityRow` (also drawn in the ordinary bottom bar, gated on `showsIdentity` there
+  too, so a session that never zaps renders unchanged) and `_liveEpgStripFor` (the same body
+  `_liveEpgStrip` calls, now parameterised on a programme pair so it can take the **cursor's**
+  guide instead of `widget.epgNow`/`epgNext`).
+- **Visible** requires all of: a live route with a non-null `zap`, chrome hidden
+  (`_zapBannerVisible`, mutually exclusive with the ordinary bars the same way Kotlin's are), and
+  either the plain 3 s dwell timer still running or a mid-interaction state that outlives it
+  (`ZapBannerState.outlivesTimer` — a half-typed digit buffer or a transient message, matching
+  Kotlin's extra clause on `showZapBanner`).
+- **The dwell timer is keyed on `revision`, not widget identity**: `didUpdateWidget` restarts it
+  (`_armZapBanner`) whenever `zap!.revision` changes, so a held key produces a fresh revision on
+  every repeat and the banner never has a chance to time out mid-hold — the Dart mirror of Kotlin's
+  `LaunchedEffect(state.zapBannerAtMs)`.
+- **The dwell timer deliberately does not go through `appMotion`.** `appMotion` returns
+  `Duration.zero` under the OS "remove animations" accessibility flag, which would make the banner
+  vanish the instant it appeared — a dwell time is not a transition and must survive that setting
+  intact. Only the fade (`AnimatedOpacity`'s `duration`, 180 ms) goes through `appMotion`.
+  `EmbeddedPlayerControlsState.kZapBannerVisible` (3 s) is the Dart mirror of Kotlin's
+  `ZAP_BANNER_VISIBLE_MS` and the Lua OSD's `ZAP_BANNER_VISIBLE_S`.
+- **The banner widget is always a `Positioned` child, even when there is nothing to draw** — a
+  `Positioned(child: SizedBox.shrink())`, never a bare `SizedBox.shrink()` conditionally omitted
+  from the tree. This `Stack`'s other children (the top/bottom bars) are all `Positioned`, and a
+  `RenderStack` with *no* non-positioned children sizes itself to fill its incoming constraints; the
+  moment one non-positioned child appears — even a zero-size one — it switches to sizing itself from
+  its non-positioned children instead, collapsing the whole `Stack`, bars included, toward zero.
+  It's also `IgnorePointer`, so it never steals a tap meant for the background reveal layer while
+  faded out.
+- The channel logo reuses the same `CachedNetworkImage` + `logImageFailure` + fallback pattern every
+  other logo call site in the app follows, and the same test seam: `debugDisableNetworkChannelLogos`
+  moved from `live_tab_view.dart` to `widgets/image_utils.dart` (re-exported from its old home so
+  existing importers keep compiling) precisely because the banner needed it too.
+
+Zero behaviour change for a session that never zaps: `zap` is null off any route without a zap
+controller (VOD, catch-up), the identity row in the ordinary bottom bar only ever rendered when
+`showsIdentity` — which needs a cursor move, a digit, or a message, none of which happen without
+zapping — and the banner itself never builds real content when `zap` is null.
 
 ## PiP note
 
