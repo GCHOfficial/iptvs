@@ -511,7 +511,7 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   only when `live && !chromeVisible`: Up = the next higher list index (`index + 1`) and **both
   directions wrap** — a deliberate divergence from the live tab's Up-never-wraps rule, since there
   is nothing here for Up to escape *to*. Right is the "previous channel" toggle, and **Left (or
-  GUIDE) opens the quick list** (Phase 6 — Dart side done). Digits, PageUp/Down, CHANNEL_UP/DOWN
+  GUIDE) opens the quick list** (Phase 6). Digits, PageUp/Down, CHANNEL_UP/DOWN
   and the last-channel key are
   live regardless of chrome, since they're unambiguous; none of the zap keys ever reveal the
   chrome — revealing it on the first Up would hand the second Up to the control row instead of the
@@ -533,8 +533,7 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   bottom-bar banner (`ZapBannerState`, pure — reused by Windows' SDR embedded surface), the Windows
   native HWND surface owns a C++ key ring (`zap_key_policy.h`, a structural mirror of `ZapKeyPolicy`)
   plus its own GDI banner, and the Linux Lua OSD registers its own zap-only key bindings per stream
-  and draws the same banner. Only iOS's zap input, and the three native *renderers* of the quick
-  list, remain outstanding.
+  and draws the same banner. Only iOS's zap input remains outstanding.
   Detail: docs/player.md "Live zapping", "Android native input + banner (Phase 2)", "Windows",
   "Linux"; the key table is in docs/tv-navigation.md "In-player navigation".
 - **The quick list (Phase 6) is a mode stack over one list, not a three-column panel.**
@@ -553,7 +552,15 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   **window** of ~40 preformatted rows (`setQuickList`, `kZapWindowRows`) and send
   `zap:list`/`zap:close`/`zap:move:±n`/`zap:activate`/`zap:descend`/`zap:back`. The frozen payload
   is in docs/player.md "The quick list (Phase 6)"; the selection model and its Back rungs are
-  in docs/tv-navigation.md.
+  in docs/tv-navigation.md. **Every surface renders it** (Flutter overlay, Android Compose, Windows
+  GDI, Linux Lua) and every renderer **prints, never formats or derives**; the highlight is drawn at
+  `selectedIndex - windowStart`, never from a row's own `selected` flag, so scroll and highlight are
+  one computation. **While the list is open, its surface claims the arrows and Back regardless of
+  chrome visibility** (the one exception to "arrows zap only while chrome is hidden" — a list on
+  screen gives them an unambiguous job) and opening it stands the chrome down, since a control row
+  left up behind it strands the D-pad. Desktops have no GUIDE key: Windows uses `G`, Linux `g`
+  (registered per stream like every zap-only mpv key). Android's quick-list Back is a rung on
+  `nextPlayerBackAction` (a gesture Back has a list to close) while the digit rung deliberately is not.
 
 ## Cloud sync + profiles (essentials)
 
@@ -1065,8 +1072,8 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `kIosFallbackSurfaceAfter` surfaces Retry rather than waiting silently. Detail: docs/ios.md
   "What routes to which engine", docs/player.md "iOS".
 - **In-player live zapping (channel up/down, previous-channel, digit entry) is Dart-authoritative
-  (Phase 1, the spine, plus Android native input+banner — Phase 2 — now implemented; Windows/Linux
-  input+banner and the quick list are Phases 4/5/6, not yet implemented).** `LiveZapController`
+  (Phases 1–6 implemented on Android, the Flutter overlay, Windows and Linux; iOS zap input
+  pending).** `LiveZapController`
   (`lib/player/live_zap_controller.dart`)
   owns the launch-range list, the cursor and the resolve; every native surface is an **input
   source and a view**, never a second copy of the list — the launch range's ordering rules (the
@@ -1151,7 +1158,7 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   `lua linux/mpv/overlay_layout_test.lua` — mpv's dialect is 5.1, and CI runs it plus `luac5.1 -p`.
   Nothing else in the suite executes that script: it only renders on Wayland+HDR. It also covers the
   zap banner (`draw_zap_banner`/`draw_channel_identity_row`) and the key policy
-  (`zap_key_command`), exercised through a test-only seam the module exports rather than by
+  (`zap_key_command`) and the quick list (`draw_quick_list`, its 40-row slice), exercised through a test-only seam the module exports rather than by
   simulating real mpv key dispatch.
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
   every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
