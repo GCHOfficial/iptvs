@@ -500,7 +500,11 @@ apply.
   differs per surface, which is exactly what the shared `parseZapCommand`/`zap:*` vocabulary exists
   to prevent on the Dart side of the wire.
 - **The quick list is the same kind of thing as the banner, only browsable** — one cursor, no
-  focus ring, keys owned by the surface's own policy. Its rungs are below.
+  focus ring, keys owned by the surface's own policy. Its rungs are below. It is the **one state
+  where the chrome gate does not apply**: with the list up its surface claims the arrows whether
+  the transport chrome is showing or not, because the gate exists to leave the control row its
+  keys and the list has already taken the screen from it (the surface hides the chrome as the
+  list opens, for the same reason).
 - **The zap banner is a readout, never a focus target.** It never receives focus, is never part of
   any focus ring, and pressing a zap key never reveals the transport chrome to show it — the banner
   itself is the only acknowledgement a keypress gets while the chrome is hidden, on every surface
@@ -512,7 +516,10 @@ Left (live, chrome hidden) or `GUIDE` opens a browsable list over the video. It 
 stack**, not a three-column panel: `categories` → `channels` (each with a now-playing line) →
 that channel's schedule for today. Right/OK descends, Left/Back ascends, and Back at the top
 closes. Full behaviour, and the frozen `setQuickList` payload every surface renders it from, are
-in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigation model.
+in docs/player.md "The quick list (Phase 6)"; what belongs here is the navigation model. Rendered
+today by the shared Flutter overlay and by Android's Compose overlay (Phase 6b — the key table
+with the list open is under "Android's key map" below); the Windows GDI and Linux Lua renderers
+are outstanding.
 
 - **It is a selection model, and the strictest case of one in the app.** One cursor (an integer
   per mode), rows that are *not* focus targets, an explicit `itemExtent` so the reveal is exact
@@ -568,16 +575,41 @@ Activity boundary `PlayerBackPolicy`/`ReconnectPolicy` already are, pinned by pl
 | D-pad Up | Yes — only while `live && !controlsVisible` | Passes through |
 | D-pad Down | Yes — only while `live && !controlsVisible` | Passes through |
 | D-pad Right (previous-channel) | Yes | Swallowed |
-| D-pad Left / `GUIDE` (quick list) | Yes, and additionally gated on `QUICK_LIST_ENABLED` | Swallowed |
+| D-pad Left (open the quick list) | Yes | Swallowed |
+| `GUIDE` (toggle the quick list) | No — a dedicated key is unambiguous | Swallowed |
 | OK / Enter / numpad Enter, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
 | Back, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
 
-`QUICK_LIST_ENABLED` gated Left and `GUIDE` out of the policy while Dart answered `zap:list` "not
-consumed" — `dispatchKeyEvent` has to answer synchronously, so claiming the key into a decided
-no-op would have silently broken Left's present job (revealing the chrome). **Dart now consumes
-the whole quick-list vocabulary**, so flipping that constant is the Android half of the Phase 6
-cutover, together with rendering `setQuickList` and sending `zap:move`/`zap:descend` for the
-arrows while the list is open.
+**With the quick list open** (`decide(quickListOpen = true)`, Phase 6b) the same policy answers a
+second, smaller table — and the chrome gate **does not apply to any of it**, because the gate
+exists to leave the control row its keys and the list has already taken the screen from the
+control row:
+
+| Key(s) | Command | Repeat |
+| --- | --- | --- |
+| D-pad Up / Down | `zap:move:-1` / `zap:move:1` — the *highlight*, so the opposite sign to the channel keys beside them | Passes through |
+| D-pad Left, Back | `zap:back` (one rung up the mode stack; at the top, close) | Swallowed |
+| D-pad Right | `zap:descend` | Swallowed |
+| OK / Enter / numpad Enter | `zap:activate` | Swallowed |
+| `GUIDE` | `zap:close` | Swallowed |
+| `CHANNEL_UP/DOWN`, `PAGE_UP/DOWN`, `LAST_CHANNEL`, digits | unchanged — Dart re-reads the same commands with the list open | unchanged |
+| anything else | not claimed — the list is a readout over a running player, not a modal | — |
+
+`QUICK_LIST_ENABLED` is now **true**. It gated Left and `GUIDE` out of the policy while Dart
+answered `zap:list` "not consumed" — `dispatchKeyEvent` has to answer synchronously, so claiming
+the key into a decided no-op would have silently broken Left's other job (revealing the chrome).
+It stays as the one switch that removes the feature, and `ZapKeyPolicyTest` pins both settings.
+Whether the list is open is read from the last `setQuickList` push **plus an optimistic mirror**
+(`HdrPlayerActivity.zapQuickListOpenOptimistic`), the same shortcut the digit buffer takes and
+for the same reason; only `zap:list`/`zap:close` move it, since whether `zap:back` or
+`zap:activate` closes the list is a question about a mode stack only Dart holds.
+
+**The list's Back rung *is* on `nextPlayerBackAction`'s ladder** (its top rung,
+`PlayerBackAction.QuickListBack` → `zap:back`), unlike the digit rung below. The difference is the
+one that kept digits out: a gesture Back has no digit buffer behind it, but it does have a visible
+list to close, and leaving the list off the ladder would make it uncloseable on a phone using
+gesture navigation. One press still peels one rung — `ZapKeyPolicy` claims a *key* Back outright
+while the list is open, so `handleSystemBack` never runs for that press.
 
 A digit-pending Back clears the buffer instead of peeling a chrome layer, but that rung is
 `ZapKeyPolicy`'s alone — it is not added to `nextPlayerBackAction`'s ladder, because it only exists

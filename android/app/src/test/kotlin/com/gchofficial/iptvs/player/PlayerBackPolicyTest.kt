@@ -25,6 +25,63 @@ class PlayerBackPolicyTest {
     }
 
     @Test
+    fun `the quick list is the ladder's top rung`() {
+        // It outranks every chrome layer, because it is drawn over all of them.
+        assertEquals(
+            PlayerBackAction.QuickListBack,
+            nextPlayerBackAction(
+                menuOpen = true,
+                infoOpen = true,
+                controlsVisible = true,
+                quickListOpen = true,
+            ),
+        )
+        assertEquals(
+            PlayerBackAction.QuickListBack,
+            nextPlayerBackAction(
+                menuOpen = false,
+                infoOpen = false,
+                controlsVisible = false,
+                quickListOpen = true,
+            ),
+        )
+        // Closed, the ladder is unchanged — including through the default,
+        // which is what every pre-existing call site still gets.
+        assertEquals(
+            PlayerBackAction.Exit,
+            nextPlayerBackAction(
+                menuOpen = false,
+                infoOpen = false,
+                controlsVisible = false,
+                quickListOpen = false,
+            ),
+        )
+        assertEquals(
+            PlayerBackAction.Exit,
+            nextPlayerBackAction(menuOpen = false, infoOpen = false, controlsVisible = false),
+        )
+    }
+
+    @Test
+    fun `one press never peels a list rung twice`() {
+        // Unlike the digit rung, the quick list *is* on this ladder — a
+        // gesture Back has a visible list to close. There is still no double
+        // peel on the key path, because ZapKeyPolicy claims Back outright
+        // while the list is open and `handleSystemBack` never runs for it.
+        assertEquals(
+            ZapKeyAction.Back,
+            ZapKeyPolicy.decide(
+                keyCode = ZapKeyPolicy.KEYCODE_BACK,
+                isLive = true,
+                controlsVisible = false,
+                digitsPending = false,
+                isRepeat = false,
+                quickListOpen = true,
+            ).action,
+        )
+    }
+
+    @Test
     fun `duplicate Back callback from one press is ignored`() {
         val guard = PlayerBackGuard(duplicateWindowMs = 120L)
 

@@ -183,14 +183,35 @@ class PlayerUiState(
     var zapBannerAtMs by mutableStateOf(0L)
 
     /**
+     * The quick list, as last pushed by Dart on `setQuickList`.
+     *
+     * Presentation only, like the banner fields above: Dart owns the list, the
+     * cursor and the mode stack, and this is the parsed window it sent
+     * ([QuickListState]). Starts [QuickListState.closed], and a push with
+     * `open:false` puts it back there — a closed list is still pushed, so this
+     * can never be left drawing one.
+     */
+    var quickList by mutableStateOf(QuickListState.closed)
+
+    /** Whether the quick-list panel is on screen. */
+    val showQuickList: Boolean get() = quickList.open && !inPip
+
+    /**
      * The banner is drawn whenever there is something to acknowledge. A
      * half-typed number and a transient note outlive the plain banner timer
      * on purpose: both are mid-interaction states, and hiding them would take
      * the feedback away while the user is still typing.
+     *
+     * **The banner yields to the quick list.** Both describe the cursor's
+     * channel and both sit in the lower-left, so drawn together they would
+     * print it twice from two cursors. Dart already suppresses the banner
+     * while the list is open; holding the same rule here keeps the two from
+     * disagreeing across a frame of wire latency.
      */
     val showZapBanner: Boolean
         get() = isLive &&
             !inPip &&
+            !quickList.open &&
             (zapBannerVisible || digitBuffer.isNotEmpty() || zapMessage != null)
 
     /**

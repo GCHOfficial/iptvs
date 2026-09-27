@@ -92,6 +92,13 @@ class PlayerCallbacks(
     val onToggleFavorite: () -> Unit,
     val onBack: () -> Unit,
     val onEnterPip: () -> Unit,
+    /**
+     * One member of the shared zap vocabulary (`lib/player/zap_command.dart`)
+     * sent to Dart. The overlay's only use for it is the quick list's
+     * *pointer* path: every key that drives the list is claimed at the
+     * Activity boundary by [ZapKeyPolicy] and never reaches Compose.
+     */
+    val onZapCommand: (String) -> Unit,
 )
 
 private const val HIDE_DELAY_VOD = 3500L
@@ -168,6 +175,11 @@ fun PlayerScreen(
             .focusable()
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // With the quick list up, a key that the zap policy declined
+                // must not throw the chrome over it: the list has the screen,
+                // and reveal-on-any-key would put the control row on top of
+                // the thing the user is reading.
+                if (state.quickList.open) return@onPreviewKeyEvent false
                 val wasHidden = !state.controlsVisible
                 poke()
                 wasHidden // consume the first key only to reveal controls
@@ -187,7 +199,9 @@ fun PlayerScreen(
 
         // Tap layer (below the controls) toggles visibility on touch devices.
         // Skipped in PiP: the tiny window shows video only, no control chrome.
-        if (!state.inPip) {
+        // Skipped with the quick list up for the same reason the root key
+        // handler is: the list owns the screen until it is dismissed.
+        if (!state.inPip && !state.quickList.open) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -233,6 +247,23 @@ fun PlayerScreen(
             exit = fadeOut(),
         ) {
             ControlsOverlay(state, callbacks, playFocus, nowMillis) { poke() }
+        }
+
+        // Above the bars: the quick list is what the user is looking at while
+        // it is open, and the Activity hides the chrome as it arrives anyway.
+        AnimatedVisibility(
+            visible = state.showQuickList,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            QuickListPanel(state) { row ->
+                // A tap names a row; the cursor is still Dart's to move, so
+                // this is "put the cursor here, then OK" rather than a second
+                // way to activate — one path, one set of rules.
+                val delta = row.index - state.quickList.selectedIndex
+                if (delta != 0) callbacks.onZapCommand("zap:move:$delta")
+                callbacks.onZapCommand("zap:activate")
+            }
         }
 
         // Menus + info panel sit above the bars; they imply controls are visible.

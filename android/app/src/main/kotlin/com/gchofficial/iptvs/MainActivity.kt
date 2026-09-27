@@ -299,6 +299,18 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
+                // The quick list's row window, routed exactly like the banner
+                // beside it. Every push is forwarded, including the closing
+                // one: `open:false` is a tear-down instruction, not an
+                // absence (`HdrPlayerActivity.applyQuickList`).
+                "setQuickList" -> {
+                    val args = call.arguments as? Map<*, *>
+                    if (args != null) {
+                        HdrPlayerActivity.instance?.get()?.applyQuickList(args)
+                    }
+                    result.success(true)
+                }
+
                 // Debug-only lifecycle counters for an integration-test soak
                 // (see DebugCounters); empty map in a release build.
                 "debugCounters" -> result.success(DebugCounters.snapshot())

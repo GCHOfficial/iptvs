@@ -55,6 +55,28 @@ object PlayerDimens {
     val InfoPanelWidth = 260.dp
 
     /**
+     * The in-player quick list's panel width.
+     *
+     * Wider than [MenuWidth] because its rows carry two lines and a badge — a
+     * channel's name plus its now-playing programme — where a track menu
+     * carries one short label. Still a left-hand panel rather than a
+     * full-width sheet: the picture behind it is what the user is choosing
+     * against.
+     */
+    val QuickListWidth = 380.dp
+
+    /**
+     * Fixed row height for the quick list, mirroring the shared Flutter
+     * overlay's `kQuickListRowExtent` (56).
+     *
+     * Fixed on purpose: the list is a **selection model** over a window cut
+     * from a range that is routinely the whole catalog, so "bring the cursor
+     * into view" is index arithmetic rather than a measurement of rows that
+     * may not be composed (docs/tv-navigation.md, "The in-player quick list").
+     */
+    val QuickListRowHeight = 56.dp
+
+    /**
      * Horizontal inset from the window edge for overlay chrome, on a phone or
      * tablet. Also the anchor inset for the list-menu and the info panel, which
      * hang off the same edge.

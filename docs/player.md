@@ -1969,11 +1969,14 @@ used for something else.
   are **swallowed** on repeat (`ZapKeyAction.Swallow`, consumed but no command) rather than let
   through to `None` — falling through would leak a held digit into Compose's focus traversal, and
   repeating "previous channel" or "commit"/"clear" would flap or double-fire.
-- **`QUICK_LIST_ENABLED = false`.** Left and `KEYCODE_GUIDE` stay out of the policy entirely until
-  Phase 6 wires a real quick list — `dispatchKeyEvent` has to answer synchronously and Dart today
-  answers `zap:list` "not consumed", so claiming Left into a decided no-op would break its present
-  job (revealing the chrome) rather than merely doing nothing new. Flipping the one constant is the
-  whole Phase 6 cutover; the behaviour on both settings is already pinned by `ZapKeyPolicyTest`.
+- **`QUICK_LIST_ENABLED = true` since Phase 6b.** It was false while Dart answered `zap:list`
+  "not consumed": `dispatchKeyEvent` has to answer synchronously, so claiming Left into a decided
+  no-op would have broken its present job (revealing the chrome) rather than merely doing nothing
+  new. Dart now consumes the whole quick-list vocabulary and this Activity renders it, so Left
+  (chrome hidden) and `KEYCODE_GUIDE` (chrome-independent, and a *toggle* — `zap:list`/`zap:close`)
+  are the policy's. The constant stays as the one switch that takes the feature back out, and
+  `ZapKeyPolicyTest` pins both settings. What the policy does with the list **open** is in
+  "Android's quick list (Phase 6b)" below.
 - **Digit-pending Back/OK.** While a channel number is half-typed, OK/Enter commits it early
   (`zap:activate`) and Back clears it (`zap:back`) instead of their ordinary meanings — Back's rung
   here sits **above** `nextPlayerBackAction`'s ladder, not inside it (see `PlayerBackPolicy.kt`'s
@@ -2067,9 +2070,10 @@ directly (no zap yet this session) shows the plain title until the first Up/Down
 
 ### The quick list (Phase 6 — Dart side, the shared Flutter overlay, the Linux Lua OSD)
 
-**Implemented in Dart (Phase 6a) and on the Linux Lua OSD (Phase 6d, see "Linux" below); the
-Kotlin and C++ renderers implement against the frozen payload below.** The quick list is the browsable list the fullscreen live player opens over the video —
-Left (chrome hidden) or `GUIDE`.
+**Implemented in Dart, on the shared Flutter overlay (Phase 6a), on Android (Phase 6b, "Android's
+quick list" below) and on the Linux Lua OSD (Phase 6d, see "Linux" below); the C++ renderer
+implements against the frozen payload below.** The quick list is the browsable list the fullscreen
+live player opens over the video — Left (chrome hidden) or `GUIDE`.
 
 #### A mode stack, not a three-column panel
 
@@ -2249,6 +2253,83 @@ metrics do — the same split the live tab's fixed-extent rows use, swept with t
 `test/layout_overflow_test.dart`. The selection ring is a `foregroundDecoration`, never a laid-out
 border. The panel is `IgnorePointer`, so it can't swallow the background tap the touch Back ladder
 depends on.
+
+#### Android's quick list (Phase 6b)
+
+**Implemented; on-device validation pending.** The Activity is the second renderer of the frozen
+payload above, and it holds no list logic of its own: it parses one push, draws the window, and
+sends keys back.
+
+**Routing and parsing.** `setQuickList` arrives on `iptvs/native_hdr_player`, which
+`MainActivity` owns once per process, so it forwards to `HdrPlayerActivity.instance` exactly as
+`setZapBanner` and `zapTo` already do — including the **closing** push, since `open:false` is a
+tear-down instruction rather than an absence. `HdrPlayerActivity.applyQuickList` parses it with
+`QuickListState.fromPayload` (`player/QuickListState.kt`), a pure, Android-free parser pinned by
+`QuickListStateTest`. It **never throws** — it runs on a platform-channel payload, and a quick
+list that can crash the player is worse than one that draws nothing — and it maps rows
+**positionally, never dropping one**, because the highlight is drawn at
+`selectedIndex - windowStart` and a dropped row would silently move it onto a different channel.
+A window that doesn't contain the cursor draws **no** highlight (`selectedInWindow == -1`) rather
+than one in the wrong place.
+
+**Opening it takes the screen from the chrome.** `applyQuickList` sets `controlsVisible = false`
+on the open transition (which also closes any menu and the info panel, through the overlay's
+existing `controlsVisible` effect). That is not cosmetic: the list claims the D-pad at the
+Activity boundary whatever the chrome is doing, so leaving the control row up would leave a
+focused Compose button on screen that no arrow key can walk away from — the stranding "Go to
+live" once caused. For the same reason the root overlay's reveal-on-any-key `onPreviewKeyEvent`
+and the touch-to-reveal tap layer both stand down while the list is open. The **banner yields to
+the list** in two places, not one: Dart stops pushing it, and `PlayerUiState.showZapBanner` also
+reads `!quickList.open`, so the two can't disagree across a frame of wire latency.
+
+**The key policy** (`ZapKeyPolicy.decide`, now taking `quickListOpen`). With the list open the
+arrows are claimed **regardless of `controlsVisible`** — the chrome gate exists to leave the
+control row its keys, and the list has already taken the screen from the control row:
+
+| Key | With the list open | Repeat |
+| --- | --- | --- |
+| D-pad Up / Down | `zap:move:-1` / `zap:move:1` (the *highlight*, so the opposite sign to the channel keys) | Passes through |
+| D-pad Left | `zap:back` | Swallowed |
+| D-pad Right | `zap:descend` | Swallowed |
+| OK / Enter / numpad Enter | `zap:activate` | Swallowed |
+| Back | `zap:back`, ahead of the player's own ladder | Swallowed |
+| `GUIDE` | `zap:close` (it is the one **toggle**, chrome-independent) | Swallowed |
+| `CHANNEL_UP/DOWN`, `PAGE_UP/DOWN`, `LAST_CHANNEL`, digits | unchanged — Dart re-reads them with the list open | unchanged |
+| anything else | not claimed: the list is a readout over a running player, not a modal | — |
+
+`quickListOpen` is read from the parsed state **plus an optimistic mirror**
+(`zapQuickListOpenOptimistic`), the same shape and for the same synchronous reason as the digit
+mirror: the authoritative answer is a frame or two behind the key that asked for it, and the next
+key's meaning turns on it (Left opens the list, then Left ascends its mode stack). Only the two
+unambiguous commands move the mirror — open and close. `zap:back` and `zap:activate` deliberately
+do not, because whether either of them closes the list is a question about a mode stack only Dart
+holds.
+
+**Back is on the ladder here, unlike the digit rung.** `nextPlayerBackAction` gained a
+`quickListOpen` top rung returning `PlayerBackAction.QuickListBack`, which the Activity answers by
+sending `zap:back`. The digit rung stayed out of the ladder because a *gesture* Back has no digit
+buffer behind it; a gesture Back with the list open has something visible to close, so leaving the
+list out would make it uncloseable on a phone using gesture navigation. There is still no double
+peel: `ZapKeyPolicy` claims a key Back outright while the list is open, so `handleSystemBack` never
+runs for that press. Pinned by `PlayerBackPolicyTest`.
+
+**The view** is a second mode of the existing `ListMenu.kt` panel primitive — the same surface
+colour, corner radius, header type and row rhythm — and the difference from the track menus beside
+it is the one that matters: `ListMenu`'s rows are **focus targets**, `QuickListPanel`'s are not.
+A track menu has five rows; this one draws a window of at most 40 cut from a range that is
+routinely the whole catalog, so a row outside the window does not exist to focus and the cursor
+cannot be a focused node (docs/tv-navigation.md, "The in-player quick list"). A left-anchored
+panel (`PlayerDimens.QuickListWidth`) banded between the safe-drawing insets, a `LazyColumn` of
+fixed-height rows (`QuickListRowHeight`, 56 dp — the Flutter overlay's `kQuickListRowExtent`), the
+highlight at `selectedInWindow`, and a scroll that only animates when the cursor has actually left
+the visible range (scrolling on every push would fight a user paging with a held key). Rows carry
+the payload's label and second line, the `ON NOW`/`CATCH-UP` badge chip, a play glyph on the
+playing row, a history glyph on an archive row, and a dimmed label on a past one — all printed,
+never derived; with no `emptyLabel` there is nothing this side is entitled to say. The one
+computed thing is the `n/total` position readout, which the contract sets `index` aside for.
+A **pointer tap** on a row sends `zap:move:<delta>` then `zap:activate` (`PlayerCallbacks.
+onZapCommand`) rather than activating directly — one path, one set of rules, and the cursor stays
+Dart's to move.
 
 ### Shared Flutter overlay banner (Phase 3)
 
