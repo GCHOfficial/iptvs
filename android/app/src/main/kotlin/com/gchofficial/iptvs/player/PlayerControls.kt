@@ -137,6 +137,17 @@ fun PlayerScreen(
         }
     }
 
+    // The zap banner fades on its own timer, deliberately **not** on
+    // `controlsVisible`: it is the only acknowledgement a keypress gets while
+    // the chrome is hidden, which is exactly when zapping is used. Keyed on
+    // the push timestamp, so each press restarts the countdown instead of
+    // stacking timers.
+    LaunchedEffect(state.zapBannerAtMs) {
+        if (state.zapBannerAtMs == 0L) return@LaunchedEffect
+        kotlinx.coroutines.delay(ZAP_BANNER_VISIBLE_MS)
+        state.zapBannerVisible = false
+    }
+
     // Move focus to the controls when shown; park it on the root when hidden so a
     // D-pad press can reveal them again.
     LaunchedEffect(state.controlsVisible) {
@@ -203,6 +214,17 @@ fun PlayerScreen(
 
         if (state.reconnecting) {
             ReconnectingNotice(modifier = Modifier.align(Alignment.Center))
+        }
+
+        // Below the bars on purpose: the two are mutually exclusive by the
+        // `!controlsVisible` gate, but their fades overlap, and the bar (which
+        // carries the same information plus the controls) should win.
+        AnimatedVisibility(
+            visible = state.showZapBanner && !state.controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            ZapBanner(state, nowMillis)
         }
 
         AnimatedVisibility(
@@ -406,8 +428,17 @@ private fun BottomBar(
             Scrubber(state, callbacks, onInteract)
             Spacer(Modifier.height(10.dp))
         } else {
-            // Live has no scrubber; surface the EPG now/next + programme progress in
-            // its place when available.
+            // Live has no scrubber; surface the channel identity + the EPG
+            // now/next + programme progress in its place when available.
+            //
+            // The identity run is drawn only when it says something the top
+            // bar's title does not — a channel number, a half-typed number, a
+            // transient note — so a session that never zaps looks exactly as
+            // it did before.
+            if (state.showsChannelIdentity) {
+                ChannelIdentityRow(state)
+                Spacer(Modifier.height(10.dp))
+            }
             state.epgNow?.let { now ->
                 LiveEpgStrip(now, state.epgNext, nowMillis)
                 Spacer(Modifier.height(12.dp))
@@ -956,6 +987,107 @@ private fun formatClock(ms: Long): String =
 private fun clockHm(ms: Long): String =
     java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
         .format(java.util.Date(ms))
+
+/**
+ * The zap banner: what a channel change says while the chrome is hidden.
+ *
+ * It sits exactly where the bottom bar's live block does and carries the same
+ * two pieces — the channel identity run and the live EPG strip — rather than
+ * a layout of its own, so a channel seen through the banner and the same
+ * channel seen with the controls up read identically. That reuse is the whole
+ * design: this is the fifth surface that has to agree about the live strip
+ * (docs/player.md, "The live EPG strip"), and a bespoke one would be a fifth
+ * thing to keep in step.
+ */
+@Composable
+private fun ZapBanner(state: PlayerUiState, nowMillis: Long) {
+    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        Column(
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(
+                    start = PlayerDimens.edgePadding(state.isTv),
+                    end = PlayerDimens.edgePadding(state.isTv),
+                    bottom = 18.dp + PlayerDimens.edgeExtraVertical(state.isTv),
+                )
+                .clip(RoundedCornerShape(PlayerDimens.BarCorner))
+                .background(PlayerColors.Panel)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            ChannelIdentityRow(state)
+            state.epgNow?.let { now ->
+                Spacer(Modifier.height(10.dp))
+                LiveEpgStrip(now, state.epgNext, nowMillis)
+            }
+        }
+    }
+}
+
+/**
+ * `12 · BBC One`, with the half-typed channel number leading it and any
+ * transient note trailing it.
+ *
+ * Shared by the banner and the bottom bar so the two cannot drift. The typed
+ * digits are the headline while they exist: mid-entry, the number the user is
+ * building is the thing they are looking at, and the channel beside it is
+ * still the one playing.
+ */
+@Composable
+private fun ChannelIdentityRow(state: PlayerUiState) {
+    val identity = state.channelIdentityLabel()
+    val digits = state.digitBuffer
+    val message = state.zapMessage
+    if (identity == null && digits.isEmpty() && message == null) return
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (digits.isNotEmpty()) {
+            Text(
+                text = digits,
+                color = PlayerColors.Accent,
+                fontFamily = InterFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 24.sp,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(12.dp))
+        }
+        if (identity != null) {
+            Text(
+                text = identity,
+                color = PlayerColors.TextHi,
+                fontFamily = InterFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+        if (message != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = message,
+                color = PlayerColors.Live,
+                fontFamily = InterFontFamily,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
+        } else if (state.zapTotal > 0 && state.zapPosition > 0) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "${state.zapPosition}/${state.zapTotal}",
+                color = PlayerColors.TextLo,
+                fontFamily = InterFontFamily,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
+        }
+    }
+}
 
 /**
  * Live EPG strip shown where the VOD scrubber sits: the current programme title +

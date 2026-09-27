@@ -519,7 +519,18 @@ per-row-focus approach whose races produced repeated D-pad bugs, and the doc rec
   shared between `LiveFocusCoordinator` (the live tab) and `player/zap_command.dart` (in-player) —
   typing a channel number on a remote is the same gesture in both places. A digit match is scoped
   to the **zap range only** (never the whole source); a miss shows "No channel N" in the banner
-  and leaves playback alone. Detail: docs/player.md "Live zapping".
+  and leaves playback alone. **Android implements the same rules natively (Phase 2, done):**
+  `ZapKeyPolicy` (Android-free, pinned like `PlayerBackPolicy`/`ReconnectPolicy`) is consulted in
+  `HdrPlayerActivity.dispatchKeyEvent` ahead of Back/`super`, digit-pending Back/OK read a native
+  mirror of `setZapBanner`'s buffer rather than round-tripping to Dart, and a settled `zapTo`
+  rebuilds the engine only when headers or the buffer preset actually changed (resetting every
+  watchdog counter either way, never `armHandoff`) — a rebuild of an adopted engine un-adopts via
+  `SharedEngine.invalidateFromFullscreen` first. The favorite star reports **both** live (`nativeZap
+  favorite:0|1`, so a session that has zapped away updates the right channel) and at close
+  (`RESULT_FAVORITE`, the one guaranteed to survive a kill) — both absolute, never a toggle, so they
+  can't disagree. Windows/Linux native input and the quick list remain unimplemented (Phases 4/5/6).
+  Detail: docs/player.md "Live zapping", "Android native input + banner (Phase 2)"; the key table is
+  in docs/tv-navigation.md "In-player navigation".
 
 ## Cloud sync + profiles (essentials)
 
@@ -1023,8 +1034,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `kIosFallbackSurfaceAfter` surfaces Retry rather than waiting silently. Detail: docs/ios.md
   "What routes to which engine", docs/player.md "iOS".
 - **In-player live zapping (channel up/down, previous-channel, digit entry) is Dart-authoritative
-  (Phase 1 — the Dart spine only; Android/Windows/Linux input+banner and the quick list are
-  Phases 2/4/5/6, not yet implemented).** `LiveZapController` (`lib/player/live_zap_controller.dart`)
+  (Phase 1, the spine, plus Android native input+banner — Phase 2 — now implemented; Windows/Linux
+  input+banner and the quick list are Phases 4/5/6, not yet implemented).** `LiveZapController`
+  (`lib/player/live_zap_controller.dart`)
   owns the launch-range list, the cursor and the resolve; every native surface is an **input
   source and a view**, never a second copy of the list — the launch range's ordering rules (the
   category filter, favourites' catalog order, the cross-source Favorites view's per-row

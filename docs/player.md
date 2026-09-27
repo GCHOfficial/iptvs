@@ -72,10 +72,15 @@ audio/subtitle/speed list-menus, aspect cycle, info panel, contextual hiding, a 
 favorite star** (see below), and **D-pad nav** (single-press Back peels menu→info→hide→exit;
 sliders are custom "OK to edit" controls, not Material `Slider`, so the D-pad isn't trapped).
 
-**Back has one Activity-owned policy.** `HdrPlayerActivity.dispatchKeyEvent` consumes hardware and
-remote Back on both key-down and key-up before a focused Compose control can eat it; key repeat is
-ignored so a held button peels only one rung. Gesture navigation reaches the Activity's lifecycle-
-aware `onBackPressedDispatcher` callback; Compose does not register a second Back handler.
+**Back has one Activity-owned policy — and live zapping's key map sits at the same boundary, ahead
+of it.** `HdrPlayerActivity.dispatchKeyEvent` consults `ZapKeyPolicy` first (`dispatchZapKey`, live
+zapping's pure key policy — see "Android native input + banner (Phase 2)" under "Live zapping"
+below) and returns before the Back check runs whenever a zap key claims the press, for the same
+reason Back itself is decided here rather than in Compose: one physical press must not be read
+twice. It then consumes hardware and remote Back on both key-down and key-up before a focused
+Compose control can eat it; key repeat is ignored so a held button peels only one rung. Gesture
+navigation reaches the Activity's lifecycle-aware `onBackPressedDispatcher` callback; Compose does
+not register a second Back handler.
 `PlayerBackGuard` rejects duplicate key/dispatcher callbacks within 120ms on TV images that route
 one physical press through both paths. `handleSystemBack` then applies
 `nextPlayerBackAction`: close menu → close info → hide controls → exit. Keeping the state change at
@@ -118,8 +123,12 @@ modern set (to check it doesn't merely look wasteful).
 the Dart host owns the favorites store, so it seeds the initial state via an Intent extra
 (`EXTRA_CAN_FAVORITE`/`EXTRA_IS_FAVORITE`) and reads the final state back on exit
 (`RESULT_FAVORITE`, relayed by `MainActivity` in the `nativeClosed` args) — the Activity toggles
-its own `uiState.isFavorite` locally, since it has no live method channel to Dart. Dart applies the
-returned value through the same `FavoritesController.toggle` the channel list uses, so an in-player
+its own `uiState.isFavorite` locally. **Since Phase 2 it also reports live**, over the zap channel
+(`nativeZap "favorite:0"`/`"favorite:1"`), because a session that has zapped away from the launch
+channel needs the toggle applied to whichever channel is actually current, not the one
+`RESULT_FAVORITE` will describe at close. Both reports are absolute (never a toggle), so they can
+never disagree, and `RESULT_FAVORITE` stays as the one report guaranteed to survive a kill. Dart
+applies either through the same `FavoritesController.toggle` the channel list uses, so an in-player
 toggle shows up in the list on return. The embedded media_kit overlay carries the same star,
 toggling the store directly. **Every surface draws it in the same slot** — the control row,
 immediately right of "Go to live" — at that row's ordinary button size: Kotlin `RightCluster`,
@@ -1269,7 +1278,12 @@ handoff.
 A session that **zaps** while adopted changes which channel the shared engine is actually playing,
 which this controller has no way to hear about on its own; see "Live zapping" below for
 `LivePreviewController.adoptFullscreenChannel` and why the preview return leg must never resume
-onto the launch channel once a zap has moved the session off it.
+onto the launch channel once a zap has moved the session off it. **Implemented (Phase 2):**
+`HdrPlayerActivity.applyZap` calls `SharedEngine.noteFullscreenZap(url, headers, preset)` on every
+settled zap so the adoption key tracks the channel actually playing, and a zap that has to rebuild
+the engine (changed headers or buffer preset) **un-adopts first**, via
+`SharedEngine.invalidateFromFullscreen()` — the same shape `fallbackToMpv` already uses — rather
+than releasing the shared engine behind the preview's back.
 
 Streams ExoPlayer can't decode (DV P5 on non-DV hardware) fall back **per channel** to the
 embedded media_kit preview (the `previewEvent: unsupported`/`lost` events;
@@ -1471,12 +1485,13 @@ number the instrumentation would still be missing.
 ## Live zapping
 
 In-player channel changes (channel up/down, "previous channel", digit entry, and eventually a
-quick list) without leaving the fullscreen route. **Phase 1 — this section — is the Dart spine
-only.** Android native input/banner (Phase 2), the Windows GDI overlay (Phase 4), the Linux Lua
-OSD (Phase 5) and the quick list (Phase 6) all follow; until then the only surfaces that actually
-zap are the ones the shared Flutter overlay itself owns (embedded, and Windows' native HWND
-through its ordinary `vo` swap) — but every native transport already speaks the wire contract
-below, so a later phase adds emitters and renderers, never new plumbing.
+quick list) without leaving the fullscreen route. **Phase 1 — most of this section — is the Dart
+spine.** **Phase 2, Android native input + banner, is now implemented** — see "Android native
+input + banner (Phase 2)" below. The Windows GDI overlay (Phase 4), the Linux Lua OSD (Phase 5)
+and the quick list (Phase 6) are still ahead; until then the surfaces that actually zap are the
+ones the shared Flutter overlay itself owns (embedded, and Windows' native HWND through its
+ordinary `vo` swap) plus Android's native HDR/mpv engines — but every native transport already
+speaks the wire contract below, so a later phase adds emitters and renderers, never new plumbing.
 
 ### Ownership: why Dart, not a native-cached list
 
@@ -1556,9 +1571,10 @@ starts on a clean stall clock and full backoff budget.
 One parser, `parseZapCommand` (`lib/player/zap_command.dart`), reads the identical short strings
 from every transport:
 
-- Android: `nativeZap` on `iptvs/native_hdr_player`, `{command: '<string>'}` (Phase 2 — Kotlin
-  doesn't emit these yet; the Dart handler is already wired and will pick them up unchanged).
-- Windows: the existing `nativeControl` method, same strings (Phase 4 — same status).
+- Android: `nativeZap` on `iptvs/native_hdr_player`, `{command: '<string>'}` — **wired end to end
+  (Phase 2)**: `HdrPlayerActivity.dispatchZapKey`/`ZapKeyPolicy` emit it, `MainActivity.requestZap`
+  forwards it, and the Dart handler applies it exactly as it already did for the shared overlay.
+- Windows: the existing `nativeControl` method, same strings (Phase 4 — not yet emitted).
 - Linux: the existing `user-data/iptvs-control` mpv property, same strings — this one **is** wired
   end to end today: `_handleLinuxNativeControl` parses and applies a zap command before falling
   through to its ordinary switch, but nothing in the Lua OSD (Phase 5) sends one yet.
@@ -1582,7 +1598,9 @@ platform whose native half hasn't landed yet is expected and logged, never fatal
   `title`, `sourceName`, `channelNumber` (if numbered), `channelName`, `logoUrl` (if any), `isLive`,
   `bufferPreset`, `aspect`, `canFavorite`, `isFavorite`, plus the EPG now/next pair
   (`epgNowTitle`/`epgNowStartMs`/`epgNowStopMs`/`epgNowDesc`, `epgNextTitle`/`epgNextStartMs`/
-  `epgNextStopMs`). **Never logged** — it's a provider locator plus its headers.
+  `epgNextStopMs`). **Never logged** — it's a provider locator plus its headers. On Android,
+  `HdrPlayerActivity.applyZap` is the receiving end and replies `{engineRebuilt: bool}` — see
+  "Android native input + banner (Phase 2)" below for what it does with the call.
 - **`setZapBanner`** (`LiveZapController.bannerPayload`, pushed by `_pushZapBanner` for the two
   surfaces that draw their own chrome — the separate-engine platforms and the Windows native HWND)
   — the **cursor's** channel, not the playing one, so a held key shows the user where it's got to
@@ -1597,7 +1615,8 @@ platform whose native half hasn't landed yet is expected and logged, never fatal
 
 | Surface | What `_zapPlay` does |
 | --- | --- |
-| Android / iOS (`_separateEngineOwnsPlayback`) | Sends `zapTo` (above) and returns — the native engine, once it exists, owns stop+reload |
+| Android (`_separateEngineOwnsPlayback`) | Sends `zapTo` (above); `HdrPlayerActivity.applyZap` owns stop+reload — see "Android native input + banner (Phase 2)" below. **Implemented.** |
+| iOS (`_separateEngineOwnsPlayback`) | Sends `zapTo` and returns — the native engine, once wired, owns stop+reload. Not yet implemented. |
 | Linux native mpv session | `set_property http-header-fields`, `set_property force-media-title`, `loadfile <url> replace`, then the ordinary `_pushLinuxOverlayState()` (title/EPG only — not the dedicated zap banner with digits/settling/position, since that's Phase 5) |
 | Embedded, and Windows' native HWND (same `_player`) | Re-applies mpv buffer options and header options on the existing `NativePlayer`, then `_player.open(Media(...))` on the surface already in use — exactly the reopen `_goToLive` already does |
 
@@ -1633,6 +1652,133 @@ makes "which channel did this session end on" answerable after the fact —
   the session actually ended on via `LivePreviewController.adoptFullscreenChannel` — called *before*
   `adoptedByFullscreen` is cleared, so a clean EOF landing in that window restarts the right channel
   rather than the launch one the controller would otherwise still believe in.
+
+### Android native input + banner (Phase 2)
+
+**Implemented.** `HdrPlayerActivity` now emits zap commands and applies `zapTo`/`setZapBanner`
+itself; Dart's channel-list/`LiveZapController` machinery above is unchanged — Android is simply a
+real input source and view now, exactly as the ownership section says a native surface should be.
+
+**Key policy.** `ZapKeyPolicy` (`android/.../player/ZapKeyPolicy.kt`) is a pure, Android-free
+object — raw `Int` key codes mirrored and pinned against `android.view.KeyEvent` by
+`ZapKeyPolicyTest` — consulted at the same Activity boundary as `PlayerBackPolicy`/
+`ReconnectPolicy`, and for the same reason: one physical press must not be read once by the
+Activity and again by a focused Compose control. `HdrPlayerActivity.dispatchKeyEvent` calls
+`dispatchZapKey` **before** the Back check and before `super`, so a consumed zap key never reaches
+Back handling or the Compose tree. Only `ACTION_DOWN` carries a decision; the paired `ACTION_UP` is
+consumed by a remembered keycode (`zapConsumedKeyCode`) rather than re-run through the policy — the
+state a repeat decision reads (a half-typed number) can change between the down and the up, and a
+bare key-up reaching a focused control would activate it right after the down had already been
+used for something else.
+
+- **Chrome-gated vs. always-live.** Digits (number row + numpad), `CHANNEL_UP`/`CHANNEL_DOWN`,
+  `PAGE_UP`/`PAGE_DOWN` and `LAST_CHANNEL` are unambiguous dedicated keys and act whether the
+  transport chrome is showing or not. The D-pad arrows are the contested keys — with the chrome up
+  they belong to the control row — so `ZapKeyPolicy` only claims them when `isLive &&
+  !controlsVisible`, matching the Dart/shared-overlay rule in "In-player navigation"
+  (docs/tv-navigation.md) exactly: Up/Down are channel up/down, Right is "previous channel", Left
+  is reserved for the quick list.
+- **Repeats.** Channel up/down (both the dedicated keys and the D-pad arrows) pass every repeat
+  through — holding the key is how a user scans, and Dart's 600 ms settle is what collapses that to
+  one `create_link`. Digits, `LAST_CHANNEL`, `Activate`/`Back` (see below) and the quick-list open
+  are **swallowed** on repeat (`ZapKeyAction.Swallow`, consumed but no command) rather than let
+  through to `None` — falling through would leak a held digit into Compose's focus traversal, and
+  repeating "previous channel" or "commit"/"clear" would flap or double-fire.
+- **`QUICK_LIST_ENABLED = false`.** Left and `KEYCODE_GUIDE` stay out of the policy entirely until
+  Phase 6 wires a real quick list — `dispatchKeyEvent` has to answer synchronously and Dart today
+  answers `zap:list` "not consumed", so claiming Left into a decided no-op would break its present
+  job (revealing the chrome) rather than merely doing nothing new. Flipping the one constant is the
+  whole Phase 6 cutover; the behaviour on both settings is already pinned by `ZapKeyPolicyTest`.
+- **Digit-pending Back/OK.** While a channel number is half-typed, OK/Enter commits it early
+  (`zap:activate`) and Back clears it (`zap:back`) instead of their ordinary meanings — Back's rung
+  here sits **above** `nextPlayerBackAction`'s ladder, not inside it (see `PlayerBackPolicy.kt`'s
+  doc comment): it exists only on the key-dispatch path, so a copy inside `nextPlayerBackAction`
+  would peel two layers for one press. `digitsPending` is read from a **native mirror** of
+  `setZapBanner`'s `digits` field (`uiState.digitBuffer.isNotEmpty() || zapDigitsPendingOptimistic`),
+  not a round trip to Dart — `dispatchKeyEvent` must return synchronously, and Dart's authoritative
+  answer is a frame or two away. `zapDigitsPendingOptimistic` is set the instant a digit is
+  dispatched and replaced wholesale by the next `setZapBanner` push, so it can only ever be early,
+  never stale; the worst a stale mirror can do is let one Back press peel a control layer instead
+  of clearing the buffer (recoverable), which is why the mirror is an acceptable shortcut where
+  waiting for Dart's reply is not.
+
+**Routing.** `MainActivity` registers `iptvs/native_hdr_player` once per process (see
+"MethodChannel handler ownership"), so the inbound `zapTo`/`setZapBanner` methods have to be
+handled there and forwarded — `HdrPlayerActivity.instance` (a `WeakReference` companion, the same
+shape `MainActivity.instance` already uses for PiP) is how `MainActivity` reaches the live player
+Activity. Both are no-ops with no Activity up (`instance?.get()`): a push that arrives after the
+player closed has nothing to apply, and answering rather than erroring keeps a late push off
+Dart's error path. Outbound, `HdrPlayerActivity.sendZap` calls `MainActivity.requestZap`, which
+invokes `nativeZap` (`{command: '<string>'}`) on the same channel — fire-and-forget, since the
+native side names a command, not a channel, and holds no cursor to reconcile a reply against.
+
+**Applying a settled zap (`HdrPlayerActivity.applyZap`).** Nothing here decides *which* channel —
+Dart already did, and already resolved it. What the Activity owns is everything that would
+otherwise be wrong the moment the stream underneath changes:
+
+- **Abandons any in-flight re-resolve** (`resolveGate.abandon()`, `LiveResolve.kt`) before doing
+  anything else. A re-resolve in flight describes the channel being left, and its continuation
+  ends in `engine.load(url)` — letting it settle after the zap would reload the previous channel on
+  top of the new one, with every health flag reading normal.
+- **Rebuilds the engine only if it has to.** Both the HTTP headers and the buffer preset are
+  build-time arguments (`ExoPlayerEngine`'s data-source factory, `DefaultLoadControl`), so a
+  cross-source zap that changes either forces a rebuild (`rebuildEngineForZap`); otherwise it's a
+  plain `engine.load(url, subtitles)` on the running engine — the cheap path, and the common one
+  (same-source zapping never changes headers or preset). External subtitle sidecars are always
+  cleared (`subtitles = emptyList()`) — a zapped channel's contract carries none, and keeping the
+  launch channel's would attach the wrong files.
+- **A rebuild un-adopts an adopted engine first**, via `SharedEngine.invalidateFromFullscreen()` —
+  the same shape `fallbackToMpv` already uses — rather than a bare `release()`, because the preview
+  still believes it owns that engine; releasing it behind the holder's back would leave `onDestroy`
+  handing a dead object to `fullscreenDetached()`. It keeps `DebugCounters.exoEngines`/
+  `sharedEngineLive` balanced: release decrements, the fresh engine's constructor increments.
+  **The engine kind is preserved across a rebuild** (mpv stays mpv, ExoPlayer stays ExoPlayer) —
+  falling back to mpv is a one-way, per-session decision about what this device can decode, and a
+  zap is not new evidence about that.
+- **Every watchdog counter resets to a clean sheet**: `frameLiveness.reset()` — deliberately
+  `reset()`, never `armHandoff` — because the surface did not change and no earlier frames say
+  anything about the new decoder; `playbackStats.reset()`; `handoffRebuilds`, `stalledSinceMs`,
+  `lastReconnectMs`, `reconnectAttempt` and `stallKind` all cleared. A zap is a deliberate stop, not
+  a drop, so the new channel gets a full stall threshold and a full backoff budget, exactly like
+  the Dart spine's own re-arm.
+- **Presentation fields** (title, source name, channel name/number, EPG now/next, `canFavorite`/
+  `isFavorite`, aspect) are applied from the payload, and `SharedEngine.noteFullscreenZap` keeps the
+  shared engine's adoption key (`url`/`headers`/`preset`) in step — a no-op after a rebuild, which
+  has already un-adopted.
+- Logs one credential-free, exportable line: **`zap applied rebuilt=<bool> adopted=<bool>`** — the
+  locator and headers are never logged, matching every other playback log line.
+
+**Watchdog stand-down.** `setZapBanner`'s `settling` flag is mirrored into `zapSettlingSinceMs`;
+while it is set, both the stall poll and the reconnect check (`zapSettlingNow`) return early, the
+same shape as the existing `resolveGate.inFlight` early-return — the stream a reconnect would
+target is one Dart is deliberately replacing. The stand-down is bounded by `ResolveGate.TIMEOUT_MS`
+(read from `zapSettlingSinceMs`), so a `settling` push whose settled follow-up never arrives expires
+back into ordinary watchdog coverage instead of wedging it for the rest of the session.
+
+**Favorite star: two idempotent reports, not one.** Pressing the star locally toggles
+`uiState.isFavorite` **and** sends it live (`nativeZap "favorite:0"`/`"favorite:1"`) so a session
+that has since zapped away updates the channel actually being toggled, not the one the Activity
+launched on. The close-time `RESULT_FAVORITE` reply stays — it's the only report guaranteed to
+survive a kill — and Dart applies both against whichever channel is current when it hears them.
+Both reports are **absolute, not a toggle**, so replaying either one twice is a no-op and the two
+can never disagree with each other.
+
+**Banner UI** (`PlayerControls.kt`). `ZapBanner` occupies the same bottom-bar slot the live EPG
+strip/channel-identity row use, shown only while the transport chrome is hidden
+(`state.showZapBanner && !state.controlsVisible` — the two are mutually exclusive by that gate, but
+their fades overlap, so the ordinary bottom bar — which carries the same information plus the
+controls — is drawn on top when both are mid-fade). It fades on its own `ZAP_BANNER_VISIBLE_MS`
+(3 s) timer, restarted on every push via `zapBannerAtMs`, deliberately independent of
+`controlsVisible` — the banner is the only acknowledgement a keypress gets while the chrome is
+hidden, which is exactly when zapping happens. It reuses two pieces rather than drawing its own
+layout: `ChannelIdentityRow` (the half-typed digit readout, `<number> · <name>`, and a trailing
+transient message or launch-range position) and `LiveEpgStrip` — the same widgets the ordinary
+bottom bar now also draws (`BottomBar` renders `ChannelIdentityRow` only when
+`state.showsChannelIdentity` — a number, digits, or a message — so a session that never zaps
+renders exactly as it did before Phase 2). One consequence worth remembering when testing: a
+channel's **number only appears after the first cursor move** — `channelNumber` is null until a
+`setZapBanner`/`applyZapBanner` push sets it, and none is sent at tune-in, so opening a channel
+directly (no zap yet this session) shows the plain title until the first Up/Down/digit press.
 
 ## PiP note
 
@@ -2056,6 +2202,14 @@ deliberately *not* a new inbound channel — no new handler ownership surface; a
 platform exception, or wrong reply shape just omits the native keys rather than throwing, and
 release builds reply with an empty map. The snapshot renders in a `kDebugMode`-only section of
 the diagnostics screen.
+
+**A zap that rebuilds the engine is a new create/dispose path the same counters must balance.**
+`HdrPlayerActivity.rebuildEngineForZap` releases (or un-adopts) the old engine and constructs a
+fresh one within one call, so `exoEngines`/`mpvEngines` and `sharedEngineLive` must return to their
+pre-zap values immediately, not just at session end — a leak here would otherwise hide behind the
+ordinary open/close balance the soak already checks. **Not yet done:** the 100-cycle soak below
+does not yet include a zap (rebuild-triggering and load-only) in its cycle; it currently only
+verifies the plain open/close and preview start/stop paths.
 
 The **100-cycle soak** (`integration_test/player_soak_test.dart`, never run by CI or plain
 `flutter test`) cycles `PlayerScreen` push/pop and preview start/stop on real hardware —

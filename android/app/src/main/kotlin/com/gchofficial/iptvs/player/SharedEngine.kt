@@ -370,6 +370,31 @@ object SharedEngine {
         }, REATTACH_SAMPLE_MS)
     }
 
+    /**
+     * Fullscreen **zapped** the adopted engine to another channel.
+     *
+     * [url] is the adoption key, so leaving it pointing at the channel the
+     * session was launched on would make a later `adoptForFullscreen` either
+     * refuse a legitimate adoption or — worse — accept one for a URL this
+     * engine is no longer playing. [headers] and [preset] matter for the same
+     * reason `openPreview` compares them: they decide whether the *next*
+     * preview can reuse this engine or must build a fresh one.
+     *
+     * Only meaningful while fullscreen holds the engine; a zap that had to
+     * rebuild the engine has already un-adopted through
+     * [invalidateFromFullscreen], and this is then a no-op by design.
+     */
+    fun noteFullscreenZap(
+        streamUrl: String,
+        requestHeaders: Map<String, String>,
+        bufferPreset: BufferPreset,
+    ) {
+        if (!adoptedByFullscreen) return
+        url = streamUrl
+        headers = requestHeaders
+        preset = bufferPreset
+    }
+
     /** Fullscreen swapped the adopted engine for mpv (unsupported video): the
      *  shared engine is dead; tell Dart so the preview side resets. */
     fun invalidateFromFullscreen() {

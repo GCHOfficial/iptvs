@@ -48,6 +48,16 @@ enum class AspectMode(val label: String) {
     Ratio4x3("4:3"),
 }
 
+/**
+ * How long the zap banner stays up after a press, before it fades.
+ *
+ * Long enough to read a channel name and its now/next after a single press,
+ * short enough not to sit over the picture once the user has stopped zapping.
+ * A half-typed number or a transient note keeps it up regardless
+ * ([PlayerUiState.showZapBanner]).
+ */
+const val ZAP_BANNER_VISIBLE_MS = 3_000L
+
 /** Sentinel id for the "Off" subtitle option. */
 const val SUBTITLE_OFF_ID = "off"
 
@@ -131,6 +141,78 @@ class PlayerUiState(
     var videoCodec by mutableStateOf("")
     var audioCodec by mutableStateOf("")
     var audioChannels by mutableStateOf(0)
+
+    // ── Live zapping (see `lib/player/live_zap_controller.dart`) ─────────────
+    //
+    // Pushed from Dart on `setZapBanner`. Dart owns the channel list and the
+    // cursor; these fields are presentation only, and none of them decides
+    // anything about playback.
+
+    /** The cursor channel's provider number, when it has one. */
+    var channelNumber by mutableStateOf<Int?>(null)
+
+    /** The cursor channel's name — ahead of [title] while a zap is settling. */
+    var channelName by mutableStateOf<String?>(null)
+
+    /** Half-typed channel number, shown as a digit readout. */
+    var digitBuffer by mutableStateOf("")
+
+    /** Transient note ("No channel 123", a failed zap). */
+    var zapMessage by mutableStateOf<String?>(null)
+
+    /** 1-based cursor position in the zap range, and its size. */
+    var zapPosition by mutableStateOf(0)
+    var zapTotal by mutableStateOf(0)
+
+    /** True while Dart is stopping/resolving/opening the settled channel. */
+    var zapSettling by mutableStateOf(false)
+
+    /**
+     * Whether the zap banner is on screen. Set true by each `setZapBanner`
+     * push and cleared by the overlay's own timer
+     * ([ZAP_BANNER_VISIBLE_MS]) — **not** by [controlsVisible], because the
+     * banner is the only acknowledgement a keypress gets while the chrome is
+     * hidden, which is exactly when zapping is used.
+     */
+    var zapBannerVisible by mutableStateOf(false)
+
+    /**
+     * When the last banner push arrived. Keys the overlay's auto-hide effect,
+     * so each new press restarts the timer rather than stacking timers.
+     */
+    var zapBannerAtMs by mutableStateOf(0L)
+
+    /**
+     * The banner is drawn whenever there is something to acknowledge. A
+     * half-typed number and a transient note outlive the plain banner timer
+     * on purpose: both are mid-interaction states, and hiding them would take
+     * the feedback away while the user is still typing.
+     */
+    val showZapBanner: Boolean
+        get() = isLive &&
+            !inPip &&
+            (zapBannerVisible || digitBuffer.isNotEmpty() || zapMessage != null)
+
+    /**
+     * Whether the bottom bar should draw the identity run.
+     *
+     * Only when it says something the top bar's title does not: a channel
+     * number, a half-typed number, or a transient note. A session that never
+     * zaps therefore renders byte-identically to before — nothing sets
+     * [channelNumber] until Dart pushes a banner, which it does only on a
+     * cursor move.
+     */
+    val showsChannelIdentity: Boolean
+        get() = isLive &&
+            (channelNumber != null || digitBuffer.isNotEmpty() || zapMessage != null)
+
+    /** `12 · BBC One`, or just the name when the provider gave no number. */
+    fun channelIdentityLabel(): String? {
+        val name = channelName?.trim().orEmpty().ifEmpty { title.trim() }
+        if (name.isEmpty()) return null
+        val number = channelNumber
+        return if (number != null) "$number · $name" else name
+    }
 
     var openMenu by mutableStateOf(PlayerMenu.None)
     var infoOpen by mutableStateOf(false)

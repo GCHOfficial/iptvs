@@ -32,4 +32,36 @@ class PlayerBackPolicyTest {
         assertEquals(false, guard.shouldHandle(1_050L))
         assertEquals(true, guard.shouldHandle(1_120L))
     }
+
+    @Test
+    fun `the digit rung sits above this ladder, not inside it`() {
+        // Back clears a half-typed channel number first, but that rung is
+        // ZapKeyPolicy's — it is only reachable through key dispatch, and a
+        // copy here would make one press peel two layers on that path.
+        assertEquals(
+            ZapKeyAction.Back,
+            ZapKeyPolicy.decide(
+                keyCode = ZapKeyPolicy.KEYCODE_BACK,
+                isLive = true,
+                controlsVisible = true,
+                digitsPending = true,
+                isRepeat = false,
+            ).action,
+        )
+        // With nothing to clear, Back is the ladder's again — unchanged.
+        assertEquals(
+            ZapKeyAction.None,
+            ZapKeyPolicy.decide(
+                keyCode = ZapKeyPolicy.KEYCODE_BACK,
+                isLive = true,
+                controlsVisible = true,
+                digitsPending = false,
+                isRepeat = false,
+            ).action,
+        )
+        assertEquals(
+            PlayerBackAction.HideControls,
+            nextPlayerBackAction(menuOpen = false, infoOpen = false, controlsVisible = true),
+        )
+    }
 }

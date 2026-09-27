@@ -41,11 +41,14 @@ import com.gchofficial.iptvs.player.ResolveAgainReply
 import com.gchofficial.iptvs.player.ResolveGate
 import com.gchofficial.iptvs.player.SharedEngine
 import com.gchofficial.iptvs.player.SubtitleSpec
+import com.gchofficial.iptvs.player.ZapKeyPolicy
+import com.gchofficial.iptvs.player.ZapKeyAction
 import com.gchofficial.iptvs.player.nextPlayerBackAction
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.lang.ref.WeakReference
 
 /**
  * Native HDR player. Hosts a [PlaybackEngine] behind the Jetpack Compose control
@@ -106,6 +109,41 @@ class HdrPlayerActivity : ComponentActivity() {
     // and settles the reply-vs-timeout race exactly once.
     private val resolveGate = ResolveGate()
     private var resolveTimeoutJob: Job? = null
+
+    // The buffering preset the current engine was built with. Read from the
+    // launch Intent and then **kept in a field**, because an in-player zap can
+    // change it: `LoadControl` is a build-time argument, so a changed preset
+    // rebuilds the engine exactly as changed headers do (the rule
+    // `SharedEngine.openPreview` already applies to the preview).
+    private var bufferPreset: BufferPreset = BufferPreset.NORMAL
+
+    // Live zapping (Dart owns the channel list and the cursor — see
+    // `lib/player/live_zap_controller.dart`). The Activity holds only what a
+    // *synchronous* key decision needs.
+    //
+    // `zapConsumedKeyCode` pairs a consumed ACTION_UP with the ACTION_DOWN
+    // that claimed it: the state the policy reads (a half-typed number) can
+    // change between the two, and a bare key-up reaching a focused Compose
+    // control would activate it right after the down had already been used
+    // for something else.
+    private var zapConsumedKeyCode: Int? = null
+
+    // Optimistic mirror of "a channel number is half-typed".
+    //
+    // The authoritative buffer is Dart's and arrives back on `setZapBanner`,
+    // but that is a frame or two away, and OK or Back pressed inside that
+    // window would otherwise fall through to the overlay — on a remote, a
+    // fast "1 OK" is the normal way to enter a single-digit channel. Set when
+    // a digit is dispatched and replaced wholesale by the next authoritative
+    // push, so it can only ever be early, never stale.
+    private var zapDigitsPendingOptimistic = false
+
+    // When Dart last reported a zap resolve in flight (`setZapBanner`'s
+    // `settling`). While one is, the reconnect watchdog stands down: the
+    // stream it would be reconnecting is one Dart is deliberately replacing.
+    // Bounded by ResolveGate.TIMEOUT_MS so a banner whose follow-up never
+    // arrives cannot wedge the watchdog for the rest of the session.
+    private var zapSettlingSinceMs = 0L
     private val backGuard = PlayerBackGuard()
     // Entering PiP moves MainActivity's task behind the launcher so the pinned
     // window is unobstructed.  When the restored player is then closed, the
@@ -120,11 +158,59 @@ class HdrPlayerActivity : ComponentActivity() {
      * the Back dispatcher cannot process the same physical press again.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (dispatchZapKey(event)) return true
         if (event.keyCode != KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
             handleSystemBack()
         }
         return true
+    }
+
+    /**
+     * Live zapping's share of the key stream, decided by the pure
+     * [ZapKeyPolicy] at this same Activity boundary Back already uses — one
+     * physical press must not be read once here and again by a focused
+     * Compose control.
+     *
+     * Returns whether the press was consumed. Only the key-down sends a
+     * command; its key-up is consumed by code so nothing downstream ever sees
+     * half a press.
+     */
+    private fun dispatchZapKey(event: KeyEvent): Boolean {
+        if (!::uiState.isInitialized) return false
+        if (event.action == KeyEvent.ACTION_UP) {
+            if (zapConsumedKeyCode != event.keyCode) return false
+            zapConsumedKeyCode = null
+            return true
+        }
+        if (event.action != KeyEvent.ACTION_DOWN) return false
+        val decision = ZapKeyPolicy.decide(
+            keyCode = event.keyCode,
+            isLive = uiState.isLive,
+            controlsVisible = uiState.controlsVisible,
+            digitsPending = uiState.digitBuffer.isNotEmpty() || zapDigitsPendingOptimistic,
+            isRepeat = event.repeatCount > 0,
+        )
+        if (!decision.consumed) return false
+        zapConsumedKeyCode = event.keyCode
+        // A digit keeps the banner up while the number is being typed; the
+        // authoritative buffer still comes back from Dart on `setZapBanner`,
+        // which is what the next key decision reads.
+        if (decision.action == ZapKeyAction.Digit) {
+            zapDigitsPendingOptimistic = true
+            uiState.zapBannerVisible = true
+        } else if (decision.action == ZapKeyAction.Activate ||
+            decision.action == ZapKeyAction.Back
+        ) {
+            zapDigitsPendingOptimistic = false
+        }
+        decision.command?.let { sendZap(it) }
+        return true
+    }
+
+    /** Outbound half of the zap wire contract (see `MainActivity.requestZap`). */
+    private fun sendZap(command: String) {
+        MainActivity.instance?.get()?.requestZap(command)
     }
 
     /** One press closes one layer: menu, info, controls, then Activity. */
@@ -205,6 +291,7 @@ class HdrPlayerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = WeakReference(this)
         startedAtMs = SystemClock.elapsedRealtime()
         // Gesture navigation and Android's system Back dispatcher terminate at
         // this same Activity boundary as remote key events. Do not register a
@@ -254,6 +341,7 @@ class HdrPlayerActivity : ComponentActivity() {
         url = streamUrl
         headers = requestHeaders()
         subtitles = subtitleSpecs()
+        bufferPreset = BufferPreset.fromName(intent.getStringExtra(EXTRA_BUFFER_PRESET))
 
         // Seamless handoff: when the live preview is already playing this exact
         // stream, adopt its running engine — only the video output moves to this
@@ -387,9 +475,10 @@ class HdrPlayerActivity : ComponentActivity() {
             context = this,
             state = uiState,
             headers = headers,
-            bufferPreset = BufferPreset.fromName(
-                intent.getStringExtra(EXTRA_BUFFER_PRESET),
-            ),
+            // The field, not the Intent: a zap can change both the headers
+            // (a cross-source zap) and the preset, and the rebuilt engine has
+            // to be built with the *current* ones.
+            bufferPreset = this.bufferPreset,
         )
         exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
@@ -418,14 +507,17 @@ class HdrPlayerActivity : ComponentActivity() {
         }
         // Reset stale stream info before the new engine repopulates it.
         uiState.videoUnsupported = false
+        startWithMpv()
+    }
+
+    /** Builds and loads an [MpvEngine] with the session's current locator. */
+    private fun startWithMpv() {
         val mpv = MpvEngine(
             context = this,
             state = uiState,
             headers = headers,
             post = { action -> if (!isFinishing) runOnUiThread(action) },
-            bufferPreset = BufferPreset.fromName(
-                intent.getStringExtra(EXTRA_BUFFER_PRESET),
-            ),
+            bufferPreset = this.bufferPreset,
         )
         setEngine(mpv)
         mpv.load(url, subtitles)
@@ -446,6 +538,9 @@ class HdrPlayerActivity : ComponentActivity() {
         // the reload actually starts.
         if (resolveGate.inFlight) return
         val now = System.currentTimeMillis()
+        // A zap resolve in flight is not a stall: Dart is replacing this
+        // stream on purpose (see [zapSettlingNow]).
+        if (zapSettlingNow(now)) return
         // "Playing normally" by the engine's own account. When that is true and
         // no frame has reached the screen for NO_FRAME_STALL_MS, the account is
         // wrong — see [FrameLivenessWatch] for the failure it catches.
@@ -560,6 +655,7 @@ class HdrPlayerActivity : ComponentActivity() {
         // 500ms progress ticker re-enters once the in-flight request settles.
         if (resolveGate.inFlight) return
         val now = System.currentTimeMillis()
+        if (zapSettlingNow(now)) return
         val sinceLast = now - lastReconnectMs
         val minGap = ReconnectPolicy.minGapMs(reconnectAttempt, force)
         if (lastReconnectMs != 0L && sinceLast < minGap) return
@@ -657,6 +753,207 @@ class HdrPlayerActivity : ComponentActivity() {
         onFresh()
     }
 
+    // ── Live zapping: applying what Dart decided ─────────────────────────────
+
+    /**
+     * Presentation-only push from Dart's zap controller, once per cursor move.
+     *
+     * Carries the **cursor's** channel, which during the settle window is
+     * ahead of what is playing — that is the whole point of a banner. The
+     * guide fields move with it for the same reason: while the user is
+     * browsing, the strip should describe the channel they are browsing to.
+     * [applyZap] puts both back in step when the move settles.
+     */
+    fun applyZapBanner(args: Map<*, *>) {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        uiState.channelNumber = (args["channelNumber"] as? Number)?.toInt()
+        uiState.channelName = (args["channelName"] as? String)?.takeIf { it.isNotBlank() }
+        uiState.digitBuffer = (args["digits"] as? String).orEmpty()
+        zapDigitsPendingOptimistic = uiState.digitBuffer.isNotEmpty()
+        uiState.zapMessage = (args["message"] as? String)?.takeIf { it.isNotBlank() }
+        uiState.zapPosition = (args["position"] as? Number)?.toInt() ?: 0
+        uiState.zapTotal = (args["total"] as? Number)?.toInt() ?: 0
+        uiState.epgNow = epgFromMap(args, "epgNowTitle", "epgNowStartMs", "epgNowStopMs", "epgNowDesc")
+        uiState.epgNext = epgFromMap(args, "epgNextTitle", "epgNextStartMs", "epgNextStopMs", null)
+        val settling = args["settling"] as? Boolean ?: false
+        uiState.zapSettling = settling
+        zapSettlingSinceMs = if (settling) System.currentTimeMillis() else 0L
+        uiState.zapBannerAtMs = System.currentTimeMillis()
+        uiState.zapBannerVisible = true
+    }
+
+    /**
+     * Applies a settled zap: this Activity keeps playing, on the same surface,
+     * with a new locator.
+     *
+     * Nothing here decides *which* channel — Dart already did, and already
+     * resolved it. What the Activity owns is everything that would otherwise
+     * be wrong the moment the stream underneath changes: an in-flight
+     * re-resolve for the channel being left, an engine whose build-time
+     * arguments no longer match, the shared engine's adoption key, and every
+     * watchdog counter (the stop below is *ours*, not a drop).
+     *
+     * Never logs the locator or its headers — they carry account credentials.
+     */
+    fun applyZap(args: Map<*, *>): Map<String, Any> {
+        val refused = mapOf<String, Any>("engineRebuilt" to false)
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return refused
+        val nextUrl = (args["url"] as? String)?.takeIf { it.isNotBlank() } ?: return refused
+        val nextHeaders = headerMapFrom(args["headers"])
+        val nextPreset = BufferPreset.fromName(args["bufferPreset"] as? String)
+
+        // A re-resolve in flight describes the channel we are leaving, and its
+        // continuation ends in `engine.load(url)` — letting it settle after
+        // this would reload the previous channel on top of the new one, with
+        // every health flag reading normal.
+        resolveGate.abandon()
+        resolveTimeoutJob?.cancel()
+        resolveTimeoutJob = null
+
+        // Both are build-time arguments (the HTTP data-source factory and
+        // `LoadControl`), so neither can be changed on a running engine — the
+        // same reason `SharedEngine.openPreview` rebuilds on either.
+        val rebuild = nextHeaders != headers || nextPreset != bufferPreset
+        url = nextUrl
+        headers = nextHeaders
+        bufferPreset = nextPreset
+        // A zapped channel brings no external subtitle sidecars of its own
+        // (the contract carries none), and keeping the launch channel's would
+        // attach the wrong files to it.
+        subtitles = emptyList()
+
+        uiState.title = (args["title"] as? String).orEmpty()
+        uiState.sourceName = args["sourceName"] as? String
+        uiState.channelName = (args["channelName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: uiState.title.takeIf { it.isNotBlank() }
+        uiState.channelNumber = (args["channelNumber"] as? Number)?.toInt()
+        uiState.epgNow = epgFromMap(args, "epgNowTitle", "epgNowStartMs", "epgNowStopMs", "epgNowDesc")
+        uiState.epgNext = epgFromMap(args, "epgNextTitle", "epgNextStartMs", "epgNextStopMs", null)
+        uiState.canFavorite = args["canFavorite"] as? Boolean ?: false
+        uiState.isFavorite = args["isFavorite"] as? Boolean ?: false
+        (args["aspect"] as? String)?.let { label ->
+            AspectMode.entries.firstOrNull { it.label == label }?.let { uiState.aspect = it }
+        }
+        uiState.digitBuffer = ""
+        zapDigitsPendingOptimistic = false
+        uiState.zapMessage = null
+        uiState.zapSettling = false
+        zapSettlingSinceMs = 0L
+        uiState.zapBannerAtMs = System.currentTimeMillis()
+        uiState.zapBannerVisible = true
+
+        // The watchdog starts the new channel on a clean sheet: a full stall
+        // threshold, a full backoff budget, and no handoff window — the
+        // surface did not change, and no earlier frames say anything about
+        // this decoder, so `reset()` (never `armHandoff`) is the honest state.
+        frameLiveness.reset()
+        playbackStats.reset()
+        handoffRebuilds = 0
+        stalledSinceMs = 0L
+        lastReconnectMs = 0L
+        reconnectAttempt = 0
+        stallKind = "none"
+        uiState.ended = false
+        uiState.reconnecting = false
+        uiState.liveSynced = true
+        uiState.videoUnsupported = false
+
+        if (rebuild) {
+            rebuildEngineForZap()
+        } else {
+            // `load` stops first (see ExoPlayerEngine.load), which is what
+            // frees a single-connection account's only slot before the new
+            // stream opens.
+            engine?.load(url, subtitles)
+            engine?.applyAspect(uiState.aspect)
+        }
+        // Keep the adoption key in step, or a later `adoptForFullscreen` keys
+        // off the channel this session was launched on. A no-op after a
+        // rebuild, which has already un-adopted.
+        SharedEngine.noteFullscreenZap(url, headers, bufferPreset)
+        logNative("zap applied rebuilt=$rebuild adopted=$adoptedShared")
+        return mapOf("engineRebuilt" to rebuild)
+    }
+
+    /**
+     * Replaces the engine because a zap changed something baked in at
+     * construction (the headers of a cross-source zap, or the buffer preset).
+     *
+     * An **adopted** engine has to go through [SharedEngine.invalidateFromFullscreen]
+     * rather than a bare `release()`: the preview owns that engine, and
+     * releasing it behind the holder's back would leave `onDestroy`'s
+     * `fullscreenDetached()` handing the preview a dead object. Same shape as
+     * [fallbackToMpv], and it keeps `DebugCounters.exoEngines` /
+     * `sharedEngineLive` balanced (release decrements, the fresh engine's
+     * constructor increments).
+     *
+     * The engine *kind* is deliberately preserved: falling back to mpv is a
+     * one-way, per-session decision about what this device can decode, and a
+     * zap is not new evidence about that.
+     */
+    private fun rebuildEngineForZap() {
+        val wasMpv = engine is MpvEngine
+        if (adoptedShared) {
+            adoptedShared = false
+            SharedEngine.invalidateFromFullscreen()
+        } else {
+            engine?.release()
+        }
+        if (wasMpv) startWithMpv() else startWithExoPlayer()
+        engine?.applyAspect(uiState.aspect)
+    }
+
+    /** Coerces the channel codec's `Map<Object?, Object?>` header payload. */
+    private fun headerMapFrom(raw: Any?): Map<String, String> {
+        val map = raw as? Map<*, *> ?: return emptyMap()
+        return map.entries.mapNotNull { entry ->
+            val key = entry.key as? String
+            val value = entry.value
+            if (key.isNullOrBlank() || value == null) null else key to value.toString()
+        }.toMap()
+    }
+
+    /** [epgEntry]'s counterpart for a MethodChannel payload. */
+    private fun epgFromMap(
+        args: Map<*, *>,
+        titleKey: String,
+        startKey: String,
+        stopKey: String,
+        descKey: String?,
+    ): com.gchofficial.iptvs.player.EpgEntry? {
+        val title = (args[titleKey] as? String)?.takeIf { it.isNotBlank() } ?: return null
+        val start = (args[startKey] as? Number)?.toLong() ?: -1L
+        val stop = (args[stopKey] as? Number)?.toLong() ?: -1L
+        if (start < 0L || stop <= start) return null
+        return com.gchofficial.iptvs.player.EpgEntry(
+            title = title,
+            startMs = start,
+            stopMs = stop,
+            description = descKey?.let { args[it] as? String }?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    /**
+     * True while Dart has a zap resolve in flight.
+     *
+     * The watchdog stands down for the duration: the stream it would be
+     * reconnecting is one Dart is deliberately replacing, and a reconnect
+     * would spend a second `create_link` on a single-connection account
+     * against the channel being left. Bounded by the same timeout the resolve
+     * round trip uses, so a `settling` that never gets its follow-up expires
+     * instead of wedging the watchdog.
+     */
+    private fun zapSettlingNow(nowMs: Long): Boolean {
+        val since = zapSettlingSinceMs
+        if (since == 0L) return false
+        if (nowMs - since >= ResolveGate.TIMEOUT_MS) {
+            zapSettlingSinceMs = 0L
+            if (::uiState.isInitialized) uiState.zapSettling = false
+            return false
+        }
+        return true
+    }
+
     private fun playerCallbacks() = PlayerCallbacks(
         onPlayPause = {
             // Pausing a live stream drops you behind the live edge.
@@ -685,9 +982,19 @@ class HdrPlayerActivity : ComponentActivity() {
                 if (started) uiState.liveSynced = true
             }
         },
-        // Toggle locally; the final state is returned to Dart on finish, which
-        // persists it (no live channel exists from this Activity to Dart).
-        onToggleFavorite = { uiState.isFavorite = !uiState.isFavorite },
+        // Toggled locally **and** reported straight away.
+        //
+        // The close-time `RESULT_FAVORITE` stays — it is the only report
+        // guaranteed to survive a kill — but it can only describe one channel,
+        // and zapping means the star may be pressed on a channel this session
+        // has since left. Dart applies both to whichever channel is current
+        // when it hears them, and an absolute set is idempotent, so the two
+        // cannot disagree.
+        onToggleFavorite = {
+            val next = !uiState.isFavorite
+            uiState.isFavorite = next
+            sendZap(if (next) "favorite:1" else "favorite:0")
+        },
         onBack = { finish() },
         onEnterPip = { enterPip() },
     )
@@ -872,6 +1179,7 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (instance?.get() === this) instance = null
         soakAutoCloseJob?.cancel()
         soakAutoCloseJob = null
         // lifecycleScope cancels this anyway; dropping the reference here also
@@ -967,6 +1275,19 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     companion object {
+        /**
+         * The live player Activity, while one exists.
+         *
+         * [MainActivity] routes the inbound zap methods (`zapTo`,
+         * `setZapBanner`) here: they are Dart→native pushes for a *running*
+         * player, and a MethodChannel can only be registered once per process
+         * — so the channel handler stays in `MainActivity` and forwards, the
+         * same shape `logPlaybackDiagnostic` already uses in the other
+         * direction.
+         */
+        var instance: WeakReference<HdrPlayerActivity>? = null
+            private set
+
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_IS_LIVE = "is_live"

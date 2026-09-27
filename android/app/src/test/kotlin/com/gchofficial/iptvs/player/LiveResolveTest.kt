@@ -223,4 +223,29 @@ class ResolveGateTest {
         assertEquals(a, b)
         assertEquals(a.url, b.url)
     }
+
+    @Test
+    fun `abandon drops the in-flight request without settling it`() {
+        // A zap supersedes a reconnect re-resolve outright: that reply would
+        // reload the channel the user has just left.
+        val gate = ResolveGate()
+        val stale = gate.begin()!!
+        gate.abandon()
+        assertFalse(gate.inFlight)
+
+        val fresh = gate.begin()
+        assertNotNull(fresh)
+        assertFalse("an abandoned token must never settle", gate.settle(stale))
+        assertTrue(gate.settle(fresh!!))
+    }
+
+    @Test
+    fun `abandon with nothing in flight is a no-op`() {
+        val gate = ResolveGate()
+        gate.abandon()
+        assertFalse(gate.inFlight)
+        val token = gate.begin()
+        assertNotNull(token)
+        assertTrue(gate.settle(token!!))
+    }
 }

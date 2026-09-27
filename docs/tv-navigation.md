@@ -445,10 +445,11 @@ window (safe precisely because they aren't focus targets); pinned by `test/epg_g
 
 ## In-player navigation
 
-The fullscreen live player has its own key map (Phase 1 of live zapping — see
-docs/player.md "Live zapping" for the state machine behind it), separate from every model above
-because it isn't one: there's no focus ring and no D-pad geometry, just a cursor over a snapshot
-list and a set of keys that either move it or don't apply.
+The fullscreen live player has its own key map — the Dart spine (Phase 1) plus, on Android, a
+native key policy that speaks the same vocabulary (Phase 2, implemented; see docs/player.md "Live
+zapping" for the state machine and "Android native input + banner (Phase 2)" for the native side).
+Separate from every model above because it isn't one: there's no focus ring and no D-pad geometry,
+just a cursor over a snapshot list and a set of keys that either move it or don't apply.
 
 - **Arrows zap only when `live && !chromeVisible`.** With the transport chrome on screen Up/Down
   stay volume and Left/Right stay seek — a live stream's own `_seekBy` is already a no-op, so
@@ -470,11 +471,46 @@ list and a set of keys that either move it or don't apply.
   ordinary play/pause toggle. **Back/Escape clears a half-typed buffer first**, the same
   peel-one-rung shape the live tab's own Back ladder uses, before it means anything else on this
   screen.
-- Arrow zapping is further narrowed to the surfaces the shared Flutter overlay actually draws over
-  (embedded, and Windows' native HWND via its `vo` swap) — never the Windows native HWND's own key
-  ring, never an out-of-process engine (Android/iOS, once Phase 2/4 land), and never Android's
-  embedded fallback, whose stock media_kit controls are focus targets a D-pad walks with Up/Down;
-  binding the arrows there would strand the remote on that surface.
+- The shared Flutter overlay's own `CallbackShortcuts` binding covers embedded playback and
+  Windows' native HWND via its `vo` swap — never the Windows native HWND's own key ring (Phase 4,
+  not yet implemented), and never Android's embedded fallback, whose stock media_kit controls are
+  focus targets a D-pad walks with Up/Down; binding the arrows there would strand the remote on
+  that surface. **Android's own key map is a separate, native implementation of the same rules**
+  (`ZapKeyPolicy`, below) — it doesn't reuse the Dart `CallbackShortcuts` path, because
+  `HdrPlayerActivity` is a self-contained Activity with its own Compose overlay, not a route inside
+  the Flutter engine. iOS has neither yet.
+
+### Android's key map (`ZapKeyPolicy`, implemented)
+
+`android/.../player/ZapKeyPolicy.kt` is a pure, Android-free policy object — consulted at the same
+Activity boundary `PlayerBackPolicy`/`ReconnectPolicy` already are, pinned by plain-JUnit tests in
+`ZapKeyPolicyTest` — and implements the rules above one key at a time:
+
+| Key(s) | Chrome-gated? | Repeat |
+| --- | --- | --- |
+| Digits (`0`–`9`, numpad `0`–`9`) | No — always live | Swallowed (consumed, no command) |
+| `CHANNEL_UP` / `PAGE_UP` | No | Passes through (`zap:up` on every repeat) |
+| `CHANNEL_DOWN` / `PAGE_DOWN` | No | Passes through (`zap:down` on every repeat) |
+| `LAST_CHANNEL` | No | Swallowed |
+| D-pad Up | Yes — only while `live && !controlsVisible` | Passes through |
+| D-pad Down | Yes — only while `live && !controlsVisible` | Passes through |
+| D-pad Right (previous-channel) | Yes | Swallowed |
+| D-pad Left / `GUIDE` (quick list) | Yes, and additionally gated on `QUICK_LIST_ENABLED` | Swallowed |
+| OK / Enter / numpad Enter, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
+| Back, while a digit is pending | No (digit-pending overrides chrome) | Swallowed |
+
+`QUICK_LIST_ENABLED = false` keeps Left and `GUIDE` out of the policy entirely — a decision made
+here rather than in Dart, because `dispatchKeyEvent` has to answer synchronously and today's Dart
+side answers `zap:list` "not consumed"; claiming the key into a decided no-op would silently break
+Left's present job (revealing the chrome). Flipping the one constant is the whole Phase 6 cutover.
+
+A digit-pending Back clears the buffer instead of peeling a chrome layer, but that rung is
+`ZapKeyPolicy`'s alone — it is not added to `nextPlayerBackAction`'s ladder, because it only exists
+on the key-dispatch path (a gesture Back has no digit buffer behind it) and a second copy there
+would peel two layers for one press. Whether a digit is pending is read from a **native mirror** of
+`setZapBanner`'s `digits` field plus a short-lived optimistic bit set the instant a digit is
+dispatched (`HdrPlayerActivity.zapDigitsPendingOptimistic`) — not a round trip to Dart, since key
+dispatch must return synchronously and Dart's authoritative answer is a frame or two away.
 
 **The digit-entry buffer is one implementation, used in two places.** `kDigitEntryCommitDelay`
 (idle timeout), `kDigitEntryMaxDigits` and the `kDigitEntryKeys` key map live in
