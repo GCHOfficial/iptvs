@@ -1266,6 +1266,11 @@ but **only when not adopted**: during an adopted fullscreen handoff the Activity
 output (`claimViewSurface`/`fullscreenDetached`), and clearing there would fight the transparent
 handoff.
 
+A session that **zaps** while adopted changes which channel the shared engine is actually playing,
+which this controller has no way to hear about on its own; see "Live zapping" below for
+`LivePreviewController.adoptFullscreenChannel` and why the preview return leg must never resume
+onto the launch channel once a zap has moved the session off it.
+
 Streams ExoPlayer can't decode (DV P5 on non-DV hardware) fall back **per channel** to the
 embedded media_kit preview (the `previewEvent: unsupported`/`lost` events;
 `_nativeUnsupportedIds`), which is also the only preview path on non-Android platforms.
@@ -1463,6 +1468,172 @@ the only first frame describing the handoff — the preview's own fired seconds 
 `claimViewSurface` clears `reportedFirstFrame`; without that the handoff's own latency is the one
 number the instrumentation would still be missing.
 
+## Live zapping
+
+In-player channel changes (channel up/down, "previous channel", digit entry, and eventually a
+quick list) without leaving the fullscreen route. **Phase 1 — this section — is the Dart spine
+only.** Android native input/banner (Phase 2), the Windows GDI overlay (Phase 4), the Linux Lua
+OSD (Phase 5) and the quick list (Phase 6) all follow; until then the only surfaces that actually
+zap are the ones the shared Flutter overlay itself owns (embedded, and Windows' native HWND
+through its ordinary `vo` swap) — but every native transport already speaks the wire contract
+below, so a later phase adds emitters and renderers, never new plumbing.
+
+### Ownership: why Dart, not a native-cached list
+
+`LiveZapController` (`lib/player/live_zap_controller.dart`) is the **only** place that holds the
+channel list, the cursor and the resolve decision. Every native surface is an input source and a
+view. The alternative — mirroring the launch list into Kotlin/C++/Lua so each surface can walk it
+locally — was rejected because the list's ordering rules are already intricate and already live in
+exactly one place: the category filter, the catalog order favourites derive
+(`screens/favorites_order.dart`), and the cross-source Favorites view, whose every row carries its
+*own* `SourceConfig` and therefore its own repository, EPG guide, buffering preset and favourites
+store. Re-deriving any slice of that in three more languages is three more places for it to drift,
+and the failure mode isn't cosmetic: it is Up/Down landing on provider B's channel while resolving
+it through provider A's `Source`. A native surface that can't render the whole channel list (the
+overlay banner, Phase 2/4/5) doesn't need to — it only ever names a *command*.
+
+### Launch range
+
+The zap range is **the list the user was looking at when they pressed OK**, not the whole source —
+Up/Down in the player should mean what Up/Down meant in the list they came from
+(`_ChannelListScreenState._zapRangeFor`). Three shapes, resolved once at launch and never rebuilt
+mid-session:
+
+- **The cross-source Favorites view** contributes its own rows, each wrapped as a `ZapEntry` with
+  the `SourceConfig` that owns it — the one case where consecutive cursor positions resolve through
+  different repositories, EPGs and favourites stores.
+- **A search** has no meaningful neighbours ("the next search result" is not a next channel), so it
+  falls back to the whole active source **minus the categories the user hid** — a search *result*
+  from a hidden category is still playable, it just isn't somewhere Up/Down should wander into.
+- **Otherwise** the visible category, in catalog order.
+- **`explicit`** overrides all three: the EPG grid hands `_playChannelFullscreen` the list it is
+  already showing, so the player's Up/Down walks the identical rows the grid's own selection model
+  does.
+
+The list is captured as a **snapshot, wrapped lazily** (`zapEntriesOf` → `_HomogeneousZapEntries`):
+`ZapEntry` objects are built on `[]` access, not up front, because an unfiltered source's zap range
+is its whole catalog — eagerly materialising 250k of them would cost several megabytes and a
+visible pause on a set-top box, at the exact moment the user is waiting for a picture to appear. A
+channel not found in its own intended range (a hidden category reached through search, a list that
+moved under the user) gets a one-entry range of just itself, so zapping degrades to an honest no-op
+rather than walking a list that channel isn't in.
+
+### Settle, resolve, failure revert
+
+Every cursor move (`channelUp`/`channelDown`/`previousChannel`/a committed digit buffer) updates
+`current` — and therefore the banner — **immediately**. Only playback waits: `kZapSettleDelay` (600
+ms) after the *last* move, `_settle()` stops the current stream, resolves the settled channel
+through its **owning** source, and plays it. This is what makes a held Up key cost one
+`create_link`, not one per channel passed over — on a single-connection Stalker portal that
+difference is zapping versus a token storm. Stop runs **before** resolve and is awaited, because a
+single-connection account refuses the new stream while the old one still holds the slot; only the
+surfaces `PlayerScreen`'s own `_player` drives need this explicit stop (`_zapStopCurrent`) — the
+engines that own playback out of process fold the stop into applying the new locator (`zapTo` on
+Android/iOS, `loadfile … replace` on Linux native).
+
+A resolve that lands while a newer cursor move is already pending is coalesced
+(`_resettleWanted`), never queued: only the most recent target is ever resolved. A reconnect
+re-resolve in flight when a zap starts is **abandoned**, not raced — its answer describes the
+channel being left, and applying it after the fact would reload the old channel behind the new one
+(`ZapResolveGate.abandon`, the Dart mirror of Kotlin's `ResolveGate`).
+
+**A failed zap has already stopped the previous stream**, so reporting the failure isn't enough —
+`_revertFailedZap` moves the cursor back to `playingIndex`, shows "Couldn't play `<name>`" in the
+banner, and re-resolves+replays the channel that was actually on screen. If that revert also fails,
+the surface's own ordinary error/reconnect handling takes over, which is what a genuinely dead
+stream would have hit regardless.
+
+**The surface never changes on a zap.** There is deliberately no de-escalation path — no way for a
+zap to go from a native HDR surface back to embedded, or vice versa — because building one means
+tearing down an mpv process (Linux) or an HWND (Windows) on every channel change, which is far
+worse than the flash a same-surface reopen costs. What *is* re-armed per zap: the one-shot
+embedded→native HDR/PQ escalation flags (`_windowsEscalated`/`_linuxEscalated`), the HDR10+ probe,
+and every reconnect-watchdog counter — a zap is a deliberate stop, not a drop, so the new channel
+starts on a clean stall clock and full backoff budget.
+
+### Wire contract
+
+One parser, `parseZapCommand` (`lib/player/zap_command.dart`), reads the identical short strings
+from every transport:
+
+- Android: `nativeZap` on `iptvs/native_hdr_player`, `{command: '<string>'}` (Phase 2 — Kotlin
+  doesn't emit these yet; the Dart handler is already wired and will pick them up unchanged).
+- Windows: the existing `nativeControl` method, same strings (Phase 4 — same status).
+- Linux: the existing `user-data/iptvs-control` mpv property, same strings — this one **is** wired
+  end to end today: `_handleLinuxNativeControl` parses and applies a zap command before falling
+  through to its ordinary switch, but nothing in the Lua OSD (Phase 5) sends one yet.
+- The shared Flutter overlay: its own `CallbackShortcuts` bindings, parsed through the same
+  function so a key means the same thing a native string would.
+
+The vocabulary: `zap:up`, `zap:down`, `zap:prev`, `zap:list`/`zap:close` (quick list — Phase 6,
+parsed but not consumed: `handleCommand` returns `false` for them so the surface keeps its present
+behaviour rather than swallowing the key into a no-op), `zap:activate` (commits a pending digit
+buffer early; otherwise not consumed, so OK still means what it always did), `zap:back` (clears a
+half-typed digit buffer — same peel-one-rung shape as the live tab's Back ladder — otherwise not
+consumed), `zap:digit:N`, `zap:move:±N` (quick-list cursor, Phase 6), `favorite:0`/`favorite:1`.
+An unrecognised string, or a well-formed prefix with an unusable argument (`zap:digit:x`), parses
+to `null` and is dropped — a command that can't be read is not one to guess at.
+
+Two outbound payloads, both fire-and-forget and failure-tolerant (a `MissingPluginException` on a
+platform whose native half hasn't landed yet is expected and logged, never fatal):
+
+- **`zapTo`** (Android/iOS `_invokeNativeZapTo`) — the settled channel. Carries the new locator and
+  everything the native overlay presents, because a zap changes all of it at once: `url`, `headers`,
+  `title`, `sourceName`, `channelNumber` (if numbered), `channelName`, `logoUrl` (if any), `isLive`,
+  `bufferPreset`, `aspect`, `canFavorite`, `isFavorite`, plus the EPG now/next pair
+  (`epgNowTitle`/`epgNowStartMs`/`epgNowStopMs`/`epgNowDesc`, `epgNextTitle`/`epgNextStartMs`/
+  `epgNextStopMs`). **Never logged** — it's a provider locator plus its headers.
+- **`setZapBanner`** (`LiveZapController.bannerPayload`, pushed by `_pushZapBanner` for the two
+  surfaces that draw their own chrome — the separate-engine platforms and the Windows native HWND)
+  — the **cursor's** channel, not the playing one, so a held key shows the user where it's got to
+  before anything actually resolves: `channelNumber`/`channelName`/`sourceName`/`logoUrl`, `digits`
+  (the pending number buffer), `message` (a transient note — "No channel 123", a failed zap),
+  `settling` (a resolve is in flight or about to be), `position`/`total` (place in the launch
+  range), and the cursor channel's own now/next pair. Deliberately **not** routed through the 2 Hz
+  `setControlState` coalescer that ordinary transport state uses — a banner has to track every
+  press, not the state a few times a second.
+
+### Per-surface apply (today)
+
+| Surface | What `_zapPlay` does |
+| --- | --- |
+| Android / iOS (`_separateEngineOwnsPlayback`) | Sends `zapTo` (above) and returns — the native engine, once it exists, owns stop+reload |
+| Linux native mpv session | `set_property http-header-fields`, `set_property force-media-title`, `loadfile <url> replace`, then the ordinary `_pushLinuxOverlayState()` (title/EPG only — not the dedicated zap banner with digits/settling/position, since that's Phase 5) |
+| Embedded, and Windows' native HWND (same `_player`) | Re-applies mpv buffer options and header options on the existing `NativePlayer`, then `_player.open(Media(...))` on the surface already in use — exactly the reopen `_goToLive` already does |
+
+### Watchdog interaction
+
+`PlayerScreen.resolveAgain`'s Dart implementation is now `zap.resolveCurrent()`: the reconnect
+watchdog and "Go to live" re-resolve the channel **on screen**, not the route's launch channel, and
+single-flight against a settle through the shared `ZapResolveGate`. `_pollLiveReconnect` stands
+down entirely while `zap.settling` — mirroring Kotlin's `resolveGate.inFlight` early return — because
+the stream it would otherwise reconnect is one the zap deliberately stopped; reading that as a
+stall would reload the channel the user has just left. A resolve superseded by a zap won't ever be
+applied (`ZapResolveGate.abandon`, above): the gate keys off tokens, not identity, so there is no
+window where a stale reconnect's outcome can land on top of a newer zap's.
+
+### Preview return leg
+
+The channel list owns the `LiveZapController` for a session, not the route (`_ChannelListScreenState`
+builds it before pushing `PlayerScreen`, disposes it in the `finally` after the route pops). That
+makes "which channel did this session end on" answerable after the fact —
+`zap.zapped`/`zap.playing` — which the return leg needs for two things:
+
+- **Selection restore.** The channel list re-selects the channel the session actually **ended** on,
+  not the one it launched with, with the visible filters untouched.
+- **The preview must never resume onto the launch channel.** `decidePreviewReturn`
+  (`lib/screens/channel_list_screen.dart`, pure — pinned by `test/fullscreen_handoff_test.dart` with
+  no libmpv engine required) checks `zapped` **after only** the two cases that mean the preview
+  player can no longer be used at all (a Windows hot-swap onto native; a phone-sheet handoff with no
+  preview shown at all), and **before** every resume branch, including the cross-engine
+  stop-and-resolve-fresh case. Resuming the preview after a zap would put the channel the user
+  explicitly navigated away from back on screen, captioned as though it were current — and on an
+  *adopted* engine it would also be the thing still holding a single-connection account's only slot.
+  On a **seamless adopted** handoff that did zap, the preview is instead re-pointed at the channel
+  the session actually ended on via `LivePreviewController.adoptFullscreenChannel` — called *before*
+  `adoptedByFullscreen` is cleared, so a clean EOF landing in that window restarts the right channel
+  rather than the launch one the controller would otherwise still believe in.
+
 ## PiP note
 
 When `HdrPlayerActivity` enters picture-in-picture it is reparented into its own **pinned task**,
@@ -1478,8 +1649,10 @@ source** with capped backoff (≈8s stall threshold, ≤30s between attempts), s
 error/Retry overlay). On the Dart watchdogs a reload **re-resolves the stream first** when the
 caller wired `PlayerScreen.resolveAgain` (Stalker `create_link` tokens are single-use, so a
 portal-side kill leaves the original URL permanently dead; falls back to the original URL when
-unwired or the resolve fails). **Four independent watchdogs** because the platforms play through
-different stacks:
+unwired or the resolve fails). **On a zapping session, `resolveAgain` is `zap.resolveCurrent()` and
+re-resolves the channel currently on screen, not the route's launch channel** — see "Live zapping"
+above, including why the watchdog stands down entirely while a zap is settling. **Four independent
+watchdogs** because the platforms play through different stacks:
 
 - **Android** in `HdrPlayerActivity` (its 500ms progress ticker watches `PlayerUiState`;
   ExoPlayer network errors that leave it idle trigger an immediate reconnect). **It watches three
@@ -1800,7 +1973,10 @@ be pending — the plugin has no way to know that), which is the wake signal for
 calls *into* Dart to request a fresh locator (single-use Stalker `play_token`s die with the
 failed/stale URL the native side is holding), and `_freshLiveStream`'s return value flows back to
 Swift as the method call's result) and
-`iptvs/native_preview` (`previewEvent`: unsupported/lost/error) — are **process-static**, so two
+`iptvs/native_preview` (`previewEvent`: unsupported/lost/error) — also carry live zapping's wire
+contract on the same two rails: inbound `nativeZap` (`{command: '<string>'}`, Android/Windows —
+"Live zapping" above) reuses `iptvs/native_hdr_player`, and outbound `zapTo`/`setZapBanner` are
+ordinary calls on it, not new channels — are **process-static**, so two
 widget/controller instances can race over the single handler slot during route transitions
 (Flutter runs a replacement route's `initState` *before* the old route's `dispose`). Ownership is
 guarded by `ChannelHandlerOwner` (`lib/player/channel_owner.dart`), a monotonic owner-token

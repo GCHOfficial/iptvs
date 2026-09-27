@@ -166,6 +166,15 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   /// path in line. No-op where the overlay isn't mounted.
   void revealChrome() => _controlsKey.currentState?.revealChrome();
 
+  /// Whether the overlay's bars are currently on screen.
+  ///
+  /// Read by [PlayerScreen]'s key map to decide who owns the arrow keys on a
+  /// live stream: with the chrome **hidden** they zap channels, with it
+  /// visible they stay volume / control traversal. False where the overlay
+  /// isn't mounted, which is the conservative answer — an unmounted overlay
+  /// has no controls to navigate.
+  bool get chromeVisible => _controlsKey.currentState?.chromeVisible ?? false;
+
   // Keyboard counterparts of the overlay's own buttons. These exist so the
   // embedded surface answers the same keys as the Linux native mpv/Lua OSD:
   // `m`/`i`/`s`/volume were bound there and nowhere here, so on Linux the same
@@ -834,6 +843,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// Public counterpart of [_show] for [PlayerVideoSurfaceState.revealChrome] —
   /// see its doc for why any keyboard input has to reach here.
   void revealChrome() => _show();
+
+  /// Whether the bars are on screen — see
+  /// [PlayerVideoSurfaceState.chromeVisible].
+  bool get chromeVisible => _visible;
 
   /// Mute/unmute — the keyboard counterpart of the volume button.
   void toggleMute() {

@@ -638,6 +638,36 @@ class LivePreviewController extends ChangeNotifier {
     return null;
   }
 
+  /// Re-points this controller at the channel a fullscreen session **zapped
+  /// to** while it held this controller's engine.
+  ///
+  /// Only meaningful for an adopted handoff (Android's shared native engine,
+  /// or the embedded seamless one), where the engine playing is literally the
+  /// preview's. The fullscreen route changes the channel on that engine
+  /// without this controller hearing about it, so on return its
+  /// `channelId`/`_activeChannel`/`_activeRepo` would describe the *launch*
+  /// channel: the panel would caption the wrong programme, `isPreviewing`
+  /// would answer for the wrong row, and — worst — a clean EOF would restart
+  /// the channel the user left rather than the one on screen.
+  ///
+  /// Must be called **before** [adoptedByFullscreen] is cleared, for the same
+  /// ordering reason the resume does: recovery must not be handed back while
+  /// the controller still believes in the old channel.
+  void adoptFullscreenChannel(
+    Channel channel, {
+    required LibraryRepository from,
+    required BufferPreset bufferPreset,
+  }) {
+    if (_disposed) return;
+    _activeChannel = channel;
+    _activeRepo = from;
+    _bufferPreset = bufferPreset;
+    _set(() {
+      channelId = channel.id;
+      error = null;
+    });
+  }
+
   /// Stop the preview player. [clearSelection] also drops the previewing
   /// channel (used when leaving the live view / closing the phone sheet).
   Future<void> stop({bool clearSelection = false}) async {

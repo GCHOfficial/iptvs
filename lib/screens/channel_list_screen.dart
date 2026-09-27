@@ -21,6 +21,7 @@ import '../player/ios_engine.dart';
 import '../player/linux_native_session.dart';
 import '../player/aspect_mode.dart' show aspectModeIndexOf;
 import '../player/buffer_preset.dart';
+import '../player/live_zap_controller.dart';
 import '../player/player_screen.dart';
 import 'channel_list_chrome.dart';
 import 'diagnostics_screen.dart';
@@ -271,6 +272,66 @@ extension FullscreenHandoffDerived on FullscreenHandoff {
 
   /// A different-channel preview: stop it outright, not restarted on return.
   bool get stopsPreview => this == FullscreenHandoff.stopPreview;
+}
+
+/// What [_ChannelListScreenState._openLivePlayer] does with the live preview
+/// once the fullscreen route has popped.
+enum PreviewReturnAction {
+  /// The player hot-swapped this player's video output onto the Windows native
+  /// HDR surface, which has just been torn down — the engine can't be reused
+  /// for the preview's texture.
+  discardPlayer,
+
+  /// Stop it outright and drop the selection.
+  stop,
+
+  /// Restart the *same* channel (the cross-engine stop-and-resolve-fresh case,
+  /// where the preview was only stopped to free the connection).
+  restartSameChannel,
+
+  /// Resume an adopted engine that never stopped, restoring its mute.
+  resumeAdopted,
+
+  /// Resume a same-channel preview that was merely paused.
+  resumePaused,
+
+  /// Nothing to reconcile.
+  none,
+}
+
+/// Pure counterpart of the return leg's branch chain, so the one rule that is
+/// easy to get wrong can be pinned without a libmpv engine
+/// (`test/fullscreen_handoff_test.dart`).
+///
+/// That rule is [zapped]: once an in-player zap has moved the session off the
+/// launch channel, **no** resume is correct. Resuming would put the channel
+/// the user navigated away from back in the panel — captioned as if it were
+/// the one they were just watching — and on an adopted engine it is also the
+/// thing still holding a single-connection account's only slot. It outranks
+/// every resume branch, including the cross-engine restart, and is checked
+/// after only the two cases that describe a player which can no longer be
+/// used at all.
+PreviewReturnAction decidePreviewReturn({
+  required bool hotSwapped,
+  required bool resumePreviewOnReturn,
+  required bool zapped,
+  required FullscreenHandoff decision,
+  required bool previewHasStream,
+}) {
+  if (hotSwapped) return PreviewReturnAction.discardPlayer;
+  // Phone sheet handoff: nothing shows the preview after fullscreen.
+  if (!resumePreviewOnReturn) return PreviewReturnAction.stop;
+  if (zapped) return PreviewReturnAction.stop;
+  if (decision.stopsAndResolvesFresh) {
+    return PreviewReturnAction.restartSameChannel;
+  }
+  if (decision.seamless && previewHasStream) {
+    return PreviewReturnAction.resumeAdopted;
+  }
+  if (decision.pausesPreview && previewHasStream) {
+    return PreviewReturnAction.resumePaused;
+  }
+  return PreviewReturnAction.none;
 }
 
 /// Lists a source's channels with in-memory search + category filtering, plus
@@ -1290,6 +1351,109 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     return _globalFavorites.epgFor(item.sourceId, item.channel.id);
   }
 
+  // ── In-player live zapping ─────────────────────────────────────────────────
+
+  /// The channels an in-player zap may walk — the *launch range*.
+  ///
+  /// It is deliberately the list the user was looking at, not the whole
+  /// source: Up/Down in the player should mean the same thing Up/Down meant in
+  /// the list they came from. Three shapes:
+  ///
+  /// - the **cross-source Favorites** view contributes its own rows, each with
+  ///   the `SourceConfig` that owns it — zapping across providers is the one
+  ///   case where consecutive entries resolve through different repositories;
+  /// - a **search** has no meaningful neighbours ("the next result" is not a
+  ///   next channel), so it falls back to the whole active source, minus the
+  ///   categories the user disabled;
+  /// - otherwise the visible category, in catalog order.
+  ///
+  /// [explicit] overrides all of it — the EPG grid hands over the list it is
+  /// showing, which is what its Up/Down already walks.
+  ({List<ZapEntry> entries, int index}) _zapRangeFor(
+    Channel channel, {
+    List<Channel>? explicit,
+  }) {
+    if (explicit == null && _categoryId == kAllSourcesFavoritesCategoryId) {
+      final items = _globalFavorites.items;
+      var index = items.indexWhere((item) => identical(item.channel, channel));
+      if (index < 0) {
+        index = items.indexWhere((item) => item.channel.id == channel.id);
+      }
+      if (index >= 0) {
+        return (
+          entries: [
+            for (final item in items)
+              ZapEntry(
+                channel: item.channel,
+                config: item.config,
+                sourceName: item.sourceLabel,
+              ),
+          ],
+          index: index,
+        );
+      }
+    }
+    final channels =
+        explicit ??
+        (_query.trim().isEmpty ? _visible : _unhiddenLiveChannels());
+    // Indexed over the *channels*, before they are wrapped: the wrapper is
+    // lazy precisely so an unfiltered 250k-channel range costs nothing, and
+    // scanning wrapped entries would throw that away.
+    var index = channels.indexWhere((c) => identical(c, channel));
+    if (index < 0) index = channels.indexWhere((c) => c.id == channel.id);
+    if (index < 0) {
+      // Not in the range after all (a hidden category reached through search,
+      // a list that moved under us). A one-entry range makes zapping an
+      // honest no-op rather than walking a list this channel isn't in.
+      return (
+        entries: zapEntriesOf(
+          [channel],
+          config: _configForChannel(channel),
+          sourceName: widget.repo.source.name,
+        ),
+        index: 0,
+      );
+    }
+    return (
+      entries: zapEntriesOf(
+        channels,
+        config: widget.config,
+        sourceName: widget.repo.source.name,
+      ),
+      index: index,
+    );
+  }
+
+  /// The active source's channels minus the categories the user disabled —
+  /// the search-launch zap range. Hidden categories are excluded because the
+  /// user turned them off; a search *result* from one is still playable, it
+  /// just isn't somewhere Up/Down should wander into.
+  List<Channel> _unhiddenLiveChannels() {
+    final hidden = _hiddenCategories(ContentKind.live);
+    if (hidden.isEmpty) return _live.channels;
+    return _live.channels
+        .where((c) => !hidden.contains(c.categoryId))
+        .toList(growable: false);
+  }
+
+  /// Builds the zap controller for one fullscreen session. Live only — VOD and
+  /// catch-up have no channel neighbours.
+  LiveZapController _zapControllerFor(
+    Channel channel, {
+    List<Channel>? explicit,
+  }) {
+    final range = _zapRangeFor(channel, explicit: explicit);
+    return LiveZapController(
+      entries: range.entries,
+      initialIndex: range.index,
+      catalog: _ChannelListZapCatalog(this),
+    )..onChannelChanged = (entry) {
+      // Keeps the toolbar's "last channel" target and the post-playback
+      // selection restore pointed at the channel the session is really on.
+      if (mounted) _notePlayedChannel(entry.channelId);
+    };
+  }
+
   Future<void> _play(Channel channel) async {
     if (_resolving) return;
     final isWide = isWideLayout(MediaQuery.sizeOf(context));
@@ -1349,6 +1513,9 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     }
     {
       setState(() => _resolving = true);
+      // Zapping is not a wide-layout privilege: a phone with a keyboard, and
+      // any set-top box that fell to the narrow layout, reach this path too.
+      final zap = _zapControllerFor(channel);
       try {
         DiagnosticsLog.instance.add(
           'library',
@@ -1370,6 +1537,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
               title: channel.name,
               stream: stream,
               sourceName: repo.source.name,
+              zap: zap,
               bufferPreset: _bufferPresetForChannel(channel),
               initialAspectLabel: _configForChannel(channel).aspectModeLabel,
               onAspectChanged: (label) => unawaited(
@@ -1400,6 +1568,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
           );
         }
       } finally {
+        zap.dispose();
         if (mounted) setState(() => _resolving = false);
       }
     }
@@ -1450,6 +1619,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     bool reusePreview = true,
     bool resumePreviewOnReturn = true,
     LibraryRepository? repo,
+    List<Channel>? zapChannels,
   }) async {
     // The owning source: the active one for an ordinary channel, another
     // provider's for a cross-source favorite. Everything the route needs from
@@ -1471,6 +1641,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     // Assigned once `decision` is known (inside the try, after the await
     // below) — declared here so the catch block can still read it.
     var previewWasMuted = false;
+    // The session's channel cursor. Owned here, not by the route: the route
+    // reads through it while it is up, and the return leg below reads where
+    // the session *ended* — which is not where it started as soon as the user
+    // zaps.
+    final zap = _zapControllerFor(channel, explicit: zapChannels);
     try {
       DiagnosticsLog.instance.add(
         'library',
@@ -1622,6 +1797,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         title: channel.name,
         stream: playbackStream,
         sourceName: playRepo.source.name,
+        // Live zapping: from here on the *controller* answers "which channel
+        // is this?", including for the reconnect re-resolve, the favourite
+        // star and the stored aspect mode. The fields around it stay as the
+        // initial values.
+        zap: zap,
         bufferPreset: _bufferPresetForChannel(channel),
         initialAspectLabel: _configForChannel(channel).aspectModeLabel,
         onAspectChanged: (label) =>
@@ -1698,33 +1878,58 @@ class _ChannelListScreenState extends State<ChannelListScreen>
             'previewStream=${_preview.stream != null}',
       );
       if (!mounted) return;
-      if (hotSwapped) {
-        // The fullscreen player re-pointed this player's video output at the
-        // Windows native HDR surface, which just tore down — no longer safe
-        // to reuse for the preview's embedded texture.
-        await _preview.discardPlayer();
-      } else if (!resumePreviewOnReturn) {
-        // Phone sheet handoff: nothing shows the preview after fullscreen.
-        await _preview.stop(clearSelection: true);
-      } else if (stopResolveFresh) {
-        // Same-channel cross-engine stop is the one stop case that restarts: the
-        // preview was stopped only to free the connection/token for the other
-        // engine (Linux native mpv / iOS AVPlayer), not because the user left
-        // the channel.
-        await _preview.start(
-          channel,
-          muted: previewWasMuted,
-          from: playRepo,
-          bufferPreset: _bufferPresetForChannel(channel),
+      // The session left the channel it was launched on. Whatever the handoff
+      // decision was, the preview must not come back on the *launch* channel:
+      // it would caption and play something the user navigated away from
+      // minutes ago, and on an adopted engine it would be the one still
+      // holding this account's single connection.
+      final zapped = zap.zapped;
+      if (zapped && decision.seamless) {
+        // The adopted engine really is playing the zapped-to channel, so say
+        // so before anything acts on the controller's state — an EOF landing
+        // in this window would otherwise restart the launch channel.
+        _preview.adoptFullscreenChannel(
+          zap.playing.channel,
+          from: _repoFor(zap.playing.config),
+          bufferPreset: _bufferPresetForChannel(zap.playing.channel),
         );
-      } else if (decision.seamless && _preview.stream != null) {
-        await _preview.play();
-        if (previewWasMuted) await _preview.setMuted(true);
-      } else if (pausedPreview && _preview.stream != null) {
-        // A same-channel non-adopted fullscreen paused the preview above; resume
-        // it now that we're back (matches the catch-up path). A stopped preview
-        // (different channel) is intentionally not restarted.
-        await _preview.play();
+      }
+      switch (decidePreviewReturn(
+        hotSwapped: hotSwapped,
+        resumePreviewOnReturn: resumePreviewOnReturn,
+        zapped: zapped,
+        decision: decision,
+        previewHasStream: _preview.stream != null,
+      )) {
+        case PreviewReturnAction.discardPlayer:
+          // The fullscreen player re-pointed this player's video output at the
+          // Windows native HDR surface, which just tore down — no longer safe
+          // to reuse for the preview's embedded texture.
+          await _preview.discardPlayer();
+        case PreviewReturnAction.stop:
+          await _preview.stop(clearSelection: true);
+        case PreviewReturnAction.restartSameChannel:
+          // Same-channel cross-engine stop is the one stop case that restarts:
+          // the preview was stopped only to free the connection/token for the
+          // other engine (Linux native mpv / iOS AVPlayer), not because the
+          // user left the channel.
+          await _preview.start(
+            channel,
+            muted: previewWasMuted,
+            from: playRepo,
+            bufferPreset: _bufferPresetForChannel(channel),
+          );
+        case PreviewReturnAction.resumeAdopted:
+          await _preview.play();
+          if (previewWasMuted) await _preview.setMuted(true);
+        case PreviewReturnAction.resumePaused:
+          // A same-channel non-adopted fullscreen paused the preview above;
+          // resume it now that we're back (matches the catch-up path). A
+          // stopped preview (different channel) is intentionally not
+          // restarted.
+          await _preview.play();
+        case PreviewReturnAction.none:
+          break;
       }
       // Only now: the restore above is the preview's own re-entry, and
       // `PlayerScreen.dispose` (which pauses the adopted player and drops its
@@ -1757,13 +1962,19 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       // Belt-and-braces for the throw-before-pop path: a preview left marked as
       // adopted would never recover from an EOF again.
       _preview.adoptedByFullscreen = false;
+      // Outlives the route by exactly this block — `PlayerScreen.dispose`
+      // unhooks itself, and the return leg above has finished reading it.
+      zap.dispose();
       if (mounted) setState(() => _resolving = false);
     }
   }
 
   /// Resolve [channel] and play it fullscreen directly, bypassing the preview
   /// flow (used by zap and the EPG grid).
-  Future<void> _playChannelFullscreen(Channel channel) async {
+  Future<void> _playChannelFullscreen(
+    Channel channel, {
+    List<Channel>? zapChannels,
+  }) async {
     if (_resolving) return;
     // Set before the resolve (not just before the push): _openLivePlayer's
     // own guard only takes effect once it's called, and resolve() itself can
@@ -1777,7 +1988,12 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     try {
       final stream = await widget.repo.resolve(channel);
       if (!mounted) return;
-      await _openLivePlayer(channel, stream, reusePreview: false);
+      await _openLivePlayer(
+        channel,
+        stream,
+        reusePreview: false,
+        zapChannels: zapChannels,
+      );
     } catch (e) {
       messenger.showSnackBar(
         SnackBar(content: Text('Could not play: ${redactText('$e')}')),
@@ -1812,8 +2028,11 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         builder: (_) => EpgGridScreen(
           repo: widget.repo,
           channels: channels,
-          onPlayChannel: (channel) =>
-              unawaited(_playChannelFullscreen(channel)),
+          onPlayChannel: (channel) => unawaited(
+            // The grid's Up/Down already walks this list; the player's should
+            // walk the same one.
+            _playChannelFullscreen(channel, zapChannels: channels),
+          ),
           onPlayArchive: (channel, programme) =>
               unawaited(_playCatchup(channel, programme)),
         ),
@@ -2976,4 +3195,71 @@ class _ChannelListScreenState extends State<ChannelListScreen>
         byId(_lastPlayedLiveChannelId) ??
         visible.first;
   }
+}
+
+/// Bridges [LiveZapController] to the channel list's own per-source plumbing.
+///
+/// It exists as a seam rather than the state implementing [ZapCatalog]
+/// directly so the controller can be unit-tested with a fake — instantiating
+/// this screen needs a live media_kit engine, which a Windows dev box hasn't
+/// got, and the zap rules are far too load-bearing to be pinned only by a
+/// suite that silently skips (CLAUDE.md, "Testing notes").
+///
+/// Every method routes through the **owning** source of the entry it is given,
+/// never the active one: the cross-source Favorites view puts two providers'
+/// channels in one zap range, and resolving, favouriting or framing one
+/// against the wrong provider is silent and wrong rather than noisy.
+class _ChannelListZapCatalog implements ZapCatalog {
+  _ChannelListZapCatalog(this._screen);
+
+  final _ChannelListScreenState _screen;
+
+  bool _isActiveSource(ZapEntry entry) =>
+      entry.sourceId == _screen.widget.repo.source.id;
+
+  @override
+  Future<StreamInfo> resolve(ZapEntry entry) =>
+      _screen._repoFor(entry.config).resolve(entry.channel);
+
+  @override
+  ({Programme? now, Programme? next}) epgFor(ZapEntry entry) =>
+      _screen._epgFor(
+        entry.channel,
+        foreign: !_isActiveSource(entry),
+        sourceId: entry.sourceId,
+      );
+
+  @override
+  bool isFavorite(ZapEntry entry) {
+    if (_isActiveSource(entry)) {
+      return _screen._isFavorite(ContentKind.live, entry.channelId);
+    }
+    // `FavoritesController` holds only the active source's ids, so a foreign
+    // row is answered from the cross-source list instead.
+    return _screen._globalFavorites.items.any(
+      (item) =>
+          item.sourceId == entry.sourceId &&
+          item.channel.id == entry.channelId,
+    );
+  }
+
+  @override
+  Future<void> setFavorite(ZapEntry entry, bool value) =>
+      _isActiveSource(entry)
+      ? _screen._setLiveFavorite(entry.channelId, value)
+      : _screen._setForeignFavorite(entry.sourceId, entry.channelId, value);
+
+  @override
+  String? aspectLabelFor(ZapEntry entry) => entry.config.aspectModeLabel;
+
+  @override
+  Future<void> persistAspect(ZapEntry entry, String label) =>
+      _screen._persistAspectMode(entry.config, label);
+
+  @override
+  BufferPreset bufferPresetFor(ZapEntry entry) =>
+      bufferPresetFromName(entry.config.bufferPresetName);
+
+  @override
+  void log(String note) => DiagnosticsLog.instance.add('library', note);
 }

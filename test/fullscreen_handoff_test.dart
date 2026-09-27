@@ -674,4 +674,90 @@ void main() {
       expect(owns(loading: true), isFalse);
     });
   });
+
+  group('decidePreviewReturn', () {
+    PreviewReturnAction act({
+      bool hotSwapped = false,
+      bool resumePreviewOnReturn = true,
+      bool zapped = false,
+      FullscreenHandoff decision = FullscreenHandoff.adoptEmbedded,
+      bool previewHasStream = true,
+    }) => decidePreviewReturn(
+      hotSwapped: hotSwapped,
+      resumePreviewOnReturn: resumePreviewOnReturn,
+      zapped: zapped,
+      decision: decision,
+      previewHasStream: previewHasStream,
+    );
+
+    test('the pre-zap behaviour is unchanged', () {
+      expect(
+        act(hotSwapped: true),
+        PreviewReturnAction.discardPlayer,
+        reason: 'the Windows hot-swap tore the player down',
+      );
+      expect(
+        act(resumePreviewOnReturn: false),
+        PreviewReturnAction.stop,
+        reason: 'the phone sheet has no panel to return to',
+      );
+      expect(
+        act(decision: FullscreenHandoff.stopResolveFresh),
+        PreviewReturnAction.restartSameChannel,
+      );
+      expect(
+        act(decision: FullscreenHandoff.adoptNative),
+        PreviewReturnAction.resumeAdopted,
+      );
+      expect(
+        act(decision: FullscreenHandoff.adoptEmbedded),
+        PreviewReturnAction.resumeAdopted,
+      );
+      expect(
+        act(decision: FullscreenHandoff.pausePreview),
+        PreviewReturnAction.resumePaused,
+      );
+      expect(
+        act(decision: FullscreenHandoff.stopPreview),
+        PreviewReturnAction.none,
+        reason: 'a different-channel preview was stopped and is not restarted',
+      );
+      expect(
+        act(decision: FullscreenHandoff.none),
+        PreviewReturnAction.none,
+      );
+      expect(
+        act(decision: FullscreenHandoff.adoptEmbedded, previewHasStream: false),
+        PreviewReturnAction.none,
+      );
+    });
+
+    test('a zap outranks every resume, whatever the handoff was', () {
+      // Once the session has left the launch channel, resuming would put a
+      // channel the user navigated away from back in the panel — and, on an
+      // adopted engine, leave it holding a single-connection account's only
+      // slot on the wrong stream.
+      for (final decision in FullscreenHandoff.values) {
+        expect(
+          act(zapped: true, decision: decision),
+          PreviewReturnAction.stop,
+          reason: decision.name,
+        );
+      }
+    });
+
+    test('a zap does not resurrect a player that cannot be reused', () {
+      // The two cases above it describe a player, not a channel: a hot-swapped
+      // engine is gone whatever the cursor did, and the phone sheet still has
+      // nowhere to show a preview.
+      expect(
+        act(zapped: true, hotSwapped: true),
+        PreviewReturnAction.discardPlayer,
+      );
+      expect(
+        act(zapped: true, resumePreviewOnReturn: false),
+        PreviewReturnAction.stop,
+      );
+    });
+  });
 }
