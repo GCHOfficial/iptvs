@@ -442,6 +442,12 @@ class HdrPlayerActivity : ComponentActivity() {
             ?.let { uiState.aspect = it }
         uiState.canFavorite = intent.getBooleanExtra(EXTRA_CAN_FAVORITE, false)
         uiState.isFavorite = intent.getBooleanExtra(EXTRA_IS_FAVORITE, false)
+        // Whether a LiveZapController exists behind this route. Set here (not
+        // only in the fresh-state branch above) because an adopted preview
+        // state was born faceless and carries the *previous* session's value.
+        // Fails closed: an older Dart build that doesn't send the key simply
+        // offers no quick-list button, exactly as before.
+        uiState.canZap = intent.getBooleanExtra(EXTRA_ZAP_ENABLED, false)
 
         if (shared != null) {
             val sharedEngine = shared.first
@@ -1384,6 +1390,7 @@ class HdrPlayerActivity : ComponentActivity() {
         /** Favorite toggle (live channels): whether to show the star + its seed state. */
         const val EXTRA_CAN_FAVORITE = "can_favorite"
         const val EXTRA_IS_FAVORITE = "is_favorite"
+        const val EXTRA_ZAP_ENABLED = "zap_enabled"
 
         /** Result extras: final position/duration + favorite, for the Dart stores. */
         const val RESULT_POSITION_MS = "position_ms"

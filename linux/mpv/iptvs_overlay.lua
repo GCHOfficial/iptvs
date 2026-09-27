@@ -89,6 +89,10 @@ local ICON = {
     live_tv              = utf8_char(0xE387),
     schedule             = utf8_char(0xE556),
     history              = utf8_char(0xE314),
+    -- The quick-list opener in the control row — Flutter's
+    -- `Icons.format_list_bulleted` (0xE2B8 -> "format_list_bulleted_baseline"
+    -- in this font's cmap), so all four surfaces draw the same glyph.
+    format_list_bulleted = utf8_char(0xE2B8),
 }
 
 local overlay = mp.create_osd_overlay('ass-events')
@@ -656,6 +660,17 @@ local function quick_list_block()
     if type(list) ~= 'table' then return nil end
     if list.open ~= true then return nil end
     return list
+end
+
+-- Whether this route can open the list at all — what gates the control row's
+-- quick-list button (the only way a *mouse* reaches the list; `g` and the
+-- D-pad are the keyboard halves). Dart pushes a `quickList` block on every
+-- state push of a zapping session — `{open = false, ...}` while it is closed,
+-- absent entirely off a zapping route — so its presence *is* the flag and no
+-- new field is needed on the contract.
+local function zap_enabled()
+    if not state.isLive then return false end
+    return type(state.quickList) == 'table'
 end
 
 local function quick_list_rows(list)
@@ -1236,6 +1251,18 @@ local function render()
         local go_w = text_button_width(label, fs(14), false)
         right = right - go_w
         text_button(ass, right, row2_cy, label, 'goLive')
+    end
+
+    -- The quick-list opener, **immediately left of "Go to live"** — the one
+    -- slot every surface puts it in (Kotlin's `RightCluster`, the Windows GDI
+    -- `BottomLayout`, the shared Flutter cluster), the same way the favorite
+    -- star has exactly one. Keyboard/remote users reach the list with `g` or
+    -- D-pad Left; without this button a pointer could not open it at all.
+    -- Never tinted: it opens a panel, it is not a toggle, and `active` here
+    -- means state (the star) on every surface.
+    if zap_enabled() then
+        right = right - px(8) - px(44)
+        icon_button(ass, right, row2_cy, ICON.format_list_bulleted, 'zap:list')
     end
 
     -- ===== info panel =====

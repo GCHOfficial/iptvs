@@ -128,6 +128,31 @@ class PlayerUiState(
     var canFavorite by mutableStateOf(false)
     var isFavorite by mutableStateOf(false)
 
+    /**
+     * Whether this route has a `LiveZapController` behind it.
+     *
+     * Seeded from `EXTRA_ZAP_ENABLED` on the open Intent (Dart's
+     * `zapEnabled`), which is constant for the life of a route: the
+     * controller either exists at `PlayerScreen` construction or it never
+     * does. It is the Android twin of the Windows overlay's
+     * `NativeControlState.zap_enabled`, and it exists for the same reason —
+     * a live route opened *without* a controller (the EPG grid's own play
+     * path) has Dart decline every zap command, so an affordance offered
+     * there would simply do nothing.
+     *
+     * Only the quick-list button reads it today; [ZapKeyPolicy] deliberately
+     * does not, so the key ring's behaviour is unchanged.
+     */
+    var canZap by mutableStateOf(false)
+
+    /**
+     * Whether the control row offers the quick-list opener.
+     *
+     * Pointer and mouse users have no other way in: Left and `GUIDE` are the
+     * remote's route to the list, and neither exists on a touchscreen.
+     */
+    val showQuickListButton: Boolean get() = isLive && canZap && !inPip
+
     var audioTracks by mutableStateOf<List<TrackOption>>(emptyList())
     var selectedAudioId by mutableStateOf<String?>(null)
     var subtitleTracks by mutableStateOf<List<TrackOption>>(emptyList())

@@ -21,6 +21,7 @@
 #include <windowsx.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "player_back_policy.h"
 #include "resource.h"
 #include "zap_key_policy.h"
 #include "zap_quick_list_state.h"
@@ -190,6 +191,9 @@ enum class NativeFocusItem {
   kInfo,
   kFullscreen,
   kGoLive,
+  // The quick-list opener: the pointer/keyboard way into a panel that
+  // otherwise only a remote's Left or `G` could reach.
+  kQuickList,
 };
 
 HWND NativeControlsOwner(HWND hwnd) {
@@ -1343,6 +1347,10 @@ struct BottomLayout {
   RECT go_live; // live-only "jump to live edge" button
   bool has_favorite = false;
   RECT favorite;
+  // The quick-list opener, left end of the right cluster (see
+  // ComputeBottomLayout for why it sits there and not beside the star).
+  bool has_quick_list = false;
+  RECT quick_list;
 };
 
 BottomLayout ComputeBottomLayout(const RECT &rect) {
@@ -1418,6 +1426,20 @@ BottomLayout ComputeBottomLayout(const RECT &rect) {
   if (l.has_go_live) {
     place(l.go_live, 92);
   }
+  // The quick-list opener, **immediately left of "Go to live"** — the slot
+  // every surface that draws its own chrome puts it in (Android `RightCluster`,
+  // the shared Flutter cluster, the Linux Lua OSD). Placed last because this
+  // cluster is laid out right-to-left, so "last placed" is "leftmost drawn".
+  //
+  // Gated on [ZapActive], not on `live` alone: a live route opened without a
+  // `LiveZapController` — the EPG grid's own play path — has Dart decline
+  // `zap:list`, and a button that does nothing is worse than no button. It is
+  // the same predicate the key ring uses for Left and `G`, so the pointer
+  // affordance and the keys can never disagree about whether the list exists.
+  l.has_quick_list = ZapActive();
+  if (l.has_quick_list) {
+    place(l.quick_list, kBtn);
+  }
 
   l.has_scrubber = !live;
   if (l.has_scrubber) {
@@ -1460,6 +1482,22 @@ int MenuAnchorX(const BottomLayout &l) {
   }
 }
 
+// What the quick-list button sends: members of the shared zap vocabulary,
+// parsed by Dart's `parseZapCommand` exactly like the ones Left and `G` send.
+//
+// **It toggles**, unlike Android's, and the difference is forced by what the
+// chrome does on each surface. Opening the list stands the chrome down on
+// Android and Linux, so the button is off screen while the list is up and one
+// command is all it can ever send; this surface deliberately leaves the chrome
+// alone (the panel is banded clear of the bars, and the key ring claims the
+// arrows whether they are up or not), so the button stays under the pointer —
+// and a visible control whose second click does nothing reads as broken. This
+// is also the only way a mouse-only user closes the list: the panel itself is
+// not a hit target, by design, so otherwise only Escape would shut it.
+std::string QuickListToggleCommand() {
+  return QuickListShown() ? "zap:close" : "zap:list";
+}
+
 // The overlay is two rows, and arrow-key navigation treats them differently:
 // Left/Right cycles within a row, Up returns to Back, Down drops into the
 // transport. Back is the only control in the top row — the favorite star used
@@ -1477,8 +1515,10 @@ std::vector<NativeFocusItem> FocusableItems(const BottomLayout &l) {
     out.push_back(NativeFocusItem::kSeekForward);
   }
   out.push_back(NativeFocusItem::kMute);
-  // Match visual order: LIVE is leftmost in the right cluster, before CC/audio,
+  // Match visual order: the quick-list opener is leftmost in the right
+  // cluster, then "Go to live" and the favourite star, then speed/audio/CC,
   // aspect, info, and fullscreen.
+  if (l.has_quick_list) out.push_back(NativeFocusItem::kQuickList);
   if (l.has_go_live) out.push_back(NativeFocusItem::kGoLive);
   if (l.has_favorite) out.push_back(NativeFocusItem::kFavorite);
   if (l.has_speed) out.push_back(NativeFocusItem::kSpeed);
@@ -1516,6 +1556,8 @@ std::string CommandForFocusedItem(NativeFocusItem item) {
     return "info";
   case NativeFocusItem::kFullscreen:
     return "fullscreen";
+  case NativeFocusItem::kQuickList:
+    return QuickListToggleCommand();
   case NativeFocusItem::kGoLive:
     return "goLive";
   }
@@ -2838,6 +2880,14 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
     DrawTextButton(paint_hdc, l.go_live, L"Go to live",
                    is_focused(NativeFocusItem::kGoLive));
   }
+  if (l.has_quick_list) {
+    // Segoe MDL2 "BulletedList". The filled background means focus *or*
+    // engaged, the same split the audio/subtitle/info buttons above use for
+    // their own open panels — here "engaged" is the list being on screen.
+    DrawIconButton(paint_hdc, l.quick_list, L"\xE8FD",
+                   is_focused(NativeFocusItem::kQuickList) ||
+                       QuickListShown());
+  }
 
   PaintListMenu(paint_hdc, rect);
   RECT info_panel_rect = {0};
@@ -2994,6 +3044,9 @@ std::string NativeControlCommandFromPoint(HWND hwnd, int control_kind, int x,
   if (l.has_favorite && PointInRect(x, y, l.favorite)) {
     return "favorite";
   }
+  if (l.has_quick_list && PointInRect(x, y, l.quick_list)) {
+    return QuickListToggleCommand();
+  }
   return "show";
 }
 
@@ -3071,6 +3124,28 @@ bool IsZapKeyPress(UINT message, WPARAM wparam, LPARAM lparam) {
       .consumed();
 }
 
+// Whether this press must **not** raise the chrome before `MessageHandler`
+// gets to decide what it means.
+//
+// Same trap `IsZapKeyPress` documents, one key wider. Both child window
+// procedures *post* kNativeVideoSurfaceInputMessage ahead of the key itself,
+// and that message calls ShowNativeControls(true); posted messages are
+// processed in order, so any key whose handling reads the chrome's state sees
+// it already `true` by the time it is decided.
+//
+// Escape joined the list when it grew a Back ladder
+// (`iptvs::NextPlayerBackAction`): with the chrome hidden, Escape means
+// "leave the player", but the reveal would land first and turn every press
+// into "hide the chrome I just raised" — a key that toggles the bars forever
+// and never exits. It was safe while Escape sent "back" unconditionally,
+// which is exactly why the ladder had to bring this with it.
+bool SuppressesControlsReveal(UINT message, WPARAM wparam, LPARAM lparam) {
+  if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) {
+    return true;
+  }
+  return IsZapKeyPress(message, wparam, lparam);
+}
+
 LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
                                        LPARAM lparam) noexcept {
   switch (message) {
@@ -3095,7 +3170,7 @@ LRESULT CALLBACK NativeControlsWndProc(HWND hwnd, UINT message, WPARAM wparam,
   case WM_SYSKEYDOWN:
   case WM_SYSKEYUP:
     if (HWND parent = NativeControlsOwner(hwnd)) {
-      if (!IsZapKeyPress(message, wparam, lparam)) {
+      if (!SuppressesControlsReveal(message, wparam, lparam)) {
         PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
       }
       PostMessage(parent, message, wparam, lparam);
@@ -3249,7 +3324,7 @@ LRESULT CALLBACK NativeVideoSurfaceWndProc(HWND hwnd, UINT message,
   case WM_SYSKEYDOWN:
   case WM_SYSKEYUP:
     if (HWND parent = GetParent(hwnd)) {
-      if (!IsZapKeyPress(message, wparam, lparam)) {
+      if (!SuppressesControlsReveal(message, wparam, lparam)) {
         PostMessage(parent, kNativeVideoSurfaceInputMessage, 0, 0);
       }
       PostMessage(parent, message, wparam, lparam);
@@ -3403,8 +3478,46 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     }
 
     if (wparam == VK_ESCAPE) {
-      ShowNativeControls(true);
-      NotifyNativeControlCommand("back");
+      // One press, one layer (`player_back_policy.h`) — the same ladder
+      // Android's `handleSystemBack` walks. This used to call
+      // `ShowNativeControls(true)` and send "back" unconditionally, so Escape
+      // tore the player down from underneath an open menu, an open info panel
+      // or a control row the user had only just revealed.
+      //
+      // The two rungs above this one — a half-typed channel number and the
+      // quick list's own mode stack — were already claimed by `DecideZapKey`
+      // at the top of this branch, which is why neither appears here.
+      //
+      // A held key peels one rung, not the whole ladder — the same rule
+      // `HdrPlayerActivity.dispatchKeyEvent` applies to Android's Back, and
+      // the same one `DecideZapKey` applies by swallowing its own Escape
+      // repeats. Consumed rather than passed on, or the repeat would fall
+      // through to Flutter and be read a second time.
+      if (IsKeyRepeat(lparam)) {
+        return 0;
+      }
+      switch (iptvs::NextPlayerBackAction(
+          g_native_control_state.open_menu != NativeMenuKind::kNone,
+          g_native_control_state.info_open, native_controls_visible_)) {
+      case iptvs::PlayerBackAction::kCloseMenu:
+        g_native_control_state.open_menu = NativeMenuKind::kNone;
+        // The same repaint/region/hide-timer path a click on the menu's own
+        // button takes (`ApplyOverlayOwnedCommand`), so a menu closed by key
+        // and one closed by mouse leave identical state behind.
+        PostMessage(hwnd, kNativeControlsLayoutMessage, 0, 0);
+        break;
+      case iptvs::PlayerBackAction::kCloseInfo:
+        g_native_control_state.info_open = false;
+        PostMessage(hwnd, kNativeControlsLayoutMessage, 0, 0);
+        break;
+      case iptvs::PlayerBackAction::kHideControls:
+        KillTimer(hwnd, kNativeControlsHideTimer);
+        ShowNativeControls(false);
+        break;
+      case iptvs::PlayerBackAction::kExit:
+        NotifyNativeControlCommand("back");
+        break;
+      }
       return 0;
     }
 

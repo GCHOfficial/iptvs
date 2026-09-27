@@ -155,6 +155,14 @@ class PlayerVideoSurface extends StatefulWidget {
   /// zap. See [ZapQuickListState].
   final ZapQuickListState? quickList;
 
+  /// Whether this route has a zap session at all — i.e. whether the quick
+  /// list can be opened. Drives the control row's quick-list button, which is
+  /// the only way a mouse or a finger can reach the list.
+  final bool zapEnabled;
+
+  /// Sends `zap:list` (open the quick list). Null off a zapping route.
+  final VoidCallback? onOpenQuickList;
+
   /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
   /// "4:3"). Rendered as the aspect control's text, exactly as all four native
   /// overlays do — Dart owns the mode sequence (`PlayerScreen._aspectModes`),
@@ -209,6 +217,8 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.liveSynced,
     this.zap,
     this.quickList,
+    this.zapEnabled = false,
+    this.onOpenQuickList,
     required this.aspectLabel,
     required this.videoFit,
     required this.dynamicRangeLabel,
@@ -243,10 +253,11 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
   }
 
   /// Single-press Back/Escape peel for the embedded overlay, called by
-  /// [PlayerScreen]'s Escape binding: closes the info panel if open (returns
-  /// true — the press is consumed) so the exit only happens once there's
-  /// nothing left to peel. No-op (false) on the non-desktop default-controls
-  /// path where the overlay isn't mounted.
+  /// [PlayerScreen]'s Escape binding: one rung per press — info panel, then
+  /// visible chrome — returning true while it still has something to peel, so
+  /// the exit only happens once there's nothing left. See
+  /// [EmbeddedPlayerControlsState.handleBackPeel]. No-op (false) on the
+  /// non-desktop default-controls path where the overlay isn't mounted.
   bool handleBackPeel() => _controlsKey.currentState?.handleBackPeel() ?? false;
 
   /// Brings the chrome back on **any** input, called by every one of
@@ -323,6 +334,8 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             liveSynced: widget.liveSynced,
             zap: widget.zap,
             quickList: widget.quickList,
+            zapEnabled: widget.zapEnabled,
+            onOpenQuickList: widget.onOpenQuickList,
             aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
@@ -466,6 +479,8 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.liveSynced,
     this.zap,
     this.quickList,
+    this.zapEnabled = false,
+    this.onOpenQuickList,
     required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -494,6 +509,14 @@ class EmbeddedPlayerControls extends StatefulWidget {
   /// The in-player quick list (Phase 6), or null on any route that doesn't
   /// zap. See [ZapQuickListState].
   final ZapQuickListState? quickList;
+
+  /// Whether this route can open the quick list — see
+  /// [PlayerVideoSurface.zapEnabled]. The button is drawn only when this and
+  /// [isLive] are both true and [onOpenQuickList] is wired.
+  final bool zapEnabled;
+
+  /// Sends `zap:list`. See [PlayerVideoSurface.onOpenQuickList].
+  final VoidCallback? onOpenQuickList;
 
   /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
   final String aspectLabel;
@@ -959,6 +982,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     }
     final list = widget.quickList;
     if (list != null && list.open && list != oldWidget.quickList) {
+      // **Opening the list stands the chrome down** — one-shot on the
+      // closed→open edge, exactly as the Lua OSD and `applyQuickList` on
+      // Android do it. The list draws over the bars and claims the arrows
+      // and Back whatever the chrome is doing, so a control row left up
+      // behind it strands the D-pad on a button no arrow can walk away from
+      // (docs/tv-navigation.md). Only the *edge*, so chrome the user then
+      // deliberately reveals over an open list stays up.
+      if (!(oldWidget.quickList?.open ?? false)) _hideNow();
       // After this frame: the `ListView` may have no clients yet on the frame
       // the list opens on.
       WidgetsBinding.instance.addPostFrameCallback(
@@ -1061,16 +1092,34 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     });
   }
 
-  /// Closes the info panel (the non-modal `Positioned` overlay). Shared by the
-  /// tap-outside dismiss and [PlayerScreen]'s Escape peel; returns true when it
-  /// had an open panel to close (so Escape consumes the press instead of
-  /// exiting). The modal `PopupMenuButton` menus aren't a rung here — they
-  /// dismiss themselves on outside-tap/Escape.
+  /// One rung of the Back/Escape ladder, returning true when it had something
+  /// to peel (so the press is consumed instead of exiting the player).
+  ///
+  /// The ladder is the app-wide one — **menu → info → hide chrome → exit**
+  /// (CLAUDE.md, docs/tv-navigation.md), the same table Kotlin's
+  /// `nextPlayerBackAction`, the Windows GDI overlay and the Lua OSD's
+  /// `handle_back` answer. This used to peel the info panel *only*, so on the
+  /// one surface Windows SDR live actually uses, Escape with the chrome up
+  /// skipped straight out to the channel list — two rungs at once.
+  ///
+  /// The modal `PopupMenuButton` menus aren't a rung this method can see: they
+  /// are routes with their own barrier, so Escape is answered by the menu
+  /// route (which pops itself) and never reaches [PlayerScreen]'s binding at
+  /// all. That is the menu rung, just owned by the Navigator.
+  ///
+  /// The on-screen back arrow deliberately skips the ladder and exits outright
+  /// — as it does on every other surface.
   bool handleBackPeel() {
-    if (!_showInfo) return false;
-    setState(() => _showInfo = false);
-    _scheduleHide();
-    return true;
+    if (_showInfo) {
+      setState(() => _showInfo = false);
+      _scheduleHide();
+      return true;
+    }
+    if (_visible) {
+      _hideNow();
+      return true;
+    }
+    return false;
   }
 
   void _hideNow() {
@@ -1492,6 +1541,28 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                       : _positionRebuild(_timeLabel),
               ];
               final cluster = <Widget>[
+                // The quick-list opener, **immediately left of "Go to live"**
+                // — the one slot every surface puts it in (Android's
+                // `RightCluster`, the Windows GDI `BottomLayout`, the Lua
+                // OSD's right-to-left cluster), the same way the favorite
+                // star has one slot. Without it the list was keyboard/remote
+                // only: a mouse or a finger had no way to open it at all.
+                //
+                // Not a toggle, so the accent tints nothing here — pressing
+                // it opens the list, which takes the screen from this row
+                // (see [didUpdateWidget]), and the list's own Back closes it.
+                if (widget.isLive &&
+                    widget.zapEnabled &&
+                    widget.onOpenQuickList != null)
+                  _button(
+                    Icons.format_list_bulleted,
+                    // The desktop overlays bind `G` (Windows' key ring, the
+                    // Lua OSD, and this route's own `keyG`); a finger has no
+                    // keyboard to be told about.
+                    widget.touch ? 'Channel list' : 'Channel list (G)',
+                    widget.onOpenQuickList!,
+                    semanticsLabel: 'Channel list',
+                  ),
                 // "Go to live", as a plain text chip — the same control every
                 // other overlay now draws, in the same chip chrome as the
                 // aspect label beside it. It used to be a Material

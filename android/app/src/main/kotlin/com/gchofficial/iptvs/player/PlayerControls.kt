@@ -29,6 +29,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+// Shadows `kotlin.collections.List` inside this file — an explicit import wins
+// over a default one. Harmless today (nothing here names the collection type)
+// and kept because it is the icon's real name, but anything added below that
+// wants a `List<T>` must spell it `kotlin.collections.List`.
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.ClosedCaption
@@ -575,6 +580,30 @@ private fun RowScope.RightCluster(
 ) {
     // When `spread`, the parent Row supplies the gaps (portrait, `spacedBy`), so we
     // omit the manual spacers; otherwise (landscape) we space the buttons ourselves.
+    //
+    // The quick-list opener, **immediately left of "Go to live"** — the slot
+    // every surface that draws its own chrome gives it (the Windows GDI
+    // `BottomLayout::quick_list`, the shared Flutter cluster, the Linux Lua
+    // OSD). A remote reaches the list with Left or GUIDE; a finger and a mouse
+    // have no equivalent, which is the whole reason this button exists.
+    //
+    // Gated on `showQuickListButton` (live **and** a zap controller behind the
+    // route), never on `isLive` alone: with no controller Dart declines
+    // `zap:list` and the button would be inert. It sends the command through
+    // the same `onZapCommand` path the overlay's pointer-driven quick-list rows
+    // use — this surface is an input source, never a second copy of the list.
+    //
+    // It sends `zap:list` and never `zap:close`, unlike the Windows button:
+    // `applyQuickList` stands the chrome down on the closed→open edge, so this
+    // control is off screen for as long as the list is up and can never be
+    // pressed a second time. Back is what closes it here.
+    if (state.showQuickListButton) {
+        IconControlButton(
+            icon = Icons.AutoMirrored.Filled.List,
+            contentDescription = "Channel list",
+        ) { onInteract(); callbacks.onZapCommand("zap:list") }
+        if (!spread) Spacer(Modifier.width(8.dp))
+    }
     // Live-only "jump to live edge", shown only once behind (paused) — separate
     // from play/pause, which keeps resuming from where you paused. The label is
     // the action, not the state: this used to read "LIVE", duplicating the LIVE

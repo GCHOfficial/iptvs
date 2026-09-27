@@ -1378,6 +1378,23 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// the key was pressed for. The banner is what acknowledges the press.
   bool _handleZapInput(ZapCommand command) => _handleZapCommand(command);
 
+  /// `GUIDE` / `G` / the control row's quick-list button: open the list, or
+  /// close it if it is already up. A dedicated opener that did nothing the
+  /// second time reads as a dead key (and a dead button).
+  void _toggleQuickList() {
+    _handleZapInput(
+      ZapCommand(
+        _zapListOpen ? ZapCommandKind.closeList : ZapCommandKind.openList,
+      ),
+    );
+  }
+
+  /// Whether this route can open the quick list at all — what gates the
+  /// control row's quick-list button on the shared Flutter overlay. Live plus
+  /// a zap session; the pointer/touch counterpart of the `G`/`GUIDE` keys,
+  /// which is the only way a mouse or a finger can reach the list.
+  bool get _zapEnabled => _zap != null && _isLive;
+
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
     _showNativeControls(scheduleHide: false);
@@ -1543,6 +1560,15 @@ class _PlayerScreenState extends State<PlayerScreen>
             'resumeMs': widget.playback?.resumeFrom?.inMilliseconds ?? 0,
             'canFavorite': _canFavorite,
             'isFavorite': _favorite,
+            // Whether this route has a zap session at all — what gates the
+            // native overlay's quick-list button, the pointer half of
+            // `GUIDE`/`G` (see docs/player.md, "The opener in the control
+            // row"). Read off `widget.zap`, not `_zapEnabled`, because the
+            // `open` payload is built before `_isLive` can change and the
+            // natives read it as `EXTRA_ZAP_ENABLED` once, at launch; they
+            // fail closed, so an older build that doesn't send it simply
+            // draws no button.
+            'zapEnabled': widget.zap != null,
             if (kDebugMode && PlayerScreen.debugSoakAutoCloseMs != null)
               'soakAutoCloseMs': PlayerScreen.debugSoakAutoCloseMs,
             ..._epgPayload(),
@@ -3235,6 +3261,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       liveSynced: _liveSynced,
       zap: _zapBannerState(),
       quickList: _quickListState(),
+      zapEnabled: _zapEnabled,
+      onOpenQuickList: _zapEnabled ? _toggleQuickList : null,
       dynamicRangeLabel: _dynamicRangeLabel,
       onBack: _back,
       onToggleFavorite: _toggleFavorite,
@@ -3629,12 +3657,20 @@ class _PlayerScreenState extends State<PlayerScreen>
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () {
             if (_handleZapInput(const ZapCommand(ZapCommandKind.back))) return;
-            _handlePlaybackInput();
+            // Deliberately **no** `_handlePlaybackInput()` here, unlike every
+            // other binding: Escape is the peel key, and revealing the chrome
+            // first would make the "hide visible chrome" rung undo the reveal
+            // instead of peeling — Escape from a hidden-chrome player would
+            // then never reach the exit rung at all.
+            //
             // Single-press peel on the shared embedded overlay (Linux + Windows
-            // SDR): close an open info panel first and consume the press, only
-            // exiting once there's nothing left to peel — parity with the native
-            // overlays' menu→info→hide→exit ladder. The on-screen back arrow
-            // still exits directly (handled inside the overlay).
+            // SDR): one rung per press — info panel, then visible chrome — and
+            // only once nothing is left does the press exit, which is the
+            // native overlays' menu→info→hide→exit ladder. (An open track/
+            // subtitle/speed menu is a modal route that answers Escape itself,
+            // so it peels first without this binding ever running.) The
+            // on-screen back arrow still exits directly (handled inside the
+            // overlay).
             if (_embeddedSurfaceKey.currentState?.handleBackPeel() ?? false) {
               return;
             }
@@ -3797,14 +3833,14 @@ class _PlayerScreenState extends State<PlayerScreen>
             // so — unlike Left — it opens the quick list whether the chrome
             // is up or not. Pressed again it closes it, because a dedicated
             // key that does nothing the second time reads as a dead remote.
-            const SingleActivator(LogicalKeyboardKey.guide): () =>
-                _handleZapInput(
-                  ZapCommand(
-                    _zapListOpen
-                        ? ZapCommandKind.closeList
-                        : ZapCommandKind.openList,
-                  ),
-                ),
+            const SingleActivator(LogicalKeyboardKey.guide): _toggleQuickList,
+            // `G` is the desktop stand-in for `GUIDE`, which no PC keyboard
+            // has: the Windows native key ring already binds it and the Lua
+            // OSD binds `g`, so without it the one desktop surface a Windows
+            // SDR live stream actually lands on (this overlay) had no guide
+            // key at all. Same toggle, same chrome-independence. It collides
+            // with nothing — this screen binds only F, M, I and S.
+            const SingleActivator(LogicalKeyboardKey.keyG): _toggleQuickList,
             for (final entry in kDigitEntryKeys.entries)
               SingleActivator(entry.key): () => _handleZapInput(
                 ZapCommand(ZapCommandKind.digit, entry.value),

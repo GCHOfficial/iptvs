@@ -43,6 +43,9 @@ void main() {
     VoidCallback? onGoLive,
     ZapBannerState? zap,
     ZapQuickListState? quickList,
+    bool zapEnabled = false,
+    VoidCallback? onOpenQuickList,
+    GlobalKey<EmbeddedPlayerControlsState>? controlsKey,
   }) async {
     // Size the whole test surface (not a nested SizedBox) so the overlay fills
     // it and `getCenter` lands on-screen; the width drives the <720 compact
@@ -62,6 +65,7 @@ void main() {
           body: MediaQuery(
             data: MediaQueryData(size: Size(width, height), padding: padding),
             child: EmbeddedPlayerControls(
+              key: controlsKey,
               controls: stub,
               title: 'Channel One',
               sourceName: sourceName,
@@ -74,6 +78,8 @@ void main() {
               liveSynced: liveSynced,
               zap: zap,
               quickList: quickList,
+              zapEnabled: zapEnabled,
+              onOpenQuickList: onOpenQuickList,
               dynamicRangeLabel: dynamicRangeLabel ?? (_) => '',
               onBack: () {},
               onToggleFavorite: onToggleFavorite ?? () {},
@@ -860,6 +866,88 @@ void main() {
       expect(find.byType(ListView), findsNothing);
     });
 
+    // The pointer/touch half of the opener: `G`/`GUIDE`/D-pad Left are the
+    // key halves, and before this button a mouse could not open the list at
+    // all. The slot rule is identical on all four surfaces — right cluster,
+    // immediately LEFT of "Go to live", which itself sits left of the star.
+    testWidgets('the quick-list button sits immediately left of "Go to '
+        'live", ahead of the favorite star', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        canFavorite: true,
+        zapEnabled: true,
+        onOpenQuickList: () {},
+      );
+      final list = find.byIcon(Icons.format_list_bulleted);
+      expect(list, findsOneWidget);
+      final listX = tester.getCenter(list).dx;
+      final goLiveX = tester.getCenter(find.text('Go to live')).dx;
+      final starX = tester.getCenter(
+        find.byIcon(Icons.star_outline_rounded),
+      ).dx;
+      expect(listX, lessThan(goLiveX));
+      expect(goLiveX, lessThan(starX));
+      // One row: it takes the control row's ordinary geometry, like the star.
+      expect(
+        tester.getCenter(list).dy,
+        tester.getCenter(find.byIcon(Icons.info_outline)).dy,
+      );
+    });
+
+    testWidgets('the quick-list button is absent on VOD and off a zapping '
+        'route, and pressing it opens the list', (tester) async {
+      await pumpOverlay(tester, isLive: true);
+      expect(find.byIcon(Icons.format_list_bulleted), findsNothing);
+
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        zapEnabled: true,
+        onOpenQuickList: () {},
+      );
+      expect(find.byIcon(Icons.format_list_bulleted), findsNothing);
+
+      var opens = 0;
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onOpenQuickList: () => opens++,
+      );
+      await tester.tap(find.byIcon(Icons.format_list_bulleted));
+      await tester.pump();
+      expect(opens, 1);
+    });
+
+    testWidgets('opening the list stands the chrome down', (tester) async {
+      // The list claims the arrows and Back whatever the chrome is doing, so
+      // a control row left up behind it strands the D-pad — every other
+      // surface hides it on the closed→open edge.
+      final key = GlobalKey<EmbeddedPlayerControlsState>();
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onOpenQuickList: () {},
+        quickList: ZapQuickListState.closed,
+        controlsKey: key,
+      );
+      expect(key.currentState!.chromeVisible, isTrue);
+
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        zapEnabled: true,
+        onOpenQuickList: () {},
+        quickList: _quickList(labels: const ['One']),
+        controlsKey: key,
+      );
+      expect(key.currentState!.chromeVisible, isFalse);
+      expect(find.text('One'), findsOneWidget);
+    });
+
     testWidgets('the zap banner yields to the list', (tester) async {
       // Both live in the lower-left; drawn together they would print the
       // cursor's channel twice, from two different cursors.
@@ -877,6 +965,56 @@ void main() {
     });
   });
 
+  // The app-wide ladder: menu → info → hide chrome → exit (CLAUDE.md,
+  // docs/tv-navigation.md). This used to peel the info panel *only*, so on
+  // the Windows SDR live surface Escape with the chrome up skipped straight
+  // out to the channel list — two rungs in one press.
+  group('the Back/Escape ladder peels one rung per press', () {
+    testWidgets('info → hide chrome → exit', (tester) async {
+      final key = GlobalKey<EmbeddedPlayerControlsState>();
+      await pumpOverlay(tester, isLive: true, controlsKey: key);
+      final state = key.currentState!;
+
+      state.toggleInfo();
+      await tester.pump();
+      expect(find.text('Stream information'), findsOneWidget);
+
+      // Rung 1: the info panel, chrome untouched.
+      expect(state.handleBackPeel(), isTrue);
+      await tester.pump();
+      expect(find.text('Stream information'), findsNothing);
+      expect(state.chromeVisible, isTrue);
+
+      // Rung 2: the visible chrome.
+      expect(state.handleBackPeel(), isTrue);
+      await tester.pump();
+      expect(state.chromeVisible, isFalse);
+
+      // Rung 3: nothing left — the route exits.
+      expect(state.handleBackPeel(), isFalse);
+    });
+
+    testWidgets('with the chrome already hidden, one press exits', (
+      tester,
+    ) async {
+      final key = GlobalKey<EmbeddedPlayerControlsState>();
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        // `_scheduleHide` only arms while playing — a paused player keeps its
+        // chrome, which is the whole reason the reveal-on-input rule exists.
+        state: const PlayerState(playing: true),
+        controlsKey: key,
+      );
+      final state = key.currentState!;
+      // The chrome auto-hides after 4 s; PlayerScreen's Escape binding
+      // deliberately does not reveal it first, or this rung could never be
+      // reached.
+      await tester.pump(const Duration(seconds: 5));
+      expect(state.chromeVisible, isFalse);
+      expect(state.handleBackPeel(), isFalse);
+    });
+  });
 }
 
 ZapQuickListState _quickList({

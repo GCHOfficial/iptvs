@@ -869,10 +869,31 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   banner during a fast scan.
 - **Overlay Back is owned by the root `onPreviewKeyEvent`** (not the `BackHandler`) so a focused
   control can't eat the first press to clear its highlight; single-press peels menu→info→hide→exit.
+  **Every surface answers that same ladder**, including the shared Flutter overlay
+  (`EmbeddedPlayerControlsState.handleBackPeel`, which used to peel the info panel *only* — so Esc
+  with the chrome up left the player outright) and, natively, the Windows HWND surface
+  (`windows/runner/player_back_policy.h`, where Escape used to exit outright from any state; it
+  carries no quick-list rung, because the key ring claims that press first). The Flutter menu
+  rung is the Navigator's, since the track menus are modal routes that answer Escape themselves. The route's Escape binding is the one key
+  binding that must **not** reveal the chrome first, or the hide rung would undo the reveal and
+  the exit rung would be unreachable. The on-screen back arrow still exits directly.
   Relies on predictive back staying **off** (no `enableOnBackInvokedCallback`). Live channels get a
   **favorite star**, and it is in **one slot on every surface**: the control row, immediately right
   of "Go to live", at that row's ordinary button size (Kotlin `RightCluster`, iOS `clusterStack`,
-  the Windows GDI `BottomLayout::favorite`, the Flutter `cluster`, the Lua OSD). Windows/Flutter/Lua
+  the Windows GDI `BottomLayout::favorite`, the Flutter `cluster`, the Lua OSD). **The quick-list
+  opener has one slot the same way**, so the rule is a two-control one: the same row, the opener
+  immediately *left* of "Go to live" and the star immediately *right*, both at ordinary button
+  geometry, on every surface, the opener drawn only when the stream is **live and zap is
+  enabled** (Android `EXTRA_ZAP_ENABLED`, Windows `zapEnabled` on `setControlState`, Flutter
+  `zapEnabled`, Lua the presence of the pushed `quickList` block — all fail closed). It is tinted
+  by nothing (it opens a panel; it isn't state) and is a focus stop like the star. It is the only
+  way a mouse or a finger reaches the list. **Windows' opener toggles** (`zap:list`/`zap:close`,
+  the only mouse-only way to close a panel that isn't a hit target) because that surface keeps
+  its chrome up over the list; Android, Linux and the Flutter overlay only **open**, since
+  opening stands their chrome down and takes the button off screen. Each surface draws its own
+  icon set's bulleted-list glyph. The keyboard half is `GUIDE` **and `G`**, which every desktop
+  surface binds (the Windows key ring, the Lua OSD's `g`, and the shared Flutter overlay's `keyG`
+  — no PC keyboard has a `GUIDE` key, and Windows SDR live lands on that overlay). Windows/Flutter/Lua
   used to draw it in the top bar among the badges at three different sizes. The accent tints the
   *glyph*, never the button, whose filled state means focus. The native one round-trips state via
   Intent extra + a
