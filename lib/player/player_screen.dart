@@ -1072,6 +1072,30 @@ class _PlayerScreenState extends State<PlayerScreen>
     unawaited(_pushZapBanner());
   }
 
+  /// The Phase 3 counterpart of [_pushZapBanner] for the shared Flutter
+  /// overlay (Linux, and the Windows SDR preview→fullscreen surface): builds
+  /// [ZapBannerState] from the same cursor snapshot, rather than pushing a
+  /// wire payload to a native surface. Null off any route that doesn't zap —
+  /// VOD, catch-up, and a live open with no zap range all carry no banner.
+  ZapBannerState? _zapBannerState() {
+    final zap = _zap;
+    if (zap == null || !_isLive) return null;
+    final entry = zap.current;
+    final guide = zap.cursorEpg;
+    return ZapBannerState(
+      revision: zap.bannerRevision,
+      channelNumber: entry.number,
+      channelName: entry.name,
+      logoUrl: entry.channel.logo,
+      digits: zap.digitBuffer,
+      message: zap.message,
+      position: zap.index + 1,
+      total: zap.entries.length,
+      epgNow: guide.now,
+      epgNext: guide.next,
+    );
+  }
+
   /// Pushes the cursor's presentation to a native surface that draws its own
   /// chrome. Fire-and-forget and failure-tolerant: until the Kotlin/C++ halves
   /// land (Phase 2/4) this method simply isn't implemented natively, and a
@@ -3105,6 +3129,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       canFavorite: _canFavorite,
       favorite: _favorite,
       liveSynced: _liveSynced,
+      zap: _zapBannerState(),
       dynamicRangeLabel: _dynamicRangeLabel,
       onBack: _back,
       onToggleFavorite: _toggleFavorite,

@@ -2,12 +2,16 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+// ignore: invalid_use_of_visible_for_testing_member
+import '../screens/live_tab_view.dart' show debugDisableNetworkChannelLogos;
 import '../sources/source.dart';
 import '../theme.dart';
+import '../widgets/image_utils.dart';
 
 /// The narrow slice of a media_kit [Player] the embedded overlay reads and
 /// drives. Extracted as an interface purely so the overlay can be widget-tested
@@ -48,6 +52,87 @@ class PlayerBackedEmbeddedControls implements EmbeddedControls {
       _player.setSubtitleTrack(track);
 }
 
+/// Presentation payload for the in-player live-zapping banner (Phase 3 — the
+/// shared Flutter overlay's own render of it; see docs/player.md "Live
+/// zapping"). Pure and dependency-free — no [LiveZapController], no
+/// `SourceConfig` — so this file and its widget tests stay libmpv-free and the
+/// zap controller stays the only thing that reasons about the launch range.
+///
+/// Deliberately the **cursor's** presentation, not the playing channel's:
+/// [epgNow]/[epgNext] come from `LiveZapController.cursorEpg`, which is what
+/// lets a held key's banner show where it has got to before anything actually
+/// resolves — the bottom bar beside it keeps showing the channel actually on
+/// screen. Mirrors Kotlin's `PlayerUiState` zap fields
+/// (`ZAP_BANNER_VISIBLE_MS`, `channelIdentityLabel`, `showsChannelIdentity`).
+@immutable
+class ZapBannerState {
+  const ZapBannerState({
+    required this.revision,
+    required this.channelNumber,
+    required this.channelName,
+    this.logoUrl,
+    this.digits = '',
+    this.message,
+    required this.position,
+    required this.total,
+    this.epgNow,
+    this.epgNext,
+  });
+
+  /// Bumped on every cursor move/digit/message — `LiveZapController
+  /// .bannerRevision`, the Dart mirror of Kotlin's `zapBannerAtMs`. The
+  /// overlay restarts its dwell timer whenever this changes, so a held key
+  /// keeps the banner up instead of letting an earlier press's timer run out.
+  final int revision;
+
+  /// The cursor channel's provider number, when it has one.
+  final int? channelNumber;
+  final String channelName;
+
+  /// The cursor channel's logo, when the provider gave one. Never itself
+  /// decides whether the identity row renders — see [showsIdentity].
+  final String? logoUrl;
+
+  /// Half-typed channel number, shown as a digit readout. `''` when none.
+  final String digits;
+
+  /// A transient note ("No channel 123", a failed zap).
+  final String? message;
+
+  /// 1-based cursor position in the zap range, and its size. `0`/`0` when
+  /// unknown (e.g. a one-entry degraded range).
+  final int position;
+  final int total;
+
+  /// The **cursor's** now/next pair — `LiveZapController.cursorEpg`, never the
+  /// playing channel's `epg`.
+  final Programme? epgNow;
+  final Programme? epgNext;
+
+  /// `12 · BBC One`, or just the name when the provider gave no number, or
+  /// null when there is no name at all to show. Mirrors Kotlin's
+  /// `channelIdentityLabel()`.
+  String? get identityLabel {
+    final name = channelName.trim();
+    if (name.isEmpty) return null;
+    final number = channelNumber;
+    return number != null ? '$number · $name' : name;
+  }
+
+  /// Whether the identity run says something the ordinary title/bottom bar
+  /// doesn't already: a channel number, a half-typed number, or a transient
+  /// note. Mirrors Kotlin's `showsChannelIdentity`.
+  bool get showsIdentity =>
+      channelNumber != null || digits.isNotEmpty || message != null;
+
+  /// Whether this banner state outlives the plain dwell timer: a half-typed
+  /// number and a transient note are mid-interaction states, so hiding them
+  /// on the ordinary timer would take the feedback away while the user is
+  /// still typing (or still reading why a zap failed). Mirrors the extra
+  /// clause in Kotlin's `showZapBanner`.
+  bool get outlivesTimer => digits.isNotEmpty || message != null;
+}
+
 /// Embedded media_kit presentation. Playback lifecycle and platform handoff
 /// stay in [PlayerScreen]; this widget only describes the visible controls.
 class PlayerVideoSurface extends StatefulWidget {
@@ -61,6 +146,11 @@ class PlayerVideoSurface extends StatefulWidget {
   final bool canFavorite;
   final bool favorite;
   final bool liveSynced;
+
+  /// In-player live-zapping banner state (Phase 3), or null on any route that
+  /// doesn't zap (VOD, catch-up, a live open with no zap range). See
+  /// [ZapBannerState].
+  final ZapBannerState? zap;
 
   /// Label of the aspect mode playback is *currently* in ("Fit"/"Fill"/"16:9"/
   /// "4:3"). Rendered as the aspect control's text, exactly as all four native
@@ -114,6 +204,7 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    this.zap,
     required this.aspectLabel,
     required this.videoFit,
     required this.dynamicRangeLabel,
@@ -226,6 +317,7 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             canFavorite: widget.canFavorite,
             favorite: widget.favorite,
             liveSynced: widget.liveSynced,
+            zap: widget.zap,
             aspectLabel: widget.aspectLabel,
             dynamicRangeLabel: widget.dynamicRangeLabel,
             onBack: widget.onBack,
@@ -367,6 +459,7 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    this.zap,
     required this.aspectLabel,
     required this.dynamicRangeLabel,
     required this.onBack,
@@ -387,6 +480,10 @@ class EmbeddedPlayerControls extends StatefulWidget {
   final bool canFavorite;
   final bool favorite;
   final bool liveSynced;
+
+  /// In-player live-zapping banner state (Phase 3), or null on any route that
+  /// doesn't zap. See [ZapBannerState].
+  final ZapBannerState? zap;
 
   /// Current aspect mode label — see [PlayerVideoSurface.aspectLabel].
   final String aspectLabel;
@@ -787,6 +884,19 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   bool _visible = true;
   bool _showInfo = false;
 
+  /// How long the zap banner stays up after a press, before it fades — the
+  /// Dart mirror of Kotlin's `ZAP_BANNER_VISIBLE_MS`.
+  static const kZapBannerVisible = Duration(seconds: 3);
+
+  Timer? _zapTimer;
+
+  /// Whether the banner's own dwell timer is currently up. Distinct from
+  /// [ZapBannerState.outlivesTimer]: a plain cursor move (a channel number,
+  /// nothing typed) is only visible while this is true, whereas a half-typed
+  /// digit buffer or a transient message stays up regardless (see
+  /// `EmbeddedPlayerControlsState._zapBannerVisible`).
+  bool _zapBannerUp = false;
+
   /// True while a track/subtitle/speed `PopupMenuButton` route is open.
   ///
   /// Cancelling the timer in `_show(keep: true)` is not enough on its own:
@@ -818,6 +928,36 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       (_) => _refresh(),
     );
     _scheduleHide();
+    if (widget.zap != null) _armZapBanner();
+  }
+
+  @override
+  void didUpdateWidget(EmbeddedPlayerControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final zap = widget.zap;
+    // Keyed on `revision`, not identity: `LiveZapController.bannerRevision` is
+    // bumped on every cursor move/digit/message (`_notify`), so a held key
+    // produces a new revision on every press and restarts the dwell timer —
+    // the Dart mirror of Kotlin's `LaunchedEffect(state.zapBannerAtMs)`.
+    if (zap != null &&
+        (oldWidget.zap == null || oldWidget.zap!.revision != zap.revision)) {
+      _armZapBanner();
+    }
+  }
+
+  /// (Re)starts the banner's own dwell timer, deliberately **not** through
+  /// [appMotion] — that helper returns [Duration.zero] under the "remove
+  /// animations" accessibility flag, which would make the banner vanish
+  /// before it could ever be read. Only the *fade* (the [AnimatedOpacity] in
+  /// [_zapBanner]) goes through [appMotion]; how long the banner stays up is
+  /// a dwell time, not a transition, and must survive that setting intact.
+  void _armZapBanner() {
+    _zapTimer?.cancel();
+    if (mounted) setState(() => _zapBannerUp = true);
+    _zapTimer = Timer(kZapBannerVisible, () {
+      _zapTimer = null;
+      if (mounted) setState(() => _zapBannerUp = false);
+    });
   }
 
   void _refresh() {
@@ -943,6 +1083,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   void dispose() {
     _hideTimer?.cancel();
     _clockTimer?.cancel();
+    _zapTimer?.cancel();
     _playingSub?.cancel();
     _tracksSub?.cancel();
     _trackSub?.cancel();
@@ -999,6 +1140,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
           // the fixed-offset info panel — the tree Linux and Windows ship.
           // Touch replaces all three with one full-height column, so the panel
           // is banded between the bars by construction (see [_touchChrome]).
+          _zapBanner(),
           if (!widget.touch) ...[
             if (_visible) ...[_topBar(), _bottomBar(context)],
             if (_showInfo) _infoPanel(),
@@ -1240,6 +1382,16 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // The identity run — a channel number, a half-typed number, or a
+          // transient note — drawn only when it says something the top bar's
+          // title does not, exactly like Kotlin's `showsChannelIdentity`. A
+          // session that never zaps therefore renders byte-identically to
+          // before: nothing sets [ZapBannerState.channelNumber] until a
+          // cursor moves.
+          if (widget.isLive && (widget.zap?.showsIdentity ?? false)) ...[
+            _zapIdentityRow(widget.zap!),
+            const SizedBox(height: 10),
+          ],
           if (widget.isLive) _liveEpgStrip() else _positionRebuild(_seekBar),
           // A live channel with no guide renders no strip at all, so it gets no
           // gap either — the natives shrink the whole bar in that case
@@ -1564,10 +1716,18 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   Widget _liveEpgStrip() {
     final now = widget.epgNow;
     if (now == null) return const SizedBox.shrink();
+    return _liveEpgStripFor(now, widget.epgNext);
+  }
+
+  /// [_liveEpgStrip]'s body, parameterised on a programme pair rather than
+  /// `widget.epgNow`/`widget.epgNext` — shared with the zap banner, whose
+  /// strip is the **cursor's** guide ([ZapBannerState.epgNow]/`epgNext`), not
+  /// the playing channel's. Zero behaviour change for the bottom bar, which
+  /// still calls this only through the [_liveEpgStrip] wrapper above.
+  Widget _liveEpgStripFor(Programme now, Programme? next) {
     final total = now.stop.difference(now.start).inSeconds;
     final elapsed = DateTime.now().difference(now.start).inSeconds;
     final progress = total <= 0 ? 0.0 : (elapsed / total).clamp(0.0, 1.0);
-    final next = widget.epgNext;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1619,6 +1779,208 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// `FormatClockHm` pair, the Lua `hm_ms` pair).
   static String _programmeRange(Programme programme) =>
       '${_hm(programme.start)} – ${_hm(programme.stop)}';
+
+  // ── Live zapping (Phase 3 — the shared Flutter overlay's own banner) ──────
+  //
+  // See docs/player.md "Live zapping" and the Kotlin analogue this mirrors:
+  // `PlayerControls.kt`'s `ZapBanner`/`ChannelIdentityRow` and
+  // `PlayerUiState.kt`'s `ZAP_BANNER_VISIBLE_MS`/`showsChannelIdentity`/
+  // `channelIdentityLabel`.
+
+  /// Whether the banner card is actually on screen right now: it needs a live
+  /// zap in progress, the chrome hidden (the banner is the only
+  /// acknowledgement a keypress gets while the bars are gone — showing both at
+  /// once would be redundant and the bar wins, matching Kotlin's mutually
+  /// exclusive `AnimatedVisibility`s), and either the plain dwell timer still
+  /// running or a mid-interaction state that outlives it.
+  bool get _zapBannerVisible {
+    final zap = widget.zap;
+    if (zap == null || !widget.isLive || chromeVisible) return false;
+    return _zapBannerUp || zap.outlivesTimer;
+  }
+
+  /// The zap banner: a small floating card above where the transport row
+  /// would sit, built from exactly two pieces — the identity run and the live
+  /// EPG strip — rather than a layout of its own, so a channel seen through
+  /// the banner and the same channel seen with the controls up read
+  /// identically (mirrors Kotlin's `ZapBanner` doc comment verbatim).
+  ///
+  /// Always present in the tree while [ZapBannerState.zap] is non-null and
+  /// the stream is live, faded to invisible via [AnimatedOpacity] rather than
+  /// conditionally built — an [AnimatedOpacity] that gets unmounted mid-fade
+  /// jumps instead of fading, and [IgnorePointer] keeps it from stealing taps
+  /// meant for the background reveal layer while invisible.
+  Widget _zapBanner() {
+    final zap = widget.zap;
+    // A `Positioned`, never a bare `SizedBox.shrink()`, even when there is
+    // nothing to draw: this is a child of the same `Stack` as the top/bottom
+    // bars, whose own children are *all* `Positioned` — a `RenderStack` with
+    // no non-positioned children sizes itself to fill its incoming
+    // constraints, but the moment one non-positioned child appears (even a
+    // zero-size one) it switches to sizing itself from its non-positioned
+    // children instead, collapsing the whole Stack — and every bar in it —
+    // toward zero size.
+    if (zap == null || !widget.isLive) {
+      return const Positioned(
+        left: 0,
+        right: 0,
+        bottom: 0,
+        child: SizedBox.shrink(),
+      );
+    }
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          // The fade is the only part of this that goes through [appMotion] —
+          // see [_armZapBanner] for why the 3s dwell itself must not.
+          duration: appMotion(context, const Duration(milliseconds: 180)),
+          opacity: _zapBannerVisible ? 1 : 0,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20 + _barInsets.left,
+              0,
+              20 + _barInsets.right,
+              _m.bottomPadBottom + _barInsets.bottom,
+            ),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppColors.panel,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _zapIdentityRow(zap),
+                    if (zap.epgNow case final now?) ...[
+                      const SizedBox(height: 10),
+                      _liveEpgStripFor(now, zap.epgNext),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// `12 · BBC One`, with a half-typed channel number leading it and any
+  /// transient note (or the position/total) trailing it.
+  ///
+  /// Shared by the banner and the bottom bar so the two can't drift — the
+  /// Dart mirror of Kotlin's `ChannelIdentityRow`, which the doc comment on
+  /// it explains is shared for exactly the same reason. Self-gates to nothing
+  /// when there is truly nothing to show (no identity label, no digits, no
+  /// message); whether the row belongs in the *bottom bar* at all is a
+  /// separate decision the caller makes on [ZapBannerState.showsIdentity].
+  Widget _zapIdentityRow(ZapBannerState z) {
+    final identity = z.identityLabel;
+    if (identity == null && z.digits.isEmpty && z.message == null) {
+      return const SizedBox.shrink();
+    }
+    final logo = z.logoUrl;
+    // ignore: invalid_use_of_visible_for_testing_member
+    final logosDisabled = debugDisableNetworkChannelLogos;
+    final showLogo = !logosDisabled && logo != null && logo.isNotEmpty;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (showLogo) ...[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: CachedNetworkImage(
+              imageUrl: logo,
+              width: 28,
+              height: 28,
+              fit: BoxFit.cover,
+              memCacheWidth: imageCacheSize(context, 28),
+              placeholder: (_, _) => _zapLogoFallback(),
+              errorWidget: (_, url, error) {
+                logImageFailure(error, url);
+                return _zapLogoFallback();
+              },
+            ),
+          ),
+          const SizedBox(width: 10),
+        ],
+        if (z.digits.isNotEmpty) ...[
+          Text(
+            z.digits,
+            style: const TextStyle(
+              color: AppColors.accent,
+              fontSize: 24,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 12),
+        ],
+        if (identity != null)
+          Expanded(
+            child: Text(
+              identity,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textHi,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          )
+        else
+          const Spacer(),
+        if (z.message case final message?) ...[
+          const SizedBox(width: 8),
+          // Flexible, not rigid: a long transient note (a full channel name
+          // in "Couldn't play …") has no natural ceiling, and next to a
+          // digit readout plus an `Expanded` identity label it is the one
+          // piece left that can still overflow a narrow, heavily-scaled bar.
+          Flexible(
+            child: Text(
+              message,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.danger, fontSize: 12),
+            ),
+          ),
+        ] else if (z.total > 0 && z.position > 0) ...[
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              '${z.position}/${z.total}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.textLo, fontSize: 12),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// The 28×28 fallback drawn in place of the channel logo — same shape for
+  /// the loading placeholder and a fetch error, matching every other logo
+  /// call site in the app (`image_utils.dart`'s [logImageFailure] doc): a
+  /// screen that flickers between two different fallbacks reads as broken.
+  Widget _zapLogoFallback() => Container(
+    width: 28,
+    height: 28,
+    decoration: BoxDecoration(
+      color: AppColors.panelHi,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: const Icon(Icons.live_tv_rounded, size: 16, color: AppColors.textLo),
+  );
 
   Widget _timeLabel() => Text(
     '${_duration(widget.controls.state.position)} / ${_duration(widget.controls.state.duration)}',

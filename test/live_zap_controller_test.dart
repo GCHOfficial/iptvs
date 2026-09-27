@@ -573,6 +573,73 @@ void main() {
     });
   });
 
+  group('cursorEpg / bannerRevision', () {
+    test('cursorEpg follows the cursor while epg stays on the playing entry '
+        'during an unsettled move', () async {
+      final catalog = _FakeCatalog();
+      final start = DateTime.fromMillisecondsSinceEpoch(1700000000000);
+      catalog.epg['src/a'] = (
+        now: Programme(
+          channelId: 'a',
+          title: 'Now on A',
+          start: start,
+          stop: start.add(const Duration(hours: 1)),
+        ),
+        next: null,
+      );
+      catalog.epg['src/b'] = (
+        now: Programme(
+          channelId: 'b',
+          title: 'Now on B',
+          start: start,
+          stop: start.add(const Duration(hours: 1)),
+        ),
+        next: null,
+      );
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+
+      controller.channelUp();
+      // Not settled yet: epg (playing) is still A's, cursorEpg (cursor) is
+      // already B's.
+      expect(controller.epg.now?.title, 'Now on A');
+      expect(controller.cursorEpg.now?.title, 'Now on B');
+
+      await Future<void>.delayed(_past);
+      expect(controller.epg.now?.title, 'Now on B');
+      expect(controller.cursorEpg.now?.title, 'Now on B');
+    });
+
+    test('bannerRevision strictly increases on channel up, digit, message, '
+        'settling transition', () async {
+      final catalog = _FakeCatalog();
+      final controller = _controller(catalog: catalog);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+
+      final r0 = controller.bannerRevision;
+      controller.channelUp();
+      final r1 = controller.bannerRevision;
+      expect(r1, greaterThan(r0));
+
+      controller.appendDigit(1);
+      final r2 = controller.bannerRevision;
+      expect(r2, greaterThan(r1));
+
+      controller.appendDigit(9);
+      controller.commitDigits(); // no channel 19 -> message shown
+      final r3 = controller.bannerRevision;
+      expect(r3, greaterThan(r2));
+
+      // The settling transition (true, then false once resolved) each bump
+      // the revision too.
+      await Future<void>.delayed(_past);
+      final r4 = controller.bannerRevision;
+      expect(r4, greaterThan(r3));
+    });
+  });
+
   group('zapEntriesOf', () {
     test('wraps a channel list without materialising it', () {
       final config = _config('src');

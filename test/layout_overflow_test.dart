@@ -19,6 +19,7 @@
 // on a windowed desktop layout. Without the structural fix every `takeException`
 // below returns a `RenderFlex overflowed by …` error.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart'
@@ -26,8 +27,10 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FontLoader;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'package:iptvs/data/app_database.dart' show PlaybackPosition;
+import 'package:iptvs/player/player_overlay.dart';
 import 'package:iptvs/screens/live_focus_coordinator.dart';
 import 'package:iptvs/screens/live_tab_view.dart';
 import 'package:iptvs/screens/media_tab_controller.dart'
@@ -548,4 +551,146 @@ void main() {
       }
     }
   });
+
+  group('the zap banner fits its bar', () {
+    // Phase 3 of in-player live zapping (docs/player.md "Live zapping"). The
+    // banner and the bottom bar's identity run share one row
+    // (`_zapIdentityRow`) at a fixed height, fed by whatever a provider's
+    // channel numbering and a typed digit buffer hand it — this sweeps the
+    // worst-case payload the row can be asked to draw.
+    for (final size in const [Size(1256, 720), Size(960, 540), Size(667, 375)]) {
+      for (final textScale in const [1.0, 1.3, 2.0]) {
+        testWidgets('at $size, text scale $textScale', (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+          useWindow(tester, size, textScale);
+
+          final now = Programme(
+            channelId: 'c1',
+            title: 'A Very Long Currently Airing Programme Title That Runs On',
+            start: DateTime(2026, 1, 1, 20),
+            stop: DateTime(2026, 1, 1, 21),
+          );
+          final next = Programme(
+            channelId: 'c1',
+            title: 'An Equally Long Up-Next Programme Title Right Here',
+            start: DateTime(2026, 1, 1, 21),
+            stop: DateTime(2026, 1, 1, 22),
+          );
+          final zap = ZapBannerState(
+            revision: 1,
+            channelNumber: 999,
+            channelName: 'A Rather Long Channel Name Broadcasting Live pygjq',
+            digits: '999',
+            message: "Couldn't play A Really Very Long Channel Name pygjq",
+            position: 999,
+            total: 250000,
+            epgNow: now,
+            epgNext: next,
+          );
+          final stub = _StubEmbeddedControls();
+          addTearDown(stub.dispose);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: EmbeddedPlayerControls(
+                  controls: stub,
+                  title: 'Channel One',
+                  sourceName: 'Provider Network HD',
+                  epgNow: now,
+                  epgNext: next,
+                  isLive: true,
+                  canFavorite: true,
+                  favorite: false,
+                  liveSynced: true,
+                  zap: zap,
+                  aspectLabel: 'Fill',
+                  dynamicRangeLabel: (_) => '',
+                  onBack: () {},
+                  onToggleFavorite: () {},
+                  onPlayPause: () async {},
+                  onGoLive: () async {},
+                  onCycleAspect: () async {},
+                  onToggleFullscreen: () {},
+                ),
+              ),
+            ),
+          );
+          // A single frame — the overlay holds a periodic clock timer, and
+          // settling would mask nothing here while adding one more thing to
+          // manage.
+          await tester.pump();
+
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        });
+      }
+    }
+  });
+}
+
+/// Pure [EmbeddedControls] stub — no libmpv. Only the streams the overlay
+/// actually listens to carry real broadcast controllers; the rest are empty
+/// (`Stream<Never>` is assignable to any `Stream<T>`). Mirrors
+/// `test/player_overlay_test.dart`'s `_StubControls`.
+class _StubEmbeddedControls implements EmbeddedControls {
+  @override
+  final PlayerState state = const PlayerState();
+
+  final _playing = StreamController<bool>.broadcast();
+  final _tracks = StreamController<Tracks>.broadcast();
+  final _track = StreamController<Track>.broadcast();
+  final _videoParams = StreamController<VideoParams>.broadcast();
+  final _volume = StreamController<double>.broadcast();
+  final _position = StreamController<Duration>.broadcast();
+
+  @override
+  late final PlayerStream stream = PlayerStream(
+    const Stream<Never>.empty(), // playlist
+    _playing.stream,
+    const Stream<Never>.empty(), // completed
+    _position.stream,
+    const Stream<Never>.empty(), // duration
+    _volume.stream,
+    const Stream<Never>.empty(), // rate
+    const Stream<Never>.empty(), // pitch
+    const Stream<Never>.empty(), // buffering
+    const Stream<Never>.empty(), // bufferingPercentage
+    const Stream<Never>.empty(), // buffer
+    const Stream<Never>.empty(), // playlistMode
+    const Stream<Never>.empty(), // shuffle
+    const Stream<Never>.empty(), // audioParams
+    _videoParams.stream,
+    const Stream<Never>.empty(), // audioBitrate
+    const Stream<Never>.empty(), // audioDevice
+    const Stream<Never>.empty(), // audioDevices
+    _track.stream,
+    _tracks.stream,
+    const Stream<Never>.empty(), // width
+    const Stream<Never>.empty(), // height
+    const Stream<Never>.empty(), // subtitle
+    const Stream<Never>.empty(), // log
+    const Stream<Never>.empty(), // error
+  );
+
+  @override
+  Future<void> setVolume(double volume) async {}
+  @override
+  Future<void> seek(Duration to) async {}
+  @override
+  Future<void> setRate(double rate) async {}
+  @override
+  Future<void> setAudioTrack(AudioTrack track) async {}
+  @override
+  Future<void> setSubtitleTrack(SubtitleTrack track) async {}
+
+  Future<void> dispose() async {
+    await _playing.close();
+    await _tracks.close();
+    await _track.close();
+    await _videoParams.close();
+    await _volume.close();
+    await _position.close();
+  }
 }
