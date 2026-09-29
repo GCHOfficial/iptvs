@@ -302,21 +302,24 @@ void main() {
       );
     });
 
-    test('same-engine (mpv-routed) iOS channel adopts the preview embedded', () {
-      expect(
-        decideFullscreenHandoff(
-          reusePreview: true,
-          sameChannelPreview: true,
-          previewHasStream: true,
-          isAndroid: false,
-          nativePreviewActive: false,
-          linuxNativeLikely: false,
-          previewPlaying: true,
-          crossEngineFullscreen: false,
-        ),
-        FullscreenHandoff.adoptEmbedded,
-      );
-    });
+    test(
+      'same-engine (mpv-routed) iOS channel adopts the preview embedded',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: true,
+            sameChannelPreview: true,
+            previewHasStream: true,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+            crossEngineFullscreen: false,
+          ),
+          FullscreenHandoff.adoptEmbedded,
+        );
+      },
+    );
 
     test('it needs no HDR signal — the engine split alone decides, unlike the '
         'Linux native path which also requires streamLikelyHdr', () {
@@ -336,22 +339,25 @@ void main() {
       );
     });
 
-    test('ignored when reusePreview is false — a zap / EPG-grid play still just '
-        'stops the (different-channel) preview', () {
-      expect(
-        decideFullscreenHandoff(
-          reusePreview: false,
-          sameChannelPreview: false,
-          previewHasStream: false,
-          isAndroid: false,
-          nativePreviewActive: false,
-          linuxNativeLikely: false,
-          previewPlaying: true,
-          crossEngineFullscreen: true,
-        ),
-        FullscreenHandoff.stopPreview,
-      );
-    });
+    test(
+      'ignored when reusePreview is false — a zap / EPG-grid play still just '
+      'stops the (different-channel) preview',
+      () {
+        expect(
+          decideFullscreenHandoff(
+            reusePreview: false,
+            sameChannelPreview: false,
+            previewHasStream: false,
+            isAndroid: false,
+            nativePreviewActive: false,
+            linuxNativeLikely: false,
+            previewPlaying: true,
+            crossEngineFullscreen: true,
+          ),
+          FullscreenHandoff.stopPreview,
+        );
+      },
+    );
 
     test('ignored when reusePreview is false even for the same channel', () {
       expect(
@@ -722,28 +728,42 @@ void main() {
         PreviewReturnAction.none,
         reason: 'a different-channel preview was stopped and is not restarted',
       );
-      expect(
-        act(decision: FullscreenHandoff.none),
-        PreviewReturnAction.none,
-      );
+      expect(act(decision: FullscreenHandoff.none), PreviewReturnAction.none);
       expect(
         act(decision: FullscreenHandoff.adoptEmbedded, previewHasStream: false),
         PreviewReturnAction.none,
       );
     });
 
-    test('a zap outranks every resume, whatever the handoff was', () {
+    test('a zap turns every resume into a restart on the ended channel', () {
       // Once the session has left the launch channel, resuming would put a
       // channel the user navigated away from back in the panel — and, on an
       // adopted engine, leave it holding a single-connection account's only
-      // slot on the wrong stream.
+      // slot on the wrong stream. Wherever a preview would have come back, it
+      // comes back on the channel the session ended on instead; where none
+      // would have, none does.
       for (final decision in FullscreenHandoff.values) {
+        final resumed = act(decision: decision) != PreviewReturnAction.none;
         expect(
           act(zapped: true, decision: decision),
-          PreviewReturnAction.stop,
+          resumed
+              ? PreviewReturnAction.restartOnEndedChannel
+              : PreviewReturnAction.stop,
           reason: decision.name,
         );
       }
+      expect(
+        act(zapped: true, decision: FullscreenHandoff.adoptEmbedded),
+        PreviewReturnAction.restartOnEndedChannel,
+      );
+      expect(
+        act(
+          zapped: true,
+          decision: FullscreenHandoff.adoptEmbedded,
+          previewHasStream: false,
+        ),
+        PreviewReturnAction.stop,
+      );
     });
 
     test('a zap does not resurrect a player that cannot be reused', () {

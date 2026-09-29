@@ -1118,10 +1118,15 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   not the route's launch channel), and the reconnect watchdog stands down while `zap.settling` — a
   settling zap deliberately stopped the stream it would otherwise reconnect. Favourite and aspect
   writes (including native `RESULT_FAVORITE`/`RESULT_ASPECT`) apply to the **current** entry's
-  *owning* source, which a cross-source zap changes mid-session. Any zap stops the live preview on
-  return (`decidePreviewReturn`) — resuming would show the channel the user navigated away from —
-  and the channel list restores selection to the channel the session actually **ended** on, with
-  the visible filters unchanged. The launch range is a snapshot at open time, wrapped **lazily**
+  *owning* source, which a cross-source zap changes mid-session. A zap never *resumes* the live
+  preview on return (`decidePreviewReturn`) — that would show the channel the user navigated away
+  from — it **restarts** it (stop, then resolve) on the channel the session **ended** on, wherever
+  an un-zapped return would have brought a preview back. The channel list restores selection to
+  that ended channel, and **follows a quick-list re-range into its category** (`_followZapRange`;
+  active-source categories only — the cross-source range's per-source sub-ranges are already inside
+  the view it launched from), since otherwise the row isn't in the list and selection fell to row 0.
+  "Previous channel" is a channel **plus the range it was played from**: recalling one the quick
+  list re-ranged away from restores that range with it, rather than being a dead key. The launch range is a snapshot at open time, wrapped **lazily**
   (`zapEntriesOf`) so an unfiltered 250k-channel source costs nothing up front: cross-source
   Favorites contribute their own per-row `SourceConfig`; a search falls back to the whole active
   source minus hidden categories (a search result has no meaningful "next channel"); otherwise the
