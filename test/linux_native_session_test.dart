@@ -202,61 +202,66 @@ void main() {
       expect(payload['epgNowStartMs'], 1000);
     });
 
-    test('carries the quick list as a sibling of the zap block, not inside it',
-        () {
-      final controller = LiveZapController(
-        entries: zapEntriesOf(
-          [
-            const Channel(id: 'c1', name: 'BBC One', number: 1),
-            const Channel(id: 'c2', name: 'ITV1', number: 2),
-          ],
-          config: SourceConfig(
-            id: 'src',
-            kind: SourceKind.m3u,
-            label: 'My Provider',
-            fields: const {'playlistUrl': 'https://example.invalid/p.m3u'},
+    test(
+      'carries the quick list as a sibling of the zap block, not inside it',
+      () {
+        final controller = LiveZapController(
+          entries: zapEntriesOf(
+            [
+              const Channel(id: 'c1', name: 'BBC One', number: 1),
+              const Channel(id: 'c2', name: 'ITV1', number: 2),
+            ],
+            config: SourceConfig(
+              id: 'src',
+              kind: SourceKind.m3u,
+              label: 'My Provider',
+              fields: const {'playlistUrl': 'https://example.invalid/p.m3u'},
+            ),
+            sourceName: 'My Provider',
           ),
+          initialIndex: 0,
+          catalog: _NullZapCatalog(),
+          rangeLabel: 'Sport',
+        )..openQuickList();
+        addTearDown(controller.dispose);
+
+        final command = LinuxNativeSession.buildOverlayStateCommand(
+          title: 'BBC One HD',
           sourceName: 'My Provider',
-        ),
-        initialIndex: 0,
-        catalog: _NullZapCatalog(),
-        rangeLabel: 'Sport',
-      )..openQuickList();
-      addTearDown(controller.dispose);
+          epgNow: null,
+          epgNext: null,
+          canFavorite: true,
+          favorite: false,
+          isLive: true,
+          liveSynced: true,
+          aspectLabel: 'Fill',
+          zap: const <String, Object?>{'channelName': 'BBC One', 'atMs': 1},
+          quickList: controller.quickListPayload(),
+        );
 
-      final command = LinuxNativeSession.buildOverlayStateCommand(
-        title: 'BBC One HD',
-        sourceName: 'My Provider',
-        epgNow: null,
-        epgNext: null,
-        canFavorite: true,
-        favorite: false,
-        isLive: true,
-        liveSynced: true,
-        aspectLabel: 'Fill',
-        zap: const <String, Object?>{'channelName': 'BBC One', 'atMs': 1},
-        quickList: controller.quickListPayload(),
-      );
-
-      final payload = jsonDecode(command[3] as String) as Map<String, dynamic>;
-      // A sibling, for the same reason `zap` is nested: the two describe
-      // different things and their key names would collide.
-      final list = payload['quickList'] as Map<String, dynamic>;
-      expect(payload.containsKey('zap'), isTrue);
-      expect((payload['zap'] as Map<String, dynamic>).containsKey('rows'),
-          isFalse);
-      expect(list['open'], isTrue);
-      expect(list['mode'], 'channels');
-      expect(list['heading'], 'Sport');
-      expect(list['total'], 2);
-      expect(list['selectedIndex'], 0);
-      expect(list['windowStart'], 0);
-      final rows = list['rows'] as List<dynamic>;
-      expect(rows, hasLength(2));
-      expect((rows[0] as Map<String, dynamic>)['label'], '1 · BBC One');
-      expect((rows[0] as Map<String, dynamic>)['selected'], isTrue);
-      expect((rows[0] as Map<String, dynamic>)['playing'], isTrue);
-    });
+        final payload =
+            jsonDecode(command[3] as String) as Map<String, dynamic>;
+        // A sibling, for the same reason `zap` is nested: the two describe
+        // different things and their key names would collide.
+        final list = payload['quickList'] as Map<String, dynamic>;
+        expect(payload.containsKey('zap'), isTrue);
+        expect(
+          (payload['zap'] as Map<String, dynamic>).containsKey('rows'),
+          isFalse,
+        );
+        expect(list['open'], isTrue);
+        expect(list['mode'], 'channels');
+        expect(list['heading'], 'Sport');
+        expect(list['total'], 2);
+        expect(list['selectedIndex'], 0);
+        expect(list['windowStart'], 0);
+        final rows = list['rows'] as List<dynamic>;
+        expect(rows, hasLength(2));
+        expect((rows[0] as Map<String, dynamic>)['label'], '1 · BBC One');
+        expect((rows[0] as Map<String, dynamic>)['selected'], isTrue);
+        expect((rows[0] as Map<String, dynamic>)['playing'], isTrue);
+      },
+    );
   });
 
   group('LinuxNativeSession.buildHeaderFieldsCommand', () {

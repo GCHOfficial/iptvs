@@ -448,9 +448,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             IconButton(
               tooltip: 'Help & about',
               icon: const Icon(Icons.help_outline),
-              onPressed: () => Navigator.of(
-                context,
-              ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),
+              onPressed: () => Navigator.of(context)
+                  .push(MaterialPageRoute(builder: (_) => const LegalScreen())),
             ),
           ],
         ),

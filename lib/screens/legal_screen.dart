@@ -84,8 +84,7 @@ class LegalScreen extends StatelessWidget {
                 _LinkCard(
                   icon: Icons.delete_outline,
                   title: 'Delete cloud account',
-                  subtitle:
-                      'Permanently remove an optional panel account and its cloud data',
+                  subtitle: 'Permanently remove an optional panel account and its cloud data',
                   onTap: () => _open(context, AppLinks.deleteCloudAccount),
                 ),
                 const SizedBox(height: 20),

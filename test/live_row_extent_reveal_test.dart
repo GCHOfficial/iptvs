@@ -44,7 +44,8 @@ void main() {
               controller: controller,
               itemExtent: extent,
               itemCount: count,
-              itemBuilder: (_, i) => SizedBox(height: extent, child: Text('$i')),
+              itemBuilder: (_, i) =>
+                  SizedBox(height: extent, child: Text('$i')),
             ),
           ),
         ),

@@ -22,29 +22,27 @@ void main() {
   // the VM, but this keeps the KATs pinned to the shipped implementation).
   BrowserCryptography.isDisabledForTesting = true;
 
-  final fixture =
-      jsonDecode(
-            File('test/fixtures/crypto_vectors.json').readAsStringSync(),
-          )
-          as Map<String, dynamic>;
+  final fixture = jsonDecode(
+    File('test/fixtures/crypto_vectors.json').readAsStringSync(),
+  ) as Map<String, dynamic>;
 
   List<Map<String, dynamic>> vectors(String key) => [
     for (final e in fixture[key] as List) Map<String, dynamic>.from(e as Map),
   ];
 
-  test('canonical JSON: keys sorted ascending, no whitespace, UTF-8 non-ASCII', () {
-    for (final v in vectors('canonicalJson')) {
-      final input = (v['input'] as Map).map(
-        (k, val) => MapEntry(k.toString(), val.toString()),
-      );
-      expect(canonicalJson(input), v['expected']);
-    }
-    // Explicit shape check.
-    expect(
-      canonicalJson({'b': '2', 'a': '1'}),
-      '{"a":"1","b":"2"}',
-    );
-  });
+  test(
+    'canonical JSON: keys sorted ascending, no whitespace, UTF-8 non-ASCII',
+    () {
+      for (final v in vectors('canonicalJson')) {
+        final input = (v['input'] as Map).map(
+          (k, val) => MapEntry(k.toString(), val.toString()),
+        );
+        expect(canonicalJson(input), v['expected']);
+      }
+      // Explicit shape check.
+      expect(canonicalJson({'b': '2', 'a': '1'}), '{"a":"1","b":"2"}');
+    },
+  );
 
   test('PBKDF2-HMAC-SHA256 matches published + self vectors', () async {
     for (final v in vectors('pbkdf2HmacSha256')) {
@@ -118,9 +116,8 @@ void main() {
     });
 
     test('leading-zero shared X keeps its 0x00 first byte', () {
-      final v = vectors('ecdhP256').firstWhere(
-        (e) => e['name'] == 'leading-zero-shared-x',
-      );
+      final v = vectors('ecdhP256')
+          .firstWhere((e) => e['name'] == 'leading-zero-shared-x');
       final got = ecdhSharedX(
         _unhex(v['privateKey_hex'] as String),
         _unhex(v['peerPublicKey_hex'] as String),

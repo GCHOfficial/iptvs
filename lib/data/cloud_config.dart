@@ -8,11 +8,15 @@
 class CloudConfig {
   CloudConfig._();
 
-  static const String url =
-      String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+  static const String url = String.fromEnvironment(
+    'SUPABASE_URL',
+    defaultValue: '',
+  );
 
-  static const String anonKey =
-      String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
+  static const String anonKey = String.fromEnvironment(
+    'SUPABASE_ANON_KEY',
+    defaultValue: '',
+  );
 
   /// Where users go to manage their sources and claim a device's pairing code.
   ///
@@ -55,7 +59,7 @@ String pairingPanelLink(String panelUrl, String code) {
   final uri = Uri.tryParse(panelUrl);
   if (uri == null || !uri.hasScheme) return panelUrl;
   if (trimmed.isEmpty) return panelUrl;
-  return uri.replace(
-    queryParameters: {...uri.queryParameters, 'code': trimmed},
-  ).toString();
+  return uri
+      .replace(queryParameters: {...uri.queryParameters, 'code': trimmed})
+      .toString();
 }

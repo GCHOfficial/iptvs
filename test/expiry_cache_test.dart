@@ -65,9 +65,15 @@ void main() {
     final farOff = SubscriptionExpiry.dated(DateTime(2026, 12, 1));
 
     test('a definite answer is trusted for the full TTL', () {
-      expect(isStale(entry(farOff, const Duration(hours: 1)), now: now), isFalse);
       expect(
-        isStale(entry(farOff, kExpiryCacheTtl - const Duration(minutes: 1)), now: now),
+        isStale(entry(farOff, const Duration(hours: 1)), now: now),
+        isFalse,
+      );
+      expect(
+        isStale(
+          entry(farOff, kExpiryCacheTtl - const Duration(minutes: 1)),
+          now: now,
+        ),
         isFalse,
       );
       expect(isStale(entry(farOff, kExpiryCacheTtl), now: now), isTrue);
@@ -89,28 +95,48 @@ void main() {
       // a recovered portal look permanently broken.
       const unknown = SubscriptionExpiry.unknown();
       expect(
-        isStale(entry(unknown, kExpiryCacheUnknownTtl - const Duration(minutes: 1)), now: now),
+        isStale(
+          entry(unknown, kExpiryCacheUnknownTtl - const Duration(minutes: 1)),
+          now: now,
+        ),
         isFalse,
       );
       expect(isStale(entry(unknown, kExpiryCacheUnknownTtl), now: now), isTrue);
-      expect(isStale(entry(unknown, const Duration(hours: 1)), now: now), isTrue);
+      expect(
+        isStale(entry(unknown, const Duration(hours: 1)), now: now),
+        isTrue,
+      );
     });
 
     test('a date inside the renewal window is never cached', () {
       // The one time the user is watching this badge and expecting it to move.
       final soon = SubscriptionExpiry.dated(now.add(const Duration(hours: 5)));
-      expect(isStale(entry(soon, const Duration(minutes: 1)), now: now), isTrue);
-      final passed = SubscriptionExpiry.dated(now.subtract(const Duration(days: 2)));
-      expect(isStale(entry(passed, const Duration(minutes: 1)), now: now), isTrue);
+      expect(
+        isStale(entry(soon, const Duration(minutes: 1)), now: now),
+        isTrue,
+      );
+      final passed = SubscriptionExpiry.dated(
+        now.subtract(const Duration(days: 2)),
+      );
+      expect(
+        isStale(entry(passed, const Duration(minutes: 1)), now: now),
+        isTrue,
+      );
       final justOutside = SubscriptionExpiry.dated(
         now.add(kExpiryCacheRenewalWindow + const Duration(hours: 1)),
       );
-      expect(isStale(entry(justOutside, const Duration(minutes: 1)), now: now), isFalse);
+      expect(
+        isStale(entry(justOutside, const Duration(minutes: 1)), now: now),
+        isFalse,
+      );
     });
 
     test('a timestamp from the future is stale, not trusted forever', () {
       // A restored backup or an NTP correction can leave one behind.
-      expect(isStale(entry(farOff, const Duration(hours: -5)), now: now), isTrue);
+      expect(
+        isStale(entry(farOff, const Duration(hours: -5)), now: now),
+        isTrue,
+      );
     });
   });
 
@@ -218,30 +244,33 @@ void main() {
       );
       expect((await cache.readAny(cfg()))!.expiry.date, DateTime(2026, 12, 1));
       expect(
-        (await cache.readAny(cfg(id: 'src-2', portal: 'http://second.example/c/')))!
-            .expiry
-            .kind,
+        (await cache.readAny(
+          cfg(id: 'src-2', portal: 'http://second.example/c/'),
+        ))!.expiry.kind,
         SubscriptionExpiryKind.unlimited,
       );
     });
 
-    test('a stale entry is still returned, for the caller to revalidate', () async {
-      // The screen's contract: show what we have, refresh behind it. So the
-      // store hands back an aged entry and `isStale` decides what to do with
-      // it, rather than the read silently returning nothing.
-      final aged = CachedExpiry(
-        expiry: const SubscriptionExpiry.unknown(),
-        fetchedAt: DateTime.now().subtract(const Duration(hours: 4)),
-        fingerprint: expiryConfigFingerprint(cfg()),
-      );
-      await const FlutterSecureStorage().write(
-        key: 'source_expiry_cache',
-        value: '{"src-1":${_json(aged)}}',
-      );
-      final read = await cache.readAny(cfg());
-      expect(read, isNotNull);
-      expect(isStale(read!), isTrue);
-    });
+    test(
+      'a stale entry is still returned, for the caller to revalidate',
+      () async {
+        // The screen's contract: show what we have, refresh behind it. So the
+        // store hands back an aged entry and `isStale` decides what to do with
+        // it, rather than the read silently returning nothing.
+        final aged = CachedExpiry(
+          expiry: const SubscriptionExpiry.unknown(),
+          fetchedAt: DateTime.now().subtract(const Duration(hours: 4)),
+          fingerprint: expiryConfigFingerprint(cfg()),
+        );
+        await const FlutterSecureStorage().write(
+          key: 'source_expiry_cache',
+          value: '{"src-1":${_json(aged)}}',
+        );
+        final read = await cache.readAny(cfg());
+        expect(read, isNotNull);
+        expect(isStale(read!), isTrue);
+      },
+    );
 
     test('forget drops one source without touching the others', () async {
       await cache.write(cfg(), SubscriptionExpiry.dated(DateTime(2026, 12, 1)));
@@ -252,7 +281,9 @@ void main() {
       await cache.forget('src-1');
       expect(await cache.readAny(cfg()), isNull);
       expect(
-        await cache.readAny(cfg(id: 'src-2', portal: 'http://second.example/c/')),
+        await cache.readAny(
+          cfg(id: 'src-2', portal: 'http://second.example/c/'),
+        ),
         isNotNull,
       );
     });

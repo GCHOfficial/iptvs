@@ -254,7 +254,9 @@ void main() {
     });
   });
 
-  testWidgets('the wrong-PIN count survives closing the dialog', (tester) async {
+  testWidgets('the wrong-PIN count survives closing the dialog', (
+    tester,
+  ) async {
     // The bypass this pins: four misses, Back, re-select the profile, four more
     // — indefinitely — because the counter lived in the dialog's own state.
     await asPlatform(TargetPlatform.android, () async {

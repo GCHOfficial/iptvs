@@ -152,12 +152,15 @@ void main() {
     expect((await both[1].read().first).length, 3);
   });
 
-  test('read is re-runnable, so a retry does not need a second drain', () async {
-    final s = await spool(Stream.value(_batch(0, 4)));
-    addTearDown(s.dispose);
-    expect((await s.read().toList()).expand((b) => b).length, 4);
-    expect((await s.read().toList()).expand((b) => b).length, 4);
-  });
+  test(
+    'read is re-runnable, so a retry does not need a second drain',
+    () async {
+      final s = await spool(Stream.value(_batch(0, 4)));
+      addTearDown(s.dispose);
+      expect((await s.read().toList()).expand((b) => b).length, 4);
+      expect((await s.read().toList()).expand((b) => b).length, 4);
+    },
+  );
 
   test('a truncated spool throws rather than replaying a short guide', () async {
     // The failure mode this guards against is the quiet one: a short read that

@@ -88,12 +88,7 @@ void main() {
     // at its word, it is wider than the whole timeline. That gap is what sent
     // the reveal to the far-right clamp with the selected cell nowhere near it.
     Programme(channelId: 'd', start: at(-30), stop: at(0), title: 'D-first'),
-    Programme(
-      channelId: 'd',
-      start: at(0),
-      stop: at(30 * 60),
-      title: 'D-bad',
-    ),
+    Programme(channelId: 'd', start: at(0), stop: at(30 * 60), title: 'D-bad'),
     // Four hours long, and the row's last entry, so nothing truncates it: at a
     // narrow viewport it is genuinely wider than the timeline, which is the
     // other way the reveal can put the cursor somewhere invisible.
@@ -144,9 +139,8 @@ void main() {
       MaterialApp(
         // The real text-button styling (the dialog Close focus ring) without
         // Keep this focused on dialog layout rather than the full app theme.
-        theme: ThemeData.dark(
-          useMaterial3: true,
-        ).copyWith(textButtonTheme: AppTheme.textButtonTheme),
+        theme: ThemeData.dark(useMaterial3: true)
+            .copyWith(textButtonTheme: AppTheme.textButtonTheme),
         home: EpgGridScreen(
           repo: repo,
           channels: gridChannels,
@@ -374,7 +368,8 @@ void main() {
       expect(
         title.left,
         greaterThan(0),
-        reason: 'the selected cell\'s title must be on screen, not past the '
+        reason:
+            'the selected cell\'s title must be on screen, not past the '
             'left edge',
       );
       expect(title.left, lessThan(700));
@@ -559,9 +554,8 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        theme: ThemeData.dark(
-          useMaterial3: true,
-        ).copyWith(textButtonTheme: AppTheme.textButtonTheme),
+        theme: ThemeData.dark(useMaterial3: true)
+            .copyWith(textButtonTheme: AppTheme.textButtonTheme),
         home: Scaffold(
           body: Builder(
             builder: (context) {

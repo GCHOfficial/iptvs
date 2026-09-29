@@ -9,7 +9,10 @@ void main() {
       // and the DPR clamp holds 5 at 3, so 100x5 = 300 -> 320 rather than 500.
       expect(scaledImageCacheSize(100, 2), 224);
       expect(scaledImageCacheSize(100, 5), 320);
-      expect(scaledImageCacheSize(100, 5), lessThan(scaledImageCacheSize(200, 3)));
+      expect(
+        scaledImageCacheSize(100, 5),
+        lessThan(scaledImageCacheSize(200, 3)),
+      );
     });
 
     test('never converts infinity or NaN to an integer', () {

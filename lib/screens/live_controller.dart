@@ -178,8 +178,7 @@ class LiveController extends ChangeNotifier {
     if (_disposed || gen != _loadGeneration) return;
     _set(() {
       epgRefreshing = false;
-      epgUnavailable =
-          repo.lastEpgRefreshFailed && now.isEmpty && next.isEmpty;
+      epgUnavailable = repo.lastEpgRefreshFailed && now.isEmpty && next.isEmpty;
     });
   }
 

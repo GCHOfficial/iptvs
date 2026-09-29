@@ -31,13 +31,9 @@ void main() {
   });
 
   test('generated Stalker fixture includes controlled malformed rows', () {
-    final decoded =
-        jsonDecode(
-              utf8.decode(
-                WorkloadFixtures.stalkerChannelsJson(12, malformedEvery: 5),
-              ),
-            )
-            as Map<String, dynamic>;
+    final decoded = jsonDecode(
+      utf8.decode(WorkloadFixtures.stalkerChannelsJson(12, malformedEvery: 5)),
+    ) as Map<String, dynamic>;
     final js = decoded['js'] as Map<String, dynamic>;
     final rows = js['data'] as List<dynamic>;
 

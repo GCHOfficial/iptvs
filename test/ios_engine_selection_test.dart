@@ -149,14 +149,17 @@ void main() {
   });
 
   group('rule 4 — extension-less and unknown fall to mpv', () {
-    test('a Stalker create_link-shaped extension-less locator routes to mpv', () {
-      // This is the consequence docs/ios.md states plainly: MAG portals get
-      // HDR only when create_link happens to return an .m3u8 URL.
-      expect(
-        selectIosEngine(url: 'http://portal.example/play/12345'),
-        IosPlaybackEngine.mpv,
-      );
-    });
+    test(
+      'a Stalker create_link-shaped extension-less locator routes to mpv',
+      () {
+        // This is the consequence docs/ios.md states plainly: MAG portals get
+        // HDR only when create_link happens to return an .m3u8 URL.
+        expect(
+          selectIosEngine(url: 'http://portal.example/play/12345'),
+          IosPlaybackEngine.mpv,
+        );
+      },
+    );
 
     test('an unknown extension routes to mpv', () {
       expect(
@@ -179,12 +182,18 @@ void main() {
       expect(selectIosEngine(url: 'http://host/'), IosPlaybackEngine.mpv);
     });
 
-    test('a dotfile last segment counts as no extension, not as its suffix', () {
-      // `.mp4` is a filename, not an extension — the dot is at position 0, so
-      // there is nothing before it to call a name. The Swift mirror was fixed
-      // to match this; keep both sides in step.
-      expect(selectIosEngine(url: 'http://host/live/.mp4'), IosPlaybackEngine.mpv);
-    });
+    test(
+      'a dotfile last segment counts as no extension, not as its suffix',
+      () {
+        // `.mp4` is a filename, not an extension — the dot is at position 0, so
+        // there is nothing before it to call a name. The Swift mirror was fixed
+        // to match this; keep both sides in step.
+        expect(
+          selectIosEngine(url: 'http://host/live/.mp4'),
+          IosPlaybackEngine.mpv,
+        );
+      },
+    );
 
     test('a segment ending in a bare dot counts as no extension', () {
       expect(
@@ -195,22 +204,21 @@ void main() {
   });
 
   group('rule 2 — scheme gate', () {
-    test('non-http(s)/file schemes route to mpv even with a known extension', () {
-      for (final url in const [
-        'rtmp://host/live/1.mp4',
-        'rtsp://host/live/1.mp4',
-        'udp://238.0.0.1:1234',
-        'rtp://238.0.0.1:1234',
-        'mms://host/stream.mp4',
-        'srt://host:9000',
-      ]) {
-        expect(
-          selectIosEngine(url: url),
-          IosPlaybackEngine.mpv,
-          reason: url,
-        );
-      }
-    });
+    test(
+      'non-http(s)/file schemes route to mpv even with a known extension',
+      () {
+        for (final url in const [
+          'rtmp://host/live/1.mp4',
+          'rtsp://host/live/1.mp4',
+          'udp://238.0.0.1:1234',
+          'rtp://238.0.0.1:1234',
+          'mms://host/stream.mp4',
+          'srt://host:9000',
+        ]) {
+          expect(selectIosEngine(url: url), IosPlaybackEngine.mpv, reason: url);
+        }
+      },
+    );
 
     test('a schemeless or unparseable locator routes to mpv', () {
       for (final url in const ['', '   ', 'host/live/1.m3u8', '://nonsense']) {

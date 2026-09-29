@@ -112,9 +112,8 @@ class TmdbClient implements MetadataProvider {
         ...query,
       },
     );
-    return _download(
-      uri,
-    ).then((bytes) => jsonDecode(utf8.decode(bytes, allowMalformed: true)));
+    return _download(uri)
+        .then((bytes) => jsonDecode(utf8.decode(bytes, allowMalformed: true)));
   }
 
   Future<Uint8List> _download(Uri uri) async {

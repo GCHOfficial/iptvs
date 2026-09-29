@@ -38,10 +38,7 @@ void main() {
     final button = tester.widget<FilledButton>(find.byType(FilledButton));
     expect(button.autofocus, isTrue);
     expect(
-      Focus.of(
-        tester.element(find.text('Try again')),
-        scopeOk: true,
-      ).hasFocus,
+      Focus.of(tester.element(find.text('Try again')), scopeOk: true).hasFocus,
       isTrue,
       reason: 'nothing else in this body can take focus, so the retry must',
     );

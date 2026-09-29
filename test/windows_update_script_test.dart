@@ -148,29 +148,25 @@ void main() {
     expect(await oldExe.readAsString(), 'old-install');
   }, skip: windowsOnly);
 
-  test(
-    'restores the previous install when replacement launch fails',
-    () async {
-      final root = await Directory.systemTemp.createTemp('iptvs-update-test-');
-      addTearDown(() => root.delete(recursive: true));
-      final install = await Directory(p.join(root.path, 'install')).create();
-      final oldExe = File(p.join(install.path, 'iptvs.exe'));
-      await oldExe.writeAsString('old-install');
-      final zip = File(p.join(root.path, 'broken-replacement.zip'));
-      await _createZip(zip.path, {'iptvs.exe': 'not-a-windows-executable'});
+  test('restores the previous install when replacement launch fails', () async {
+    final root = await Directory.systemTemp.createTemp('iptvs-update-test-');
+    addTearDown(() => root.delete(recursive: true));
+    final install = await Directory(p.join(root.path, 'install')).create();
+    final oldExe = File(p.join(install.path, 'iptvs.exe'));
+    await oldExe.writeAsString('old-install');
+    final zip = File(p.join(root.path, 'broken-replacement.zip'));
+    await _createZip(zip.path, {'iptvs.exe': 'not-a-windows-executable'});
 
-      final result = await _runUpdater(root: root, zip: zip);
+    final result = await _runUpdater(root: root, zip: zip);
 
-      expect(result.exitCode, isNot(0));
-      expect(await oldExe.readAsString(), 'old-install');
-      // The rollback restores the install from a *hidden* backup folder. If
-      // the un-hide step were wrong (it is `-band -bnot` enum arithmetic
-      // inside a `try{}catch{}`, so a failure would be swallowed silently),
-      // the user's app folder would simply disappear from Explorer.
-      expect(await _attributesOf(install.path), isNot(contains('Hidden')));
-    },
-    skip: windowsOnly,
-  );
+    expect(result.exitCode, isNot(0));
+    expect(await oldExe.readAsString(), 'old-install');
+    // The rollback restores the install from a *hidden* backup folder. If
+    // the un-hide step were wrong (it is `-band -bnot` enum arithmetic
+    // inside a `try{}catch{}`, so a failure would be swallowed silently),
+    // the user's app folder would simply disappear from Explorer.
+    expect(await _attributesOf(install.path), isNot(contains('Hidden')));
+  }, skip: windowsOnly);
 
   test('a successful swap cleans up and leaves no hidden install', () async {
     final root = await Directory.systemTemp.createTemp('iptvs-update-test-');
@@ -181,7 +177,11 @@ void main() {
     // running after 5s, so the payload has to be a real, long-lived binary.
     // `cmd.exe` with no arguments waits on stdin forever; it is killed below.
     final zip = File(p.join(root.path, 'good.zip'));
-    await _createZipWithFile(zip.path, 'iptvs.exe', r'C:\Windows\System32\cmd.exe');
+    await _createZipWithFile(
+      zip.path,
+      'iptvs.exe',
+      r'C:\Windows\System32\cmd.exe',
+    );
     addTearDown(() async {
       await Process.run('taskkill.exe', ['/F', '/IM', 'iptvs.exe']);
       await Future<void>.delayed(const Duration(milliseconds: 500));
@@ -192,7 +192,10 @@ void main() {
 
     expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
     // Swapped: the new payload replaced the old tree wholesale.
-    expect(File(p.join(install.path, 'iptvs.exe')).lengthSync(), greaterThan(1000));
+    expect(
+      File(p.join(install.path, 'iptvs.exe')).lengthSync(),
+      greaterThan(1000),
+    );
     expect(File(p.join(install.path, 'stale.dll')).existsSync(), isFalse);
     // The staging folder is created hidden and *becomes* the install folder,
     // so the attribute has to be cleared on the way in.

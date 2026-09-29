@@ -26,8 +26,16 @@ void main() {
 
     test('an unrecognised override falls back to the platform default', () {
       for (final bad in ['', '   ', 'mkv', '.ts', 'ts?x']) {
-        expect(resolveXtreamStreamExtension(bad, isIOS: false), 'ts', reason: bad);
-        expect(resolveXtreamStreamExtension(bad, isIOS: true), 'm3u8', reason: bad);
+        expect(
+          resolveXtreamStreamExtension(bad, isIOS: false),
+          'ts',
+          reason: bad,
+        );
+        expect(
+          resolveXtreamStreamExtension(bad, isIOS: true),
+          'm3u8',
+          reason: bad,
+        );
       }
     });
   });

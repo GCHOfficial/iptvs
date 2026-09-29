@@ -128,27 +128,24 @@ void main() {
       );
     });
 
-    test(
-      'a truncated large payload throws via the isolate path, forwarded as XmltvParseException',
-      () async {
-        const channelCount = 40;
-        const perChannel = 60;
-        final bytes = WorkloadFixtures.xmltv(
-          channelCount: channelCount,
-          programmesPerChannel: perChannel,
-        );
-        expect(bytes.length, greaterThan(64 * 1024));
-        // Cut the payload mid-document so it's well above the isolate
-        // threshold but no longer well-formed XML.
-        final truncated = Uint8List.sublistView(bytes, 0, bytes.length ~/ 2);
-        final map = channelMap(channelCount);
+    test('a truncated large payload throws via the isolate path, forwarded as XmltvParseException', () async {
+      const channelCount = 40;
+      const perChannel = 60;
+      final bytes = WorkloadFixtures.xmltv(
+        channelCount: channelCount,
+        programmesPerChannel: perChannel,
+      );
+      expect(bytes.length, greaterThan(64 * 1024));
+      // Cut the payload mid-document so it's well above the isolate
+      // threshold but no longer well-formed XML.
+      final truncated = Uint8List.sublistView(bytes, 0, bytes.length ~/ 2);
+      final map = channelMap(channelCount);
 
-        await expectLater(parseXmltv(truncated, map), throwsA(anything));
-        await expectLater(
-          parseXmltvBatched(truncated, map).toList(),
-          throwsA(isA<XmltvParseException>()),
-        );
-      },
-    );
+      await expectLater(parseXmltv(truncated, map), throwsA(anything));
+      await expectLater(
+        parseXmltvBatched(truncated, map).toList(),
+        throwsA(isA<XmltvParseException>()),
+      );
+    });
   });
 }

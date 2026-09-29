@@ -745,9 +745,8 @@ class _ChannelListScreenState extends State<ChannelListScreen>
 
   void _showSnack(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 

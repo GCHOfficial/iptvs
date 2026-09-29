@@ -179,8 +179,14 @@ void main() {
     test('runs the helper script hidden without a profile', () {
       expect(launch.arguments, containsAllInOrder(<String>['start', '/min']));
       expect(launch.arguments, contains('powershell.exe'));
-      expect(launch.arguments, containsAllInOrder(<String>['-File', r'C:\Temp\iptvs_update.ps1']));
-      expect(launch.arguments, containsAllInOrder(<String>['-WindowStyle', 'Hidden']));
+      expect(
+        launch.arguments,
+        containsAllInOrder(<String>['-File', r'C:\Temp\iptvs_update.ps1']),
+      );
+      expect(
+        launch.arguments,
+        containsAllInOrder(<String>['-WindowStyle', 'Hidden']),
+      );
       expect(launch.arguments, contains('-NoProfile'));
     });
   });

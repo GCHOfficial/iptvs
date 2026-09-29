@@ -147,7 +147,8 @@ void main() {
     expect(
       find.byKey(videoKey),
       findsNothing,
-      reason: 'a scrim over a live hybrid-composition surface is the one '
+      reason:
+          'a scrim over a live hybrid-composition surface is the one '
           'overlay shape that costs real money — it must be an alternative to '
           'the video, not a layer on it',
     );

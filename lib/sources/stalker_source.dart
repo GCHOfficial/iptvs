@@ -2263,9 +2263,8 @@ class StalkerSource
     String endpoint,
     Map<String, String> params,
   ) async {
-    final uri = Uri.parse(
-      endpoint,
-    ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
+    final uri = Uri.parse(endpoint)
+        .replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
       final operation = HttpOperation(
         kStalkerJsonWorkload,
@@ -2331,9 +2330,8 @@ class StalkerSource
     String endpoint,
     Map<String, String> params,
   ) async {
-    final uri = Uri.parse(
-      endpoint,
-    ).replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
+    final uri = Uri.parse(endpoint)
+        .replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
       final operation = HttpOperation(
         kStalkerJsonWorkload,

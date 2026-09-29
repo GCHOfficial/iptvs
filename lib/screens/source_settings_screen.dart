@@ -181,9 +181,9 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
         ])
           k: q.isEmpty
               ? _all(k)
-              : _all(
-                  k,
-                ).where((c) => c.title.toLowerCase().contains(q)).toList(),
+              : _all(k)
+                    .where((c) => c.title.toLowerCase().contains(q))
+                    .toList(),
       };
     }
     return _filteredCache[kind] ?? const [];
@@ -243,7 +243,6 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
     setState(() => _epgControllers.add(TextEditingController()));
   }
 
-
   Future<void> _cycleBufferPreset() async {
     final next = nextBufferPreset(
       bufferPresetFromName(_config.bufferPresetName),
@@ -266,8 +265,8 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       if (url.isEmpty) continue; // a blank row is "not filled in yet"
       if (!looksLikeValidUrl(url, requireScheme: true)) {
         setState(
-          () => _epgError =
-              'Enter a valid URL starting with http:// or https://',
+          () =>
+              _epgError = 'Enter a valid URL starting with http:// or https://',
         );
         return;
       }
@@ -302,7 +301,9 @@ class _SourceSettingsScreenState extends State<SourceSettingsScreen> {
       // Honest about the timing: the running `Source` still holds the old URL
       // list, so the guides take effect when the source is next built — the
       // same "applies on next load" contract the catch-up overrides above have.
-      const SnackBar(content: Text('EPG guides saved — applied on next reload')),
+      const SnackBar(
+        content: Text('EPG guides saved — applied on next reload'),
+      ),
     );
   }
 

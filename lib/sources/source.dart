@@ -166,9 +166,8 @@ DateTime catchupProviderTime(
   if (normalized == 'UTC' || normalized == 'GMT' || normalized == 'Z') {
     return utc;
   }
-  final match = RegExp(
-    r'^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$',
-  ).firstMatch(normalized);
+  final match = RegExp(r'^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$')
+      .firstMatch(normalized);
   if (match != null) {
     final minutes =
         int.parse(match.group(2)!) * 60 + int.parse(match.group(3) ?? '0');

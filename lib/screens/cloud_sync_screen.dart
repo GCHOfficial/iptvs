@@ -250,9 +250,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pullSources(widget.store, profileId);
       final metadata = await _sync.pullMetadata(widget.store, profileId);
       await _sync.pullFavorites(widget.store, profileId);
-      _knownRemoteRevision = (await _sync.profileRevision(
-        profileId,
-      ))?.updatedAt;
+      _knownRemoteRevision = (await _sync.profileRevision(profileId))
+          ?.updatedAt;
       if (!mounted) return;
       final sources = 'Synced $count source${count == 1 ? '' : 's'}';
       setState(
@@ -381,9 +380,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       final count = await _sync.pushSources(widget.store, profileId);
       await _sync.pushMetadata(widget.store, profileId);
       await _sync.pushFavorites(widget.store, profileId);
-      _knownRemoteRevision = (await _sync.profileRevision(
-        profileId,
-      ))?.updatedAt;
+      _knownRemoteRevision = (await _sync.profileRevision(profileId))
+          ?.updatedAt;
       if (!mounted) return;
       setState(
         () => _status =

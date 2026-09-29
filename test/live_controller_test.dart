@@ -21,7 +21,9 @@ class _GatedRepo extends LibraryRepository {
   _GatedRepo({required super.source, required super.db});
 
   final List<Completer<LibrarySnapshot>> loadCompleters = [];
-  final List<Completer<({Map<String, Programme> now, Map<String, Programme> next})>>
+  final List<
+    Completer<({Map<String, Programme> now, Map<String, Programme> next})>
+  >
   nowNextCompleters = [];
 
   @override
@@ -35,7 +37,9 @@ class _GatedRepo extends LibraryRepository {
   Future<({Map<String, Programme> now, Map<String, Programme> next})>
   nowNext() {
     final completer =
-        Completer<({Map<String, Programme> now, Map<String, Programme> next})>();
+        Completer<
+          ({Map<String, Programme> now, Map<String, Programme> next})
+        >();
     nowNextCompleters.add(completer);
     return completer.future;
   }
@@ -147,42 +151,48 @@ void main() {
     expect(controller.channels.map((c) => c.id), ['gen2']);
   });
 
-  test('stale now-next result is dropped after a newer load completes', () async {
-    final refresh = controller.refreshNowNext();
-    expect(repo.nowNextCompleters.length, 1);
+  test(
+    'stale now-next result is dropped after a newer load completes',
+    () async {
+      final refresh = controller.refreshNowNext();
+      expect(repo.nowNextCompleters.length, 1);
 
-    final load = controller.load();
-    expect(repo.loadCompleters.length, 1);
-    repo.loadCompleters[0].complete(_snapshot('fresh'));
-    // load() awaits its own refreshNowNext() internally, so give it a second
-    // gated now/next completer to resolve.
-    await Future<void>.delayed(Duration.zero);
-    expect(repo.nowNextCompleters.length, 2);
-    repo.nowNextCompleters[1].complete(_nowNext('fresh'));
-    await load;
+      final load = controller.load();
+      expect(repo.loadCompleters.length, 1);
+      repo.loadCompleters[0].complete(_snapshot('fresh'));
+      // load() awaits its own refreshNowNext() internally, so give it a second
+      // gated now/next completer to resolve.
+      await Future<void>.delayed(Duration.zero);
+      expect(repo.nowNextCompleters.length, 2);
+      repo.nowNextCompleters[1].complete(_nowNext('fresh'));
+      await load;
 
-    // The stale refresh (started before the new load) resolves late.
-    repo.nowNextCompleters[0].complete(_nowNext('stale'));
-    await refresh;
+      // The stale refresh (started before the new load) resolves late.
+      repo.nowNextCompleters[0].complete(_nowNext('stale'));
+      await refresh;
 
-    expect(controller.now.keys, ['fresh']);
-    expect(controller.next, isEmpty);
-  });
+      expect(controller.now.keys, ['fresh']);
+      expect(controller.next, isEmpty);
+    },
+  );
 
-  test('dispose during load causes no notification and does not throw', () async {
-    var notifications = 0;
-    controller.addListener(() => notifications++);
+  test(
+    'dispose during load causes no notification and does not throw',
+    () async {
+      var notifications = 0;
+      controller.addListener(() => notifications++);
 
-    final future = controller.load();
-    final notificationsBeforeDispose = notifications;
-    controller.dispose();
-    controllerDisposed = true;
+      final future = controller.load();
+      final notificationsBeforeDispose = notifications;
+      controller.dispose();
+      controllerDisposed = true;
 
-    repo.loadCompleters[0].complete(_snapshot('after-dispose'));
-    await expectLater(future, completes);
+      repo.loadCompleters[0].complete(_snapshot('after-dispose'));
+      await expectLater(future, completes);
 
-    expect(notifications, notificationsBeforeDispose);
-  });
+      expect(notifications, notificationsBeforeDispose);
+    },
+  );
 
   test(
     'dispose during refreshNowNext causes no notification and does not throw',

@@ -2128,7 +2128,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     if (offsetIndex < 0) return;
     final extent = _quickListRowExtent;
     final position = _quickListScroll.position;
-    final target = (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
+    final target =
+        (offsetIndex * extent) - (position.viewportDimension - extent) / 2;
     final max = position.maxScrollExtent;
     _quickListScroll.jumpTo(target < 0 ? 0 : (target > max ? max : target));
   }

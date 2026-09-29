@@ -60,14 +60,10 @@ http://server/live/2.ts
         final parsed = parseM3uPlaylist(playlist);
 
         expect(parsed.channels, hasLength(2));
-        expect(
-          parsed.channels.map((c) => c.id).toSet(),
-          {
-            stableM3uChannelId('http://server/live/1.ts'),
-            stableM3uChannelId('http://server/live/2.ts'),
-          },
-          reason: 'ids must be unique even when tvg-id repeats',
-        );
+        expect(parsed.channels.map((c) => c.id).toSet(), {
+          stableM3uChannelId('http://server/live/1.ts'),
+          stableM3uChannelId('http://server/live/2.ts'),
+        }, reason: 'ids must be unique even when tvg-id repeats');
         // Both variants keep the shared tvg-id for EPG mapping.
         for (final channel in parsed.channels) {
           expect(channel.extra['tvgId'], 'bbc1.uk');
@@ -160,8 +156,7 @@ http://stream.invalid/two
 
   group('M3uSource.subscriptionExpiry', () {
     /// Unix seconds, the form an Xtream `user_info.exp_date` arrives in.
-    final expSeconds =
-        DateTime.utc(2026, 9, 1).millisecondsSinceEpoch ~/ 1000;
+    final expSeconds = DateTime.utc(2026, 9, 1).millisecondsSinceEpoch ~/ 1000;
 
     List<String> m3uLog() => DiagnosticsLog.instance.entries
         .where((entry) => entry.scope == 'm3u')
@@ -183,38 +178,42 @@ http://stream.invalid/two
       expect(asked, isFalse);
     });
 
-    test('asks the panel when the URL is an Xtream link with no expiry param',
-        () async {
-      // The gap behind "M3U source shows Expiry unknown with nothing in the
-      // log": a `get.php` link carries username/password and *no* expiry
-      // parameter, so the URL read had nothing to find while `player_api.php`
-      // would have answered on request.
-      final source = M3uSource(
-        sourceId: 'm3u-test',
-        playlistUrl: 'http://host/get.php?username=u&password=p',
-        debugXtreamApi: (_) async => {
-          'user_info': {'exp_date': '$expSeconds'},
-        },
-      );
-      final expiry = await source.subscriptionExpiry();
-      expect(expiry.kind, SubscriptionExpiryKind.dated);
-      expect(expiry.date!.toUtc().year, 2026);
-      expect(expiry.date!.toUtc().month, 9);
-    });
+    test(
+      'asks the panel when the URL is an Xtream link with no expiry param',
+      () async {
+        // The gap behind "M3U source shows Expiry unknown with nothing in the
+        // log": a `get.php` link carries username/password and *no* expiry
+        // parameter, so the URL read had nothing to find while `player_api.php`
+        // would have answered on request.
+        final source = M3uSource(
+          sourceId: 'm3u-test',
+          playlistUrl: 'http://host/get.php?username=u&password=p',
+          debugXtreamApi: (_) async => {
+            'user_info': {'exp_date': '$expSeconds'},
+          },
+        );
+        final expiry = await source.subscriptionExpiry();
+        expect(expiry.kind, SubscriptionExpiryKind.dated);
+        expect(expiry.date!.toUtc().year, 2026);
+        expect(expiry.date!.toUtc().month, 9);
+      },
+    );
 
-    test('a panel that answers with nothing usable stays unknown, and says so',
-        () async {
-      final source = M3uSource(
-        sourceId: 'm3u-test',
-        playlistUrl: 'http://host/get.php?username=u&password=p',
-        debugXtreamApi: (_) async => {'user_info': <String, dynamic>{}},
-      );
-      expect(
-        (await source.subscriptionExpiry()).kind,
-        SubscriptionExpiryKind.unknown,
-      );
-      expect(m3uLog().last, contains('no usable exp_date'));
-    });
+    test(
+      'a panel that answers with nothing usable stays unknown, and says so',
+      () async {
+        final source = M3uSource(
+          sourceId: 'm3u-test',
+          playlistUrl: 'http://host/get.php?username=u&password=p',
+          debugXtreamApi: (_) async => {'user_info': <String, dynamic>{}},
+        );
+        expect(
+          (await source.subscriptionExpiry()).kind,
+          SubscriptionExpiryKind.unknown,
+        );
+        expect(m3uLog().last, contains('no usable exp_date'));
+      },
+    );
 
     test('a failing panel lookup degrades rather than throwing', () async {
       final source = M3uSource(

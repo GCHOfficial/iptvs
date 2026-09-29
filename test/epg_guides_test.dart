@@ -63,10 +63,10 @@ void main() {
       ]);
       expect(out.length, 2);
       // 'a' keeps the primary guide's programme; 'b' comes from the top-up.
-      expect(
-        out.map((p) => '${p.channelId}:${p.title}'),
-        ['a:primary', 'b:secondary'],
-      );
+      expect(out.map((p) => '${p.channelId}:${p.title}'), [
+        'a:primary',
+        'b:secondary',
+      ]);
     });
 
     test('a guide is never filtered against itself', () async {
@@ -105,8 +105,11 @@ void main() {
         ]),
         // Fails before yielding (404, refused, unreadable) — nothing of its own
         // is in the transaction, so it is skipped rather than fatal.
-        _feed(const [], throwAfter: StateError('404'),
-            url: 'http://x/epg.xml?user=u'),
+        _feed(
+          const [],
+          throwAfter: StateError('404'),
+          url: 'http://x/epg.xml?user=u',
+        ),
         _feed([
           [_p('c')],
         ]),
@@ -127,19 +130,21 @@ void main() {
       expect(out.map((p) => p.channelId), ['a', 'b']);
     });
 
-    test('every guide failing propagates, so the cached guide is kept',
-        () async {
-      // `replaceEpgStream` reads a normally-completed empty stream as a
-      // successful *empty* guide — it would clear the cache and advance
-      // `epg_synced_at`. Throwing is what rolls that back.
-      expect(
-        _drain([
-          _feed(const [], throwAfter: StateError('down')),
-          _feed(const [], throwAfter: StateError('also down')),
-        ]),
-        throwsStateError,
-      );
-    });
+    test(
+      'every guide failing propagates, so the cached guide is kept',
+      () async {
+        // `replaceEpgStream` reads a normally-completed empty stream as a
+        // successful *empty* guide — it would clear the cache and advance
+        // `epg_synced_at`. Throwing is what rolls that back.
+        expect(
+          _drain([
+            _feed(const [], throwAfter: StateError('down')),
+            _feed(const [], throwAfter: StateError('also down')),
+          ]),
+          throwsStateError,
+        );
+      },
+    );
 
     test('a lone guide failing propagates', () async {
       expect(
@@ -196,8 +201,7 @@ void main() {
       expect(batches[1].single.channelId, 'b');
     });
 
-    test('a later guide is not opened until the earlier ones are drained',
-        () async {
+    test('a later guide is not opened until the earlier ones are drained', () async {
       var secondOpened = false;
       final seen = <String>[];
       final stream = mergeEpgGuides([
@@ -225,8 +229,7 @@ void main() {
   });
 
   group('mergeEpgGuides failure policy', () {
-    test('a guide that fails MID-FEED rethrows, even with a survivor',
-        () async {
+    test('a guide that fails MID-FEED rethrows, even with a survivor', () async {
       // Its batches are already inside the caller's transaction and cannot be
       // taken back, so completing normally would commit a truncated guide as a
       // whole one — `replaceEpgStream` would drop the previous guide and
@@ -257,19 +260,21 @@ void main() {
       expect(out.map((p) => p.channelId), ['a']);
     });
 
-    test('a mid-feed failure rethrows even when it is the last guide',
-        () async {
-      expect(
-        _drain([
-          _feed([
-            [_p('a')],
+    test(
+      'a mid-feed failure rethrows even when it is the last guide',
+      () async {
+        expect(
+          _drain([
+            _feed([
+              [_p('a')],
+            ]),
+            _feed([
+              [_p('b')],
+            ], throwAfter: StateError('dropped')),
           ]),
-          _feed([
-            [_p('b')],
-          ], throwAfter: StateError('dropped')),
-        ]),
-        throwsStateError,
-      );
-    });
+          throwsStateError,
+        );
+      },
+    );
   });
 }
