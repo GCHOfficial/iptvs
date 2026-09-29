@@ -180,11 +180,7 @@ void main() {
         // `isWide`, `_play` and the long-press gate all still say wide, so the
         // layout must agree — otherwise the preview panel is gone while a tap
         // still starts a preview only the panel could show.
-        await pumpLiveTab(
-          tester,
-          size: const Size(960, 600),
-          sideInset: 48,
-        );
+        await pumpLiveTab(tester, size: const Size(960, 600), sideInset: 48);
         expect(sidebar, findsOneWidget);
       },
     );
@@ -346,25 +342,22 @@ void main() {
     testWidgets('wide keeps the sidebar and shows the message beside it', (
       tester,
     ) async {
-      await pumpLiveTab(
-        tester,
-        size: const Size(1280, 800),
-        visible: const [],
-      );
+      await pumpLiveTab(tester, size: const Size(1280, 800), visible: const []);
       expect(sidebar, findsOneWidget, reason: 'the way back must survive');
       expect(find.textContaining('has no channels'), findsOneWidget);
     });
 
-    testWidgets('narrow still replaces the body (the dropdown is the way back)', (
-      tester,
-    ) async {
-      await pumpLiveTab(
-        tester,
-        size: const Size(500, 800),
-        visible: const [],
-      );
-      expect(sidebar, findsNothing);
-      expect(find.textContaining('has no channels'), findsOneWidget);
-    });
+    testWidgets(
+      'narrow still replaces the body (the dropdown is the way back)',
+      (tester) async {
+        await pumpLiveTab(
+          tester,
+          size: const Size(500, 800),
+          visible: const [],
+        );
+        expect(sidebar, findsNothing);
+        expect(find.textContaining('has no channels'), findsOneWidget);
+      },
+    );
   });
 }

@@ -93,7 +93,11 @@ void main() {
         expect(programmes.single.title, 'Fixture Programme');
         final metadata = await db.readExternalMetadata(
           'released-source',
-          const MediaItem(id: 'movie-1', title: 'Fixture Movie', kind: ContentKind.movie),
+          const MediaItem(
+            id: 'movie-1',
+            title: 'Fixture Movie',
+            kind: ContentKind.movie,
+          ),
           'tmdb',
         );
         expect(metadata?.title, 'Fixture Movie (TMDB)');
@@ -121,9 +125,7 @@ void main() {
         final freshDb = await AppDatabase.openAt(freshPath);
         await freshDb.close();
 
-        final migratedRaw = await databaseFactoryFfi.openDatabase(
-          migratedPath,
-        );
+        final migratedRaw = await databaseFactoryFfi.openDatabase(migratedPath);
         final migratedSignature = await schemaSignature(migratedRaw);
         await migratedRaw.close();
 
@@ -138,44 +140,50 @@ void main() {
 
   group('second open is a stable no-op', () {
     for (final version in releasedSchemaVersions) {
-      test('re-opening the migrated v$version fixture changes nothing', () async {
-        final path = '${tempDir.path}/v$version.db';
-        await createReleasedDatabaseFixture(path, version);
+      test(
+        're-opening the migrated v$version fixture changes nothing',
+        () async {
+          final path = '${tempDir.path}/v$version.db';
+          await createReleasedDatabaseFixture(path, version);
 
-        final firstOpen = await AppDatabase.openAt(path);
-        await firstOpen.readChannels('released-source');
-        await firstOpen.close();
+          final firstOpen = await AppDatabase.openAt(path);
+          await firstOpen.readChannels('released-source');
+          await firstOpen.close();
 
-        final rawAfterFirst = await databaseFactoryFfi.openDatabase(path);
-        final signatureAfterFirst = await schemaSignature(rawAfterFirst);
-        await rawAfterFirst.close();
+          final rawAfterFirst = await databaseFactoryFfi.openDatabase(path);
+          final signatureAfterFirst = await schemaSignature(rawAfterFirst);
+          await rawAfterFirst.close();
 
-        final secondOpen = await AppDatabase.openAt(path);
-        final channels = await secondOpen.readChannels('released-source');
-        expect(channels.single.name, 'Fixture Channel');
-        expect(
-          await secondOpen.readFavoriteIds('released-source', ContentKind.live),
-          version >= 9 ? {'channel-1'} : isEmpty,
-        );
-        final position = await secondOpen.readPlaybackPosition(
-          'released-source',
-          ContentKind.movie,
-          'movie-1',
-        );
-        if (version >= 11) {
-          expect(position?.position, const Duration(minutes: 1));
-        } else {
-          expect(position, isNull);
-        }
-        await secondOpen.close();
+          final secondOpen = await AppDatabase.openAt(path);
+          final channels = await secondOpen.readChannels('released-source');
+          expect(channels.single.name, 'Fixture Channel');
+          expect(
+            await secondOpen.readFavoriteIds(
+              'released-source',
+              ContentKind.live,
+            ),
+            version >= 9 ? {'channel-1'} : isEmpty,
+          );
+          final position = await secondOpen.readPlaybackPosition(
+            'released-source',
+            ContentKind.movie,
+            'movie-1',
+          );
+          if (version >= 11) {
+            expect(position?.position, const Duration(minutes: 1));
+          } else {
+            expect(position, isNull);
+          }
+          await secondOpen.close();
 
-        final rawAfterSecond = await databaseFactoryFfi.openDatabase(path);
-        expect(await rawAfterSecond.getVersion(), AppDatabase.schemaVersion);
-        final signatureAfterSecond = await schemaSignature(rawAfterSecond);
-        await rawAfterSecond.close();
+          final rawAfterSecond = await databaseFactoryFfi.openDatabase(path);
+          expect(await rawAfterSecond.getVersion(), AppDatabase.schemaVersion);
+          final signatureAfterSecond = await schemaSignature(rawAfterSecond);
+          await rawAfterSecond.close();
 
-        expect(signatureAfterSecond, equals(signatureAfterFirst));
-      });
+          expect(signatureAfterSecond, equals(signatureAfterFirst));
+        },
+      );
     }
   });
 }

@@ -315,7 +315,8 @@ Future<void> main() async {
       'privateKey_hex': ephHex,
       'peerPublicKey_hex': hex(device.publicKey),
       'sharedX_hex': hex(sharedX),
-      'note': 'sharedX_hex is exactly 32 bytes; first byte is 00 and must be '
+      'note':
+          'sharedX_hex is exactly 32 bytes; first byte is 00 and must be '
           'preserved (left-padded), not trimmed.',
     });
   }
@@ -463,7 +464,8 @@ Future<void> main() async {
     out['secretEnvelope'] = [
       {
         'name': 'secret-envelope-nonascii',
-        'source': 'self-generated (non-ASCII secret value; canonical-JSON/UTF-8 '
+        'source':
+            'self-generated (non-ASCII secret value; canonical-JSON/UTF-8 '
             'parity)',
         'profileId': profileId,
         'sourceId': sourceId,

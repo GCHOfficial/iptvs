@@ -275,8 +275,7 @@ bool isCkVersionRollback({
   required int rowCkVersion,
   required int serverCkVersion,
   required int watermark,
-}) =>
-    rowCkVersion < serverCkVersion || rowCkVersion < watermark;
+}) => rowCkVersion < serverCkVersion || rowCkVersion < watermark;
 
 /// Whether [e] is a "function does not exist" error from calling an RPC that a
 /// pre-migration backend doesn't have yet. Such a call must degrade to "no cloud
@@ -285,7 +284,8 @@ bool isMissingFunctionError(Object e) {
   if (e is! PostgrestException) return false;
   if (e.code == '42883' || e.code == 'PGRST202') return true;
   final m = e.message.toLowerCase();
-  return m.contains('does not exist') || m.contains('could not find the function');
+  return m.contains('does not exist') ||
+      m.contains('could not find the function');
 }
 
 /// Decode a pulled `{"format":0|1,"payload":...}` secret entry to a plain secret
@@ -321,7 +321,8 @@ Future<Map<String, String>> decodeSecretEntry({
     if (status != CloudCryptoStatus.off) return const {};
     if (payload is! Map) return const {};
     return {
-      for (final e in payload.entries) e.key.toString(): e.value?.toString() ?? '',
+      for (final e in payload.entries)
+        e.key.toString(): e.value?.toString() ?? '',
     };
   }
   if (format == 1) {
@@ -534,8 +535,10 @@ class CloudSync {
         : suggestion;
     final List res;
     try {
-      res = await _client.rpc('request_pairing', params: {'p_label': capped})
-          as List;
+      res = await _client.rpc(
+        'request_pairing',
+        params: {'p_label': capped},
+      ) as List;
     } on PostgrestException catch (e) {
       // Only a backend that predates the suggestion migration may fall back —
       // a real rate-limit or auth rejection must surface, not silently retry.
@@ -1150,7 +1153,10 @@ class CloudSync {
       await _publishDevicePublicKey(keyPair);
       final ckRow = await _getDeviceCk(profileId);
       if (ckRow == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       // No `?? ckVersion` fallback: a row without a version cannot be checked
       // for freshness, so it is not usable.
@@ -1161,15 +1167,24 @@ class CloudSync {
             serverCkVersion: ckVersion,
             watermark: mark.ckVersion,
           )) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       final wrapped = _asJsonMap(ckRow['wrapped_ck']);
       if (wrapped == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: rowCkv,
+        );
       }
       final uid = deviceId;
       if (uid == null) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: rowCkv);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: rowCkv,
+        );
       }
       final ck = await decodeDeviceWrap(
         envelope: wrapped,
@@ -1188,10 +1203,16 @@ class CloudSync {
         ck: ck,
       );
     } on CloudCryptoException {
-      return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+      return _CryptoState(
+        status: CloudCryptoStatus.locked,
+        ckVersion: ckVersion,
+      );
     } on PostgrestException catch (e) {
       if (isMissingFunctionError(e)) {
-        return _CryptoState(status: CloudCryptoStatus.locked, ckVersion: ckVersion);
+        return _CryptoState(
+          status: CloudCryptoStatus.locked,
+          ckVersion: ckVersion,
+        );
       }
       rethrow;
     }
@@ -1281,7 +1302,10 @@ class CloudSync {
         return EcKeyPair(privateKey: priv, publicKey: b64Decode(pubB64));
       }
       final rebuilt = p256KeyPairFromScalar(priv);
-      await _storage.write(key: _kDevicePub, value: b64Encode(rebuilt.publicKey));
+      await _storage.write(
+        key: _kDevicePub,
+        value: b64Encode(rebuilt.publicKey),
+      );
       return rebuilt;
     }
     final fresh = generateP256KeyPair();
@@ -1352,25 +1376,22 @@ class _CryptoState {
   final bool downgraded;
 
   // Only [_CryptoState.downgraded] sets that flag, so it is not a parameter here.
-  const _CryptoState({
-    required this.status,
-    this.ckVersion = 0,
-    this.ck,
-  }) : downgraded = false;
+  const _CryptoState({required this.status, this.ckVersion = 0, this.ck})
+    : downgraded = false;
 
   const _CryptoState.off()
-      : status = CloudCryptoStatus.off,
-        ckVersion = 0,
-        ck = null,
-        downgraded = false;
+    : status = CloudCryptoStatus.off,
+      ckVersion = 0,
+      ck = null,
+      downgraded = false;
 
   /// Locked because the server's claim regressed. Carries no ck_version on
   /// purpose: nothing the server just said about versions is trustworthy.
   const _CryptoState.downgraded()
-      : status = CloudCryptoStatus.locked,
-        ckVersion = 0,
-        ck = null,
-        downgraded = true;
+    : status = CloudCryptoStatus.locked,
+      ckVersion = 0,
+      ck = null,
+      downgraded = true;
 
   /// The message a blocked push explains itself with.
   String get blockedPushMessage =>

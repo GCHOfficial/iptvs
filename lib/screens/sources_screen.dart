@@ -257,9 +257,8 @@ class _SourcesScreenState extends State<SourcesScreen> {
           AppBarAction(
             label: 'Privacy & support',
             icon: Icons.info_outline,
-            onPressed: () => Navigator.of(
-              context,
-            ).push(MaterialPageRoute(builder: (_) => const LegalScreen())),
+            onPressed: () => Navigator.of(context)
+                .push(MaterialPageRoute(builder: (_) => const LegalScreen())),
           ),
           const SizedBox(width: 4),
         ],
@@ -1331,9 +1330,8 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     );
     if (!mounted) return;
     setState(() => _saving = false);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Metadata settings saved')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Metadata settings saved')));
   }
 
   Future<void> _clearMetadataCache() async {
@@ -1365,9 +1363,8 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     if (ok != true) return;
     await widget.db.clearExternalMetadata();
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Metadata cache cleared')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Metadata cache cleared')));
   }
 
   Future<void> _resetMetadataAndDisplay() async {
@@ -1400,9 +1397,8 @@ class _MetadataSettingsScreenState extends State<MetadataSettingsScreen> {
     await widget.db.clearExternalMetadata();
     await widget.db.resetEnrichedMediaDisplayFields();
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Metadata display reset')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Metadata display reset')));
   }
 
   @override

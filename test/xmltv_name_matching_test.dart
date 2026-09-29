@@ -62,10 +62,10 @@ void main() {
             _programme('DigiSport1.ro', title: 'Fotbal'),
         channels,
       );
-      expect(
-        progs.map((p) => '${p.channelId}:${p.title}'),
-        ['c1:Stirile', 'c2:Fotbal'],
-      );
+      expect(progs.map((p) => '${p.channelId}:${p.title}'), [
+        'c1:Stirile',
+        'c2:Fotbal',
+      ]);
     });
 
     test('an exact tvg-id still wins over a name declared earlier', () async {
@@ -106,18 +106,19 @@ void main() {
       expect(progs, isEmpty);
     });
 
-    test('a guide with no <channel> elements behaves exactly as before',
-        () async {
-      final channels = [_ch('c1', 'Pro TV', tvgId: 'protv.ro')];
-      final progs = await _parse(
-        _programme('protv.ro', title: 'Stirile') + _programme('other.ro'),
-        channels,
-      );
-      expect(progs.map((p) => p.channelId), ['c1']);
-    });
+    test(
+      'a guide with no <channel> elements behaves exactly as before',
+      () async {
+        final channels = [_ch('c1', 'Pro TV', tvgId: 'protv.ro')];
+        final progs = await _parse(
+          _programme('protv.ro', title: 'Stirile') + _programme('other.ro'),
+          channels,
+        );
+        expect(progs.map((p) => p.channelId), ['c1']);
+      },
+    );
 
-    test('declarations survive the isolate boundary on a large guide',
-        () async {
+    test('declarations survive the isolate boundary on a large guide', () async {
       // Above _isolateXmltvThreshold the bytes and BOTH index maps are sent to
       // a worker and the resolver is rebuilt there — a path the inline tests
       // never touch.
@@ -144,9 +145,7 @@ void main() {
       final channels = [_ch('c1', 'Pro TV')];
       final batches = <List<Programme>>[];
       await for (final b in parseXmltvBatched(
-        _xmltv(
-          _channel('ProTV.ro', ['Pro TV']) + _programme('ProTV.ro'),
-        ),
+        _xmltv(_channel('ProTV.ro', ['Pro TV']) + _programme('ProTV.ro')),
         buildTvgIdIndex(channels),
         nameToChannelIds: buildChannelNameIndex(channels),
       )) {

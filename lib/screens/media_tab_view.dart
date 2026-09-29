@@ -1994,9 +1994,9 @@ class _SeriesBrowser extends StatelessWidget {
                                                   : '${episode.episodeNumber}. ${episode.title}',
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
-                                              style: Theme.of(
-                                                context,
-                                              ).textTheme.bodyLarge,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .bodyLarge,
                                             ),
                                             if (episode.description !=
                                                 null) ...[

@@ -558,32 +558,29 @@ void main() {
       await db.close();
     });
 
-    test(
-      'a stale guide degrades to nothing rather than to something wrong',
-      () async {
-        // A foreign source's guide is only refreshed while that source is
-        // active, so it can be arbitrarily old. Both halves of the query are
-        // bounded by the current instant, so an out-of-date guide stops matching
-        // instead of printing yesterday's programme as "now".
-        final db = await openDb();
-        final longAgo = DateTime.now().subtract(const Duration(days: 3));
-        await db.replaceLibrary('src1', 'One', const [], const [
-          Channel(id: 'ch1', name: 'Alpha', number: 1),
-        ]);
-        await db.setFavorite('src1', ContentKind.live, 'ch1', true);
-        await db.replaceEpg('src1', [prog('ch1', 'Ancient', longAgo)]);
+    test('a stale guide degrades to nothing rather than to something wrong', () async {
+      // A foreign source's guide is only refreshed while that source is
+      // active, so it can be arbitrarily old. Both halves of the query are
+      // bounded by the current instant, so an out-of-date guide stops matching
+      // instead of printing yesterday's programme as "now".
+      final db = await openDb();
+      final longAgo = DateTime.now().subtract(const Duration(days: 3));
+      await db.replaceLibrary('src1', 'One', const [], const [
+        Channel(id: 'ch1', name: 'Alpha', number: 1),
+      ]);
+      await db.setFavorite('src1', ContentKind.live, 'ch1', true);
+      await db.replaceEpg('src1', [prog('ch1', 'Ancient', longAgo)]);
 
-        final store = SourceStore();
-        await store.setAll([cfg('src1', 'Panel One')]);
-        final controller = GlobalFavoritesController(db: db, store: store);
-        await controller.load();
+      final store = SourceStore();
+      await store.setAll([cfg('src1', 'Panel One')]);
+      final controller = GlobalFavoritesController(db: db, store: store);
+      await controller.load();
 
-        expect(controller.epgFor('src1', 'ch1').now, isNull);
-        expect(controller.hasEpg, isFalse);
-        controller.dispose();
-        await db.close();
-      },
-    );
+      expect(controller.epgFor('src1', 'ch1').now, isNull);
+      expect(controller.hasEpg, isFalse);
+      controller.dispose();
+      await db.close();
+    });
 
     test('the next programme is reported alongside the current one', () async {
       final db = await openDb();

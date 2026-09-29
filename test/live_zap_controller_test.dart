@@ -65,8 +65,7 @@ class _FakeCatalog implements ZapCatalog {
 
   @override
   ({Programme? now, Programme? next}) epgFor(ZapEntry entry) =>
-      epg['${entry.sourceId}/${entry.channelId}'] ??
-      (now: null, next: null);
+      epg['${entry.sourceId}/${entry.channelId}'] ?? (now: null, next: null);
 
   @override
   bool isFavorite(ZapEntry entry) =>
@@ -265,6 +264,78 @@ void main() {
       controller.previousChannel();
       await Future<void>.delayed(_past);
       expect(controller.playing.channelId, 'b');
+    });
+
+    test('brings back the range a quick-list pick left behind', () async {
+      final config = _config('src');
+      final catalog = _FakeCatalog();
+      catalog.channelsByCategory['news'] = zapEntriesOf(
+        [_channel('n1', number: 10), _channel('n2', number: 11)],
+        config: config,
+        sourceName: config.label,
+      );
+      final controller = _controller(catalog: catalog, config: config);
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+      expect(controller.reRanged, isFalse);
+
+      controller.openQuickList();
+      await controller.applyQuickListCategory(
+        const ZapCategoryRow(id: 'news', title: 'News'),
+      );
+      controller.moveQuickList(1); // -> n2
+      controller.activateQuickList();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, 'n2');
+      expect(controller.reRanged, isTrue);
+
+      // 'a' is not in News: the recall restores the launch range with it.
+      controller.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, 'a');
+      expect(controller.rangeCategoryId, '');
+      expect(controller.entries.length, 3);
+      controller.channelUp();
+      expect(controller.current.channelId, 'b', reason: 'Up walks it again');
+      controller.channelDown();
+
+      // And it toggles back into News the same way.
+      controller.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.channelId, 'n2');
+      expect(controller.rangeCategoryId, 'news');
+    });
+
+    test('crosses sources on the cross-source Favorites range', () async {
+      final a = _config('A');
+      final b = _config('B');
+      final all = [
+        ZapEntry(channel: _channel('1'), config: a, sourceName: 'A'),
+        ZapEntry(channel: _channel('1'), config: b, sourceName: 'B'),
+      ];
+      final catalog = _FakeCatalog();
+      catalog.channelsByCategory['src:B'] = [all[1]];
+      final controller = LiveZapController(
+        entries: all,
+        initialIndex: 0,
+        catalog: catalog,
+        settleDelay: _settle,
+      );
+      addTearDown(controller.dispose);
+      _Surface().attach(controller);
+
+      controller.openQuickList();
+      await controller.applyQuickListCategory(
+        const ZapCategoryRow(id: 'src:B', title: 'B'),
+      );
+      controller.activateQuickList();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.sourceId, 'B');
+
+      controller.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(controller.playing.sourceId, 'A');
+      expect(catalog.resolved.last, 'A/1');
     });
   });
 
@@ -703,36 +774,39 @@ void main() {
       expect(controller.quickListOpen, isFalse);
     });
 
-    test('the categories mode opens pre-selected on the current range', () async {
-      final catalog = _FakeCatalog()
-        ..categories = const [
-          ZapCategoryRow(id: '', title: 'All channels'),
-          ZapCategoryRow(id: 'news', title: 'News'),
-          ZapCategoryRow(id: 'sport', title: 'Sport'),
-        ];
-      final controller = LiveZapController(
-        entries: zapEntriesOf(
-          [_channel('a', number: 1)],
-          config: _config('src'),
-          sourceName: 'Src',
-        ),
-        initialIndex: 0,
-        catalog: catalog,
-        rangeCategoryId: 'sport',
-        rangeLabel: 'Sport',
-        settleDelay: _settle,
-        digitCommitDelay: _digits,
-        messageDuration: _digits,
-      );
-      addTearDown(controller.dispose);
-      expect(controller.rangeLabel, 'Sport');
+    test(
+      'the categories mode opens pre-selected on the current range',
+      () async {
+        final catalog = _FakeCatalog()
+          ..categories = const [
+            ZapCategoryRow(id: '', title: 'All channels'),
+            ZapCategoryRow(id: 'news', title: 'News'),
+            ZapCategoryRow(id: 'sport', title: 'Sport'),
+          ];
+        final controller = LiveZapController(
+          entries: zapEntriesOf(
+            [_channel('a', number: 1)],
+            config: _config('src'),
+            sourceName: 'Src',
+          ),
+          initialIndex: 0,
+          catalog: catalog,
+          rangeCategoryId: 'sport',
+          rangeLabel: 'Sport',
+          settleDelay: _settle,
+          digitCommitDelay: _digits,
+          messageDuration: _digits,
+        );
+        addTearDown(controller.dispose);
+        expect(controller.rangeLabel, 'Sport');
 
-      controller.openQuickList();
-      controller.quickListBack();
-      await Future<void>.delayed(_past);
-      expect(controller.quickList.selectedIndex, 2);
-      expect(controller.quickList.rows[2].playing, isTrue);
-    });
+        controller.openQuickList();
+        controller.quickListBack();
+        await Future<void>.delayed(_past);
+        expect(controller.quickList.selectedIndex, 2);
+        expect(controller.quickList.rows[2].playing, isTrue);
+      },
+    );
 
     test('picking a category re-ranges Up/Down too', () async {
       final config = _config('src');
@@ -762,23 +836,26 @@ void main() {
       expect(controller.current.channelId, 'b');
     });
 
-    test('a re-range that still contains the playing channel keeps it', () async {
-      final config = _config('src');
-      final catalog = _FakeCatalog();
-      catalog.channelsByCategory['news'] = zapEntriesOf(
-        [_channel('x'), _channel('a', number: 1)],
-        config: config,
-        sourceName: config.label,
-      );
-      final controller = _controller(catalog: catalog, config: config);
-      addTearDown(controller.dispose);
-      await controller.applyQuickListCategory(
-        const ZapCategoryRow(id: 'news', title: 'News'),
-      );
-      expect(controller.playing.channelId, 'a');
-      expect(controller.playingIndex, 1);
-      expect(controller.index, 1);
-    });
+    test(
+      'a re-range that still contains the playing channel keeps it',
+      () async {
+        final config = _config('src');
+        final catalog = _FakeCatalog();
+        catalog.channelsByCategory['news'] = zapEntriesOf(
+          [_channel('x'), _channel('a', number: 1)],
+          config: config,
+          sourceName: config.label,
+        );
+        final controller = _controller(catalog: catalog, config: config);
+        addTearDown(controller.dispose);
+        await controller.applyQuickListCategory(
+          const ZapCategoryRow(id: 'news', title: 'News'),
+        );
+        expect(controller.playing.channelId, 'a');
+        expect(controller.playingIndex, 1);
+        expect(controller.index, 1);
+      },
+    );
 
     test('an empty category is refused, not applied', () async {
       final controller = _controller();
@@ -888,34 +965,36 @@ void main() {
       expect(plain.quickListOpen, isFalse);
     });
 
-    test('OK on a past programme of an archive channel ends the session',
-        () async {
-      final catalog = _FakeCatalog();
-      catalog.scheduleByChannel['a'] = dayFor('a');
-      var exits = 0;
-      final controller = _controller(
-        catalog: catalog,
-        channels: [
-          Channel(id: 'a', name: 'Channel a', number: 1, archiveDays: 7),
-          _channel('b', number: 2),
-        ],
-      );
-      addTearDown(controller.dispose);
-      controller.onExitRequested = () => exits++;
-      controller.openQuickList();
-      controller.descendQuickList();
-      await Future<void>.delayed(_past);
-      controller.moveQuickList(-1); // the past row
-      expect(controller.quickList.rows[0].archive, isTrue);
-      expect(controller.quickList.rows[0].badge, 'CATCH-UP');
-      controller.activateQuickList();
+    test(
+      'OK on a past programme of an archive channel ends the session',
+      () async {
+        final catalog = _FakeCatalog();
+        catalog.scheduleByChannel['a'] = dayFor('a');
+        var exits = 0;
+        final controller = _controller(
+          catalog: catalog,
+          channels: [
+            Channel(id: 'a', name: 'Channel a', number: 1, archiveDays: 7),
+            _channel('b', number: 2),
+          ],
+        );
+        addTearDown(controller.dispose);
+        controller.onExitRequested = () => exits++;
+        controller.openQuickList();
+        controller.descendQuickList();
+        await Future<void>.delayed(_past);
+        controller.moveQuickList(-1); // the past row
+        expect(controller.quickList.rows[0].archive, isTrue);
+        expect(controller.quickList.rows[0].badge, 'CATCH-UP');
+        controller.activateQuickList();
 
-      expect(exits, 1);
-      expect(controller.quickListOpen, isFalse);
-      expect(controller.pendingCatchup, isNotNull);
-      expect(controller.pendingCatchup!.programme.title, 'Earlier');
-      expect(controller.pendingCatchup!.entry.channelId, 'a');
-    });
+        expect(exits, 1);
+        expect(controller.quickListOpen, isFalse);
+        expect(controller.pendingCatchup, isNotNull);
+        expect(controller.pendingCatchup!.programme.title, 'Earlier');
+        expect(controller.pendingCatchup!.entry.channelId, 'a');
+      },
+    );
 
     test('OK on the current programme plays the channel live', () async {
       final catalog = _FakeCatalog();
@@ -1135,11 +1214,7 @@ void main() {
     test('wraps a channel list without materialising it', () {
       final config = _config('src');
       final channels = List.generate(1000, (i) => _channel('c$i', number: i));
-      final entries = zapEntriesOf(
-        channels,
-        config: config,
-        sourceName: 'Src',
-      );
+      final entries = zapEntriesOf(channels, config: config, sourceName: 'Src');
       expect(entries.length, 1000);
       expect(entries[7].channelId, 'c7');
       expect(entries[7].sourceName, 'Src');

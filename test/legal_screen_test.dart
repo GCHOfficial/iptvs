@@ -22,7 +22,10 @@ void main() {
     ]) {
       expect(find.text(label), findsOneWidget);
       final card = tester.widget<FocusableCard>(
-        find.ancestor(of: find.text(label), matching: find.byType(FocusableCard)),
+        find.ancestor(
+          of: find.text(label),
+          matching: find.byType(FocusableCard),
+        ),
       );
       expect(card.onTap, isNotNull);
     }

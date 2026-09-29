@@ -39,7 +39,10 @@ void main() {
     test('a plain playlist never pays for a probe', () {
       // This runs on every app start, so doing nothing cheaply for an ordinary
       // playlist is a requirement, not an optimisation.
-      expect(couldBeXtreamPanel(m3u(url: 'http://host/playlist.m3u8')), isFalse);
+      expect(
+        couldBeXtreamPanel(m3u(url: 'http://host/playlist.m3u8')),
+        isFalse,
+      );
       expect(couldBeXtreamPanel(m3u(url: 'not a url at all')), isFalse);
       expect(couldBeXtreamPanel(m3u(url: '')), isFalse);
     });
@@ -91,7 +94,9 @@ void main() {
 
     test('keeps a URL-only expiry the panel might not repeat', () async {
       final upgraded = await upgradeM3uToXtream(
-        m3u(url: 'http://host:8080/get.php?username=u&password=p&exp=2026-09-01'),
+        m3u(
+          url: 'http://host:8080/get.php?username=u&password=p&exp=2026-09-01',
+        ),
         debugApi: authOk,
       );
       expect(

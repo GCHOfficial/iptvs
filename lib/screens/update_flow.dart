@@ -46,9 +46,8 @@ Future<void> runUpdateCheck(
     release = await svc.fetchLatest();
   } catch (e) {
     if (manual && context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Update check failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Update check failed: $e')));
     }
     return;
   } finally {
@@ -506,9 +505,8 @@ Future<void> _downloadAndInstall(
     if (canceled) return; // user aborted — stay silent
     closeDialog();
     if (context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Update failed: $e')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Update failed: $e')));
     }
   } finally {
     _activeInstallFlows -= 1;

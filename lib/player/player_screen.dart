@@ -696,6 +696,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     widget.onAspectChanged?.call(label);
   }
+
   // Live-edge sync for the Windows overlay: false once the user pauses live (and
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
@@ -748,6 +749,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   // VOD resume plumbing (null when untracked / live).
   Timer? _positionPersistTimer;
   Duration? _pendingEmbeddedResume;
+
   /// Index into [kAspectModes]: the user's stored choice if they have one,
   /// otherwise [defaultAspectModeIndex] — Fill on a television, Fit on a
   /// desktop, and on a handset whatever the window's shape asks for (so
@@ -770,7 +772,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     1.5,
     2.0,
   ];
-
 
   // Whether playback is *currently* on the native HWND surface. Starts from the
   // initial SDR/HDR decision (`preferWindowsEmbedded`) but flips true when an
@@ -1108,8 +1109,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Null when this route has no zap session; a closed list is pushed as
   /// `{open: false, …}` so the Lua side always has something to tear down
   /// with rather than having to treat "absent" as "close".
-  Map<String, Object?>? _quickListOverlayPayload() =>
-      _zap?.quickListPayload();
+  Map<String, Object?>? _quickListOverlayPayload() => _zap?.quickListPayload();
 
   /// The shared Flutter overlay's quick list, or null off any route that
   /// doesn't zap. The overlay draws it itself from this pure value object —
@@ -1446,9 +1446,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     // doubles up behind the embedded fallback.
     if (widget.adoptNativePreview) {
       try {
-        await const MethodChannel(
-          'iptvs/native_preview',
-        ).invokeMethod<void>('pause');
+        await const MethodChannel('iptvs/native_preview')
+            .invokeMethod<void>('pause');
       } catch (_) {}
     }
 
@@ -2467,11 +2466,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         await session.command(['set_property', 'panscan', mode.panscan]);
         // Pushed by every mode, not only Stretch: the cycle has to undo it on
         // the next press.
-        await session.command([
-          'set_property',
-          'keepaspect',
-          mode.keepaspect,
-        ]);
+        await session.command(['set_property', 'keepaspect', mode.keepaspect]);
         await session.command([
           'set_property',
           'video-aspect-override',
@@ -3942,4 +3937,3 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '${track.id}$codec$decoder$channels$rate$size';
   }
 }
-

@@ -314,52 +314,46 @@ void main() {
       expect(session.clients, isEmpty);
     });
 
-    test(
-      'preview and fullscreen claims overlap without silencing each other',
-      () async {
-        // The adopted-embedded handoff (`FullscreenHandoff.adoptEmbedded`): the
-        // preview engine keeps playing and keeps its claim while `PlayerScreen`
-        // takes its own. Distinct ids are the whole point — a shared id would let
-        // the fullscreen route's dispose deactivate the session under the preview.
-        final preview = claim(IosAudioSessionClient.livePreview);
-        final embedded = claim(IosAudioSessionClient.embeddedPlayer);
+    test('preview and fullscreen claims overlap without silencing each other', () async {
+      // The adopted-embedded handoff (`FullscreenHandoff.adoptEmbedded`): the
+      // preview engine keeps playing and keeps its claim while `PlayerScreen`
+      // takes its own. Distinct ids are the whole point — a shared id would let
+      // the fullscreen route's dispose deactivate the session under the preview.
+      final preview = claim(IosAudioSessionClient.livePreview);
+      final embedded = claim(IosAudioSessionClient.embeddedPlayer);
 
-        await preview.acquire();
-        await embedded.acquire();
-        expect(session.clients, hasLength(2));
+      await preview.acquire();
+      await embedded.acquire();
+      expect(session.clients, hasLength(2));
 
-        await embedded.release(); // fullscreen route pops
-        expect(session.active, isTrue, reason: 'the preview is still playing');
-        expect(session.deactivations, 0);
+      await embedded.release(); // fullscreen route pops
+      expect(session.active, isTrue, reason: 'the preview is still playing');
+      expect(session.deactivations, 0);
 
-        await preview.release(); // user leaves the live tab
-        expect(session.active, isFalse);
-        expect(session.activations, 1);
-        expect(session.deactivations, 1);
-      },
-    );
+      await preview.release(); // user leaves the live tab
+      expect(session.active, isFalse);
+      expect(session.activations, 1);
+      expect(session.deactivations, 1);
+    });
 
-    test(
-      'app pause releases the preview and leaves the player playing',
-      () async {
-        // The asymmetry `UIBackgroundModes = [audio]` makes load-bearing: the
-        // fullscreen player *should* keep playing behind the launcher; a muted
-        // preview must not keep decoding and holding a second provider connection
-        // on a single-connection account.
-        final preview = claim(IosAudioSessionClient.livePreview);
-        final embedded = claim(IosAudioSessionClient.embeddedPlayer);
-        await preview.acquire();
-        await embedded.acquire();
+    test('app pause releases the preview and leaves the player playing', () async {
+      // The asymmetry `UIBackgroundModes = [audio]` makes load-bearing: the
+      // fullscreen player *should* keep playing behind the launcher; a muted
+      // preview must not keep decoding and holding a second provider connection
+      // on a single-connection account.
+      final preview = claim(IosAudioSessionClient.livePreview);
+      final embedded = claim(IosAudioSessionClient.embeddedPlayer);
+      await preview.acquire();
+      await embedded.acquire();
 
-        // `channel_list_screen`'s lifecycle observer stops the preview, and the
-        // release rides that same `stop()`.
-        await preview.release();
+      // `channel_list_screen`'s lifecycle observer stops the preview, and the
+      // release rides that same `stop()`.
+      await preview.release();
 
-        expect(session.clients, {IosAudioSessionClient.embeddedPlayer});
-        expect(session.active, isTrue);
-        expect(session.deactivations, 0);
-      },
-    );
+      expect(session.clients, {IosAudioSessionClient.embeddedPlayer});
+      expect(session.active, isTrue);
+      expect(session.deactivations, 0);
+    });
 
     test('a preview alone releases the session on app pause', () async {
       final preview = claim(IosAudioSessionClient.livePreview);
@@ -398,9 +392,8 @@ void main() {
     );
 
     String swiftConstant(String name) {
-      final match = RegExp(
-        'static\\s+let\\s+$name\\s*=\\s*"([^"]*)"',
-      ).firstMatch(swift.readAsStringSync());
+      final match = RegExp('static\\s+let\\s+$name\\s*=\\s*"([^"]*)"')
+          .firstMatch(swift.readAsStringSync());
       expect(
         match,
         isNotNull,

@@ -43,9 +43,9 @@ Future<void> detectDeviceClass() async {
     // because the two run at different times for different reasons — this one
     // must settle before the first frame, that one at pairing — and the native
     // answer is a cheap, constant property.
-    final tv = await const MethodChannel(
-      'iptvs/device',
-    ).invokeMethod<bool>('isTelevision').timeout(_detectTimeout);
+    final tv = await const MethodChannel('iptvs/device')
+        .invokeMethod<bool>('isTelevision')
+        .timeout(_detectTimeout);
     _isTelevision = tv ?? false;
   } catch (error) {
     _isTelevision = false;

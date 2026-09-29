@@ -229,7 +229,10 @@ void main() {
         normalizeChannelName('WWE Raw'),
         isNot(normalizeChannelName('WWE')),
       );
-      expect(normalizeChannelName('WWE Raw HD'), normalizeChannelName('WWE Raw'));
+      expect(
+        normalizeChannelName('WWE Raw HD'),
+        normalizeChannelName('WWE Raw'),
+      );
     });
 
     test('a backup feed still folds onto its channel', () {

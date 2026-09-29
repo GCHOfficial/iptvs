@@ -136,7 +136,9 @@ IosPlaybackEngine selectIosEngine({
   // 3. Container from the last path segment. `Uri` has already removed the
   //    query and fragment, so `…/1.ts?token=x` and `…/1.ts` are identical here.
   final extension = _extensionOf(uri);
-  if (_kAvPlayerExtensions.contains(extension)) return IosPlaybackEngine.avPlayer;
+  if (_kAvPlayerExtensions.contains(extension)) {
+    return IosPlaybackEngine.avPlayer;
+  }
   if (_kMpvExtensions.contains(extension)) return IosPlaybackEngine.mpv;
 
   // 4. No extension, or one we don't recognise.

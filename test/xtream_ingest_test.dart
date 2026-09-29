@@ -60,96 +60,97 @@ void main() {
       expect(channels.map((c) => c.id), everyElement(isNotEmpty));
     });
 
-    test('a malformed JSON payload throws FormatException, same as jsonDecode',
-        () {
-      final bytes = Uint8List.fromList(utf8.encode('{not valid json'));
-      expect(() => decodeLiveChannelsBytes(bytes), throwsFormatException);
-      expect(
-        () => jsonDecode(utf8.decode(bytes)),
-        throwsFormatException,
-      );
-    });
+    test(
+      'a malformed JSON payload throws FormatException, same as jsonDecode',
+      () {
+        final bytes = Uint8List.fromList(utf8.encode('{not valid json'));
+        expect(() => decodeLiveChannelsBytes(bytes), throwsFormatException);
+        expect(() => jsonDecode(utf8.decode(bytes)), throwsFormatException);
+      },
+    );
   });
 
-  group('decodeMediaItemsBytes (one-pass get_vod_streams/get_series worker)', () {
-    test('movie payload matches the two-step decode+map pipeline', () {
-      const itemCount = 500;
-      final bytes = WorkloadFixtures.xtreamVodJson(itemCount);
-      final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
+  group(
+    'decodeMediaItemsBytes (one-pass get_vod_streams/get_series worker)',
+    () {
+      test('movie payload matches the two-step decode+map pipeline', () {
+        const itemCount = 500;
+        final bytes = WorkloadFixtures.xtreamVodJson(itemCount);
+        final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
 
-      final onePass = decodeMediaItemsBytes(args);
-      final twoStep = mapMediaItemsFromDecoded(
-        jsonDecode(utf8.decode(bytes, allowMalformed: true)),
-        ContentKind.movie,
-      );
+        final onePass = decodeMediaItemsBytes(args);
+        final twoStep = mapMediaItemsFromDecoded(
+          jsonDecode(utf8.decode(bytes, allowMalformed: true)),
+          ContentKind.movie,
+        );
 
-      expect(onePass, hasLength(itemCount));
-      expect(twoStep, hasLength(itemCount));
+        expect(onePass, hasLength(itemCount));
+        expect(twoStep, hasLength(itemCount));
 
-      for (final items in [onePass, twoStep]) {
-        final first = items[0];
-        expect(first.id, '1');
-        expect(first.title, 'Movie 0');
-        expect(first.kind, ContentKind.movie);
-        expect(first.categoryId, '0');
-        expect(first.poster, 'https://images.example.invalid/movie/0.png');
-        expect(first.rating, 5.0);
-        expect(first.extra['container_extension'], 'mkv');
-      }
-    });
+        for (final items in [onePass, twoStep]) {
+          final first = items[0];
+          expect(first.id, '1');
+          expect(first.title, 'Movie 0');
+          expect(first.kind, ContentKind.movie);
+          expect(first.categoryId, '0');
+          expect(first.poster, 'https://images.example.invalid/movie/0.png');
+          expect(first.rating, 5.0);
+          expect(first.extra['container_extension'], 'mkv');
+        }
+      });
 
-    test('series payload matches the two-step decode+map pipeline', () {
-      const itemCount = 500;
-      final bytes = WorkloadFixtures.xtreamSeriesJson(itemCount);
-      final args = XtreamMediaDecodeArgs(bytes, ContentKind.series);
+      test('series payload matches the two-step decode+map pipeline', () {
+        const itemCount = 500;
+        final bytes = WorkloadFixtures.xtreamSeriesJson(itemCount);
+        final args = XtreamMediaDecodeArgs(bytes, ContentKind.series);
 
-      final onePass = decodeMediaItemsBytes(args);
-      final twoStep = mapMediaItemsFromDecoded(
-        jsonDecode(utf8.decode(bytes, allowMalformed: true)),
-        ContentKind.series,
-      );
+        final onePass = decodeMediaItemsBytes(args);
+        final twoStep = mapMediaItemsFromDecoded(
+          jsonDecode(utf8.decode(bytes, allowMalformed: true)),
+          ContentKind.series,
+        );
 
-      expect(onePass, hasLength(itemCount));
-      expect(twoStep, hasLength(itemCount));
+        expect(onePass, hasLength(itemCount));
+        expect(twoStep, hasLength(itemCount));
 
-      for (final items in [onePass, twoStep]) {
-        final first = items[0];
-        expect(first.id, '1');
-        expect(first.title, 'Series 0');
-        expect(first.kind, ContentKind.series);
-        expect(first.categoryId, '0');
-        expect(first.poster, 'https://images.example.invalid/series/0.png');
-        expect(first.rating, 5.0);
-      }
-    });
+        for (final items in [onePass, twoStep]) {
+          final first = items[0];
+          expect(first.id, '1');
+          expect(first.title, 'Series 0');
+          expect(first.kind, ContentKind.series);
+          expect(first.categoryId, '0');
+          expect(first.poster, 'https://images.example.invalid/series/0.png');
+          expect(first.rating, 5.0);
+        }
+      });
 
-    test('drops non-map rows and rows without an id, never throws', () {
-      final rows = <Object?>[
-        for (var i = 0; i < 15; i++)
-          {'stream_id': i + 1, 'name': 'Movie $i', 'category_id': 'cat-a'},
-        // No id-shaped field at all -> filtered by the empty-id guard.
-        {'name': 'No id fields', 'category_id': 'cat-a'},
-        null,
-        'not-a-movie',
-      ];
-      final bytes = Uint8List.fromList(utf8.encode(jsonEncode(rows)));
-      final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
+      test('drops non-map rows and rows without an id, never throws', () {
+        final rows = <Object?>[
+          for (var i = 0; i < 15; i++)
+            {'stream_id': i + 1, 'name': 'Movie $i', 'category_id': 'cat-a'},
+          // No id-shaped field at all -> filtered by the empty-id guard.
+          {'name': 'No id fields', 'category_id': 'cat-a'},
+          null,
+          'not-a-movie',
+        ];
+        final bytes = Uint8List.fromList(utf8.encode(jsonEncode(rows)));
+        final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
 
-      final items = decodeMediaItemsBytes(args);
+        final items = decodeMediaItemsBytes(args);
 
-      expect(items, hasLength(15));
-      expect(items.map((i) => i.id), everyElement(isNotEmpty));
-    });
+        expect(items, hasLength(15));
+        expect(items.map((i) => i.id), everyElement(isNotEmpty));
+      });
 
-    test('a malformed JSON payload throws FormatException, same as jsonDecode',
+      test(
+        'a malformed JSON payload throws FormatException, same as jsonDecode',
         () {
-      final bytes = Uint8List.fromList(utf8.encode('[1, 2,'));
-      final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
-      expect(() => decodeMediaItemsBytes(args), throwsFormatException);
-      expect(
-        () => jsonDecode(utf8.decode(bytes)),
-        throwsFormatException,
+          final bytes = Uint8List.fromList(utf8.encode('[1, 2,'));
+          final args = XtreamMediaDecodeArgs(bytes, ContentKind.movie);
+          expect(() => decodeMediaItemsBytes(args), throwsFormatException);
+          expect(() => jsonDecode(utf8.decode(bytes)), throwsFormatException);
+        },
       );
-    });
-  });
+    },
+  );
 }

@@ -164,7 +164,8 @@ class LibraryRepository {
     // fetched rather than the one now cached. Nothing is lost by skipping:
     // `epg_synced_at` is only advanced by a refresh that actually landed, so
     // the next load still finds the guide stale and re-runs it.
-    if (!(token?.isCancelled ?? false) && await _epgNeedsRefresh(forceRefresh)) {
+    if (!(token?.isCancelled ?? false) &&
+        await _epgNeedsRefresh(forceRefresh)) {
       unawaited(
         _scheduleEpgRefresh(snapshot.channels, forceRefresh: forceRefresh),
       );
@@ -201,7 +202,8 @@ class LibraryRepository {
     // load's.
     final refresh = db.epgIngest.start(
       source.id,
-      (token) => _refreshEpg(channels, forceRefresh: forceRefresh, token: token),
+      (token) =>
+          _refreshEpg(channels, forceRefresh: forceRefresh, token: token),
     );
     _pendingEpgRefresh = refresh;
     return refresh;
@@ -1009,7 +1011,7 @@ class LibraryRepository {
         (provider) => !provider.ratingsOnly,
         orElse: () => metadataProviders.first,
       );
-      return cachedExternalMetadata(merged, provider.provider);
+      return await cachedExternalMetadata(merged, provider.provider);
     } catch (error) {
       _logMetadata('refresh error ${item.kind.name}:${item.id}: $error');
       rethrow;

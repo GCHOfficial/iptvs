@@ -88,7 +88,10 @@ void main() {
         Exception('connection failed to http://panel.invalid:8080/get.php'),
       );
 
-      expect(message, 'The source could not be loaded. Check its details and try again.');
+      expect(
+        message,
+        'The source could not be loaded. Check its details and try again.',
+      );
     });
 
     test('keeps the credential wording for a status-less auth failure', () {

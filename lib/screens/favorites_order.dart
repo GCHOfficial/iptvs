@@ -86,5 +86,6 @@ Map<String, int> catalogRanks(Iterable<String> orderedIds) {
 
 /// The rank of [id] in [ranks], or [kUnrankedCatalogPosition] when it isn't
 /// there (including for a null id — an uncategorised favorite).
-int rankOf(Map<String, int> ranks, String? id) =>
-    id == null ? kUnrankedCatalogPosition : ranks[id] ?? kUnrankedCatalogPosition;
+int rankOf(Map<String, int> ranks, String? id) => id == null
+    ? kUnrankedCatalogPosition
+    : ranks[id] ?? kUnrankedCatalogPosition;

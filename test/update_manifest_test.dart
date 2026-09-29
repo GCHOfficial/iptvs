@@ -58,8 +58,7 @@ void main() {
 
       final manifest = await verifier.verify(
         manifestBytes: bytes,
-        signatureBase64:
-            '62k6SPfz0orSnznIRn5LDfoRL4+zpFFlg15YPSNW1TGvXBXUOVqsU6ybbBz6VUh9brofaE7r/8COKZoTBgX0Bg==',
+        signatureBase64: '62k6SPfz0orSnznIRn5LDfoRL4+zpFFlg15YPSNW1TGvXBXUOVqsU6ybbBz6VUh9brofaE7r/8COKZoTBgX0Bg==',
         publicKeyBase64: 'i6CuVlUd5rYtdQOIHmznHE70sizci80VJ/IvEZCnyAw=',
       );
 
@@ -199,7 +198,10 @@ void main() {
       );
 
       expect(manifest.artifacts.keys, ['android']);
-      expect(manifest.artifacts['android']?.filename, 'iptvs-1.4.2-android.apk');
+      expect(
+        manifest.artifacts['android']?.filename,
+        'iptvs-1.4.2-android.apk',
+      );
     },
   );
 

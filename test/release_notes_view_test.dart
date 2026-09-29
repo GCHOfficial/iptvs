@@ -26,8 +26,9 @@ void main() {
     MaterialApp(home: Scaffold(body: ReleaseNotesView(notes))),
   );
 
-  testWidgets('renders headings, bold and bullets without literal markers',
-      (tester) async {
+  testWidgets('renders headings, bold and bullets without literal markers', (
+    tester,
+  ) async {
     await pump(tester, '''
 ## What's Changed
 * **TV UX**: stronger EPG cursor by @GCHOfficial in https://github.com/GCHOfficial/iptvs/pull/91
@@ -59,7 +60,10 @@ void main() {
   });
 
   testWidgets('markdown links show their text, not the URL', (tester) async {
-    await pump(tester, 'See the [release page](https://example.com/x) for more.');
+    await pump(
+      tester,
+      'See the [release page](https://example.com/x) for more.',
+    );
     final text = renderedText(tester);
     expect(text, contains('release page'));
     expect(text.contains('https://'), isFalse);
@@ -71,8 +75,9 @@ void main() {
     expect(find.byType(ReleaseNotesView), findsOneWidget);
   });
 
-  testWidgets('renders inline code and italics without literal markers',
-      (tester) async {
+  testWidgets('renders inline code and italics without literal markers', (
+    tester,
+  ) async {
     await pump(
       tester,
       'Set `SUPABASE_URL` to enable sync — *optional*, and **safe** to skip.',
@@ -100,8 +105,7 @@ void main() {
           if (span.text == 'SUPABASE_URL' && style.fontFamily == 'monospace') {
             sawCode = true;
           }
-          if (span.text == 'optional' &&
-              style.fontStyle == FontStyle.italic) {
+          if (span.text == 'optional' && style.fontStyle == FontStyle.italic) {
             sawItalic = true;
           }
         }

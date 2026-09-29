@@ -37,11 +37,7 @@ void main() {
     // — its test asserts the same two triples.
     test('matches an independent implementation', () {
       String hex(String pin, List<int> salt, int iterations) {
-        final encoded = hashProfilePin(
-          pin,
-          salt: salt,
-          iterations: iterations,
-        );
+        final encoded = hashProfilePin(pin, salt: salt, iterations: iterations);
         final dk = base64.decode(encoded.split(r'$')[3]);
         return dk.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
       }

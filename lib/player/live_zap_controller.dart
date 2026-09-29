@@ -148,6 +148,9 @@ class ZapCategoryRow {
   int get hashCode => Object.hash(id, title);
 }
 
+/// A zap range as it stood when a channel was played from it.
+typedef _ZapRange = ({List<ZapEntry> entries, String categoryId, String label});
+
 /// The live zap state machine for one fullscreen session.
 ///
 /// Created by `channel_list_screen` when it opens the player, handed to
@@ -177,7 +180,13 @@ class LiveZapController extends ChangeNotifier {
        _playingEntry = entries[initialIndex],
        _launchEntry = entries[initialIndex],
        _rangeCatId = rangeCategoryId,
-       _rangeCatLabel = rangeLabel;
+       _rangeCatLabel = rangeLabel,
+       _launchRangeCatId = rangeCategoryId,
+       _playingRange = (
+         entries: entries,
+         categoryId: rangeCategoryId,
+         label: rangeLabel,
+       );
 
   final ZapCatalog catalog;
   final Duration settleDelay;
@@ -207,7 +216,16 @@ class LiveZapController extends ChangeNotifier {
   /// everything, and recalling row 7 of a list the user has since replaced
   /// would zap somewhere arbitrary.
   ZapEntry? _previousEntry;
+
+  /// The range each of those two channels was *played from*. A channel picked
+  /// through the quick list after a re-range belongs to the new range, while
+  /// the channel it replaced belongs to the old one — so "last channel" has to
+  /// be able to bring the old range back with it, or it is a dead key after
+  /// any cross-category (or cross-source) pick.
+  _ZapRange _playingRange;
+  _ZapRange? _previousRange;
   final ZapEntry _launchEntry;
+  final String _launchRangeCatId;
   String _rangeCatId;
   String _rangeCatLabel;
   int _zapCount = 0;
@@ -262,6 +280,11 @@ class LiveZapController extends ChangeNotifier {
   /// "everything" row), and its display title.
   String get rangeCategoryId => _rangeCatId;
   String get rangeLabel => _rangeCatLabel;
+
+  /// Whether the session ended in a different range than it launched in — the
+  /// channel list follows it there on return, so the row the session ended on
+  /// is actually in the list it restores selection into.
+  bool get reRanged => _rangeCatId != _launchRangeCatId;
 
   /// How many channel changes this session has actually played. Non-zero means
   /// the caller must not resume a preview onto the launch channel on return.
@@ -458,17 +481,37 @@ class LiveZapController extends ChangeNotifier {
   void channelDown() =>
       _moveTo((_index - 1 + _entries.length) % _entries.length);
 
-  /// Classic "last channel" recall. No-op until two channels have played —
-  /// and also a no-op when the previous channel isn't in the current range
-  /// any more (the quick list re-ranged away from it), because there is no
-  /// cursor position to move to and silently widening the range behind the
-  /// user's back would be worse than doing nothing.
+  /// Classic "last channel" recall. No-op until two channels have played.
+  ///
+  /// When the quick list has since re-ranged away from the previous channel,
+  /// the recall **brings its range back with it** — the range that channel was
+  /// played from, not a widened one — so Up/Down afterwards walk the list the
+  /// user was in when they last watched it. That is the only way a pick from
+  /// another category (or, on the cross-source Favorites range, another
+  /// source) can be undone with the key built for undoing it.
   void previousChannel() {
     final target = _previousEntry;
     if (target == null) return;
     final index = _indexOfEntry(target);
-    if (index < 0 || index == _index) return;
-    _moveTo(index);
+    if (index >= 0) {
+      if (index != _index) _moveTo(index);
+      return;
+    }
+    final range = _previousRange;
+    if (range == null || identical(range.entries, _entries)) return;
+    final restored = _indexIn(range.entries, target);
+    if (restored < 0) return;
+    _entries = range.entries;
+    _rangeCatId = range.categoryId;
+    _rangeCatLabel = range.label;
+    _playingIndex = _indexOfEntry(_playingEntry);
+    _channelCursor = restored;
+    catalog.log(
+      'zap previous re-range category=${range.label} rows=${range.entries.length}',
+    );
+    // The cursor index belonged to the range just replaced, so it is
+    // compared against nothing: always move.
+    _moveTo(restored);
   }
 
   void appendDigit(int digit) {
@@ -863,7 +906,8 @@ class LiveZapController extends ChangeNotifier {
         ZapQuickListMode.schedule => _scheduleEntry?.name ?? '',
       },
       rows: [
-        for (var i = start; i < end; i++) _quickListRow(i, selected: i == cursor),
+        for (var i = start; i < end; i++)
+          _quickListRow(i, selected: i == cursor),
       ],
       selectedIndex: cursor,
       windowStart: start,
@@ -911,8 +955,7 @@ class LiveZapController extends ChangeNotifier {
         final now = DateTime.now();
         final past = !programme.stop.isAfter(now);
         final live = !programme.start.isAfter(now) && !past;
-        final archive =
-            past && (_scheduleEntry?.channel.hasArchive ?? false);
+        final archive = past && (_scheduleEntry?.channel.hasArchive ?? false);
         return ZapQuickListRow(
           index: index,
           id: '${programme.start.millisecondsSinceEpoch}',
@@ -935,9 +978,11 @@ class LiveZapController extends ChangeNotifier {
   /// Index of [entry] in the current range, or -1. O(n) and deliberately only
   /// called on a re-range or a recall — the lazy range materialises a
   /// `ZapEntry` per probe, so this must never reach a per-keypress path.
-  int _indexOfEntry(ZapEntry entry) {
-    for (var i = 0; i < _entries.length; i++) {
-      if (_entries[i] == entry) return i;
+  int _indexOfEntry(ZapEntry entry) => _indexIn(_entries, entry);
+
+  static int _indexIn(List<ZapEntry> entries, ZapEntry entry) {
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] == entry) return i;
     }
     return -1;
   }
@@ -1000,6 +1045,11 @@ class LiveZapController extends ChangeNotifier {
         // can re-range the session while a settle is in flight, and `target`
         // then means a different row (or none) in the new range.
         final list = _entries;
+        final range = (
+          entries: list,
+          categoryId: _rangeCatId,
+          label: _rangeCatLabel,
+        );
         final entry = list[target];
         // A reconnect re-resolve in flight describes the channel we are
         // leaving; discard its outcome rather than let it reload behind us.
@@ -1033,6 +1083,8 @@ class LiveZapController extends ChangeNotifier {
           continue;
         }
         _previousEntry = _playingEntry;
+        _previousRange = _playingRange;
+        _playingRange = range;
         // `_playingEntry` is the authority; the index is only re-derived —
         // at O(n), and only on the rare re-range-during-settle race — when
         // the range moved under us. Getting it wrong would draw the
@@ -1112,7 +1164,6 @@ class LiveZapController extends ChangeNotifier {
     super.dispose();
   }
 }
-
 
 /// A read-only, **lazily materialised** [ZapEntry] view over a channel list
 /// that all belongs to one source — which is every launch range except the

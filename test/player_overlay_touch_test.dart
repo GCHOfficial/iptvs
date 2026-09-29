@@ -394,43 +394,39 @@ void main() {
   /// metrics) fix both independently of [kCompactControlsWidth], which keeps
   /// its old job unchanged.
   group('short landscape (the reported bug)', () {
-    testWidgets(
-      '667x375 puts the transport and the cluster back on one row',
-      (tester) async {
-        await pumpOverlay(
-          tester,
-          isLive: true,
-          liveSynced: false,
-          canFavorite: true,
-          width: 667,
-          height: 375,
-          sourceName: 'Provider Network HD',
-          epgNow: _programme('News'),
-          epgNext: _programme('Next Up'),
-          dynamicRangeLabel: (_) => 'HDR10 · PQ',
-          state: const PlayerState(
-            tracks: Tracks(
-              audio: [
-                AudioTrack('1', null, 'eng'),
-                AudioTrack('2', null, 'fra'),
-              ],
-            ),
+    testWidgets('667x375 puts the transport and the cluster back on one row', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        canFavorite: true,
+        width: 667,
+        height: 375,
+        sourceName: 'Provider Network HD',
+        epgNow: _programme('News'),
+        epgNext: _programme('Next Up'),
+        dynamicRangeLabel: (_) => 'HDR10 · PQ',
+        state: const PlayerState(
+          tracks: Tracks(
+            audio: [AudioTrack('1', null, 'eng'), AudioTrack('2', null, 'fra')],
           ),
-        );
+        ),
+      );
 
-        // 667 is above kTouchReflowWidth (560), so the transport (play_arrow)
-        // and the cluster (info_outline) share the bottom bar's single row —
-        // not stacked as they are in portrait (see the sibling test below).
-        expect(
-          tester.getCenter(find.byIcon(Icons.play_arrow)).dy,
-          tester.getCenter(find.byIcon(Icons.info_outline)).dy,
-          reason:
-              '667pt is wider than kTouchReflowWidth (560); the transport '
-              'and cluster must stay on one row',
-        );
-        expect(tester.takeException(), isNull);
-      },
-    );
+      // 667 is above kTouchReflowWidth (560), so the transport (play_arrow)
+      // and the cluster (info_outline) share the bottom bar's single row —
+      // not stacked as they are in portrait (see the sibling test below).
+      expect(
+        tester.getCenter(find.byIcon(Icons.play_arrow)).dy,
+        tester.getCenter(find.byIcon(Icons.info_outline)).dy,
+        reason:
+            '667pt is wider than kTouchReflowWidth (560); the transport '
+            'and cluster must stay on one row',
+      );
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('...and the badges rejoin the title row', (tester) async {
       await pumpOverlay(
@@ -469,72 +465,71 @@ void main() {
       );
     });
 
-    testWidgets(
-      'the chrome leaves a real video band on a 375pt-tall surface',
-      (tester) async {
-        Future<double> measureBand({required bool live}) async {
-          await pumpOverlay(
-            tester,
-            isLive: live,
-            liveSynced: false,
-            canFavorite: true,
-            width: 667,
-            height: 375,
-            sourceName: 'Provider Network HD',
-            epgNow: live ? _programme('News') : null,
-            epgNext: live ? _programme('Next Up') : null,
-            dynamicRangeLabel: (_) => 'HDR10 · PQ',
-            state: live
-                ? const PlayerState(
-                    playing: true,
-                    tracks: Tracks(
-                      audio: [
-                        AudioTrack('1', null, 'eng'),
-                        AudioTrack('2', null, 'fra'),
-                      ],
-                    ),
-                  )
-                : const PlayerState(
-                    duration: Duration(hours: 1, minutes: 30),
-                    tracks: Tracks(
-                      audio: [
-                        AudioTrack('1', null, 'eng'),
-                        AudioTrack('2', null, 'fra'),
-                      ],
-                    ),
+    testWidgets('the chrome leaves a real video band on a 375pt-tall surface', (
+      tester,
+    ) async {
+      Future<double> measureBand({required bool live}) async {
+        await pumpOverlay(
+          tester,
+          isLive: live,
+          liveSynced: false,
+          canFavorite: true,
+          width: 667,
+          height: 375,
+          sourceName: 'Provider Network HD',
+          epgNow: live ? _programme('News') : null,
+          epgNext: live ? _programme('Next Up') : null,
+          dynamicRangeLabel: (_) => 'HDR10 · PQ',
+          state: live
+              ? const PlayerState(
+                  playing: true,
+                  tracks: Tracks(
+                    audio: [
+                      AudioTrack('1', null, 'eng'),
+                      AudioTrack('2', null, 'fra'),
+                    ],
                   ),
-          );
-          final bars = chromeBands();
-          expect(bars, findsNWidgets(2));
-          final rects = [tester.getRect(bars.at(0)), tester.getRect(bars.at(1))]
-            ..sort((a, b) => a.top.compareTo(b.top));
-          return rects[1].top - rects[0].bottom;
-        }
-
-        final liveBand = await measureBand(live: true);
-        final vodBand = await measureBand(live: false);
-
-        // Measured on this build at 667x375 (dense metrics): live 209pt, VOD
-        // 183pt. Pre-fix values were 49pt (live) / 23pt (VOD) — both several
-        // times larger, confirming the fix is doing its job. The thresholds
-        // below sit ~25% under each measured value, leaving headroom for
-        // incidental layout drift without masking a real regression.
-        expect(
-          liveBand,
-          greaterThan(155.0),
-          reason:
-              'measured 209pt on this build; pre-fix this surface left only '
-              '49pt of visible video',
+                )
+              : const PlayerState(
+                  duration: Duration(hours: 1, minutes: 30),
+                  tracks: Tracks(
+                    audio: [
+                      AudioTrack('1', null, 'eng'),
+                      AudioTrack('2', null, 'fra'),
+                    ],
+                  ),
+                ),
         );
-        expect(
-          vodBand,
-          greaterThan(135.0),
-          reason:
-              'measured 183pt on this build; pre-fix this surface left only '
-              '23pt of visible video',
-        );
-      },
-    );
+        final bars = chromeBands();
+        expect(bars, findsNWidgets(2));
+        final rects = [tester.getRect(bars.at(0)), tester.getRect(bars.at(1))]
+          ..sort((a, b) => a.top.compareTo(b.top));
+        return rects[1].top - rects[0].bottom;
+      }
+
+      final liveBand = await measureBand(live: true);
+      final vodBand = await measureBand(live: false);
+
+      // Measured on this build at 667x375 (dense metrics): live 209pt, VOD
+      // 183pt. Pre-fix values were 49pt (live) / 23pt (VOD) — both several
+      // times larger, confirming the fix is doing its job. The thresholds
+      // below sit ~25% under each measured value, leaving headroom for
+      // incidental layout drift without masking a real regression.
+      expect(
+        liveBand,
+        greaterThan(155.0),
+        reason:
+            'measured 209pt on this build; pre-fix this surface left only '
+            '49pt of visible video',
+      );
+      expect(
+        vodBand,
+        greaterThan(135.0),
+        reason:
+            'measured 183pt on this build; pre-fix this surface left only '
+            '23pt of visible video',
+      );
+    });
 
     testWidgets(
       'the info panel is banded between the bars and scrolls instead of '
@@ -636,46 +631,41 @@ void main() {
       }
     });
 
-    testWidgets(
-      'portrait keeps the two-row layout and the stacked badge row',
-      (tester) async {
-        await pumpOverlay(
-          tester,
-          isLive: true,
-          liveSynced: false,
-          canFavorite: true,
-          sourceName: 'Provider Network HD',
-          epgNow: _programme('News'),
-          state: const PlayerState(
-            tracks: Tracks(
-              audio: [
-                AudioTrack('1', null, 'eng'),
-                AudioTrack('2', null, 'fra'),
-              ],
-            ),
+    testWidgets('portrait keeps the two-row layout and the stacked badge row', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        canFavorite: true,
+        sourceName: 'Provider Network HD',
+        epgNow: _programme('News'),
+        state: const PlayerState(
+          tracks: Tracks(
+            audio: [AudioTrack('1', null, 'eng'), AudioTrack('2', null, 'fra')],
           ),
-        );
+        ),
+      );
 
-        // 390 is below kTouchReflowWidth (560), so this is the non-regression
-        // twin of the two tests above: portrait must keep reflowing.
-        expect(
-          tester.getCenter(find.byIcon(Icons.play_arrow)).dy,
-          isNot(tester.getCenter(find.byIcon(Icons.info_outline)).dy),
-          reason:
-              'portrait must keep the transport and cluster on separate rows',
-        );
+      // 390 is below kTouchReflowWidth (560), so this is the non-regression
+      // twin of the two tests above: portrait must keep reflowing.
+      expect(
+        tester.getCenter(find.byIcon(Icons.play_arrow)).dy,
+        isNot(tester.getCenter(find.byIcon(Icons.info_outline)).dy),
+        reason: 'portrait must keep the transport and cluster on separate rows',
+      );
 
-        final badgeDy = tester.getCenter(find.text('Provider Network HD')).dy;
-        final closeDy = tester.getCenter(find.byIcon(Icons.close)).dy;
-        expect(
-          badgeDy,
-          greaterThan(closeDy),
-          reason:
-              'badges must stay stacked under the title row at portrait '
-              'width, not rejoin it the way they do at 667x375',
-        );
-      },
-    );
+      final badgeDy = tester.getCenter(find.text('Provider Network HD')).dy;
+      final closeDy = tester.getCenter(find.byIcon(Icons.close)).dy;
+      expect(
+        badgeDy,
+        greaterThan(closeDy),
+        reason:
+            'badges must stay stacked under the title row at portrait '
+            'width, not rejoin it the way they do at 667x375',
+      );
+    });
 
     testWidgets('accessibility text scaling is clamped, so the chrome cannot '
         'outgrow a short surface', (tester) async {
@@ -747,10 +737,7 @@ void main() {
       const portrait = Size(390, 844);
 
       final metrics = EmbeddedOverlayMetrics.of(wide, touch: false);
-      expect(
-        EmbeddedOverlayMetrics.of(shortLandscape, touch: false),
-        metrics,
-      );
+      expect(EmbeddedOverlayMetrics.of(shortLandscape, touch: false), metrics);
       expect(EmbeddedOverlayMetrics.of(portrait, touch: false), metrics);
 
       expect(metrics.buttonWidth, 44);

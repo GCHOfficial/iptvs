@@ -116,7 +116,8 @@ void main() {
         expect(
           plate.width,
           closeTo(plate.height, 0.5),
-          reason: 'a non-square symbol is one no scanner will read — which is '
+          reason:
+              'a non-square symbol is one no scanner will read — which is '
               'exactly what a fixed size clamped on width alone produces',
         );
         expect(plate.width, lessThanOrEqualTo(PairingQrView.maxSide));
@@ -158,7 +159,9 @@ void main() {
   ) async {
     Future<void> pumpLink(String value) async {
       await tester.pumpWidget(
-        MaterialApp(home: Scaffold(body: PairingQrView(link: value))),
+        MaterialApp(
+          home: Scaffold(body: PairingQrView(link: value)),
+        ),
       );
       await tester.pumpAndSettle();
     }
@@ -174,7 +177,8 @@ void main() {
     expect(
       tester.takeException(),
       isNull,
-      reason: 'the cap must sit below the encoder ceiling, not on it — a link '
+      reason:
+          'the cap must sit below the encoder ceiling, not on it — a link '
           'at the limit still has to encode',
     );
     expect(find.byType(QrImageView), findsOneWidget);
@@ -184,7 +188,9 @@ void main() {
     // A hard newline reads correctly at exactly one width, and this widget is
     // shown from a 360 px phone at text scale 2.0 to a 1080p television.
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: PairingQrView(link: link))),
+      MaterialApp(
+        home: Scaffold(body: PairingQrView(link: link)),
+      ),
     );
     await tester.pumpAndSettle();
 

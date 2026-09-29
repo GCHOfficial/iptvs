@@ -2109,15 +2109,25 @@ makes "which channel did this session end on" answerable after the fact —
 `zap.zapped`/`zap.playing` — which the return leg needs for two things:
 
 - **Selection restore.** The channel list re-selects the channel the session actually **ended** on,
-  not the one it launched with, with the visible filters untouched.
-- **The preview must never resume onto the launch channel.** `decidePreviewReturn`
-  (`lib/screens/channel_list_screen.dart`, pure — pinned by `test/fullscreen_handoff_test.dart` with
-  no libmpv engine required) checks `zapped` **after only** the two cases that mean the preview
-  player can no longer be used at all (a Windows hot-swap onto native; a phone-sheet handoff with no
-  preview shown at all), and **before** every resume branch, including the cross-engine
-  stop-and-resolve-fresh case. Resuming the preview after a zap would put the channel the user
-  explicitly navigated away from back on screen, captioned as though it were current — and on an
-  *adopted* engine it would also be the thing still holding a single-connection account's only slot.
+  not the one it launched with. The visible filters are untouched **unless the quick list
+  re-ranged the session** (`LiveZapController.reRanged`): then `_followZapRange` switches the list to
+  the session's final category first, because the ended channel is otherwise not a row of the list
+  being restored into and selection silently fell to row 0. Active-source categories only — the
+  cross-source Favorites range re-ranges by owning *source*, which is not a category this list has,
+  and every row of those sub-ranges is already in the view it launched from.
+- **The preview must never resume onto the launch channel — it restarts on the ended one.**
+  `decidePreviewReturn` (`lib/screens/channel_list_screen.dart`, pure — pinned by
+  `test/fullscreen_handoff_test.dart` with no libmpv engine required) checks `zapped` **after only**
+  the two cases that mean the preview player can no longer be used at all (a Windows hot-swap onto
+  native; a phone-sheet handoff with no preview shown at all). Wherever the un-zapped return would
+  have brought a preview back (any resume branch, including the cross-engine stop-and-resolve-fresh
+  case) a zapped one answers `restartOnEndedChannel`: **stop, then `start` on `zap.playing`**
+  through its owning source's repository — stop first, because whatever the preview holds owns a
+  single-connection account's only slot. Where no preview would have come back, none does
+  (`stop`). Resuming instead would put the channel the user explicitly navigated away from back on
+  screen, captioned as though it were current; and resuming an adopted engine the zap drove isn't
+  safe either, since Android may have rebuilt (un-adopted) it mid-session — hence a fresh start
+  rather than a resume, at the cost of one visible reload.
   On a **seamless adopted** handoff that did zap, the preview is instead re-pointed at the channel
   the session actually ended on via `LivePreviewController.adoptFullscreenChannel` — called *before*
   `adoptedByFullscreen` is cleared, so a clean EOF landing in that window restarts the right channel
@@ -2293,11 +2303,14 @@ deliberate:
 - The playing channel is tracked as a **value** (`_playingEntry`), not an index, because a re-range
   renumbers everything. `playingIndex` becomes `-1` when the new range doesn't contain it; playback
   is untouched either way.
-- "Last channel" is likewise a channel. Recall is a **no-op** when the previous channel has fallen
-  outside the range — silently widening the range behind the user would be worse than doing
-  nothing.
-- The **channel list's own filter is never touched.** The player does not reach back into the
-  screen it was launched from; the range lives entirely in the session.
+- "Last channel" is likewise a channel — **plus the range it was played from**
+  (`_previousRange`, rotated with `_playingRange` on every settle). Recalling a previous channel
+  that has fallen outside the current range **restores that range with it** (never a widened one),
+  so Up/Down afterwards walk the list the user was in when they last watched it. It used to be a
+  no-op there, which made the key dead after any cross-category or cross-source pick — exactly
+  the pick it exists to undo.
+- **The player never reaches back into the channel list mid-session**; the range lives entirely in
+  the session. Only on return does the list follow a re-range (see "Selection restore" above).
 
 **The cross-source Favorites range has no provider categories**, so its top mode lists the
 **owning sources** instead (`Favorites · All sources`, then one row per contributing source). That

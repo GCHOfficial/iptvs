@@ -39,10 +39,7 @@ void main() {
       // The reported bug, in miniature: favouriting Pro before TVR1 must not
       // move Pro above TVR1 when the catalog lists TVR1 first.
       expect(
-        order([
-          row('pro', category: 'sport'),
-          row('tvr1', category: 'news'),
-        ]),
+        order([row('pro', category: 'sport'), row('tvr1', category: 'news')]),
         ['tvr1', 'pro'],
       );
     });
@@ -98,14 +95,11 @@ void main() {
     });
 
     test('a null category sorts last and keeps its relative order', () {
-      expect(
-        order([
-          row('u1'),
-          row('tvr1', category: 'news'),
-          row('u2'),
-        ]),
-        ['tvr1', 'u1', 'u2'],
-      );
+      expect(order([row('u1'), row('tvr1', category: 'news'), row('u2')]), [
+        'tvr1',
+        'u1',
+        'u2',
+      ]);
     });
   });
 
@@ -127,15 +121,9 @@ void main() {
         row('from-s1', source: 's1', category: 'news'),
         row('from-s2', source: 's2', category: 'news'),
       ];
-      expect(order(rows, sources: const ['s1', 's2']), [
-        'from-s1',
-        'from-s2',
-      ]);
+      expect(order(rows, sources: const ['s1', 's2']), ['from-s1', 'from-s2']);
       // Reordering the sources screen reorders the favorites with it.
-      expect(order(rows, sources: const ['s2', 's1']), [
-        'from-s2',
-        'from-s1',
-      ]);
+      expect(order(rows, sources: const ['s2', 's1']), ['from-s2', 'from-s1']);
     });
 
     test('a deleted source sorts last rather than jumping to the top', () {
@@ -153,13 +141,10 @@ void main() {
 
     test('a single-source view ignores the source rank entirely', () {
       expect(
-        order(
-          [
-            row('pro', source: 'whatever', category: 'sport'),
-            row('tvr1', source: 'other', category: 'news'),
-          ],
-          withSourceRank: false,
-        ),
+        order([
+          row('pro', source: 'whatever', category: 'sport'),
+          row('tvr1', source: 'other', category: 'news'),
+        ], withSourceRank: false),
         ['tvr1', 'pro'],
       );
     });

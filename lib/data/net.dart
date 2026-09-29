@@ -598,8 +598,7 @@ String _redactUrlPath(String value) {
 /// change the password, press Save, and the Host field they never touched
 /// errors out while the source itself still plays fine.
 bool looksLikeValidUrl(String value, {bool requireScheme = false}) {
-  final hasScheme =
-      value.startsWith('http://') || value.startsWith('https://');
+  final hasScheme = value.startsWith('http://') || value.startsWith('https://');
   if (requireScheme && !hasScheme) return false;
   final normalised = hasScheme ? value : 'http://$value';
   final uri = Uri.tryParse(normalised);

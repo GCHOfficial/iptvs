@@ -33,11 +33,12 @@ enum BufferPreset {
 /// Parses a stored or transported preset name; anything unrecognised — including
 /// a value written by a newer build — is [BufferPreset.normal], matching the
 /// Kotlin `BufferPreset.fromName` fallback.
-BufferPreset bufferPresetFromName(String? name) => switch (name?.toLowerCase()) {
-  'low' => BufferPreset.low,
-  'high' => BufferPreset.high,
-  _ => BufferPreset.normal,
-};
+BufferPreset bufferPresetFromName(String? name) =>
+    switch (name?.toLowerCase()) {
+      'low' => BufferPreset.low,
+      'high' => BufferPreset.high,
+      _ => BufferPreset.normal,
+    };
 
 /// The next preset in the settings tile's cycle (low → normal → high → low).
 BufferPreset nextBufferPreset(BufferPreset current) =>

@@ -149,7 +149,9 @@ Future<Uint8List> aesGcmEncrypt(
   List<int> plaintext,
   List<int> aad,
 ) async {
-  if (key.length != 32) throw const CloudCryptoException('key must be 32 bytes');
+  if (key.length != 32) {
+    throw const CloudCryptoException('key must be 32 bytes');
+  }
   if (iv.length != 12) throw const CloudCryptoException('iv must be 12 bytes');
   final algo = AesGcm.with256bits();
   final box = await algo.encrypt(
@@ -173,7 +175,9 @@ Future<Uint8List> aesGcmDecrypt(
   List<int> ctAndTag,
   List<int> aad,
 ) async {
-  if (key.length != 32) throw const CloudCryptoException('key must be 32 bytes');
+  if (key.length != 32) {
+    throw const CloudCryptoException('key must be 32 bytes');
+  }
   if (iv.length != 12) throw const CloudCryptoException('iv must be 12 bytes');
   if (ctAndTag.length < 16) {
     throw const CloudCryptoException('ciphertext too short');
@@ -234,7 +238,9 @@ _EcPoint _double(_EcPoint p) {
   final x1 = p.x!, y1 = p.y!;
   if (y1 == BigInt.zero) return _EcPoint.infinity;
   final s =
-      ((_three * x1 * x1 + _aP) % _pP) * (BigInt.two * y1).modInverse(_pP) % _pP;
+      ((_three * x1 * x1 + _aP) % _pP) *
+      (BigInt.two * y1).modInverse(_pP) %
+      _pP;
   final x3 = (s * s - BigInt.two * x1) % _pP;
   final y3 = (s * (x1 - x3) - y1) % _pP;
   return _EcPoint(x3, y3);
@@ -385,7 +391,11 @@ String _requireString(Map<String, dynamic> m, String key) {
   throw CloudCryptoException('envelope missing string "$key"');
 }
 
-void _checkHeader(Map<String, dynamic> env, int expectedCkVersion, String? kdf) {
+void _checkHeader(
+  Map<String, dynamic> env,
+  int expectedCkVersion,
+  String? kdf,
+) {
   if (_requireInt(env, 'v') != kEnvelopeVersion) {
     throw const CloudCryptoException('unsupported envelope version');
   }
@@ -447,7 +457,8 @@ Future<Map<String, String>> decryptSecretEnvelope({
     throw const CloudCryptoException('secret plaintext is not a JSON object');
   }
   return {
-    for (final e in decoded.entries) e.key.toString(): e.value?.toString() ?? '',
+    for (final e in decoded.entries)
+      e.key.toString(): e.value?.toString() ?? '',
   };
 }
 

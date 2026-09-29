@@ -160,9 +160,8 @@ void main() {
     });
 
     test('builds strict get_profile params', () {
-      final params = MagIdentity.fromMac(
-        '00:1A:79:12:34:56',
-      ).profileParams(profile: MagProfile.mag250, timestamp: 123456);
+      final params = MagIdentity.fromMac('00:1A:79:12:34:56')
+          .profileParams(profile: MagProfile.mag250, timestamp: 123456);
 
       expect(params['stb_type'], 'MAG250');
       expect(params['sn'], '2213785DC6113');

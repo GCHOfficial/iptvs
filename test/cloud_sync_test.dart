@@ -72,17 +72,20 @@ void main() {
       expect(config.hiddenCategoryIds(ContentKind.movie), isEmpty);
     });
 
-    test('defaults settings to empty when the column is absent (legacy row)', () {
-      final config = cloudRowToConfig({
-        'id': 'id4',
-        'kind': 'm3u',
-        'label': '',
-        'fields': {'playlistUrl': 'http://x/list.m3u'},
-      });
+    test(
+      'defaults settings to empty when the column is absent (legacy row)',
+      () {
+        final config = cloudRowToConfig({
+          'id': 'id4',
+          'kind': 'm3u',
+          'label': '',
+          'fields': {'playlistUrl': 'http://x/list.m3u'},
+        });
 
-      expect(config.settings, isEmpty);
-      expect(config.hiddenCategoryIds(ContentKind.live), isEmpty);
-    });
+        expect(config.settings, isEmpty);
+        expect(config.hiddenCategoryIds(ContentKind.live), isEmpty);
+      },
+    );
 
     test('throws on an unknown kind (defends against bad cloud data)', () {
       expect(
@@ -102,7 +105,10 @@ void main() {
         'id': '123e4567-e89b-42d3-a456-426614174000',
         'kind': 'stalker',
         'label': 'Portal',
-        'fields': {'portal': 'http://portal.example', 'mac': '00:1A:79:AB:CD:EF'},
+        'fields': {
+          'portal': 'http://portal.example',
+          'mac': '00:1A:79:AB:CD:EF',
+        },
       });
       expect(config.fields['portal'], 'http://portal.example');
       expect(config.fields['mac'], '00:1A:79:AB:CD:EF');
@@ -128,14 +134,9 @@ void main() {
         'id': '123e4567-e89b-42d3-a456-426614174002',
         'kind': 'm3u',
         'label': 'List',
-        'fields': {
-          'playlistUrl': 'https://example.invalid/get.php',
-        },
+        'fields': {'playlistUrl': 'https://example.invalid/get.php'},
       });
-      expect(
-        config.fields['playlistUrl'],
-        'https://example.invalid/get.php',
-      );
+      expect(config.fields['playlistUrl'], 'https://example.invalid/get.php');
     });
 
     test('push payload sends the full fields (config.fields verbatim)', () {
@@ -145,11 +146,7 @@ void main() {
         id: '123e4567-e89b-42d3-a456-426614174003',
         kind: SourceKind.xtream,
         label: 'X',
-        fields: {
-          'host': 'http://host:8080',
-          'username': 'u',
-          'password': 'p',
-        },
+        fields: {'host': 'http://host:8080', 'username': 'u', 'password': 'p'},
       );
       final payloadFields = config.fields;
       expect(payloadFields, containsPair('username', 'u'));
@@ -218,22 +215,19 @@ void main() {
   });
 
   group('friendlyCloudError', () {
-    test(
-      'strips the server prefix from a PostgrestException and never leaks '
-      'details',
-      () {
-        final e = PostgrestException(
-          message: 'iptvs: too many favorites (max 200000)',
-          code: '23514',
-          details:
-              'Failing row contains (http://user:pass@host/live/user/pass/1.ts).',
-        );
-        final message = friendlyCloudError(e);
-        expect(message, 'too many favorites (max 200000)');
-        expect(message.contains('Failing row'), isFalse);
-        expect(message.contains('pass'), isFalse);
-      },
-    );
+    test('strips the server prefix from a PostgrestException and never leaks '
+        'details', () {
+      final e = PostgrestException(
+        message: 'iptvs: too many favorites (max 200000)',
+        code: '23514',
+        details:
+            'Failing row contains (http://user:pass@host/live/user/pass/1.ts).',
+      );
+      final message = friendlyCloudError(e);
+      expect(message, 'too many favorites (max 200000)');
+      expect(message.contains('Failing row'), isFalse);
+      expect(message.contains('pass'), isFalse);
+    });
 
     test('uses the AuthException message as-is', () {
       final e = AuthException('Invalid login credentials');
@@ -245,8 +239,7 @@ void main() {
       // in the `iptvs: ` contract, so it is not shown: some constraint kinds
       // name the offending values right in the message.
       final e = PostgrestException(
-        message:
-            'duplicate key value violates unique constraint "source_secrets_pkey"',
+        message: 'duplicate key value violates unique constraint "source_secrets_pkey"',
         code: '23505',
         details: 'Key (source_id)=(123) already exists.',
       );
@@ -300,7 +293,8 @@ void main() {
 
     test('redacts a credentialed URL embedded in the message', () {
       final e = PostgrestException(
-        message: 'iptvs: could not reach '
+        message:
+            'iptvs: could not reach '
             'http://panel.example.com/live/someuser12345/s3cretp4ssw0rd/1.ts',
       );
       final message = friendlyCloudError(e);
@@ -321,7 +315,10 @@ void main() {
         'password': 'p',
         'playlistExpiryHint': '2026-01-01',
       }, kSourceSecretKeys);
-      expect(broad, {'host': 'http://h:8080', 'playlistExpiryHint': '2026-01-01'});
+      expect(broad, {
+        'host': 'http://h:8080',
+        'playlistExpiryHint': '2026-01-01',
+      });
       expect(secret, {'username': 'u', 'password': 'p'});
     });
 
@@ -337,10 +334,11 @@ void main() {
     });
 
     test('mergeFields overlays secret onto broad', () {
-      expect(
-        mergeFields({'host': 'h'}, {'username': 'u', 'password': 'p'}),
-        {'host': 'h', 'username': 'u', 'password': 'p'},
-      );
+      expect(mergeFields({'host': 'h'}, {'username': 'u', 'password': 'p'}), {
+        'host': 'h',
+        'username': 'u',
+        'password': 'p',
+      });
     });
 
     test('fillGapsFromLocal keeps a local secret only where cloud is empty', () {
@@ -673,11 +671,7 @@ void main() {
       // authoritative, so a consistent pre-rotation bundle (old device_ck + old
       // envelopes, all at N-1) pinned the device to a REVOKED content key.
       expect(
-        isCkVersionRollback(
-          rowCkVersion: 1,
-          serverCkVersion: 2,
-          watermark: 0,
-        ),
+        isCkVersionRollback(rowCkVersion: 1, serverCkVersion: 2, watermark: 0),
         isTrue,
       );
     });
@@ -686,22 +680,14 @@ void main() {
       // Survives both RPCs lying in agreement: the watermark only ever advances
       // after a successful unwrap, which the server cannot forge.
       expect(
-        isCkVersionRollback(
-          rowCkVersion: 1,
-          serverCkVersion: 1,
-          watermark: 3,
-        ),
+        isCkVersionRollback(rowCkVersion: 1, serverCkVersion: 1, watermark: 3),
         isTrue,
       );
     });
 
     test('the current version is accepted', () {
       expect(
-        isCkVersionRollback(
-          rowCkVersion: 3,
-          serverCkVersion: 3,
-          watermark: 3,
-        ),
+        isCkVersionRollback(rowCkVersion: 3, serverCkVersion: 3, watermark: 3),
         isFalse,
       );
     });
@@ -710,11 +696,7 @@ void main() {
       // The panel can rotate between get_crypto_state and get_device_ck; that
       // is forward motion, not a rollback.
       expect(
-        isCkVersionRollback(
-          rowCkVersion: 4,
-          serverCkVersion: 3,
-          watermark: 3,
-        ),
+        isCkVersionRollback(rowCkVersion: 4, serverCkVersion: 3, watermark: 3),
         isFalse,
       );
     });
@@ -736,28 +718,34 @@ void main() {
   });
 
   group('MetadataConfig cloud split + merge', () {
-    test('broad projection carries no API keys; secret projection carries them', () {
-      const config = MetadataConfig(
-        provider: 'tvdb',
-        tmdbApiKey: 'tk',
-        tvdbApiKey: 'vk',
-        tvdbPin: 'pin',
-        mdblistApiKey: 'mk',
-        autoEnrich: false,
-      );
-      final broad = config.cloudBroadJson();
-      expect(broad, {'provider': 'tvdb', 'autoEnrich': false});
-      expect(broad.containsKey('tmdbApiKey'), isFalse);
-      expect(config.cloudSecretFields(), {
-        'tmdbApiKey': 'tk',
-        'tvdbApiKey': 'vk',
-        'tvdbPin': 'pin',
-        'mdblistApiKey': 'mk',
-      });
-    });
+    test(
+      'broad projection carries no API keys; secret projection carries them',
+      () {
+        const config = MetadataConfig(
+          provider: 'tvdb',
+          tmdbApiKey: 'tk',
+          tvdbApiKey: 'vk',
+          tvdbPin: 'pin',
+          mdblistApiKey: 'mk',
+          autoEnrich: false,
+        );
+        final broad = config.cloudBroadJson();
+        expect(broad, {'provider': 'tvdb', 'autoEnrich': false});
+        expect(broad.containsKey('tmdbApiKey'), isFalse);
+        expect(config.cloudSecretFields(), {
+          'tmdbApiKey': 'tk',
+          'tvdbApiKey': 'vk',
+          'tvdbPin': 'pin',
+          'mdblistApiKey': 'mk',
+        });
+      },
+    );
 
     test('fromCloudParts merges broad + secret and falls back to local', () {
-      const local = MetadataConfig(tmdbApiKey: 'local-tmdb', mdblistApiKey: 'local-mdb');
+      const local = MetadataConfig(
+        tmdbApiKey: 'local-tmdb',
+        mdblistApiKey: 'local-mdb',
+      );
       final merged = MetadataConfig.fromCloudParts(
         broad: const {'provider': 'tmdb', 'autoEnrich': true},
         // Cloud knows tvdb key but not tmdb → tmdb falls back to local.
@@ -782,7 +770,9 @@ void main() {
       expect(sourceCredentialsMissing(locked), isTrue);
       expect(
         sourceCredentialsMissing(
-          locked.copyWith(fields: {'host': 'http://h', 'username': 'u', 'password': 'p'}),
+          locked.copyWith(
+            fields: {'host': 'http://h', 'username': 'u', 'password': 'p'},
+          ),
         ),
         isFalse,
       );
@@ -798,7 +788,12 @@ void main() {
       expect(sourceCredentialsMissing(stalker), isTrue);
       expect(
         sourceCredentialsMissing(
-          const SourceConfig(id: 'd', kind: SourceKind.demo, label: 'D', fields: {}),
+          const SourceConfig(
+            id: 'd',
+            kind: SourceKind.demo,
+            label: 'D',
+            fields: {},
+          ),
         ),
         isFalse,
       );
@@ -812,14 +807,20 @@ void main() {
         'Android TV',
       );
       expect(
-        suggestedDeviceLabelFor(operatingSystem: 'android', isTelevision: false),
+        suggestedDeviceLabelFor(
+          operatingSystem: 'android',
+          isTelevision: false,
+        ),
         'Android',
       );
     });
 
     test('names the desktop and mobile platforms', () {
       expect(
-        suggestedDeviceLabelFor(operatingSystem: 'windows', isTelevision: false),
+        suggestedDeviceLabelFor(
+          operatingSystem: 'windows',
+          isTelevision: false,
+        ),
         'Windows PC',
       );
       expect(
@@ -841,10 +842,16 @@ void main() {
       // the server stores '', and the panel keeps rendering "Device" until the
       // owner names it — exactly the pre-feature behaviour.
       expect(
-        suggestedDeviceLabelFor(operatingSystem: 'fuchsia', isTelevision: false),
+        suggestedDeviceLabelFor(
+          operatingSystem: 'fuchsia',
+          isTelevision: false,
+        ),
         '',
       );
-      expect(suggestedDeviceLabelFor(operatingSystem: '', isTelevision: true), '');
+      expect(
+        suggestedDeviceLabelFor(operatingSystem: '', isTelevision: true),
+        '',
+      );
     });
   });
 

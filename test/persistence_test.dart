@@ -676,19 +676,27 @@ void main() {
       await db.close();
     });
 
-    test('a catalog under a different source id does not block the seed', () async {
-      final db = await AppDatabase.openAt(dbPath());
-      await db.replaceLibrary('other', 'Other', cats, seeded);
+    test(
+      'a catalog under a different source id does not block the seed',
+      () async {
+        final db = await AppDatabase.openAt(dbPath());
+        await db.replaceLibrary('other', 'Other', cats, seeded);
 
-      expect(
-        await db.replaceLibrary('src1', 'Src', cats, fresh,
-            onlyIfAbsent: true),
-        isTrue,
-      );
-      expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
-      expect((await db.readChannels('other')).map((c) => c.id), ['old']);
-      await db.close();
-    });
+        expect(
+          await db.replaceLibrary(
+            'src1',
+            'Src',
+            cats,
+            fresh,
+            onlyIfAbsent: true,
+          ),
+          isTrue,
+        );
+        expect((await db.readChannels('src1')).map((c) => c.id), ['new']);
+        expect((await db.readChannels('other')).map((c) => c.id), ['old']);
+        await db.close();
+      },
+    );
 
     test('seeds when synced_at is set but no channel rows survive', () async {
       // The boundary that makes the guard the exact complement of
@@ -1055,44 +1063,47 @@ void main() {
       },
     );
 
-    test('v10 database gains the playback_positions table on upgrade', () async {
-      // Simulate a pre-v11 install: open at v10 (no positions table), then
-      // reopen through AppDatabase so the oldV < 11 repair branch runs.
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-      final raw = await openDatabase(
-        dbPath(),
-        version: 10,
-        onCreate: (db, _) async {
-          await db.execute(
-            'CREATE TABLE sources (id TEXT PRIMARY KEY, '
-            'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
-          );
-          // `programmes` has existed since onCreate/oldV<2, so a genuine v10
-          // install always has it too — the v11->v12 index-add branch targets it.
-          await db.execute(
-            'CREATE TABLE programmes (source_id TEXT NOT NULL, '
-            'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
-            'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
-          );
-        },
-      );
-      await raw.close();
+    test(
+      'v10 database gains the playback_positions table on upgrade',
+      () async {
+        // Simulate a pre-v11 install: open at v10 (no positions table), then
+        // reopen through AppDatabase so the oldV < 11 repair branch runs.
+        sqfliteFfiInit();
+        databaseFactory = databaseFactoryFfi;
+        final raw = await openDatabase(
+          dbPath(),
+          version: 10,
+          onCreate: (db, _) async {
+            await db.execute(
+              'CREATE TABLE sources (id TEXT PRIMARY KEY, '
+              'name TEXT NOT NULL, synced_at INTEGER, epg_synced_at INTEGER)',
+            );
+            // `programmes` has existed since onCreate/oldV<2, so a genuine v10
+            // install always has it too — the v11->v12 index-add branch targets it.
+            await db.execute(
+              'CREATE TABLE programmes (source_id TEXT NOT NULL, '
+              'channel_id TEXT NOT NULL, start INTEGER NOT NULL, '
+              'stop INTEGER NOT NULL, title TEXT NOT NULL, description TEXT)',
+            );
+          },
+        );
+        await raw.close();
 
-      final db = await AppDatabase.openAt(dbPath());
-      await db.savePlaybackPosition(
-        'src',
-        ContentKind.movie,
-        'm1',
-        position: const Duration(minutes: 12),
-        duration: const Duration(minutes: 90),
-      );
-      expect(
-        await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
-        isNotNull,
-      );
-      await db.close();
-    });
+        final db = await AppDatabase.openAt(dbPath());
+        await db.savePlaybackPosition(
+          'src',
+          ContentKind.movie,
+          'm1',
+          position: const Duration(minutes: 12),
+          duration: const Duration(minutes: 90),
+        );
+        expect(
+          await db.readPlaybackPosition('src', ContentKind.movie, 'm1'),
+          isNotNull,
+        );
+        await db.close();
+      },
+    );
   });
 
   group('AppDatabase programmes', () {
@@ -1136,54 +1147,46 @@ void main() {
       },
     );
 
-    test(
-      'returns a channel\'s programmes overlapping a window, ordered',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
-        await db.replaceEpg('src1', [
-          Programme(channelId: 'ch1', start: t(8), stop: t(9), title: 'Early'),
-          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
-          Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
-          Programme(channelId: 'ch1', start: t(13), stop: t(14), title: 'Late'),
-          Programme(
-            channelId: 'ch2',
-            start: t(10),
-            stop: t(11),
-            title: 'Other',
-          ),
-        ]);
+    test('returns a channel\'s programmes overlapping a window, ordered', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      DateTime t(int h, [int m = 0]) => DateTime.utc(2024, 1, 1, h, m);
+      await db.replaceEpg('src1', [
+        Programme(channelId: 'ch1', start: t(8), stop: t(9), title: 'Early'),
+        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'A'),
+        Programme(channelId: 'ch1', start: t(11), stop: t(12), title: 'B'),
+        Programme(channelId: 'ch1', start: t(13), stop: t(14), title: 'Late'),
+        Programme(channelId: 'ch2', start: t(10), stop: t(11), title: 'Other'),
+      ]);
 
-        final progs = await db.programmesForChannel(
-          'src1',
-          'ch1',
-          from: t(10),
-          to: t(12),
-        );
-        // Ordered by start; other channels excluded; out-of-window dropped.
-        expect(progs.map((p) => p.title), ['A', 'B']);
+      final progs = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(10),
+        to: t(12),
+      );
+      // Ordered by start; other channels excluded; out-of-window dropped.
+      expect(progs.map((p) => p.title), ['A', 'B']);
 
-        // Overlap, not containment: a window edge that cuts through A and B still
-        // includes both (A ends after `from`, B starts before `to`).
-        final overlap = await db.programmesForChannel(
-          'src1',
-          'ch1',
-          from: t(10, 30),
-          to: t(11, 30),
-        );
-        expect(overlap.map((p) => p.title), ['A', 'B']);
+      // Overlap, not containment: a window edge that cuts through A and B still
+      // includes both (A ends after `from`, B starts before `to`).
+      final overlap = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(10, 30),
+        to: t(11, 30),
+      );
+      expect(overlap.map((p) => p.title), ['A', 'B']);
 
-        // A window before any cached programme is empty.
-        final empty = await db.programmesForChannel(
-          'src1',
-          'ch1',
-          from: t(0),
-          to: t(1),
-        );
-        expect(empty, isEmpty);
-        await db.close();
-      },
-    );
+      // A window before any cached programme is empty.
+      final empty = await db.programmesForChannel(
+        'src1',
+        'ch1',
+        from: t(0),
+        to: t(1),
+      );
+      expect(empty, isEmpty);
+      await db.close();
+    });
 
     test(
       'a failure mid-insert rolls back the whole replaceEpg transaction',
@@ -1891,88 +1894,82 @@ void main() {
       await db.close();
     });
 
-    test(
-      'a success-empty EPG refresh clears stale programmes and advances the sync time',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        final source = _FakeSource()..epgResult = const [];
-        final repo = LibraryRepository(source: source, db: db);
-        final now = DateTime.now();
+    test('a success-empty EPG refresh clears stale programmes and advances the sync time', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _FakeSource()..epgResult = const [];
+      final repo = LibraryRepository(source: source, db: db);
+      final now = DateTime.now();
 
-        await db.replaceEpg('fake', [
-          Programme(
-            channelId: 'a',
-            start: now.subtract(const Duration(minutes: 30)),
-            stop: now.add(const Duration(minutes: 30)),
-            title: 'Stale',
-          ),
-        ]);
+      await db.replaceEpg('fake', [
+        Programme(
+          channelId: 'a',
+          start: now.subtract(const Duration(minutes: 30)),
+          stop: now.add(const Duration(minutes: 30)),
+          title: 'Stale',
+        ),
+      ]);
 
-        final beforeLoad = DateTime.now();
-        await repo.load(forceRefresh: true);
-        // `load` returns as soon as the channel list is ready; the guide
-        // refreshes behind it.
-        await repo.pendingEpgRefresh;
+      final beforeLoad = DateTime.now();
+      await repo.load(forceRefresh: true);
+      // `load` returns as soon as the channel list is ready; the guide
+      // refreshes behind it.
+      await repo.pendingEpgRefresh;
 
-        final result = await db.nowNext('fake', now);
-        expect(result.now, isEmpty);
-        final synced = await db.lastEpgSynced('fake');
-        expect(synced, isNotNull);
-        expect(
-          synced!.isAtSameMomentAs(beforeLoad) || synced.isAfter(beforeLoad),
-          isTrue,
-        );
-        await db.close();
-      },
-    );
+      final result = await db.nowNext('fake', now);
+      expect(result.now, isEmpty);
+      final synced = await db.lastEpgSynced('fake');
+      expect(synced, isNotNull);
+      expect(
+        synced!.isAtSameMomentAs(beforeLoad) || synced.isAfter(beforeLoad),
+        isTrue,
+      );
+      await db.close();
+    });
 
-    test(
-      'a failed EPG refresh retains cached programmes and does not advance the sync time',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        final now = DateTime.now();
+    test('a failed EPG refresh retains cached programmes and does not advance the sync time', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final now = DateTime.now();
 
-        // Seed the sources row first (replaceLibrary), then the good EPG —
-        // replaceEpg's timestamp update is a no-op if the sources row is
-        // absent, so order matters for a meaningful t0.
-        await db.replaceLibrary(
-          'fake',
-          'Fake',
-          const [Category(id: 'c1', title: 'News')],
-          const [
-            Channel(id: 'a', name: 'A', categoryId: 'c1'),
-            Channel(id: 'b', name: 'B', categoryId: 'c1'),
-          ],
-        );
-        await db.replaceEpg('fake', [
-          Programme(
-            channelId: 'a',
-            start: now.subtract(const Duration(minutes: 30)),
-            stop: now.add(const Duration(minutes: 30)),
-            title: 'Good',
-          ),
-        ]);
-        final t0 = await db.lastEpgSynced('fake');
-        expect(t0, isNotNull);
+      // Seed the sources row first (replaceLibrary), then the good EPG —
+      // replaceEpg's timestamp update is a no-op if the sources row is
+      // absent, so order matters for a meaningful t0.
+      await db.replaceLibrary(
+        'fake',
+        'Fake',
+        const [Category(id: 'c1', title: 'News')],
+        const [
+          Channel(id: 'a', name: 'A', categoryId: 'c1'),
+          Channel(id: 'b', name: 'B', categoryId: 'c1'),
+        ],
+      );
+      await db.replaceEpg('fake', [
+        Programme(
+          channelId: 'a',
+          start: now.subtract(const Duration(minutes: 30)),
+          stop: now.add(const Duration(minutes: 30)),
+          title: 'Good',
+        ),
+      ]);
+      final t0 = await db.lastEpgSynced('fake');
+      expect(t0, isNotNull);
 
-        final source = _FakeSource()..epgThrow = Exception('epg fetch failed');
-        final repo = LibraryRepository(source: source, db: db);
+      final source = _FakeSource()..epgThrow = Exception('epg fetch failed');
+      final repo = LibraryRepository(source: source, db: db);
 
-        // Forced refresh: the channel-library replace no longer clobbers
-        // epg_synced_at, and the EPG fetch itself fails; load()'s outer catch
-        // swallows the exception so the channel list still loads.
-        await repo.load(forceRefresh: true);
-        await repo.pendingEpgRefresh;
+      // Forced refresh: the channel-library replace no longer clobbers
+      // epg_synced_at, and the EPG fetch itself fails; load()'s outer catch
+      // swallows the exception so the channel list still loads.
+      await repo.load(forceRefresh: true);
+      await repo.pendingEpgRefresh;
 
-        // replaceEpg is never reached on a failed fetch, so the earlier
-        // delete-then-insert never ran — the cached programme survives, and
-        // the EPG sync timestamp is untouched.
-        final result = await db.nowNext('fake', now);
-        expect(result.now['a']?.title, 'Good');
-        expect(await db.lastEpgSynced('fake'), t0);
-        await db.close();
-      },
-    );
+      // replaceEpg is never reached on a failed fetch, so the earlier
+      // delete-then-insert never ran — the cached programme survives, and
+      // the EPG sync timestamp is untouched.
+      final result = await db.nowNext('fake', now);
+      expect(result.now['a']?.title, 'Good');
+      expect(await db.lastEpgSynced('fake'), t0);
+      await db.close();
+    });
 
     test('load returns the channel list without waiting for the guide', () async {
       // The whole point of the change: one extra guide used to add its download
@@ -2024,23 +2021,26 @@ void main() {
       await db.close();
     });
 
-    test('a fresh guide is not re-fetched, and reports nothing pending', () async {
-      // `pendingEpgRefresh` is what the status line reads to say "updating
-      // guide", so a load with no work to do must leave it null rather than
-      // hand back an already-completed future.
-      final db = await AppDatabase.openAt(dbPath());
-      final source = _FakeSource();
-      final repo = LibraryRepository(source: source, db: db);
+    test(
+      'a fresh guide is not re-fetched, and reports nothing pending',
+      () async {
+        // `pendingEpgRefresh` is what the status line reads to say "updating
+        // guide", so a load with no work to do must leave it null rather than
+        // hand back an already-completed future.
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource();
+        final repo = LibraryRepository(source: source, db: db);
 
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(source.epgStarted.isCompleted, isTrue);
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(source.epgStarted.isCompleted, isTrue);
 
-      final second = LibraryRepository(source: _FakeSource(), db: db);
-      await second.load();
-      expect(second.pendingEpgRefresh, isNull);
-      await db.close();
-    });
+        final second = LibraryRepository(source: _FakeSource(), db: db);
+        await second.load();
+        expect(second.pendingEpgRefresh, isNull);
+        await db.close();
+      },
+    );
 
     test('a newer load supersedes the guide refresh still running', () async {
       // Two repositories, one database — the shape of a source switch. The
@@ -2067,22 +2067,25 @@ void main() {
       await db.close();
     });
 
-    test('a failed refresh is recorded, and a later good one clears it', () async {
-      // The verdict the live status line reads to say "guide unavailable".
-      final db = await AppDatabase.openAt(dbPath());
-      final source = _FakeSource()..epgThrow = StateError('guide refused');
-      final repo = LibraryRepository(source: source, db: db);
+    test(
+      'a failed refresh is recorded, and a later good one clears it',
+      () async {
+        // The verdict the live status line reads to say "guide unavailable".
+        final db = await AppDatabase.openAt(dbPath());
+        final source = _FakeSource()..epgThrow = StateError('guide refused');
+        final repo = LibraryRepository(source: source, db: db);
 
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(repo.lastEpgRefreshFailed, isTrue);
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(repo.lastEpgRefreshFailed, isTrue);
 
-      source.epgThrow = null;
-      await repo.load(forceRefresh: true);
-      await repo.pendingEpgRefresh;
-      expect(repo.lastEpgRefreshFailed, isFalse);
-      await db.close();
-    });
+        source.epgThrow = null;
+        await repo.load(forceRefresh: true);
+        await repo.pendingEpgRefresh;
+        expect(repo.lastEpgRefreshFailed, isFalse);
+        await db.close();
+      },
+    );
 
     test('a superseded refresh leaves the previous verdict standing', () async {
       // Cancelled is not an outcome. Recording one as a *success* cleared a

@@ -415,7 +415,8 @@ void main() {
             expect(key, findsOneWidget, reason: 'digit $digit is drawn');
             final rect = tester.getRect(key);
             expect(
-              window.contains(rect.topLeft) && window.contains(rect.bottomRight),
+              window.contains(rect.topLeft) &&
+                  window.contains(rect.bottomRight),
               isTrue,
               reason: 'digit $digit is off screen at $size/$textScale: $rect',
             );
@@ -559,7 +560,11 @@ void main() {
     // (`_zapIdentityRow`) at a fixed height, fed by whatever a provider's
     // channel numbering and a typed digit buffer hand it — this sweeps the
     // worst-case payload the row can be asked to draw.
-    for (final size in const [Size(1256, 720), Size(960, 540), Size(667, 375)]) {
+    for (final size in const [
+      Size(1256, 720),
+      Size(960, 540),
+      Size(667, 375),
+    ]) {
       for (final textScale in const [1.0, 1.3, 2.0]) {
         testWidgets('at $size, text scale $textScale', (tester) async {
           debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -643,7 +648,11 @@ void main() {
     // the live channel row three times. Swept with the real font, because
     // `flutter_test`'s default one lays every line out at `1.0 * fontSize`
     // and hides the whole class of bug.
-    for (final size in const [Size(1256, 720), Size(960, 540), Size(667, 375)]) {
+    for (final size in const [
+      Size(1256, 720),
+      Size(960, 540),
+      Size(667, 375),
+    ]) {
       for (final textScale in const [1.0, 1.3, 2.0]) {
         testWidgets('at $size, text scale $textScale', (tester) async {
           debugDefaultTargetPlatformOverride = TargetPlatform.windows;

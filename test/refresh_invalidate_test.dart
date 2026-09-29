@@ -28,37 +28,39 @@ void main() {
   });
   String dbPath() => '${tempDir.path}/iptv.db';
 
-  test('two forced live reloads hit the provider twice; cache serves between',
-      () async {
-    final db = await AppDatabase.openAt(dbPath());
-    final source = _CountingSource();
-    final repo = LibraryRepository(source: source, db: db);
+  test(
+    'two forced live reloads hit the provider twice; cache serves between',
+    () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final source = _CountingSource();
+      final repo = LibraryRepository(source: source, db: db);
 
-    // Cold load: provider fetched once.
-    await repo.load();
-    expect(source.channelFetches, 1);
+      // Cold load: provider fetched once.
+      await repo.load();
+      expect(source.channelFetches, 1);
 
-    // Non-forced load: served from the SQLite cache, provider untouched, and
-    // invalidate() never called.
-    final warm = await repo.load();
-    expect(warm.fromCache, isTrue);
-    expect(source.channelFetches, 1);
-    expect(source.invalidateCount, 0);
+      // Non-forced load: served from the SQLite cache, provider untouched, and
+      // invalidate() never called.
+      final warm = await repo.load();
+      expect(warm.fromCache, isTrue);
+      expect(source.channelFetches, 1);
+      expect(source.invalidateCount, 0);
 
-    // Forced reload #1: invalidate() drops the memo, so the provider is hit
-    // again (this is the bug the fix closes — before it, the memoized list
-    // survived and channelFetches stayed at 1).
-    await repo.load(forceRefresh: true);
-    expect(source.invalidateCount, 1);
-    expect(source.channelFetches, 2);
+      // Forced reload #1: invalidate() drops the memo, so the provider is hit
+      // again (this is the bug the fix closes — before it, the memoized list
+      // survived and channelFetches stayed at 1).
+      await repo.load(forceRefresh: true);
+      expect(source.invalidateCount, 1);
+      expect(source.channelFetches, 2);
 
-    // Forced reload #2: provider hit a third time.
-    await repo.load(forceRefresh: true);
-    expect(source.invalidateCount, 2);
-    expect(source.channelFetches, 3);
+      // Forced reload #2: provider hit a third time.
+      await repo.load(forceRefresh: true);
+      expect(source.invalidateCount, 2);
+      expect(source.channelFetches, 3);
 
-    await db.close();
-  });
+      await db.close();
+    },
+  );
 
   test('forced media reload invalidates; loadMoreMedia never does', () async {
     final db = await AppDatabase.openAt(dbPath());
@@ -114,8 +116,8 @@ class _CountingSource extends Source implements RefreshableSource {
 
   @override
   Future<List<Category>> categories() async => const [
-        Category(id: 'c1', title: 'General'),
-      ];
+    Category(id: 'c1', title: 'General'),
+  ];
 
   @override
   Future<List<Channel>> channels({String? categoryId}) async {
@@ -138,8 +140,8 @@ class _CountingSource extends Source implements RefreshableSource {
 
   @override
   Future<List<MediaCategory>> mediaCategories(ContentKind kind) async => const [
-        MediaCategory(id: 'm1', title: 'Movies', kind: ContentKind.movie),
-      ];
+    MediaCategory(id: 'm1', title: 'Movies', kind: ContentKind.movie),
+  ];
 
   @override
   Future<MediaPage> mediaItemsPage(

@@ -4,9 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('Store manifest pins Partner Center identity and least capability', () {
-    final manifest = File(
-      'windows/packaging/AppxManifest.xml.in',
-    ).readAsStringSync();
+    final manifest = File('windows/packaging/AppxManifest.xml.in')
+        .readAsStringSync();
 
     expect(manifest, contains('Name="George-CosminHanta.IPTVSPlayer"'));
     expect(
@@ -27,9 +26,8 @@ void main() {
   });
 
   test('Store listing leads with the certified dependency disclosure', () {
-    final listing = File(
-      'assets/store/microsoft-store/listing.md',
-    ).readAsLinesSync();
+    final listing = File('assets/store/microsoft-store/listing.md')
+        .readAsLinesSync();
     final descriptionStart = listing.indexOf('## Store description');
     expect(descriptionStart, greaterThanOrEqualTo(0));
     expect(
@@ -65,20 +63,17 @@ void main() {
     // ID inside each row keeps the real property (the links can't drift to
     // another product) without re-pinning a placeholder.
     expect(
-      RegExp(
-        r'\| (Store deep link|Web Store URL) \| [^|]*9P8KK9T379WN[^|]*\|',
-      ).allMatches(publishing),
+      RegExp(r'\| (Store deep link|Web Store URL) \| [^|]*9P8KK9T379WN[^|]*\|')
+          .allMatches(publishing),
       hasLength(2),
     );
   });
 
   test('Store workflow is isolated from direct release artifacts', () {
-    final storeWorkflow = File(
-      '.github/workflows/microsoft-store.yml',
-    ).readAsStringSync();
-    final directWorkflow = File(
-      '.github/workflows/release.yml',
-    ).readAsStringSync();
+    final storeWorkflow = File('.github/workflows/microsoft-store.yml')
+        .readAsStringSync();
+    final directWorkflow = File('.github/workflows/release.yml')
+        .readAsStringSync();
 
     expect(storeWorkflow, contains('DISTRIBUTION_CHANNEL=microsoftStore'));
     expect(storeWorkflow, isNot(contains('UPDATE_MANIFEST_PUBLIC_KEY')));

@@ -75,53 +75,50 @@ void main() {
 
     String dbPath() => '${tempDir.path}/iptv.db';
 
-    test(
-      'a stream that throws LoadCancelledException rolls back, retaining the prior guide',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        DateTime t(int h) => DateTime.utc(2024, 1, 1, h);
+    test('a stream that throws LoadCancelledException rolls back, retaining the prior guide', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      DateTime t(int h) => DateTime.utc(2024, 1, 1, h);
 
-        // Seed the sources row + a good guide first.
-        await db.replaceLibrary(
-          'src1',
-          'Src',
-          const [Category(id: 'c1', title: 'News')],
-          const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
-        );
-        await db.replaceEpg('src1', [
-          Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'Good'),
-        ]);
-        final before = await db.lastEpgSynced('src1');
-        expect(before, isNotNull);
+      // Seed the sources row + a good guide first.
+      await db.replaceLibrary(
+        'src1',
+        'Src',
+        const [Category(id: 'c1', title: 'News')],
+        const [Channel(id: 'ch1', name: 'One', categoryId: 'c1')],
+      );
+      await db.replaceEpg('src1', [
+        Programme(channelId: 'ch1', start: t(10), stop: t(11), title: 'Good'),
+      ]);
+      final before = await db.lastEpgSynced('src1');
+      expect(before, isNotNull);
 
-        Stream<List<Programme>> cancelledMidFeed() async* {
-          yield [
-            Programme(
-              channelId: 'ch1',
-              start: t(12),
-              stop: t(13),
-              title: 'Partial',
-            ),
-          ];
-          throw const LoadCancelledException();
-        }
+      Stream<List<Programme>> cancelledMidFeed() async* {
+        yield [
+          Programme(
+            channelId: 'ch1',
+            start: t(12),
+            stop: t(13),
+            title: 'Partial',
+          ),
+        ];
+        throw const LoadCancelledException();
+      }
 
-        await expectLater(
-          db.replaceEpgStream('src1', cancelledMidFeed()),
-          throwsA(isA<LoadCancelledException>()),
-        );
+      await expectLater(
+        db.replaceEpgStream('src1', cancelledMidFeed()),
+        throwsA(isA<LoadCancelledException>()),
+      );
 
-        // The delete + partial batch both rolled back with the transaction —
-        // the prior guide and its sync timestamp are untouched.
-        final result = await db.nowNext(
-          'src1',
-          t(10).add(const Duration(minutes: 30)),
-        );
-        expect(result.now['ch1']?.title, 'Good');
-        expect(await db.lastEpgSynced('src1'), before);
-        await db.close();
-      },
-    );
+      // The delete + partial batch both rolled back with the transaction —
+      // the prior guide and its sync timestamp are untouched.
+      final result = await db.nowNext(
+        'src1',
+        t(10).add(const Duration(minutes: 30)),
+      );
+      expect(result.now['ch1']?.title, 'Good');
+      expect(await db.lastEpgSynced('src1'), before);
+      await db.close();
+    });
   });
 
   group('LibraryRepository cancellation', () {
@@ -137,37 +134,34 @@ void main() {
 
     String dbPath() => '${tempDir.path}/iptv.db';
 
-    test(
-      'a token cancelled between the fetch and the cache write does not '
-      'clobber an existing cache',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        // The seed is the load-bearing part of this test: a superseded load is
-        // only barred from writing because there is already something to lose.
-        await db.replaceLibrary(
-          'fake',
-          'Fake',
-          const [Category(id: 'test', title: 'Test streams')],
-          const [Channel(id: 'old', name: 'Old', categoryId: 'test')],
-        );
+    test('a token cancelled between the fetch and the cache write does not '
+        'clobber an existing cache', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      // The seed is the load-bearing part of this test: a superseded load is
+      // only barred from writing because there is already something to lose.
+      await db.replaceLibrary(
+        'fake',
+        'Fake',
+        const [Category(id: 'test', title: 'Test streams')],
+        const [Channel(id: 'old', name: 'Old', categoryId: 'test')],
+      );
 
-        final token = LoadToken();
-        // channels() cancels the token as a side effect, simulating a newer
-        // load superseding this one while the fetch was still in flight.
-        final source = _CancelingSource(tokenToCancel: token);
-        final repo = LibraryRepository(source: source, db: db);
-        repo.loadToken = token;
+      final token = LoadToken();
+      // channels() cancels the token as a side effect, simulating a newer
+      // load superseding this one while the fetch was still in flight.
+      final source = _CancelingSource(tokenToCancel: token);
+      final repo = LibraryRepository(source: source, db: db);
+      repo.loadToken = token;
 
-        final snapshot = await repo.load(forceRefresh: true);
+      final snapshot = await repo.load(forceRefresh: true);
 
-        // The returned snapshot reflects what the source fetched — matches
-        // "the controller already discarded this by generation" semantics —
-        // but the cache write itself was skipped.
-        expect(snapshot.channels.map((c) => c.id), ['new']);
-        expect((await db.readChannels('fake')).map((c) => c.id), ['old']);
-        await db.close();
-      },
-    );
+      // The returned snapshot reflects what the source fetched — matches
+      // "the controller already discarded this by generation" semantics —
+      // but the cache write itself was skipped.
+      expect(snapshot.channels.map((c) => c.id), ['new']);
+      expect((await db.readChannels('fake')).map((c) => c.id), ['old']);
+      await db.close();
+    });
 
     test(
       'a token cancelled before anything is cached still seeds the empty cache',
@@ -190,25 +184,22 @@ void main() {
       },
     );
 
-    test(
-      'a superseded load schedules no EPG refresh',
-      () async {
-        final db = await AppDatabase.openAt(dbPath());
-        final token = LoadToken();
-        final source = _CancelingSource(tokenToCancel: token);
-        final repo = LibraryRepository(source: source, db: db);
-        repo.loadToken = token;
+    test('a superseded load schedules no EPG refresh', () async {
+      final db = await AppDatabase.openAt(dbPath());
+      final token = LoadToken();
+      final source = _CancelingSource(tokenToCancel: token);
+      final repo = LibraryRepository(source: source, db: db);
+      repo.loadToken = token;
 
-        await repo.load(forceRefresh: true);
+      await repo.load(forceRefresh: true);
 
-        // The load that cancelled this one schedules its own, and the ingest
-        // coordinator is last-start-wins — a late refresh from here would take
-        // the slot from the correct one.
-        expect(repo.pendingEpgRefresh, isNull);
-        expect(await db.lastEpgSynced('fake'), isNull);
-        await db.close();
-      },
-    );
+      // The load that cancelled this one schedules its own, and the ingest
+      // coordinator is last-start-wins — a late refresh from here would take
+      // the slot from the correct one.
+      expect(repo.pendingEpgRefresh, isNull);
+      expect(await db.lastEpgSynced('fake'), isNull);
+      await db.close();
+    });
 
     test(
       'a cancelled EPG batch stream is swallowed, not surfaced as a load error',

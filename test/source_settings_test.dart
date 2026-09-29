@@ -146,10 +146,7 @@ void main() {
       id: 'src1',
       kind: SourceKind.m3u,
       label: 'One',
-      fields: {
-        'playlistUrl': 'http://example.test/list.m3u',
-        'epgUrls': ?raw,
-      },
+      fields: {'playlistUrl': 'http://example.test/list.m3u', 'epgUrls': ?raw},
     );
 
     test('absent or empty reads as no extra guides', () {
@@ -249,8 +246,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('adding a guide, typing and saving persists it',
-        (tester) async {
+    testWidgets('adding a guide, typing and saving persists it', (
+      tester,
+    ) async {
       final store = await mount(tester, config);
       expect(find.text('http://a/g.xml'), findsNothing);
 
@@ -269,8 +267,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('a malformed URL is rejected and nothing is saved',
-        (tester) async {
+    testWidgets('a malformed URL is rejected and nothing is saved', (
+      tester,
+    ) async {
       final store = await mount(tester, config);
       await tester.tap(find.text('Add guide'));
       await tester.pump();
@@ -289,8 +288,9 @@ void main() {
       expect((await store.list()).single.extraEpgUrls, isEmpty);
     });
 
-    testWidgets('a duplicate is rejected rather than silently dropped',
-        (tester) async {
+    testWidgets('a duplicate is rejected rather than silently dropped', (
+      tester,
+    ) async {
       // The merge would skip the second copy anyway (every channel is already
       // claimed), so saving it would look like it did something.
       final store = await mount(tester, config);
@@ -358,8 +358,9 @@ void main() {
       expect(find.byIcon(Icons.clear), findsOneWidget);
     });
 
-    testWidgets('Add guide is disabled once the cap is reached',
-        (tester) async {
+    testWidgets('Add guide is disabled once the cap is reached', (
+      tester,
+    ) async {
       // kMaxEpgGuides counts the built-in guide, so an M3U source with one
       // offers three editable rows.
       await mount(

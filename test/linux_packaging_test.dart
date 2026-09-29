@@ -76,9 +76,8 @@ void main() {
   });
 
   test('native mpv uses a filesystem IPC server socket', () {
-    final session = File(
-      'lib/player/linux_native_session.dart',
-    ).readAsStringSync();
+    final session = File('lib/player/linux_native_session.dart')
+        .readAsStringSync();
     expect(session, contains('--input-ipc-server=\$_socketPath'));
     expect(session, contains("'--script=\$overlayScript'"));
     expect(session, contains("'user-data/iptvs-control'"));
@@ -86,9 +85,8 @@ void main() {
   });
 
   test('native mpv points libass at the vendored overlay fonts', () {
-    final session = File(
-      'lib/player/linux_native_session.dart',
-    ).readAsStringSync();
+    final session = File('lib/player/linux_native_session.dart')
+        .readAsStringSync();
     // The overlay renders as an OSD ass-events surface, so libass needs
     // --osd-fonts-dir (not --sub-fonts-dir) to find the bundled Inter/
     // Material Icons faces referenced by the Lua script's \fn tags.
@@ -98,9 +96,8 @@ void main() {
 
   test('desktop identity matches the Linux runner', () {
     final cmake = File('linux/CMakeLists.txt').readAsStringSync();
-    final desktop = File(
-      'linux/com.gchofficial.iptvs.desktop',
-    ).readAsStringSync();
+    final desktop = File('linux/com.gchofficial.iptvs.desktop')
+        .readAsStringSync();
     expect(cmake, contains('com.gchofficial.iptvs'));
     expect(desktop, contains('StartupWMClass=com.gchofficial.iptvs'));
   });

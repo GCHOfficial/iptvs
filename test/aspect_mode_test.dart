@@ -11,10 +11,13 @@ import 'package:iptvs/player/aspect_mode.dart';
 void main() {
   group('the cycle', () {
     test('is the five modes every surface renders, in order', () {
-      expect(
-        kAspectModes.map((m) => m.label),
-        ['Fit', 'Fill', 'Stretch', '16:9', '4:3'],
-      );
+      expect(kAspectModes.map((m) => m.label), [
+        'Fit',
+        'Fill',
+        'Stretch',
+        '16:9',
+        '4:3',
+      ]);
     });
 
     test('Fill crops and Stretch distorts — they are not the same mode', () {
@@ -102,7 +105,8 @@ void main() {
         expect(
           kAspectModes[defaultAspectModeIndex(container: size)].label,
           'Fit',
-          reason: 'a desktop window is an arbitrary shape, so cropping it is '
+          reason:
+              'a desktop window is an arbitrary shape, so cropping it is '
               'wrong — the crop would change every time it is resized',
         );
       }

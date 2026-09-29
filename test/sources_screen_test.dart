@@ -93,11 +93,9 @@ void main() {
         findsNothing,
         reason: 'the first OK press must reach a focused action',
       );
-      expect(
-        (await store.list()).map((s) => s.id),
-        ['one'],
-        reason: 'and that action must be the non-destructive one',
-      );
+      expect((await store.list()).map((s) => s.id), [
+        'one',
+      ], reason: 'and that action must be the non-destructive one');
     });
 
     testWidgets('the destructive action still works when chosen', (
@@ -171,7 +169,9 @@ void main() {
       await store.setAll([existing]);
 
       await tester.pumpWidget(
-        MaterialApp(home: EditSourceScreen(store: store, existing: existing)),
+        MaterialApp(
+          home: EditSourceScreen(store: store, existing: existing),
+        ),
       );
       await settle(tester);
 

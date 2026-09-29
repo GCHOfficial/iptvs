@@ -69,10 +69,7 @@ Set<String>? _arrayLiteralKeys(String functionBody) {
   if (match == null) return null;
   final inner = match.group(1)!;
   final itemRegex = RegExp(r"'((?:[^'\\]|\\.)*)'");
-  return itemRegex
-      .allMatches(inner)
-      .map((m) => m.group(1)!)
-      .toSet();
+  return itemRegex.allMatches(inner).map((m) => m.group(1)!).toSet();
 }
 
 void main() {
@@ -85,10 +82,9 @@ void main() {
       reason: 'expected ${migrationsDir.path} to exist',
     );
     expect(
-      migrationsDir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.toLowerCase().endsWith('.sql')),
+      migrationsDir.listSync().whereType<File>().where(
+        (f) => f.path.toLowerCase().endsWith('.sql'),
+      ),
       isNotEmpty,
     );
   });

@@ -427,7 +427,6 @@ class LivePreviewController extends ChangeNotifier {
   Future<void> get pendingStart => _pendingStart ?? Future<void>.value();
   Future<void>? _pendingStart;
 
-
   /// Buffering preset of the source that owns the previewing channel.
   ///
   /// Set per [start] rather than at construction because a cross-source
@@ -863,12 +862,12 @@ class _NativePreviewView extends StatelessWidget {
     ),
     onCreatePlatformView: (params) =>
         PlatformViewsService.initExpensiveAndroidView(
-          id: params.id,
-          viewType: _viewType,
-          layoutDirection: TextDirection.ltr,
-          creationParamsCodec: const StandardMessageCodec(),
-          onFocus: () => params.onFocusChanged(true),
-        )
+            id: params.id,
+            viewType: _viewType,
+            layoutDirection: TextDirection.ltr,
+            creationParamsCodec: const StandardMessageCodec(),
+            onFocus: () => params.onFocusChanged(true),
+          )
           ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
           ..create(),
   );

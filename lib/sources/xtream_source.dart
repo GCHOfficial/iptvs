@@ -64,6 +64,7 @@ class XtreamSource
   final String host; // e.g. http://host:port
   final String username;
   final String password;
+
   /// `'ts'` (most compatible) or `'m3u8'`. Resolved once at construction by
   /// [resolveXtreamStreamExtension] — see there for the iOS default and the
   /// per-source override.

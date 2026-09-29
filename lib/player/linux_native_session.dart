@@ -961,9 +961,9 @@ class LinuxNativeSession {
     }
     final inputConfigPath = _inputConfigPath;
     if (inputConfigPath != null) {
-      await File(
-        inputConfigPath,
-      ).delete().catchError((_) => File(inputConfigPath));
+      await File(inputConfigPath)
+          .delete()
+          .catchError((_) => File(inputConfigPath));
     }
   }
 }

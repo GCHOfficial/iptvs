@@ -40,7 +40,7 @@ void logImageFailure(Object error, String url) {
   DiagnosticsLog.instance.add(
     'image',
     'fetch failed url=${redactUrl(url)} error=$error'
-    '${suppressed > 0 ? ' (+$suppressed suppressed)' : ''}',
+        '${suppressed > 0 ? ' (+$suppressed suppressed)' : ''}',
   );
 }
 
