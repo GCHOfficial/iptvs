@@ -117,7 +117,7 @@ class UpdateInstaller {
         sha256Digest: digestSink.value.toString(),
       );
       if (await file.exists()) await file.delete();
-      return partial.rename(file.path);
+      return await partial.rename(file.path);
     } catch (_) {
       if (!hashClosed) hashSink.close();
       if (await partial.exists()) await partial.delete();

@@ -1009,7 +1009,7 @@ class LibraryRepository {
         (provider) => !provider.ratingsOnly,
         orElse: () => metadataProviders.first,
       );
-      return cachedExternalMetadata(merged, provider.provider);
+      return await cachedExternalMetadata(merged, provider.provider);
     } catch (error) {
       _logMetadata('refresh error ${item.kind.name}:${item.id}: $error');
       rethrow;

@@ -963,7 +963,7 @@ class StalkerSource
       final channels = debugApi != null
           ? await _fetchAllChannelsViaCall()
           : await _fetchAllChannelsFromBytes();
-      if (channels.isNotEmpty) return _withCensoredGenres(channels);
+      if (channels.isNotEmpty) return await _withCensoredGenres(channels);
     } on StalkerException catch (e) {
       // Some portals only expose ITV through paginated get_ordered_list.
       _debug(

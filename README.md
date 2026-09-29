@@ -70,7 +70,7 @@ the same signed GitHub release channel when launched from a writable location.
 
 ## Build from source
 
-Requires the **Flutter `3.44.5`** stable toolchain (the version CI pins).
+Requires the **Flutter `3.47.5`** stable toolchain (the version CI pins).
 
 ```bash
 flutter pub get
