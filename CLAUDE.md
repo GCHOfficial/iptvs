@@ -1126,7 +1126,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   active-source categories only — the cross-source range's per-source sub-ranges are already inside
   the view it launched from), since otherwise the row isn't in the list and selection fell to row 0.
   "Previous channel" is a channel **plus the range it was played from**: recalling one the quick
-  list re-ranged away from restores that range with it, rather than being a dead key. The launch range is a snapshot at open time, wrapped **lazily**
+  list re-ranged away from restores that range with it, rather than being a dead key. It also
+  **outlives the session**: the ending controller's `ZapRecall` seeds the next one
+  (`_zapRecall`), so fullscreen A → Back → fullscreen B recalls A. The launch range is a snapshot at open time, wrapped **lazily**
   (`zapEntriesOf`) so an unfiltered 250k-channel source costs nothing up front: cross-source
   Favorites contribute their own per-row `SourceConfig`; a search falls back to the whole active
   source minus hidden categories (a search result has no meaningful "next channel"); otherwise the

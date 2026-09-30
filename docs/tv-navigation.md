@@ -465,7 +465,8 @@ apply.
   inside the player — a remote that stops dead at the end of the list reads as broken, not as
   reaching a boundary — so both directions wrap here.
 - **Right is the "previous channel" toggle** (classic last-channel recall; a no-op until two
-  channels have actually played this session; recalling a channel the quick list re-ranged away
+  channels have actually played — **counting earlier fullscreen sessions**: fullscreen A, Back,
+  fullscreen B, and Right recalls A; recalling a channel the quick list re-ranged away
   from brings its range back with it). **Left opens the quick list** — see "The in-player
   quick list" below — as does the dedicated `GUIDE` key, which (being unambiguous) works whether
   the chrome is up or not and closes the list on a second press. **No desktop keyboard has a

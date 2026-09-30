@@ -143,6 +143,7 @@ LiveZapController _controller({
   _FakeCatalog? catalog,
   SourceConfig? config,
   Duration messageDuration = _digits,
+  ZapRecall? recall,
 }) {
   final source = config ?? _config('src');
   final list =
@@ -159,6 +160,7 @@ LiveZapController _controller({
     settleDelay: _settle,
     digitCommitDelay: _digits,
     messageDuration: messageDuration,
+    recall: recall,
   );
 }
 
@@ -304,6 +306,98 @@ void main() {
       await Future<void>.delayed(_past);
       expect(controller.playing.channelId, 'n2');
       expect(controller.rangeCategoryId, 'news');
+    });
+
+    // The field report: fullscreen A, Back to the list, fullscreen B —
+    // "last channel" did nothing, because each session starts a fresh
+    // controller that had never seen A.
+    test('recalls the channel the previous session ended on', () async {
+      final first = _controller(initialIndex: 0); // a
+      _Surface().attach(first);
+      final recall = first.recall;
+      first.dispose();
+
+      final second = _controller(initialIndex: 2, recall: recall); // c
+      addTearDown(second.dispose);
+      final surface = _Surface()..attach(second);
+
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'a');
+      expect(surface.events, isNotEmpty);
+
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'c', reason: 'and toggles back');
+    });
+
+    test('carries the ended channel after a zap inside the session', () async {
+      final first = _controller(initialIndex: 0); // a
+      _Surface().attach(first);
+      first.channelUp(); // -> b
+      await Future<void>.delayed(_past);
+      final recall = first.recall;
+      first.dispose();
+
+      final second = _controller(initialIndex: 2, recall: recall); // c
+      addTearDown(second.dispose);
+      _Surface().attach(second);
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'b');
+    });
+
+    test('relaunching the ended channel recalls the one before it', () async {
+      final first = _controller(initialIndex: 0); // a
+      _Surface().attach(first);
+      first.channelUp(); // -> b
+      await Future<void>.delayed(_past);
+      final recall = first.recall;
+      first.dispose();
+
+      final second = _controller(initialIndex: 1, recall: recall); // b again
+      addTearDown(second.dispose);
+      _Surface().attach(second);
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'a');
+    });
+
+    test('relaunching the only channel ever played stays inert', () async {
+      final first = _controller(initialIndex: 0);
+      final recall = first.recall;
+      first.dispose();
+
+      final second = _controller(initialIndex: 0, recall: recall);
+      addTearDown(second.dispose);
+      final surface = _Surface()..attach(second);
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'a');
+      expect(surface.events, isEmpty);
+    });
+
+    test('restores the range the recalled channel was played from', () async {
+      final config = _config('src');
+      final first = _controller(config: config, initialIndex: 1); // b
+      _Surface().attach(first);
+      final recall = first.recall;
+      first.dispose();
+
+      // The next session launches from a category that doesn't contain b.
+      final second = _controller(
+        config: config,
+        channels: [_channel('n1', number: 10), _channel('n2', number: 11)],
+        recall: recall,
+      );
+      addTearDown(second.dispose);
+      _Surface().attach(second);
+      second.previousChannel();
+      await Future<void>.delayed(_past);
+      expect(second.playing.channelId, 'b');
+      expect(second.entries.length, 3);
+      second.channelUp();
+      expect(second.current.channelId, 'c', reason: 'Up walks b\'s range');
     });
 
     test('crosses sources on the cross-source Favorites range', () async {
