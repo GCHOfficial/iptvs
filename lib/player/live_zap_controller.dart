@@ -151,6 +151,33 @@ class ZapCategoryRow {
 /// A zap range as it stood when a channel was played from it.
 typedef _ZapRange = ({List<ZapEntry> entries, String categoryId, String label});
 
+/// What one fullscreen session leaves behind for the next one's "last
+/// channel" key: the channel it ended on and the channel before that, each
+/// with the range it was played from.
+///
+/// A [LiveZapController] lives exactly as long as its route, so without this
+/// the key was dead in every session that hadn't zapped yet — watch A
+/// fullscreen, Back to the list, open B fullscreen, and "last channel" did
+/// nothing, where a television's recall goes back to A. Opaque on purpose:
+/// the host only carries it from [LiveZapController.recall] to the next
+/// controller's constructor.
+class ZapRecall {
+  const ZapRecall._(
+    this._ended,
+    this._endedRange,
+    this._before,
+    this._beforeRange,
+  );
+
+  final ZapEntry _ended;
+  final _ZapRange _endedRange;
+  final ZapEntry? _before;
+  final _ZapRange? _beforeRange;
+
+  /// The channel the session ended on.
+  ZapEntry get ended => _ended;
+}
+
 /// The live zap state machine for one fullscreen session.
 ///
 /// Created by `channel_list_screen` when it opens the player, handed to
@@ -165,6 +192,7 @@ class LiveZapController extends ChangeNotifier {
     required this.catalog,
     String rangeCategoryId = '',
     String rangeLabel = 'Channels',
+    ZapRecall? recall,
     this.settleDelay = kZapSettleDelay,
     this.digitCommitDelay = kDigitEntryCommitDelay,
     this.messageDuration = kZapMessageDuration,
@@ -186,7 +214,20 @@ class LiveZapController extends ChangeNotifier {
          entries: entries,
          categoryId: rangeCategoryId,
          label: rangeLabel,
-       );
+       ) {
+    if (recall == null) return;
+    // Relaunching the channel the last session ended on: its own "last
+    // channel" is the one that session watched before it, or the key would
+    // recall the channel already on screen.
+    final launch = entries[initialIndex];
+    if (recall._ended != launch) {
+      _previousEntry = recall._ended;
+      _previousRange = recall._endedRange;
+    } else if (recall._before != null && recall._before != launch) {
+      _previousEntry = recall._before;
+      _previousRange = recall._beforeRange;
+    }
+  }
 
   final ZapCatalog catalog;
   final Duration settleDelay;
@@ -481,7 +522,13 @@ class LiveZapController extends ChangeNotifier {
   void channelDown() =>
       _moveTo((_index - 1 + _entries.length) % _entries.length);
 
-  /// Classic "last channel" recall. No-op until two channels have played.
+  /// What this session hands the next one for its "last channel" key — read
+  /// by the host when the route pops.
+  ZapRecall get recall =>
+      ZapRecall._(_playingEntry, _playingRange, _previousEntry, _previousRange);
+
+  /// Classic "last channel" recall. No-op until two channels have played —
+  /// counting the ones earlier sessions played ([ZapRecall]).
   ///
   /// When the quick list has since re-ranged away from the previous channel,
   /// the recall **brings its range back with it** — the range that channel was

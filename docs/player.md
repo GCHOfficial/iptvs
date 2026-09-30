@@ -2309,6 +2309,13 @@ deliberate:
   so Up/Down afterwards walk the list the user was in when they last watched it. It used to be a
   no-op there, which made the key dead after any cross-category or cross-source pick — exactly
   the pick it exists to undo.
+- **"Last channel" outlives the session.** A controller lives exactly as long as its route, so
+  the key used to be dead in every session that hadn't zapped yet — fullscreen A, Back to the list,
+  fullscreen B, and Right did nothing. The ending controller's `recall` (a `ZapRecall`: the channel
+  it ended on and the one before, each with its range) is kept by `channel_list_screen`
+  (`_zapRecall`, recorded only once the route was actually pushed, dropped when the repository
+  changes) and seeded into the next controller: its previous channel is the one the last session
+  ended on — or, when relaunching that same channel, the one it watched before it.
 - **The player never reaches back into the channel list mid-session**; the range lives entirely in
   the session. Only on return does the list follow a re-range (see "Selection restore" above).
 
