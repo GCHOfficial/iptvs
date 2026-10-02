@@ -510,18 +510,24 @@ Upstream fixed this in media_kit PR #1419, **merged 2026-06-24 and still in no
 published release** — 1.2.6 remains the newest version on pub.dev, and the release
 cadence has stalled (1.2.0 ~16 months ago, 1.2.1–1.2.6 clustered 7–9 months ago,
 nothing since). Waiting was therefore not a safe plan, so `media_kit` is now
-**git-pinned to the merge commit**:
+**git-pinned to an upstream `main` commit at or after the merge**:
 
 ```yaml
 dependency_overrides:
   media_kit:
     git:
       url: https://github.com/media-kit/media-kit.git
-      ref: d7b68a584e545a9e4fa5f9a600bfab556a106654
+      ref: c533e446755f51cf53c7e57aea873f2aa5355f81
       path: media_kit
 ```
 
-Pinned to an immutable merge SHA, not a branch tip — this repo pins action SHAs
+Originally pinned to the #1419 merge commit itself (`d7b68a58`); moved on 2026-10-02 to
+`c533e446` (upstream `main`, "fix: memory leaks" #1446), which keeps the option unchanged and
+adds FFI leak fixes on `_setProperty`/`_command`'s failure paths and property-string reads, a
+content-URI file-descriptor leak fix, and `observeEvent`/`unobserveEvent`. Moving the pin
+forward is the routine dependency-update step for this package while it has no release — read
+the compare's `media_kit/` diff and confirm `iosManageAudioSession` is still present first.
+Pinned to an immutable SHA, not a branch tip — this repo pins action SHAs
 everywhere and a floating `main` would make builds non-reproducible. Verified by
 reading the commit's own patch rather than trusting the PR title: it adds
 `final bool iosManageAudioSession` to `PlayerConfiguration` **defaulting to `true`**,

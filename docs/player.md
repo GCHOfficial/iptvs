@@ -303,7 +303,7 @@ docs/ios.md "Why not `AVPlayerViewController`").
   pending: the option defaults to `true`, and mpv's `ao_audiounit` driver unconditionally calls
   `AVAudioSession.setActive:` on init/dispose otherwise, clobbering AVPlayer's session state
   (background audio, lock-screen controls) on every mpv engine teardown. `media_kit` is
-  git-pinned to the merge commit carrying the option (media-kit/media-kit PR #1419, unreleased on
+  git-pinned to an upstream commit carrying the option (media-kit/media-kit PR #1419, unreleased on
   pub.dev — docs/ios.md Constraint 1). Both sites construct a `PlayerConfiguration`
   independently — the option is inert off iOS, so this is a one-line invariant to preserve at
   each site, not a runtime-configurable thing to get wrong once and fix everywhere.

@@ -33,7 +33,7 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.8
+  cupertino_icons: ^2.0.0
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
@@ -42,13 +42,13 @@ dependencies:
   sqlite3_flutter_libs: ^0.6.0+eol
   path: ^1.9.1
   path_provider: ^2.1.6
-  xml: ^7.0.1
+  xml: ^7.1.0
   flutter_secure_storage: ^11.2.0
   crypto: ^3.0.7
-  supabase_flutter: ^2.15.4
+  supabase_flutter: ^2.18.0
   url_launcher: ^6.3.2
-  cached_network_image: ^4.0.2
-  package_info_plus: ^10.2.1
+  cached_network_image: ^4.0.4
+  package_info_plus: ^10.2.2
   cryptography: ^2.9.0
   timezone: ^0.11.1
   # Renders the cloud-sync pairing code as a scannable panel link. Pure Dart
@@ -76,7 +76,7 @@ dependency_overrides:
   media_kit:
     git:
       url: https://github.com/media-kit/media-kit.git
-      ref: d7b68a584e545a9e4fa5f9a600bfab556a106654
+      ref: c533e446755f51cf53c7e57aea873f2aa5355f81
       path: media_kit
 
 dev_dependencies:
