@@ -93,6 +93,7 @@ export default defineConfig({
             { label: 'Cloud sync and pairing', slug: 'guides/cloud-sync' },
             { label: 'Profiles and PINs', slug: 'guides/profiles' },
             { label: 'TV remote controls', slug: 'guides/remote' },
+            { label: 'Favorites, catch-up and resuming', slug: 'guides/favorites' },
           ],
         },
         {

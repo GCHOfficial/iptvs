@@ -1085,7 +1085,7 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   (`lib/player/player_screen.dart`, `lib/screens/live_preview_controller.dart`) — done, not
   pending. The option defaults to `true`, so dropping it at either site silently reintroduces
   mpv's `ao_audiounit` clobbering the process-wide `AVAudioSession` state AVPlayer owns.
-  `media_kit` is git-pinned to the commit that adds the option (unreleased upstream — docs/ios.md
+  `media_kit` is git-pinned to an upstream commit carrying the option (unreleased — docs/ios.md
   Constraint 1). Both sites construct a `PlayerConfiguration` independently, so keep the line at
   each one when either site's construction changes.
 - **iOS `engineFailed` never dead-ends** — the reopen gate is three vetoes (native PiP, native app
