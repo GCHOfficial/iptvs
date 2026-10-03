@@ -56,11 +56,19 @@ const kPlaylistWorkload = HttpWorkloadPolicy(
   maximumDecodedBytes: 256 * _mib,
   totalTimeout: Duration(minutes: 5),
 );
+
+/// XMLTV guides are streamed to disk and parsed from there with the gzip
+/// inflated on the fly (`xmltvGuideFeed`, `parseXmltvFileBatched`), so neither
+/// number below is a memory budget any more — the body ceiling is disk, and the
+/// decoded ceiling is parse *time*, the one cost that still grows with a guide.
+/// Sized to take a combined "all countries" guide (~200 MB compressed, ~1.7 GB
+/// decompressed) with headroom. The total timeout covers the download only; a
+/// stalled server is still cut off by the 20 s idle timeout.
 const kEpgWorkload = HttpWorkloadPolicy(
   name: 'epg',
-  maximumBodyBytes: 128 * _mib,
-  maximumDecodedBytes: 512 * _mib,
-  totalTimeout: Duration(minutes: 8),
+  maximumBodyBytes: 512 * _mib,
+  maximumDecodedBytes: 4096 * _mib,
+  totalTimeout: Duration(minutes: 30),
 );
 const kProviderJsonWorkload = HttpWorkloadPolicy(
   name: 'provider JSON',

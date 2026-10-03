@@ -210,7 +210,7 @@ class M3uSource
       for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
         xmltvGuideFeed(
           url: urls[i],
-          download: (uri) => _download(uri, kEpgWorkload),
+          download: (uri, file) => _downloadToFile(uri, kEpgWorkload, file),
           tvgIdToChannelId: tvgIds,
           nameToChannelIds: hasPrimary && i == 0 ? const {} : names,
           token: token,
@@ -380,6 +380,25 @@ class M3uSource
         'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
       ),
     );
+    return operation.readBytes(await _open(uri, operation));
+  }
+
+  /// Streams [uri]'s body into [destination] without holding it in memory —
+  /// the XMLTV path, whose guides can run to hundreds of MB.
+  Future<void> _downloadToFile(
+    Uri uri,
+    HttpWorkloadPolicy policy,
+    File destination,
+  ) async {
+    final operation = HttpOperation(policy);
+    final bytes = await operation.readToFile(
+      await _open(uri, operation),
+      destination,
+    );
+    DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
+  }
+
+  Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {
     final req = await operation.wait(_http.getUrl(uri));
     if (userAgent != null) {
       req.headers.set(HttpHeaders.userAgentHeader, userAgent!);
@@ -392,7 +411,7 @@ class M3uSource
       // redactUrl strips credentials some providers embed in the playlist URL.
       throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
     }
-    return operation.readBytes(resp);
+    return resp;
   }
 }
 

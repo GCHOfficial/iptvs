@@ -405,14 +405,8 @@ class StalkerSource
   /// token. Those are the portal's credentials, and an arbitrary user-supplied
   /// host must never receive them. Only the profile's `User-Agent` carries
   /// over, since some guide hosts reject a default one.
-  Future<Uint8List> _downloadGuide(Uri uri) async {
-    final operation = HttpOperation(
-      kEpgWorkload,
-      onReadMetrics: (m) => DiagnosticsLog.instance.add(
-        'http:${kEpgWorkload.name}',
-        'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
-      ),
-    );
+  Future<void> _downloadGuide(Uri uri, File destination) async {
+    final operation = HttpOperation(kEpgWorkload);
     final req = await operation.wait(_http.getUrl(uri));
     req.headers.set(HttpHeaders.userAgentHeader, profile.userAgent);
     final resp = await operation.wait(req.close());
@@ -422,7 +416,12 @@ class StalkerSource
       await resp.drain<void>();
       throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
     }
-    return operation.readBytes(resp);
+    // Streamed to disk, never held — see `xmltvGuideFeed`.
+    final bytes = await operation.readToFile(resp, destination);
+    DiagnosticsLog.instance.add(
+      'http:${kEpgWorkload.name}',
+      'body_bytes=$bytes',
+    );
   }
 
   Future<List<Programme>> _portalEpg() async {

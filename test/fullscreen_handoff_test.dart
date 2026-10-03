@@ -743,7 +743,9 @@ void main() {
       // comes back on the channel the session ended on instead; where none
       // would have, none does.
       for (final decision in FullscreenHandoff.values) {
-        final resumed = act(decision: decision) != PreviewReturnAction.none;
+        final resumed =
+            act(decision: decision) != PreviewReturnAction.none ||
+            decision.seamless;
         expect(
           act(zapped: true, decision: decision),
           resumed
@@ -756,13 +758,30 @@ void main() {
         act(zapped: true, decision: FullscreenHandoff.adoptEmbedded),
         PreviewReturnAction.restartOnEndedChannel,
       );
+    });
+
+    test('a zapped adopted engine restarts even after the preview lost it', () {
+      // A zap that rebuilt the engine (cross-source headers, another buffer
+      // preset) un-adopts it on Android, and the `lost` event clears the
+      // preview's stream. The panel must still come back on the ended channel.
+      for (final decision in [
+        FullscreenHandoff.adoptNative,
+        FullscreenHandoff.adoptEmbedded,
+      ]) {
+        expect(
+          act(zapped: true, decision: decision, previewHasStream: false),
+          PreviewReturnAction.restartOnEndedChannel,
+          reason: decision.name,
+        );
+      }
       expect(
         act(
           zapped: true,
-          decision: FullscreenHandoff.adoptEmbedded,
+          decision: FullscreenHandoff.stopPreview,
           previewHasStream: false,
         ),
         PreviewReturnAction.stop,
+        reason: 'a stopped different-channel preview still stays stopped',
       );
     });
 

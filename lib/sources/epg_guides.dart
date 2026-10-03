@@ -7,7 +7,7 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 
 import '../data/diagnostics_log.dart';
 import '../data/load_token.dart';
@@ -47,39 +47,52 @@ class EpgGuideFeed {
 /// carrying its timeouts, credentials, `User-Agent` and byte-budget metrics, so
 /// injecting it keeps this helper usable by M3U, Xtream and Stalker alike
 /// without opening a second [HttpClient] or duplicating any of that setup.
+///
+/// The guide goes **to disk, not to memory**: [download] streams the body into
+/// a temporary file and the parser worker reads it back from there, inflating
+/// gzip as it goes. Holding the whole compressed and then the whole
+/// decompressed body is what used to cap guides at 128 MB — an "all countries"
+/// guide (~192 MB compressed, ~1.7 GB decompressed) was ~1.9 GB of heap on a
+/// 2 GiB TV box. Now its size costs disk while it is parsed and parse time,
+/// and the file is deleted however the feed ends (done, failed or cancelled).
 EpgGuideFeed xmltvGuideFeed({
   required String url,
-  required Future<Uint8List> Function(Uri uri) download,
+  required Future<void> Function(Uri uri, File destination) download,
   required Map<String, String> tvgIdToChannelId,
   required Map<String, List<String>> nameToChannelIds,
   LoadToken? token,
+  Directory? tempDirectory,
 }) => EpgGuideFeed(
   url: url,
   open: () async* {
-    final Uint8List bytes;
-    try {
-      bytes = await download(Uri.parse(url));
-    } on HttpWorkloadException catch (error) {
-      // The size limits are not arbitrary and raising them is not the answer:
-      // the whole compressed body and then the whole decompressed body are held
-      // in memory before parsing, so an "all countries" guide — 192 MB
-      // compressed, 1.7 GB decompressed at the time of writing — is roughly
-      // 1.9 GB of RAM on hardware that is routinely a 2 GiB TV box.
-      //
-      // What the user needs is the way out, not the number. Most publishers of
-      // a combined guide also publish per-country files two orders of magnitude
-      // smaller, and one of those is what a player wants.
-      throw HttpWorkloadException(
-        '${error.message}. A combined "all countries" guide is usually far too '
-        'large for a player — use a per-country or per-provider guide instead.',
-      );
-    }
-    yield* parseXmltvBatched(
-      bytes,
-      tvgIdToChannelId,
-      nameToChannelIds: nameToChannelIds,
-      token: token,
+    final dir = await (tempDirectory ?? Directory.systemTemp).createTemp(
+      'iptvs_guide_',
     );
+    try {
+      final file = File('${dir.path}/guide');
+      try {
+        await download(Uri.parse(url), file);
+      } on HttpWorkloadException catch (error) {
+        // What the user needs is the way out, not the number. Most publishers
+        // of a combined guide also publish per-country files two orders of
+        // magnitude smaller, and one of those is what a player wants.
+        throw HttpWorkloadException(
+          '${error.message}. Use a per-country or per-provider guide instead.',
+        );
+      }
+      yield* parseXmltvFileBatched(
+        file,
+        tvgIdToChannelId,
+        nameToChannelIds: nameToChannelIds,
+        token: token,
+      );
+    } finally {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {
+        // A temp file the OS will reap is not worth failing a guide over.
+      }
+    }
   },
 );
 

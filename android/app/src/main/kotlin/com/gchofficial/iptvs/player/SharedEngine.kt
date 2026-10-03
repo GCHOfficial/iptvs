@@ -85,6 +85,28 @@ object SharedEngine {
      *  at [fullscreenDetached] instead of releasing under the Activity. */
     private var stopAfterDetach = false
 
+    private class PendingOpen(
+        val context: Context,
+        val url: String,
+        val headers: Map<String, String>,
+        val muted: Boolean,
+        val preset: BufferPreset,
+    )
+
+    /**
+     * A preview open that arrived while fullscreen still held the engine,
+     * replayed at [fullscreenDetached].
+     *
+     * Dart only opens a preview once the fullscreen route has returned, so an
+     * open landing here means the Activity is on its way out and has not let
+     * go yet. That used to be *ignored* while the method call still answered
+     * `true`: Dart believed the preview was playing, and the stop it had sent
+     * just before (`stopAfterDetach`) then released the engine at detach — a
+     * black panel captioned with the channel. It is the return leg of a zapped
+     * session (stop, re-resolve, open) that sends exactly that sequence.
+     */
+    private var pendingOpen: PendingOpen? = null
+
     // The preview platform view's surface, when one is on screen.
     private var previewSurface: SurfaceView? = null
     private var previewAspectFrame: AspectRatioFrameLayout? = null
@@ -92,7 +114,9 @@ object SharedEngine {
     // Dart-facing preview callbacks (installed by MainActivity per session).
     var onPreviewError: ((String) -> Unit)? = null
     var onPreviewUnsupported: (() -> Unit)? = null
-    var onPreviewLost: (() -> Unit)? = null
+    /** Fullscreen let go of the adopted engine; the argument says whether it
+     *  was because the video can't be decoded (as opposed to a zap rebuild). */
+    var onPreviewLost: ((unsupported: Boolean) -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -106,9 +130,17 @@ object SharedEngine {
         bufferPreset: BufferPreset = BufferPreset.NORMAL,
     ) {
         if (adoptedByFullscreen) {
-            // Dart flows never preview while fullscreen owns the engine; refuse
-            // rather than steal the surface out from under the Activity.
-            Log.w(TAG, "openPreview ignored: engine adopted by fullscreen")
+            // Never steal the surface out from under the Activity — but never
+            // drop the request either (see [pendingOpen]).
+            Log.w(TAG, "openPreview deferred: engine adopted by fullscreen")
+            previewDiagnostics("open deferred until fullscreen detaches")
+            pendingOpen = PendingOpen(
+                context.applicationContext,
+                streamUrl,
+                requestHeaders,
+                muted,
+                bufferPreset,
+            )
             return
         }
         val existing = engine
@@ -252,13 +284,15 @@ object SharedEngine {
         headers = emptyMap()
         adoptedByFullscreen = false
         stopAfterDetach = false
+        pendingOpen = null
     }
 
     fun stopPreview() {
         if (adoptedByFullscreen) {
-            // Racy exit path (Dart's stop can land before the Activity's
-            // onDestroy): silence now, release once the Activity lets go.
+            // Racy exit path (Dart's stop can land before the Activity lets
+            // go): silence now, release once the Activity lets go.
             stopAfterDetach = true
+            pendingOpen = null
             engine?.pause()
             return
         }
@@ -320,8 +354,17 @@ object SharedEngine {
     fun fullscreenDetached() {
         if (!adoptedByFullscreen) return
         adoptedByFullscreen = false
+        val pending = pendingOpen
+        pendingOpen = null
         if (stopAfterDetach) {
+            // Released *before* the replayed open builds its engine, so a
+            // single-connection account never sees the two overlap.
             invalidate()
+            pending?.let { replayOpen(it) }
+            return
+        }
+        if (pending != null) {
+            replayOpen(pending)
             return
         }
         val e = engine ?: return
@@ -395,11 +438,17 @@ object SharedEngine {
         preset = bufferPreset
     }
 
-    /** Fullscreen swapped the adopted engine for mpv (unsupported video): the
-     *  shared engine is dead; tell Dart so the preview side resets. */
-    fun invalidateFromFullscreen() {
+    private fun replayOpen(p: PendingOpen) {
+        previewDiagnostics("deferred open replayed")
+        openPreview(p.context, p.url, p.headers, p.muted, p.preset)
+    }
+
+    /** Fullscreen released the adopted engine — swapped for mpv because the
+     *  video is undecodable ([unsupported]), or rebuilt because a zap changed
+     *  its headers or buffer preset. Tell Dart so the preview side resets. */
+    fun invalidateFromFullscreen(unsupported: Boolean) {
         invalidate()
-        onPreviewLost?.invoke()
+        onPreviewLost?.invoke(unsupported)
     }
 
     fun registerPreviewView(surface: SurfaceView, aspectFrame: AspectRatioFrameLayout) {

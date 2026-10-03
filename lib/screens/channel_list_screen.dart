@@ -339,6 +339,14 @@ PreviewReturnAction decidePreviewReturn({
     resume = PreviewReturnAction.none;
   }
   if (!zapped) return resume;
+  // An adopted engine is restarted on the ended channel whether or not the
+  // preview still reports a stream. A zap that changed something baked into
+  // the engine (a cross-source zap's headers, another source's buffer preset)
+  // rebuilds it, and on Android that un-adopts through `previewEvent: lost`,
+  // which clears the preview's stream behind the session's back — reading
+  // that as "nothing to bring back" left the panel empty after exactly the
+  // sessions that zapped furthest.
+  if (decision.seamless) return PreviewReturnAction.restartOnEndedChannel;
   return resume == PreviewReturnAction.none
       ? PreviewReturnAction.stop
       : PreviewReturnAction.restartOnEndedChannel;

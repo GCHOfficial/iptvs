@@ -108,10 +108,10 @@ class MainActivity : FlutterActivity() {
                             mapOf("event" to "unsupported"),
                         )
                     }
-                    SharedEngine.onPreviewLost = {
+                    SharedEngine.onPreviewLost = { unsupported ->
                         previewChannel.invokeMethod(
                             "previewEvent",
-                            mapOf("event" to "lost"),
+                            mapOf("event" to "lost", "unsupported" to unsupported),
                         )
                     }
                     SharedEngine.openPreview(

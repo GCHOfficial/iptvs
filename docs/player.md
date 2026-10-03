@@ -1692,8 +1692,16 @@ Going fullscreen on the previewed channel passes `adoptShared` → `HdrPlayerAct
 the running engine (`SharedEngine.adoptForFullscreen`, keyed on the URL): only the video output
 moves to its SurfaceView (`claimViewSurface`), so audio/decoder/buffer never stop — and only **one
 provider connection** ever exists (single-connection IPTV accounts). On exit the surface is handed
-back (`fullscreenDetached`); the Activity never releases an adopted engine, and `onStop` skips its
-usual pause when finishing-while-adopted. Engine callbacks (`onUnsupportedVideo` /
+back (`fullscreenDetached`) **from `finish()`, not `onDestroy`** (`handBackSharedEngine`, which
+also drops the Activity's `engine` reference so nothing later in its lifetime touches it); the
+Activity never releases an adopted engine. The timing is load-bearing: the result reaches Dart as
+soon as `MainActivity` resumes, while a finishing Activity's `onDestroy` waits for the next one to
+go idle — seconds on a busy TV box. A zapped session's whole return leg (stop, re-resolve, open the
+ended channel) used to run inside that gap: the stop was parked as `stopAfterDetach`, the open was
+**ignored while still answering `true`**, and the late detach then released the engine — a black,
+captioned preview that only reproduced on slow hardware. `openPreview` now also *defers* rather
+than drops an open that lands while adopted (`pendingOpen`, replayed at detach after any parked
+stop has released the old engine), as a backstop for any exit path that skips `finish()`. Engine callbacks (`onUnsupportedVideo` /
 `onRecoverableError`) are mutable vars for the same reason — each host rebinds them.
 
 **The surface type is load-bearing, and the original reasoning for it was wrong.** This was a
@@ -2132,6 +2140,13 @@ makes "which channel did this session end on" answerable after the fact —
   the session actually ended on via `LivePreviewController.adoptFullscreenChannel` — called *before*
   `adoptedByFullscreen` is cleared, so a clean EOF landing in that window restarts the right channel
   rather than the launch one the controller would otherwise still believe in.
+  **A zapped adopted handoff restarts even when the preview reports no stream.** A zap that rebuilt
+  the engine (a cross-source zap's headers, another source's buffer preset) un-adopts it through
+  `previewEvent: lost`, which clears the preview's `stream`; reading that as "nothing to bring
+  back" left the panel empty after exactly the sessions that zapped furthest. `lost` also carries
+  `unsupported`, and only an engine lost to undecodable video (the mpv fallback) marks the channel
+  native-unsupported — a zap rebuild used to mark the *launch* channel, pushing its later previews
+  onto media_kit for the rest of the session.
 
 ### Android native input + banner (Phase 2)
 
@@ -2210,10 +2225,11 @@ otherwise be wrong the moment the stream underneath changes:
   (same-source zapping never changes headers or preset). External subtitle sidecars are always
   cleared (`subtitles = emptyList()`) — a zapped channel's contract carries none, and keeping the
   launch channel's would attach the wrong files.
-- **A rebuild un-adopts an adopted engine first**, via `SharedEngine.invalidateFromFullscreen()` —
+- **A rebuild un-adopts an adopted engine first**, via
+  `SharedEngine.invalidateFromFullscreen(unsupported = false)` (the mpv fallback passes `true`) —
   the same shape `fallbackToMpv` already uses — rather than a bare `release()`, because the preview
-  still believes it owns that engine; releasing it behind the holder's back would leave `onDestroy`
-  handing a dead object to `fullscreenDetached()`. It keeps `DebugCounters.exoEngines`/
+  still believes it owns that engine; releasing it behind the holder's back would leave the exit's
+  hand-back giving a dead object to `fullscreenDetached()`. It keeps `DebugCounters.exoEngines`/
   `sharedEngineLive` balanced: release decrements, the fresh engine's constructor increments.
   **The engine kind is preserved across a rebuild** (mpv stays mpv, ExoPlayer stays ExoPlayer) —
   falling back to mpv is a one-way, per-session decision about what this device can decode, and a

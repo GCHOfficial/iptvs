@@ -55,9 +55,11 @@ next chunk, and the `xml` package's event decoder keeps a `carry` string for a
 tag split across chunks; a naive per-chunk `utf8.decode` would corrupt any
 non-ASCII character straddling a boundary. Pinned by the "non-ASCII titles
 survive the parser chunk boundaries" test in `test/widget_test.dart`. What is
-still *not* streamed is the HTTP body itself — it is fully buffered before the
-worker starts (`kEpgWorkload` permits 128 MiB body / 512 MiB decoded), which is
-the remaining memory term. All three keep the existing inline path below
+was still not streamed was the HTTP body itself; it now is — the guide is
+streamed to a temp file and the worker inflates and parses it from disk
+(`parseXmltvFileBatched`), so a guide's size no longer costs memory at all
+(`kEpgWorkload`: 512 MiB body / 4 GiB decoded; measurements in
+docs/sources.md "Guide size"). All three keep the existing inline path below
 their isolate thresholds (256 KB for Xtream/Stalker JSON, 64 KB for XMLTV) —
 isolate spawn overhead isn't worth it for the many small calls. Disk-backed M3U
 parsing is explicitly deferred: `ChannelListScreen` and its controllers hold

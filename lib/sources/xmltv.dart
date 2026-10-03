@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
-import 'package:xml/xml.dart';
 import 'package:xml/xml_events.dart';
 
 import '../data/load_token.dart';
@@ -30,29 +30,76 @@ const _isolateXmltvThreshold = 64 * 1024;
 /// at a time. 256 KiB is large enough that per-chunk overhead is noise.
 const _xmlChunkBytes = 256 * 1024;
 
-/// Feed [data] to the XML parser in bounded pieces.
+/// [data] as a stream of bounded slices (views, not copies).
+Stream<List<int>> _chunksOf(Uint8List data) async* {
+  for (var i = 0; i < data.length; i += _xmlChunkBytes) {
+    final end = i + _xmlChunkBytes;
+    yield Uint8List.sublistView(data, i, end < data.length ? end : data.length);
+  }
+}
+
+/// Where a guide's raw bytes are: in memory, or in a file a download streamed
+/// to disk. Exactly one of the two is set. Both cross an isolate boundary
+/// cheaply — a path is a string, and in-memory input is only ever small or a
+/// test fixture.
+typedef _GuideInput = ({Uint8List? bytes, String? path});
+
+/// The guide's raw bytes, decompressed if it is gzip, as a stream.
 ///
-/// Correctness note: this is only safe because both stages buffer across chunk
-/// boundaries. [Utf8Decoder] in chunked mode carries an incomplete multi-byte
-/// sequence into the next chunk, and the `xml` package's event decoder keeps a
-/// `carry` string so a tag or attribute split across two chunks still parses.
-/// Splitting the bytes naively into separate `utf8.decode` calls would corrupt
-/// any non-ASCII character that straddles a boundary — which is most of a
-/// real-world guide's programme titles.
-Stream<String> _decodeChunked(Uint8List data) {
-  Stream<List<int>> chunks() async* {
-    for (var i = 0; i < data.length; i += _xmlChunkBytes) {
-      final end = i + _xmlChunkBytes;
-      yield Uint8List.sublistView(
-        data,
-        i,
-        end < data.length ? end : data.length,
+/// **Nothing here holds the guide in memory.** The compressed bytes come off
+/// disk 64 KiB at a time, gzip inflates them as they arrive, and the decoded
+/// stream feeds the XML parser chunk by chunk — so a guide's size costs disk
+/// and parse time, never RAM. Holding the whole compressed body and then the
+/// whole decompressed body was what capped guides at 128 MB: an "all
+/// countries" guide (~192 MB compressed, ~1.7 GB decompressed) was roughly
+/// 1.9 GB of heap on hardware that is routinely a 2 GiB TV box.
+///
+/// [kEpgWorkload]'s decoded ceiling still applies, as a bound on *work* — a
+/// tiny gzip can still expand without limit, and the count is kept here, on
+/// the decoded stream, rather than trusted to any header.
+Future<Stream<List<int>>> _decodedGuideBytes(_GuideInput input) async {
+  final Stream<List<int>> raw;
+  final bool gzipped;
+  final bytes = input.bytes;
+  if (bytes != null) {
+    raw = _chunksOf(bytes);
+    gzipped = isGzipBytes(bytes);
+  } else {
+    final file = File(input.path!);
+    final handle = await file.open();
+    try {
+      gzipped = isGzipBytes(await handle.read(2));
+    } finally {
+      await handle.close();
+    }
+    raw = file.openRead();
+  }
+  final decoded = gzipped ? raw.transform(gzip.decoder) : raw;
+  return _boundedBytes(decoded, kEpgWorkload.maximumDecodedBytes);
+}
+
+Stream<List<int>> _boundedBytes(Stream<List<int>> source, int maximum) async* {
+  var total = 0;
+  await for (final chunk in source) {
+    total += chunk.length;
+    if (total > maximum) {
+      throw HttpWorkloadException(
+        'decoded guide is over the ${formatBytes(maximum)} limit',
       );
     }
+    yield chunk;
   }
-
-  return chunks().transform(const Utf8Decoder(allowMalformed: true));
 }
+
+/// The guide as XML event lists, ready for [_GuideExtractor].
+///
+/// `validateNesting` is what makes a truncated download an error rather than
+/// a short guide: the extractor only looks at the elements it wants, so
+/// without it a body cut off between two programmes would parse "cleanly".
+Future<Stream<List<XmlEvent>>> _guideEvents(_GuideInput input) async =>
+    (await _decodedGuideBytes(input))
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .toXmlEvents(validateNesting: true);
 
 /// Parse XMLTV [bytes] (gzip-aware) into [Programme]s, keeping only programmes
 /// on a channel that [XmltvChannelResolver] maps onto one of ours. Used by M3U
@@ -67,105 +114,226 @@ Future<List<Programme>> parseXmltv(
   Map<String, String> tvgIdToChannelId, {
   Map<String, List<String>> nameToChannelIds = const {},
 }) {
-  final args = (bytes, tvgIdToChannelId, nameToChannelIds);
+  final args = (
+    (bytes: bytes, path: null) as _GuideInput,
+    tvgIdToChannelId,
+    nameToChannelIds,
+  );
   // A tiny gzip can expand into hundreds of MB, so compressed input always
   // goes to the worker even when it is below the ordinary isolate threshold.
   if (!isGzipBytes(bytes) && bytes.length < _isolateXmltvThreshold) {
-    return _parseXmltvBytes(args);
+    return _parseXmltvAll(args);
   }
-  return compute(_parseXmltvBytes, args);
+  return compute(_parseXmltvAll, args);
 }
 
-/// The XMLTV elements a parse pass selects.
+/// Pulls programmes out of a stream of XMLTV events, one event at a time.
 ///
-/// `channel` is here for the name-matching fallback, which needs the guide's
-/// own `<display-name>`s. Taking both in one pass is safe *and* sufficient
-/// because the XMLTV DTD fixes document order as `(channel*, programme*)`: the
-/// declarations are all seen before the first programme, so
-/// [XmltvChannelResolver] can settle every claim globally without a second
-/// pass over a multi-hundred-MB guide.
-bool _isWantedElement(XmlStartElementEvent e) =>
-    e.name == 'programme' || e.name == 'channel';
+/// This replaced `selectSubtreeEvents(...).toXmlNodes()`, which built a full
+/// DOM subtree for **every** `<programme>` in the guide and only then asked
+/// whether its channel was one of ours. For a provider's own guide nearly
+/// every programme is, so that cost little; for the guides users actually add
+/// — a country or "all countries" file of which a playlist matches a few
+/// hundred channels out of tens of thousands — nearly every programme is
+/// thrown away, and building it first was most of the parse. Here a
+/// programme's channel, start and stop are read off its *start tag*, and one
+/// that can't contribute is skipped by depth-counting to its end tag: its text
+/// is never even entity-decoded.
+///
+/// Doing it at event level is also what makes that early decision **sound**.
+/// [XmltvChannelResolver] settles its claims at the first `resolve`, and must
+/// have seen every `<channel>` declaration by then (the XMLTV DTD orders them
+/// first). A `selectSubtreeEvents` predicate runs over a whole event *list*
+/// before any node from that list reaches the handler, so a resolve from the
+/// predicate could fire before the last channels in the same chunk were
+/// declared. One sequential pass has no such window.
+///
+/// Matches the DOM version's reading exactly: a channel's names are its
+/// direct `<display-name>` children, a programme's title and description are
+/// its first direct `<title>`/`<desc>`, and an element's text is the
+/// concatenation of all text and CDATA beneath it, trimmed.
+class _GuideExtractor {
+  _GuideExtractor(this.resolver);
 
-/// Feeds one selected node to [resolver] and returns the [Programme]s it
-/// yields — none for a `<channel>` declaration, and one *per claimed channel*
-/// for a `<programme>` (a single guide entry can serve a playlist's HD and SD
-/// rows both).
-Iterable<Programme> _handleNode(XmlNode node, XmltvChannelResolver resolver) {
-  if (node is! XmlElement) return const [];
-  if (node.localName == 'channel') {
-    final id = node.getAttribute('id');
-    if (id != null) {
-      resolver.declareChannel(
-        id,
-        node
-            .findElements('display-name')
-            .map((e) => e.innerText.trim())
-            .where((t) => t.isNotEmpty),
+  final XmltvChannelResolver resolver;
+
+  /// Depth inside the element being captured or skipped; 0 when outside both.
+  int _depth = 0;
+  bool _skipping = false;
+
+  // `<channel>` capture.
+  bool _inChannel = false;
+  String? _channelId;
+  final List<String> _names = [];
+
+  // `<programme>` capture.
+  bool _inProgramme = false;
+  List<String> _channelIds = const [];
+  DateTime? _start;
+  DateTime? _stop;
+  String? _title;
+  String? _desc;
+
+  // The direct child whose text is being collected, if any.
+  String? _field;
+  final StringBuffer _text = StringBuffer();
+
+  void add(XmlEvent event, List<Programme> out) {
+    if (_skipping) {
+      if (event is XmlStartElementEvent) {
+        if (!event.isSelfClosing) _depth++;
+      } else if (event is XmlEndElementEvent) {
+        if (--_depth == 0) _skipping = false;
+      }
+      return;
+    }
+    if (_inChannel || _inProgramme) {
+      _inside(event, out);
+      return;
+    }
+    if (event is! XmlStartElementEvent) return;
+    switch (event.name) {
+      case 'channel':
+        final id = _attribute(event, 'id');
+        if (event.isSelfClosing) {
+          if (id != null) resolver.declareChannel(id, const []);
+          return;
+        }
+        _inChannel = true;
+        _depth = 1;
+        _channelId = id;
+        _names.clear();
+      case 'programme':
+        final guideId = _attribute(event, 'channel');
+        final channelIds = guideId == null
+            ? const <String>[]
+            : resolver.resolve(guideId);
+        final start = channelIds.isEmpty
+            ? null
+            : parseXmltvTime(_attribute(event, 'start'));
+        final stop = start == null
+            ? null
+            : parseXmltvTime(_attribute(event, 'stop'));
+        if (stop == null) {
+          // Not one of ours, or unusable: skip the subtree unread.
+          if (!event.isSelfClosing) {
+            _skipping = true;
+            _depth = 1;
+          }
+          return;
+        }
+        _channelIds = channelIds;
+        _start = start;
+        _stop = stop;
+        _title = null;
+        _desc = null;
+        if (event.isSelfClosing) {
+          _emit(out);
+          return;
+        }
+        _inProgramme = true;
+        _depth = 1;
+    }
+  }
+
+  void _inside(XmlEvent event, List<Programme> out) {
+    if (event is XmlStartElementEvent) {
+      if (_depth == 1 && _field == null && _wantsField(event.name)) {
+        if (event.isSelfClosing) {
+          _closeField(event.name, '');
+          return;
+        }
+        _field = event.name;
+        _text.clear();
+      }
+      if (!event.isSelfClosing) _depth++;
+    } else if (event is XmlEndElementEvent) {
+      _depth--;
+      if (_depth == 1 && _field != null) {
+        _closeField(_field!, _text.toString());
+        _field = null;
+      } else if (_depth == 0) {
+        _finish(out);
+      }
+    } else if (_field != null) {
+      if (event is XmlTextEvent) {
+        _text.write(event.value);
+      } else if (event is XmlCDATAEvent) {
+        _text.write(event.value);
+      }
+    }
+  }
+
+  bool _wantsField(String name) => _inChannel
+      ? name == 'display-name'
+      : (name == 'title' && _title == null) ||
+            (name == 'desc' && _desc == null);
+
+  void _closeField(String name, String text) {
+    final trimmed = text.trim();
+    if (_inChannel) {
+      if (trimmed.isNotEmpty) _names.add(trimmed);
+    } else if (name == 'title') {
+      _title = trimmed;
+    } else {
+      _desc = trimmed;
+    }
+  }
+
+  void _finish(List<Programme> out) {
+    if (_inChannel) {
+      _inChannel = false;
+      final id = _channelId;
+      if (id != null) resolver.declareChannel(id, List.of(_names));
+      return;
+    }
+    _inProgramme = false;
+    _emit(out);
+  }
+
+  /// One [Programme] *per claimed channel* — a single guide entry can serve a
+  /// playlist's HD and SD rows both.
+  void _emit(List<Programme> out) {
+    for (final channelId in _channelIds) {
+      out.add(
+        Programme(
+          channelId: channelId,
+          start: _start!,
+          stop: _stop!,
+          title: _title ?? '',
+          description: _desc,
+        ),
       );
     }
-    return const [];
   }
-  return _programmesFromNode(node, resolver);
+
+  static String? _attribute(XmlStartElementEvent event, String name) {
+    for (final attribute in event.attributes) {
+      if (attribute.name == name) return attribute.value;
+    }
+    return null;
+  }
 }
 
-/// Top-level worker so it can run under [compute]. Takes a record of the raw
-/// [Uint8List] bytes and the tvg-id → channel-id map (both sendable across the
-/// isolate boundary), returns the mapped [Programme]s.
-Future<List<Programme>> _parseXmltvBytes(
-  (Uint8List, Map<String, String>, Map<String, List<String>>) args,
+/// Top-level worker so it can run under [compute]. Returns every mapped
+/// [Programme] in one list.
+Future<List<Programme>> _parseXmltvAll(
+  (_GuideInput, Map<String, String>, Map<String, List<String>>) args,
 ) async {
-  final (bytes, tvgIdToChannelId, nameToChannelIds) = args;
-  final resolver = XmltvChannelResolver(
-    tvgIdToChannelId: tvgIdToChannelId,
-    nameToChannelIds: nameToChannelIds,
-  );
-  // A .xml.gz file arrives as raw gzip (magic 0x1f 0x8b) with no transfer
-  // encoding, so decompress it ourselves.
-  final data = isGzipBytes(bytes)
-      ? decodeGzipBounded(bytes, kEpgWorkload.maximumDecodedBytes)
-      : bytes;
-  final out = <Programme>[];
-  await _decodeChunked(data)
-      .toXmlEvents()
-      .normalizeEvents()
-      .selectSubtreeEvents(_isWantedElement)
-      .toXmlNodes()
-      .expand((nodes) => nodes)
-      .forEach((node) => out.addAll(_handleNode(node, resolver)));
-  return out;
-}
-
-/// Builds the [Programme]s one `<programme>` XML node contributes — empty when
-/// the node should be skipped: no `channel` attribute, a `channel` that maps to
-/// none of ours, or `start`/`stop` that don't parse. Shared by
-/// [_parseXmltvBytes] and the [parseXmltvBatched] worker so the
-/// element-handling rules live in exactly one place.
-Iterable<Programme> _programmesFromNode(
-  XmlElement node,
-  XmltvChannelResolver resolver,
-) {
-  final guideId = node.getAttribute('channel');
-  if (guideId == null) return const [];
-  final channelIds = resolver.resolve(guideId);
-  if (channelIds.isEmpty) return const []; // not one of our channels
-  final start = parseXmltvTime(node.getAttribute('start'));
-  final stop = parseXmltvTime(node.getAttribute('stop'));
-  if (start == null || stop == null) return const [];
-  // Read once and reuse across claims — `innerText` walks the subtree, and a
-  // guide channel serving several of our rows would otherwise re-walk it per
-  // row for every programme in the guide.
-  final title = node.getElement('title')?.innerText.trim() ?? '';
-  final description = node.getElement('desc')?.innerText.trim();
-  return channelIds.map(
-    (channelId) => Programme(
-      channelId: channelId,
-      start: start,
-      stop: stop,
-      title: title,
-      description: description,
+  final (input, tvgIdToChannelId, nameToChannelIds) = args;
+  final extractor = _GuideExtractor(
+    XmltvChannelResolver(
+      tvgIdToChannelId: tvgIdToChannelId,
+      nameToChannelIds: nameToChannelIds,
     ),
   );
+  final out = <Programme>[];
+  await for (final events in await _guideEvents(input)) {
+    for (final event in events) {
+      extractor.add(event, out);
+    }
+  }
+  return out;
 }
 
 /// Below this many buffered programmes, [parseXmltvBatched] flushes a batch.
@@ -216,10 +384,50 @@ Stream<List<Programme>> parseXmltvBatched(
   if (token?.isCancelled ?? false) throw const LoadCancelledException();
 
   if (!isGzipBytes(bytes) && bytes.length < _isolateXmltvThreshold) {
-    yield await _parseXmltvBytes((bytes, tvgIdToChannelId, nameToChannelIds));
+    yield await _parseXmltvAll((
+      (bytes: bytes, path: null),
+      tvgIdToChannelId,
+      nameToChannelIds,
+    ));
     return;
   }
+  yield* _parseInWorker(
+    (bytes: bytes, path: null),
+    tvgIdToChannelId,
+    nameToChannelIds,
+    batchSize,
+    token,
+  );
+}
 
+/// [parseXmltvBatched] over a guide already on disk — the path every
+/// downloaded guide takes (see `xmltvGuideFeed`). Always parses on the worker
+/// isolate, which reads [file] itself: only the path crosses the boundary, so
+/// neither isolate ever holds the guide.
+Stream<List<Programme>> parseXmltvFileBatched(
+  File file,
+  Map<String, String> tvgIdToChannelId, {
+  Map<String, List<String>> nameToChannelIds = const {},
+  int batchSize = _defaultEpgBatchSize,
+  LoadToken? token,
+}) async* {
+  if (token?.isCancelled ?? false) throw const LoadCancelledException();
+  yield* _parseInWorker(
+    (bytes: null, path: file.path),
+    tvgIdToChannelId,
+    nameToChannelIds,
+    batchSize,
+    token,
+  );
+}
+
+Stream<List<Programme>> _parseInWorker(
+  _GuideInput input,
+  Map<String, String> tvgIdToChannelId,
+  Map<String, List<String>> nameToChannelIds,
+  int batchSize,
+  LoadToken? token,
+) async* {
   final receivePort = ReceivePort();
   Isolate? isolate;
   // Set from the worker's handshake message (its first send) — the channel
@@ -228,7 +436,7 @@ Stream<List<Programme>> parseXmltvBatched(
   try {
     isolate = await Isolate.spawn(_parseXmltvBatchedWorker, (
       receivePort.sendPort,
-      bytes,
+      input,
       tvgIdToChannelId,
       nameToChannelIds,
       batchSize,
@@ -261,7 +469,7 @@ Stream<List<Programme>> parseXmltvBatched(
 }
 
 /// Isolate entry point for [parseXmltvBatched]'s large-guide path. Decodes
-/// (gzip-aware, mirroring [_parseXmltvBytes]) and event-parses [args]' bytes,
+/// (gzip-aware, streamed — see [_decodedGuideBytes]) and event-parses the guide,
 /// sending a `List<Programme>` batch to the main isolate every `batchSize`
 /// programmes plus a final partial batch, then a `null` done sentinel. A
 /// parse failure is caught and forwarded as an [_XmltvBatchError] — thrown
@@ -279,42 +487,42 @@ Stream<List<Programme>> parseXmltvBatched(
 /// before parsing on. `await for` (rather than the single-list path's
 /// `forEach`) is what makes that mid-loop await possible.
 void _parseXmltvBatchedWorker(
-  (SendPort, Uint8List, Map<String, String>, Map<String, List<String>>, int)
+  (SendPort, _GuideInput, Map<String, String>, Map<String, List<String>>, int)
   args,
 ) async {
-  final (sendPort, bytes, tvgIdToChannelId, nameToChannelIds, batchSize) = args;
-  final resolver = XmltvChannelResolver(
-    tvgIdToChannelId: tvgIdToChannelId,
-    nameToChannelIds: nameToChannelIds,
+  final (sendPort, input, tvgIdToChannelId, nameToChannelIds, batchSize) = args;
+  final extractor = _GuideExtractor(
+    XmltvChannelResolver(
+      tvgIdToChannelId: tvgIdToChannelId,
+      nameToChannelIds: nameToChannelIds,
+    ),
   );
   final ackPort = ReceivePort();
   sendPort.send(ackPort.sendPort); // handshake: ack channel first
   final acks = StreamIterator<dynamic>(ackPort);
   try {
-    final data = isGzipBytes(bytes)
-        ? decodeGzipBounded(bytes, kEpgWorkload.maximumDecodedBytes)
-        : bytes;
     var batch = <Programme>[];
-    final nodes = _decodeChunked(data)
-        .toXmlEvents()
-        .normalizeEvents()
-        .selectSubtreeEvents(_isWantedElement)
-        .toXmlNodes()
-        .expand((nodes) => nodes);
-    await for (final node in nodes) {
-      batch.addAll(_handleNode(node, resolver));
-      if (batch.length >= batchSize) {
-        sendPort.send(batch);
-        batch = <Programme>[];
-        // Wait for the ack before parsing on. If the consumer went away
-        // without acking (cancellation), it's a moot point in practice —
-        // `parseXmltvBatched`'s `finally` kills this isolate outright — but
-        // bail cleanly if the ack port ever closes instead.
-        if (!await acks.moveNext()) return;
+    await for (final events in await _guideEvents(input)) {
+      for (final event in events) {
+        extractor.add(event, batch);
+        if (batch.length >= batchSize) {
+          // A programme serving several of our rows adds one per row, so a
+          // batch can overshoot; send exactly [batchSize] and carry the rest.
+          final rest = batch.sublist(batchSize);
+          sendPort.send(batch.sublist(0, batchSize));
+          batch = rest;
+          // Wait for the ack before parsing on. If the consumer went away
+          // without acking (cancellation), it's a moot point in practice —
+          // `parseXmltvBatched`'s `finally` kills this isolate outright — but
+          // bail cleanly if the ack port ever closes instead.
+          if (!await acks.moveNext()) return;
+        }
       }
     }
-    if (batch.isNotEmpty) {
-      sendPort.send(batch);
+    while (batch.isNotEmpty) {
+      final take = batch.length < batchSize ? batch.length : batchSize;
+      sendPort.send(batch.sublist(0, take));
+      batch = batch.sublist(take);
       if (!await acks.moveNext()) return;
     }
     sendPort.send(null);
