@@ -614,11 +614,17 @@ class LivePreviewController extends ChangeNotifier {
           _set(() => error = redactText('$e'));
         }
       case 'lost':
-        // Fullscreen swapped the adopted shared engine for mpv (unsupported
-        // video), so the native preview is gone. Clear the preview; the next
-        // (re)focus starts a fresh one on the fallback path.
+        // Fullscreen let go of the adopted shared engine, so the native
+        // preview is gone. Clear the preview; the next start opens a fresh
+        // one. Only an engine lost to **undecodable video** (fullscreen fell
+        // back to mpv) says anything about this channel: one rebuilt because a
+        // zap changed its headers or buffer preset does not, and marking the
+        // launch channel unsupported for that pushed every later preview of
+        // it onto media_kit for the rest of the session.
         final id = channelId;
-        if (id != null) _nativeUnsupportedIds.add((previewSourceId, id));
+        if (id != null && args?['unsupported'] == true) {
+          _nativeUnsupportedIds.add((previewSourceId, id));
+        }
         _set(() {
           nativeActive = false;
           stream = null;

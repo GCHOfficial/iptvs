@@ -302,7 +302,7 @@ class XtreamSource
       for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
         xmltvGuideFeed(
           url: urls[i],
-          download: (uri) => _download(uri, kEpgWorkload),
+          download: (uri, file) => _downloadToFile(uri, kEpgWorkload, file),
           tvgIdToChannelId: tvgIds,
           // The panel's own guide keeps exact `tvg-id` matching only — see
           // [epgNameIndexFor].
@@ -568,6 +568,25 @@ class XtreamSource
         'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
       ),
     );
+    return operation.readBytes(await _open(uri, operation));
+  }
+
+  /// Streams [uri]'s body into [destination] without holding it in memory —
+  /// the XMLTV path, whose guides can run to hundreds of MB.
+  Future<void> _downloadToFile(
+    Uri uri,
+    HttpWorkloadPolicy policy,
+    File destination,
+  ) async {
+    final operation = HttpOperation(policy);
+    final bytes = await operation.readToFile(
+      await _open(uri, operation),
+      destination,
+    );
+    DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
+  }
+
+  Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {
     final req = await operation.wait(_http.getUrl(uri));
     final resp = await operation.wait(req.close());
     if (resp.statusCode != 200) {
@@ -577,7 +596,7 @@ class XtreamSource
       // redactUrl strips the username/password query params from the panel URL.
       throw StateError('HTTP ${resp.statusCode} from ${redactUrl(uri)}');
     }
-    return operation.readBytes(resp);
+    return resp;
   }
 
   Future<MediaPage> _aggregateMediaPage(

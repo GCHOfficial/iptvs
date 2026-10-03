@@ -392,8 +392,12 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   catalogs ≥256 KB go bytes-in→typed-list-out through top-level workers
   (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels`) — the
   dynamic JSON graph never crosses the isolate boundary; smaller payloads parse inline (isolate
-  spawn would dominate). Large XMLTV guides stream bounded `Programme` batches
-  (`parseXmltvBatched`, single in-flight batch by design) straight into `replaceEpgStream`.
+  spawn would dominate). Downloaded XMLTV guides go **to a temp file, never to memory**
+  (`xmltvGuideFeed` → `readToFile`), and the worker inflates and event-parses them from disk
+  (`parseXmltvFileBatched`), skipping unmatched programmes at the start tag — so a guide's size
+  costs disk and parse time, not RAM (`kEpgWorkload` 512 MiB body / 4 GiB decoded; don't
+  reintroduce a whole-body read on that path — docs/sources.md "Guide size"). Batches stay
+  bounded (single in-flight batch by design) on their way into `replaceEpgStream`.
   Sources with a batched guide implement the optional `BatchedEpgSource` capability interface —
   deliberately separate from `Source`, since `implements` doesn't inherit default bodies.
   Don't add new parse/map work on the main isolate for provider-sized payloads, and don't
@@ -809,7 +813,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `vo->dwidth/dheight`, already correct there). A repaint-level "VO refresh" fixes neither.
 - **Android preview and fullscreen share one engine** (`SharedEngine` adoption) — only one
   provider connection ever exists (single-connection accounts); the Activity never releases an
-  adopted engine, and the preview is never paused around the *adopted* handoff. But **any
+  adopted engine and **hands it back in `finish()`, not `onDestroy`** (Dart's return leg runs as
+  soon as the result arrives, and `onDestroy` can lag seconds on a TV box — a zapped return's
+  stop/open used to land on a still-adopted engine and leave the preview black), and the preview is never paused around the *adopted* handoff. But **any
   *non*-adopted fullscreen (last-channel zap, EPG-grid play) must silence the running preview** in
   `_openLivePlayer` — even one previewing a *different* channel — or its audio doubles up behind the
   new pipeline: a same-channel preview is *paused* (resumed on return, `pausedPreview`), a

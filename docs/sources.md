@@ -140,6 +140,34 @@ The running `Source` still holds the old URL list, so the guides take effect whe
 next built — the same "applies on next load" contract the catch-up overrides have, and what the
 save confirmation says.
 
+### Guide size: disk and parse time, not memory
+
+Every downloaded XMLTV guide — provider and user-added alike — is **streamed to a temp file**
+(`xmltvGuideFeed` → the source's `_downloadToFile`/`_downloadGuide` → `HttpOperation.readToFile`)
+and parsed from there on the worker isolate (`parseXmltvFileBatched`), which inflates gzip as it
+reads. Only the file *path* crosses the isolate boundary; the temp directory is deleted however
+the feed ends. The guide used to be held whole — compressed body, then decompressed body — which
+is why `kEpgWorkload` stopped at 128 MiB / 512 MiB: an "all countries" guide (~192 MB compressed,
+~1.7 GB decompressed) was ~1.9 GB of heap on a 2 GiB TV box. The limits are now **512 MiB body
+(disk) / 4 GiB decoded (a bound on parse work)**, 30-minute download deadline, 20 s idle timeout
+unchanged.
+
+The parse itself is event-level (`_GuideExtractor` in `xmltv.dart`): a programme's channel,
+start and stop are read off its start tag, and one that can't contribute is skipped by depth
+counting without building — or even entity-decoding — its subtree. That matters because a
+user-added guide is mostly *other people's* channels. It is also what makes the early decision
+sound: `XmltvChannelResolver` freezes its claims at the first `resolve` and must have seen every
+`<channel>` by then, and a `selectSubtreeEvents` predicate evaluates a whole event list before any
+node from it reaches the handler — so resolving from a predicate could freeze before the last
+declarations in the same chunk. `toXmlEvents(validateNesting: true)` keeps a truncated body an
+error rather than a short guide.
+
+Measured (dev box, 400 MB decompressed synthetic guide, 400 of 20,000 channels matched): old
+path 26.3 s and 1.19 GB peak RSS, new path 13.4 s and 198 MB, identical output; 1.2 GB
+decompressed parses in ~38 s at the same ~200 MB. Parse time still scales with the guide — expect
+several minutes for an all-countries guide on a TV-box CPU — and it runs off the main isolate and
+outside the ingest transaction (`ProgrammeSpool`), so it costs a background core, not the UI.
+
 ### Stalker
 
 The portal's guide comes from `get_epg_info`, not XMLTV, so it joins the merge as a plain feed

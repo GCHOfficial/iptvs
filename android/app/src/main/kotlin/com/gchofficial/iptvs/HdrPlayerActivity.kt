@@ -538,7 +538,7 @@ class HdrPlayerActivity : ComponentActivity() {
             // engine is dead too: release it through the holder, which tells the
             // Dart side to reset its preview state (it falls back to media_kit).
             adoptedShared = false
-            SharedEngine.invalidateFromFullscreen()
+            SharedEngine.invalidateFromFullscreen(unsupported = true)
         } else {
             engine?.release()
         }
@@ -960,7 +960,7 @@ class HdrPlayerActivity : ComponentActivity() {
         val wasMpv = engine is MpvEngine
         if (adoptedShared) {
             adoptedShared = false
-            SharedEngine.invalidateFromFullscreen()
+            SharedEngine.invalidateFromFullscreen(unsupported = false)
         } else {
             engine?.release()
         }
@@ -1221,8 +1221,30 @@ class HdrPlayerActivity : ComponentActivity() {
             hasResult = true
             if (hasResult) setResult(RESULT_OK, result)
         }
+        // Hand the adopted engine back *now*, not in onDestroy. The result
+        // above reaches Dart as soon as MainActivity resumes, while onDestroy
+        // of a finishing Activity waits for the next one to go idle — on a
+        // busy TV box, seconds. A zapped session's return leg (stop,
+        // re-resolve, open the ended channel) ran entirely inside that gap and
+        // found the engine still adopted; and an un-zapped return sat on the
+        // preview's frozen last frame until it closed.
+        handBackSharedEngine()
         if (enteredPip) restoreMainTaskAfterPip()
         super.finish()
+    }
+
+    /**
+     * Returns an adopted engine to the preview. Idempotent: [finish] calls it
+     * first, and [onDestroy] covers any exit that never went through finish.
+     * [engine] is dropped with it, so nothing in this Activity's remaining
+     * lifetime (onStop's pause, a straggling ticker) can touch an engine the
+     * preview now owns.
+     */
+    private fun handBackSharedEngine() {
+        if (!adoptedShared) return
+        adoptedShared = false
+        engine = null
+        SharedEngine.fullscreenDetached()
     }
 
     /**
@@ -1255,8 +1277,7 @@ class HdrPlayerActivity : ComponentActivity() {
         if (adoptedShared) {
             // Not ours to release: hand the video output back to the preview
             // surface; the engine keeps playing across the return.
-            adoptedShared = false
-            SharedEngine.fullscreenDetached()
+            handBackSharedEngine()
         } else {
             engine?.release()
         }

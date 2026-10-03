@@ -42,6 +42,13 @@ Stalker portals carry no `tvg-id` at all, so there matching is by name only.
 A guide that fails to download is skipped — your provider's own guide being
 broken is usually why you are adding another one in the first place.
 
+Large guides are fine: a guide is downloaded to storage and read from there, so
+even a combined "all countries" file (around 200 MB compressed) works on a TV
+box. It still takes a few minutes to process on modest hardware, and the
+channel list stays usable while it does — the status line reads "updating
+guide…" until it lands. If only a handful of your channels are in it, a
+per-country guide gets you the same result faster.
+
 ## Hiding categories
 
 Providers often ship hundreds of categories you will never watch. Open a source's
