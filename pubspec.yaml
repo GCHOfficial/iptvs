@@ -46,7 +46,7 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   crypto: ^3.0.7
   supabase_flutter: ^2.18.0
-  url_launcher: ^6.3.2
+  url_launcher: ^6.3.3
   cached_network_image: ^4.0.4
   package_info_plus: ^10.2.2
   cryptography: ^2.9.0
