@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.13.4
+  sdk: ^3.13.5
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -38,19 +38,19 @@ dependencies:
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
   sqflite: ^2.4.4
-  sqflite_common_ffi: ^2.4.3
+  sqflite_common_ffi: ^2.4.4
   sqlite3_flutter_libs: ^0.6.0+eol
   path: ^1.9.1
   path_provider: ^2.1.6
   xml: ^7.1.0
   flutter_secure_storage: ^11.2.0
   crypto: ^3.0.7
-  supabase_flutter: ^2.18.0
-  url_launcher: ^6.3.2
+  supabase_flutter: ^2.18.3
+  url_launcher: ^6.3.3
   cached_network_image: ^4.0.4
   package_info_plus: ^10.2.2
   cryptography: ^2.9.0
-  timezone: ^0.11.1
+  timezone: ^0.11.2
   # Renders the cloud-sync pairing code as a scannable panel link. Pure Dart
   # (a CustomPainter over the `qr` encoder) — no platform channels, no native
   # dependency, nothing added to any store build but Dart code.
