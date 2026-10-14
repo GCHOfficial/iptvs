@@ -116,6 +116,90 @@ void main() {
     });
   });
 
+  group('shouldReloadStalledLive', () {
+    test('a buffering stall waits out the stall threshold', () {
+      expect(
+        shouldReloadStalledLive(
+          buffering: true,
+          endedPending: false,
+          stalledForMs: kReconnectStallMs - 1,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldReloadStalledLive(
+          buffering: true,
+          endedPending: false,
+          stalledForMs: kReconnectStallMs,
+        ),
+        isTrue,
+      );
+    });
+
+    test('healthy playback never reloads', () {
+      expect(
+        shouldReloadStalledLive(
+          buffering: false,
+          endedPending: false,
+          stalledForMs: 60000,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a pending EOF reloads immediately, with no stall threshold', () {
+      // Nothing is recoverable at EOF: mpv sits at `eof-reached` and no amount
+      // of waiting produces another byte.
+      expect(
+        shouldReloadStalledLive(
+          buffering: false,
+          endedPending: true,
+          stalledForMs: 0,
+        ),
+        isTrue,
+      );
+    });
+
+    test('an EOF the min-gap suppressed is still pending on the next tick — '
+        'the regression this exists for', () {
+      // The EOF listener is edge-triggered and `reconnectMinGapMs` is not, so
+      // a `completed` arriving inside the rate-limit window used to be dropped
+      // and never reconsidered: the poll read `buffering` only, which is
+      // **false** at EOF. A stream that drops again within 8 s of the previous
+      // reconnect — exactly what a provider cutting the link on a timer looks
+      // like — stayed dead, with no indicator and no further attempt.
+      // `_endedPending` makes it a level, like Android's sticky
+      // `PlayerUiState.ended`, so every poll re-offers it until a reload
+      // actually fires.
+      const suppressed = 1000; // well inside reconnectMinGapMs
+      expect(
+        reconnectMinGapMs(priorAttempts: 1, force: true),
+        greaterThan(suppressed),
+        reason: 'the gap really does suppress this attempt',
+      );
+      expect(
+        shouldReloadStalledLive(
+          buffering: false,
+          endedPending: true,
+          stalledForMs: suppressed,
+        ),
+        isTrue,
+        reason: 'the watchdog must keep offering it, not drop it',
+      );
+    });
+
+    test('an EOF outranks the buffering clock rather than waiting on it', () {
+      expect(
+        shouldReloadStalledLive(
+          buffering: true,
+          endedPending: true,
+          stalledForMs: 0,
+        ),
+        isTrue,
+      );
+    });
+  });
+
   group('shouldApplyEmbeddedResume', () {
     const resume = Duration(minutes: 12);
     const duration = Duration(minutes: 90);

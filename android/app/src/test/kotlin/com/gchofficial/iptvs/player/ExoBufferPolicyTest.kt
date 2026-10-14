@@ -1,5 +1,6 @@
 package com.gchofficial.iptvs.player
 
+import androidx.media3.common.C
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -92,10 +93,50 @@ class ExoBufferPolicyTest {
         val low = ExoBufferPolicy.forPreset(BufferPreset.LOW)
         val normal = ExoBufferPolicy.forPreset(BufferPreset.NORMAL)
         val high = ExoBufferPolicy.forPreset(BufferPreset.HIGH)
+        val max = ExoBufferPolicy.forPreset(BufferPreset.MAX)
         assertTrue(low.minBufferMs < normal.minBufferMs)
         assertTrue(normal.minBufferMs < high.minBufferMs)
+        assertTrue(high.minBufferMs < max.minBufferMs)
         assertTrue(low.maxBufferMs < normal.maxBufferMs)
         assertTrue(normal.maxBufferMs < high.maxBufferMs)
+        assertTrue(high.maxBufferMs < max.maxBufferMs)
+    }
+
+    /**
+     * The invariant behind [BufferPreset.MAX] existing at all, written so it
+     * binds any *future* preset too.
+     *
+     * With `prioritizeTimeOverSizeThresholds` on, media3 judges "full" purely
+     * by duration, so the allocation is bounded only by `maxBufferMs x
+     * bitrate`. That is survivable at HIGH's 90 s; past it, a 20 Mbps channel
+     * on a 2 GiB Android TV box is an OOM rather than a deeper buffer. So a
+     * preset holding more than HIGH must name a byte ceiling *and* let the
+     * bytes decide.
+     */
+    @Test
+    fun `a preset deeper than high must cap its bytes`() {
+        val high = ExoBufferPolicy.forPreset(BufferPreset.HIGH)
+        for (preset in presets) {
+            val b = ExoBufferPolicy.forPreset(preset)
+            if (b.maxBufferMs <= high.maxBufferMs) continue
+            assertTrue("$preset must set a finite targetBufferBytes", b.targetBufferBytes > 0)
+            assertTrue("$preset must not prioritize time over size", !b.prioritizeTimeOverSize)
+        }
+    }
+
+    /**
+     * …and equally, the presets that were shipped before the byte cap existed
+     * must be byte-for-byte what they were: `C.LENGTH_UNSET` lets media3 size
+     * the allocation from the durations, which is what every build so far has
+     * done.
+     */
+    @Test
+    fun `the original presets are unchanged by the byte cap`() {
+        for (preset in listOf(BufferPreset.LOW, BufferPreset.NORMAL, BufferPreset.HIGH)) {
+            val b = ExoBufferPolicy.forPreset(preset)
+            assertEquals("$preset", C.LENGTH_UNSET, b.targetBufferBytes)
+            assertEquals("$preset", ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE, b.prioritizeTimeOverSize)
+        }
     }
 
     /**
@@ -121,5 +162,21 @@ class ExoBufferPolicyTest {
         assertEquals(BufferPreset.LOW, BufferPreset.fromName("low"))
         assertEquals(BufferPreset.LOW, BufferPreset.fromName("LOW"))
         assertEquals(BufferPreset.HIGH, BufferPreset.fromName("high"))
+        assertEquals(BufferPreset.MAX, BufferPreset.fromName("max"))
+        assertEquals(BufferPreset.MAX, BufferPreset.fromName("MAX"))
+    }
+
+    /**
+     * The mpv fallback mirrors the same ordering, including `NORMAL` meaning
+     * "leave mpv's own default alone".
+     */
+    @Test
+    fun `the mpv cache depth mirrors the preset order`() {
+        assertEquals(null, BufferPreset.NORMAL.mpvCacheSecs)
+        val low = BufferPreset.LOW.mpvCacheSecs!!
+        val high = BufferPreset.HIGH.mpvCacheSecs!!
+        val max = BufferPreset.MAX.mpvCacheSecs!!
+        assertTrue(low < high)
+        assertTrue(high < max)
     }
 }

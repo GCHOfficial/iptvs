@@ -461,7 +461,10 @@ void main() {
       // exactly as it did before the setting existed.
       final store = await mount(tester, config);
       await tapTile(tester, store); // normal -> high
-      await tapTile(tester, store); // high -> low
+      await tapTile(tester, store); // high -> max
+      expect((await store.list()).single.bufferPresetName, 'max');
+      expect(find.text('Buffer size: Extra large'), findsOneWidget);
+      await tapTile(tester, store); // max -> low
       expect((await store.list()).single.bufferPresetName, 'low');
 
       await tapTile(tester, store); // low -> normal

@@ -584,12 +584,13 @@ covers API 26–34, which is most phones in use.
 ## Buffer presets
 
 Buffering depth is a per-source choice (`SourceConfig.settings['bufferPreset']`:
-`low`/`normal`/`high`, absent meaning normal), edited in **Source settings → Playback buffer**.
+`low`/`normal`/`high`/`max`, absent meaning normal), edited in **Source settings → Playback
+buffer** (labelled Small / Normal / Large / **Extra large**).
 It exists because the right depth is a property of the *link*, not of the app: a clean wired
 connection wants short buffers and instant zapping, a flaky or throttled one wants depth, and one
 default cannot serve both.
 
-Three presets rather than raw millisecond fields, deliberately. Four interacting durations is a
+A small set of presets rather than raw millisecond fields, deliberately. Four interacting durations is a
 knob people copy out of forum posts, and an invalid combination — a resume threshold above the
 stall watchdog's patience — is a reconnect loop we would then have to explain. The preset is also
 the only unit both engines can agree on: ExoPlayer takes four `LoadControl` durations, mpv takes
@@ -606,8 +607,8 @@ fix.
 It also cannot go far. A stream stuck below the resume threshold sits in `STATE_BUFFERING`, and
 `ReconnectPolicy.STALL_RECONNECT_MS` (8 s) of that reloads the source — the 4x margin that keeps
 an ordinary underrun from becoming a reconnect loop caps the resume threshold at 2 s, which
-`normal` and `high` already sit on. So `high` buys its stall resistance entirely from the
-cushion.
+`normal`, `high` and `max` already sit on. So `high` and `max` buy their stall resistance
+entirely from the cushion.
 
 On the mpv side the constraint does not apply — `cache-secs` is prefetch depth, not a start gate,
 since mpv begins playing as soon as it can decode — which is why the mpv `high` can afford to be
@@ -622,6 +623,41 @@ one, would be a no-op on the surface whose default already matched, and on the V
 retune a cache sized for seek smoothness using a control whose UI talks about stability. The byte
 cap still bounds a deep `cache-secs` — prefetch stops at whichever limit comes first, degrading
 gracefully rather than growing without bound on a 2 GiB TV box.
+
+### `max` is the one preset that also caps the **bytes**
+
+`max` (ExoPlayer 60 s / 120 s cushion, mpv `cache-secs=60`, iOS
+`preferredForwardBufferDuration=60`) exists for the reports that say *"Large still stutters"*. Its
+ExoPlayer tuning is the only one that departs from the shared shape, and the departure is the
+point: `ExoBufferPolicy.Durations` gained `targetBufferBytes` (64 MiB) and
+`prioritizeTimeOverSize` (false) for `max` alone.
+
+With `prioritizeTimeOverSizeThresholds` on — which every other preset keeps — media3 decides
+"the buffer is full" purely by duration, so the allocation is bounded only by `maxBufferMs x
+bitrate`. That is survivable at `high`'s 90 s; at two minutes a 20 Mbps channel asks for roughly
+300 MB on hardware that is routinely a 2 GiB Android TV box, which is an OOM rather than a deeper
+buffer. The byte cap degrades it gracefully instead — the loader stops at whichever limit binds
+first — and 64 MiB is deliberately the same number `PlayerConfiguration.bufferSize` already gives
+the fullscreen mpv surface, so "the most memory one stream may hold" is one figure whichever
+engine is playing. The mpv side needs no new knob for the same reason: `cache-secs=60` is already
+bounded above by that byte cap (binding first above ~8 Mbps), and the preview deliberately keeps
+media_kit's own smaller default.
+
+`ExoBufferPolicyTest` pins this as a **forward-looking** invariant rather than as a fact about
+`max`: any preset holding more than `high` must name a finite `targetBufferBytes` and must not
+prioritize time over size — and `low`/`normal`/`high` must still be `C.LENGTH_UNSET` + `true`,
+byte-for-byte what shipped before the cap existed.
+
+**What the hint says, and why.** `max` is what a user reaches for when nothing else helped, so
+its subtitle names the two causes it cannot touch: a connection that never gets far enough ahead
+to fill a buffer, and a provider closing the stream on its own timer. A preset that only
+advertises its upside is one people ratchet to maximum and then report the downside of as a
+separate bug.
+
+**Cross-version:** a build that predates `max` parses the stored name through its own
+`bufferPresetFromName`/`fromName`/`init(name:)` fallback and reads it as `normal` — the setting
+rides the cloud source row, so a paired older device degrades to the default rather than to an
+arbitrary preset.
 
 ### `normal` means *exactly* as before
 
@@ -2913,7 +2949,30 @@ watchdogs** because the platforms play through different stacks:
   `stream.completed` listener treats a *live* `completed` as a drop (pure decision:
   `shouldReconnectOnCompleted`, pinned in `test/reconnect_policy_test.dart`) — VOD completing is
   a legitimate end of playback and is left alone, and app-initiated `stop()` resets
-  `completed` to false so teardown/handoffs never trip it. The listener's `nativeSessionActive`
+  `completed` to false so teardown/handoffs never trip it.
+
+  **That EOF trigger is edge-triggered and the rate limit is not, which lost drops outright.**
+  `_reconnectLive` returns early when the previous attempt was less than `reconnectMinGapMs`
+  (8 s forced) ago, and the 1 s poll only ever read `_buffering` — **false** at EOF. So a
+  `completed` arriving inside that window was dropped and never reconsidered: the stream stayed
+  dead with no "Reconnecting…" indicator and no further attempt, which is exactly the shape a
+  provider cutting the link on a timer produces. Android never had it, because
+  `PlayerUiState.ended` is a **level** re-read on every tick rather than an edge. The fix gives
+  Dart the same level: `_endedPending` is set by the `completed` listener and cleared only when a
+  reload really fires (or on `_goToLive`, a zap's counter reset, or the player leaving EOF), and
+  the poll treats `_buffering || _endedPending` as stalled — the ended case with **threshold 0**,
+  since nothing is recoverable at `eof-reached` and no waiting produces another byte. The
+  decision is the pure `shouldReloadStalledLive`, pinned in `test/reconnect_policy_test.dart`
+  alongside the suppressed-EOF case itself. The zap stand-down is unaffected: `_pollLiveReconnect`
+  still returns before any of this while `zap.settling`.
+
+  **The reconnect line carries `kind=` and `ahead=`.** `live reconnect attempt=N force=… kind=…
+  ahead=…ms` — `kind` is `ended|buffering|error`, the same vocabulary Android's `stallKind` uses
+  so one reading serves both exports, and `ahead` is `state.buffer - state.position` at the moment
+  the decision was taken (`-1` where a separate engine owns playback and this `_player`'s numbers
+  describe nothing). Without it an export cannot tell a cushion that was *never built* — a link
+  that can't get ahead, or a connection closed on a timer — from one that was built and drained,
+  which is the whole question a buffer setting is asked to answer. Durations only; no URL. The listener's `nativeSessionActive`
   suppression is deliberately derived as `_linuxNativeSession != null || ((Platform.isAndroid ||
   Platform.isIOS) && _nativePlaybackLaunched)` — i.e. it fires **only** when a *separate* engine
   owns playback and this `_player` sits idle (Linux native mpv, Android native Activity, and now

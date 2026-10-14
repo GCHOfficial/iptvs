@@ -13,11 +13,13 @@ SourceConfig _config({String? preset}) => SourceConfig(
 
 void main() {
   group('bufferPresetFromName', () {
-    test('parses the three names, case-insensitively', () {
+    test('parses every name, case-insensitively', () {
       expect(bufferPresetFromName('low'), BufferPreset.low);
       expect(bufferPresetFromName('LOW'), BufferPreset.low);
       expect(bufferPresetFromName('normal'), BufferPreset.normal);
       expect(bufferPresetFromName('high'), BufferPreset.high);
+      expect(bufferPresetFromName('max'), BufferPreset.max);
+      expect(bufferPresetFromName('MAX'), BufferPreset.max);
     });
 
     test('anything else is normal', () {
@@ -37,10 +39,11 @@ void main() {
   });
 
   group('nextBufferPreset', () {
-    test('cycles low -> normal -> high -> low', () {
+    test('cycles low -> normal -> high -> max -> low', () {
       expect(nextBufferPreset(BufferPreset.low), BufferPreset.normal);
       expect(nextBufferPreset(BufferPreset.normal), BufferPreset.high);
-      expect(nextBufferPreset(BufferPreset.high), BufferPreset.low);
+      expect(nextBufferPreset(BufferPreset.high), BufferPreset.max);
+      expect(nextBufferPreset(BufferPreset.max), BufferPreset.low);
     });
 
     test('visits every preset in one full cycle', () {
@@ -63,8 +66,9 @@ void main() {
       expect(mpvBufferOptions(BufferPreset.normal), isEmpty);
     });
 
-    test('low and high set the cache depth, and nothing else', () {
-      for (final preset in [BufferPreset.low, BufferPreset.high]) {
+    test('every non-normal preset sets the cache depth, and nothing else', () {
+      for (final preset in BufferPreset.values) {
+        if (preset == BufferPreset.normal) continue;
         expect(mpvBufferOptions(preset).keys, ['cache-secs']);
       }
     });
@@ -90,6 +94,7 @@ void main() {
           int.parse(mpvBufferOptions(p)['cache-secs'] ?? '10');
       expect(secs(BufferPreset.low), lessThan(secs(BufferPreset.normal)));
       expect(secs(BufferPreset.normal), lessThan(secs(BufferPreset.high)));
+      expect(secs(BufferPreset.high), lessThan(secs(BufferPreset.max)));
     });
 
     test('never collides with a key kLiveMpvOptions already owns', () {
@@ -115,6 +120,7 @@ void main() {
     test('reads a stored preset', () {
       expect(_config(preset: 'low').bufferPresetName, 'low');
       expect(_config(preset: 'high').bufferPresetName, 'high');
+      expect(_config(preset: 'max').bufferPresetName, 'max');
     });
 
     test('an unrecognised stored value reads as normal', () {
@@ -135,11 +141,16 @@ void main() {
       }
     });
 
-    test('the large preset does not promise what a buffer cannot do', () {
+    test('the deep presets do not promise what a buffer cannot do', () {
       // A deeper buffer converts frequent short stalls into rarer long ones; it
       // adds no bandwidth. Saying so is the difference between a setting and a
       // false promise, and this is the most common misreading of it.
       expect(bufferPresetHint(BufferPreset.high), contains('too slow'));
+      // The deepest preset is the one users reach for when nothing else helped,
+      // so it has to name the two causes it cannot touch: a link that never
+      // gets ahead, and a provider dropping the stream on its own schedule.
+      expect(bufferPresetHint(BufferPreset.max), contains('never gets ahead'));
+      expect(bufferPresetHint(BufferPreset.max), contains('drops the stream'));
     });
   });
 }
