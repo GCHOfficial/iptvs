@@ -48,7 +48,18 @@ import java.util.Locale
 enum class BufferPreset {
     LOW,
     NORMAL,
-    HIGH;
+    HIGH,
+
+    /**
+     * The deepest cushion, for a link that still stalls on [HIGH].
+     *
+     * It is the only preset that also bounds the buffer in **bytes** — see
+     * [ExoBufferPolicy.Durations.targetBufferBytes]. With
+     * `prioritizeTimeOverSizeThresholds` left on, a two-minute ceiling is
+     * bounded only by duration x bitrate, and on a 20 Mbps channel that is
+     * far more than a 2 GiB TV box can spare.
+     */
+    MAX;
 
     /**
      * `cache-secs` for the libmpv fallback, or null to leave mpv's own default.
@@ -63,6 +74,7 @@ enum class BufferPreset {
             LOW -> 3
             NORMAL -> null
             HIGH -> 30
+            MAX -> 60
         }
 
     companion object {
@@ -70,6 +82,7 @@ enum class BufferPreset {
         fun fromName(name: String?): BufferPreset = when (name?.lowercase(Locale.US)) {
             "low" -> LOW
             "high" -> HIGH
+            "max" -> MAX
             else -> NORMAL
         }
     }
@@ -106,12 +119,38 @@ object ExoBufferPolicy {
      *   (media3 default: 2500)
      * @param afterRebufferMs buffered media required to resume after an underrun
      *   (media3 default: 5000)
+     * @param targetBufferBytes ceiling on the allocated buffer, or
+     *   `C.LENGTH_UNSET` to let media3 size it from the durations
+     * @param prioritizeTimeOverSize whether the durations alone decide when the
+     *   buffer is full — see [targetBufferBytes]
      */
     data class Durations(
         val minBufferMs: Int,
         val maxBufferMs: Int,
         val forPlaybackMs: Int,
         val afterRebufferMs: Int,
+        /**
+         * `C.LENGTH_UNSET` for every preset but [BufferPreset.MAX], where it is
+         * the point.
+         *
+         * With [prioritizeTimeOverSize] on (every other preset), media3 judges
+         * "full" purely by duration, so the allocation is bounded only by
+         * `maxBufferMs x bitrate`. At [BufferPreset.MAX]'s two-minute ceiling a
+         * 20 Mbps channel would ask for ~300 MB, on hardware that is routinely
+         * a 2 GiB Android TV box — an OOM, not a deeper buffer. Capping the
+         * bytes degrades it gracefully instead: the loader stops at whichever
+         * limit binds first, exactly as the mpv side is bounded by media_kit's
+         * `demuxer-max-bytes`.
+         */
+        val targetBufferBytes: Int = C.LENGTH_UNSET,
+        /**
+         * The shared default is [PRIORITIZE_TIME_OVER_SIZE] (spelled as a
+         * literal here only because a nested class should not have to reach
+         * into its enclosing object to state its own default).
+         *
+         * @see targetBufferBytes
+         */
+        val prioritizeTimeOverSize: Boolean = true,
     )
 
     /**
@@ -159,12 +198,36 @@ object ExoBufferPolicy {
             forPlaybackMs = 1_000,
             afterRebufferMs = 2_000,
         )
+        // Deeper still, and the first preset where the duration ceiling alone
+        // is not a safe bound — hence the byte cap and the switch away from
+        // prioritising time over size. Start gates unchanged from NORMAL, for
+        // the same reason HIGH leaves them alone.
+        BufferPreset.MAX -> Durations(
+            minBufferMs = 60_000,
+            maxBufferMs = 120_000,
+            forPlaybackMs = 1_000,
+            afterRebufferMs = 2_000,
+            targetBufferBytes = MAX_PRESET_TARGET_BUFFER_BYTES,
+            prioritizeTimeOverSize = false,
+        )
     }
+
+    /**
+     * The byte ceiling for [BufferPreset.MAX]: 64 MiB, which is ~26 s of a
+     * 20 Mbps channel and the full two minutes of a 4 Mbps one, and matches the
+     * `PlayerConfiguration.bufferSize` the fullscreen mpv surface already uses
+     * — one number for "the most memory a single stream may hold", whichever
+     * engine is playing.
+     */
+    const val MAX_PRESET_TARGET_BUFFER_BYTES = 64 * 1024 * 1024
 
     /**
      * Judge the buffer by duration rather than by allocated bytes: IPTV bitrates
      * vary wildly between providers/channels, and a byte-based threshold makes
      * time-to-first-frame a function of the bitrate instead of a fixed budget.
+     *
+     * The default every preset but [BufferPreset.MAX] takes — see
+     * [Durations.targetBufferBytes] for why the deepest one cannot.
      */
     const val PRIORITIZE_TIME_OVER_SIZE = true
 
@@ -455,7 +518,8 @@ class ExoPlayerEngine(
         onDiagnostic?.invoke(
             "buffer preset=${bufferPreset.name.lowercase(Locale.US)} " +
                 "min=${buffers.minBufferMs} max=${buffers.maxBufferMs} " +
-                "start=${buffers.forPlaybackMs} resume=${buffers.afterRebufferMs}",
+                "start=${buffers.forPlaybackMs} resume=${buffers.afterRebufferMs} " +
+                "bytes=${buffers.targetBufferBytes}",
         )
     }
 
@@ -628,7 +692,8 @@ class ExoPlayerEngine(
                 buffers.forPlaybackMs,
                 buffers.afterRebufferMs,
             )
-            .setPrioritizeTimeOverSizeThresholds(ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE)
+            .setTargetBufferBytes(buffers.targetBufferBytes)
+            .setPrioritizeTimeOverSizeThresholds(buffers.prioritizeTimeOverSize)
             .build()
 
         player = ExoPlayer.Builder(context, renderersFactory)

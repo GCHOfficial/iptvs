@@ -57,6 +57,12 @@ list on every screen. Favorites in a hidden category are still shown.
 
 ## Buffering
 
-Each source has a **buffer** setting — Low, Normal or High. It changes how much
-the player keeps in hand once a stream is running, not how long a channel takes
-to start. Raise it if a provider is unstable; leave it on Normal otherwise.
+Each source has a **buffer** setting — Small, Normal, Large or Extra large. It
+changes how much the player keeps in hand once a stream is running, not how long
+a channel takes to start. Raise it if a provider is unstable; leave it on Normal
+otherwise.
+
+Extra large is the deepest setting and uses noticeably more memory, which is
+worth knowing on a low-end TV box. It also cannot help two things: a connection
+that never gets far enough ahead to fill a buffer at all, and a provider that
+drops the stream on a timer regardless of how much you have cached.

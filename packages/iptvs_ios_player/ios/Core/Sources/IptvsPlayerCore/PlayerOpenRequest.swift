@@ -53,11 +53,17 @@ public enum PlayerBufferPreset: String, Sendable {
   case low
   case normal
   case high
+  /// The deepest cushion. On ExoPlayer this is the one preset that also caps
+  /// the buffer in bytes; AVFoundation needs no equivalent, because
+  /// `preferredForwardBufferDuration` is documented as a preference the player
+  /// may ignore rather than an allocation it must honour.
+  case max
 
   public init(name: String?) {
     switch name?.lowercased() {
     case "low": self = .low
     case "high": self = .high
+    case "max": self = .max
     default: self = .normal
     }
   }
@@ -80,6 +86,7 @@ public enum PlayerBufferPreset: String, Sendable {
     case .low: return 3
     case .normal: return nil
     case .high: return 30
+    case .max: return 60
     }
   }
 }

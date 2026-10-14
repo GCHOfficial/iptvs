@@ -905,7 +905,8 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   Intent extra + a
   `RESULT_FAVORITE` reply on close (no live channel from the Activity to Dart).
 - **Buffer depth is a per-source preset, and only the *sustained cushion* moves between the
-  presets.** `settings['bufferPreset']` (`low`/`normal`/`high`, absent = normal) reaches ExoPlayer
+  presets.** `settings['bufferPreset']` (`low`/`normal`/`high`/`max`, absent = normal; labelled
+  Small/Normal/Large/Extra large) reaches ExoPlayer
   as a name on the native `open` payload — its `LoadControl` is a build-time argument, so
   `SharedEngine` rebuilds the engine when the preset changes, exactly as it does for changed
   headers — and mpv as **`cache-secs` only**, layered over `kLiveMpvOptions`
@@ -920,6 +921,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `ReconnectPolicy.STALL_RECONNECT_MS` (8 s) of that reloads the source, so the 4x margin caps the
   resume threshold at 2 s. `normal` is byte-for-byte the previously hardcoded tuning on both
   engines (the mpv map is *empty*), so an untouched install plays exactly as before.
+  **`max` is the one preset that also caps the buffer in *bytes*** (`ExoBufferPolicy.Durations.
+  targetBufferBytes` 64 MiB + `prioritizeTimeOverSize: false`): with media3 judging "full" by
+  duration alone, a 120 s ceiling is bounded only by duration x bitrate, which on a 20 Mbps
+  channel is an OOM on a 2 GiB TV box rather than a deeper buffer. `low`/`normal`/`high` stay
+  `C.LENGTH_UNSET` + `true`, and `ExoBufferPolicyTest` pins the rule forward — *any* preset
+  deeper than `high` must cap its bytes. An older build parses `max` as `normal`.
   iOS takes the same name on the same payload and applies it as
   `AVPlayerItem.preferredForwardBufferDuration`, held on the engine (not passed to `load`) so a
   reconnect or "Go to live" keeps it — a preset that survived only the first open would revert to
@@ -1050,6 +1057,15 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   so live treats `completed` as a drop (`shouldReconnectOnCompleted`; VOD completing stays a
   legitimate end), and the preview auto-restarts its own channel on EOF, capped by the same
   policy (`reconnect_at_eof` must stay out of `kLiveMpvOptions` — it hangs HLS on FFmpeg 8).
+  **That EOF must be a *level*, not an edge** (`_endedPending`): the listener is edge-triggered
+  while `reconnectMinGapMs` is not, so an EOF arriving inside the 8 s window was dropped and
+  never reconsidered — the poll read `_buffering`, which is false at EOF — leaving the stream
+  dead with no indicator. The poll now treats `_buffering || _endedPending` as stalled with
+  **threshold 0** for ended (`shouldReloadStalledLive`), mirroring Android's sticky
+  `PlayerUiState.ended`; the flag clears only when a reload really fires (or on `_goToLive`/a
+  zap reset). The reconnect log line carries `kind=ended|buffering|error` (Android's `stallKind`
+  vocabulary) and `ahead=<ms>` buffered at the decision, so an export can tell a cushion never
+  built from one built and drained.
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
   (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
   `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF

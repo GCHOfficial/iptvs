@@ -5,7 +5,7 @@
 /// wants depth, and no single default serves both. We shipped one point on that
 /// curve and gave users nothing when it was the wrong one.
 ///
-/// A three-way preset rather than raw millisecond fields, deliberately. Four
+/// A small set of presets rather than raw millisecond fields, deliberately. Four
 /// interacting durations is a knob people copy out of forum posts, and an
 /// invalid combination — a resume threshold above the stall watchdog's patience
 /// — is a reconnect loop we would then have to explain. The presets are also
@@ -23,7 +23,17 @@ library;
 enum BufferPreset {
   low,
   normal,
-  high;
+  high,
+
+  /// The deepest cushion, for a link that stalls even on [high].
+  ///
+  /// It is the one preset that also bounds the buffer in **bytes** on
+  /// ExoPlayer (`ExoBufferPolicy.Durations.targetBufferBytes`): with
+  /// `prioritizeTimeOverSizeThresholds` left on, a two-minute ceiling is
+  /// bounded only by duration x bitrate, which on a 20 Mbps channel is far
+  /// more memory than a 2 GiB TV box has to spare. See docs/player.md
+  /// "Buffer presets".
+  max;
 
   /// The value stored in `SourceConfig.settings['bufferPreset']` and sent to
   /// the native players.
@@ -37,10 +47,12 @@ BufferPreset bufferPresetFromName(String? name) =>
     switch (name?.toLowerCase()) {
       'low' => BufferPreset.low,
       'high' => BufferPreset.high,
+      'max' => BufferPreset.max,
       _ => BufferPreset.normal,
     };
 
-/// The next preset in the settings tile's cycle (low → normal → high → low).
+/// The next preset in the settings tile's cycle (low → normal → high → max →
+/// low).
 BufferPreset nextBufferPreset(BufferPreset current) =>
     BufferPreset.values[(current.index + 1) % BufferPreset.values.length];
 
@@ -72,6 +84,11 @@ Map<String, String> mpvBufferOptions(BufferPreset preset) => switch (preset) {
   BufferPreset.low => const {'cache-secs': '3'},
   BufferPreset.normal => const {},
   BufferPreset.high => const {'cache-secs': '30'},
+  // Deeper than `high` by the same ratio `high` beats mpv's default, and still
+  // bounded above by media_kit's byte cap: at the fullscreen player's 64 MB
+  // that is ~8 Mbps before the bytes bind first, so a 4K channel holds less
+  // than sixty seconds rather than growing without limit.
+  BufferPreset.max => const {'cache-secs': '60'},
 };
 
 /// Short label for the settings tile.
@@ -79,6 +96,7 @@ String bufferPresetLabel(BufferPreset preset) => switch (preset) {
   BufferPreset.low => 'Small',
   BufferPreset.normal => 'Normal',
   BufferPreset.high => 'Large',
+  BufferPreset.max => 'Extra large',
 };
 
 /// One-line explanation of the trade, for the tile's subtitle.
@@ -94,4 +112,8 @@ String bufferPresetHint(BufferPreset preset) => switch (preset) {
   BufferPreset.high =>
     'Rides out an unsteady connection. Uses more memory; it cannot help if the '
         'connection is simply too slow.',
+  BufferPreset.max =>
+    'The deepest buffer available. Uses noticeably more memory, and it still '
+        'cannot help a connection that never gets ahead, or a provider that '
+        'drops the stream on a timer.',
 };

@@ -186,7 +186,7 @@ final class PlayerOpenRequestTests: XCTestCase {
 
   // MARK: - Buffer preset
 
-  func testBufferPresetParsesTheThreeNames() {
+  func testBufferPresetParsesEveryName() {
     XCTAssertEqual(
       PlayerOpenRequest(arguments: arguments(["bufferPreset": "low"]))?.bufferPreset,
       .low
@@ -198,6 +198,10 @@ final class PlayerOpenRequestTests: XCTestCase {
     XCTAssertEqual(
       PlayerOpenRequest(arguments: arguments(["bufferPreset": "high"]))?.bufferPreset,
       .high
+    )
+    XCTAssertEqual(
+      PlayerOpenRequest(arguments: arguments(["bufferPreset": "max"]))?.bufferPreset,
+      .max
     )
   }
 
@@ -237,11 +241,13 @@ final class PlayerOpenRequestTests: XCTestCase {
 
   func testForwardBufferGrowsWithThePreset() {
     guard let low = PlayerBufferPreset.low.preferredForwardBufferSeconds,
-      let high = PlayerBufferPreset.high.preferredForwardBufferSeconds
+      let high = PlayerBufferPreset.high.preferredForwardBufferSeconds,
+      let max = PlayerBufferPreset.max.preferredForwardBufferSeconds
     else {
-      return XCTFail("low and high must both name a duration")
+      return XCTFail("low, high and max must all name a duration")
     }
     XCTAssertGreaterThan(low, 0)
     XCTAssertGreaterThan(high, low)
+    XCTAssertGreaterThan(max, high)
   }
 }

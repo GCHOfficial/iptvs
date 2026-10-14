@@ -69,6 +69,36 @@ bool shouldReconnectOnCompleted({
   required bool nativeSessionActive,
 }) => completed && isLive && !nativeSessionActive;
 
+/// Whether the live watchdog should reload the stream on this tick.
+///
+/// Two stall shapes reach it, and they differ only in patience:
+///
+/// - **buffering** — an underrun the loader may still recover from, so it is
+///   given [stallMs] before a reload is worth the provider round trip;
+/// - **ended** — a clean server-side EOF, where there is nothing left to
+///   recover: mpv sits at `eof-reached` and no amount of waiting produces
+///   another byte. Threshold 0.
+///
+/// The ended case exists because the EOF listener is **edge-triggered** while
+/// [reconnectMinGapMs] is not. A `completed` event arriving inside the
+/// rate-limit window (a stream that drops again within 8 s of the last
+/// reconnect, which is exactly what a provider cutting the link on a timer
+/// looks like) was dropped and never reconsidered: the buffering-gated poll
+/// only ever read `buffering`, which is **false** at EOF. The stream stayed
+/// dead with no indicator and no further attempt. Android never had this —
+/// `PlayerUiState.ended` is a *level*, re-read on every tick — so the fix is
+/// to give Dart the same level (`_endedPending`) rather than a second edge.
+bool shouldReloadStalledLive({
+  required bool buffering,
+  required bool endedPending,
+  required int stalledForMs,
+  int stallMs = kReconnectStallMs,
+}) {
+  if (endedPending) return true;
+  if (!buffering) return false;
+  return stalledForMs >= stallMs;
+}
+
 /// Whether the VOD resume seek should be applied to the media_kit `_player`
 /// once its duration is known.
 ///
@@ -704,6 +734,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   // Live reconnect watchdog (Windows / embedded media_kit; Android reconnects in
   // its native Activity). Reload the source when a live stream stalls or errors.
   bool _buffering = false;
+
+  /// A live clean EOF seen but not yet acted on — a **level**, not an edge.
+  ///
+  /// Set by the `completed` listener and cleared only when a reload actually
+  /// fires (or when the stream/channel is replaced), so an EOF the
+  /// [reconnectMinGapMs] rate limit suppressed is retried by the 1 s poll
+  /// instead of being lost. See [shouldReloadStalledLive].
+  bool _endedPending = false;
   bool _reconnecting = false;
   int _stalledSinceMs = 0;
   int _lastReconnectMs = 0;
@@ -873,7 +911,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _logPlayback('error ${_redactPlayback(message)}');
         if (!mounted) return;
         if (_isLive) {
-          _reconnectLive(force: true);
+          _reconnectLive(force: true, kind: 'error');
         } else {
           setState(() => _error = message);
         }
@@ -902,10 +940,18 @@ class _PlayerScreenState extends State<PlayerScreen>
           isLive: _isLive,
           nativeSessionActive: _separateEngineOwnsPlayback,
         )) {
+          // `completed=false` is the player leaving EOF (a reopen, or an
+          // app-initiated stop): whatever the pending EOF was waiting to
+          // retry no longer describes the stream.
+          if (!completed) _endedPending = false;
           return;
         }
+        // A *level*, not just this edge: if the rate limit suppresses the
+        // reconnect below, `_pollLiveReconnect` retries it rather than
+        // losing the EOF forever (see [shouldReloadStalledLive]).
+        _endedPending = true;
         _logPlayback('live stream completed (clean EOF) — reconnecting');
-        _reconnectLive(force: true);
+        _reconnectLive(force: true, kind: 'ended');
       }),
     );
     if (_isLive) {
@@ -1243,6 +1289,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lastReconnectMs = 0;
     _stalledSinceMs = 0;
     _buffering = false;
+    _endedPending = false;
     _liveSynced = true;
     if (_reconnecting) {
       _reconnecting = false;
@@ -2160,7 +2207,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         // --keep-open holds the last frame; Back exits cleanly.
         if (!_isLive) return;
         _buffering = true;
-        unawaited(_reconnectLive(force: true));
+        unawaited(_reconnectLive(force: true, kind: 'ended'));
       case LinuxNativePlaybackSignal.stalled:
         // Initial buffering before the first file-loaded is startup latency,
         // not a mid-play stall — feeding it to the watchdog made slow HLS
@@ -2623,7 +2670,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       _stalledSinceMs = 0;
       return;
     }
-    if (!_buffering) {
+    // Two stall shapes, mirroring Kotlin's `uiState.isBuffering || ended`:
+    // an underrun, and a clean EOF the rate limit may have suppressed.
+    if (!_buffering && !_endedPending) {
       _stalledSinceMs = 0;
       _reconnectAttempt = 0;
       if (_reconnecting) {
@@ -2634,30 +2683,56 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_stalledSinceMs == 0) _stalledSinceMs = now;
-    if (now - _stalledSinceMs >= kReconnectStallMs) {
-      unawaited(_reconnectLive(force: false));
+    if (shouldReloadStalledLive(
+      buffering: _buffering,
+      endedPending: _endedPending,
+      stalledForMs: now - _stalledSinceMs,
+    )) {
+      unawaited(
+        _reconnectLive(
+          force: false,
+          kind: _endedPending ? 'ended' : 'buffering',
+        ),
+      );
     }
   }
 
   /// Reload the live source to reconnect, with capped backoff between attempts.
   /// [force] (a hard error) skips the stall threshold but still rate-limits.
-  Future<void> _reconnectLive({required bool force}) async {
+  Future<void> _reconnectLive({
+    required bool force,
+    required String kind,
+  }) async {
     if (!_isLive || !mounted) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final minGap = reconnectMinGapMs(
       priorAttempts: _reconnectAttempt,
       force: force,
     );
+    // Suppressed by the rate limit — deliberately **without** clearing
+    // `_endedPending`, so the poll brings this EOF back when the gap elapses.
     if (_lastReconnectMs != 0 && now - _lastReconnectMs < minGap) return;
     _reconnectAttempt++;
     _lastReconnectMs = now;
     _stalledSinceMs = now;
+    // The reload really is firing now; a later EOF sets the level again.
+    _endedPending = false;
     _liveSynced = true; // a reconnect reopens at the live edge
     if (!_reconnecting) {
       _reconnecting = true;
       _onReconnectingChanged();
     }
-    _logPlayback('live reconnect attempt=$_reconnectAttempt force=$force');
+    // `kind=` mirrors Android's `stallKind` so one vocabulary reads across
+    // both exports, and `ahead=` is how much media was buffered at the moment
+    // the decision was taken — without it an export cannot tell a cushion that
+    // was never built (a link that can't get ahead, or a provider closing the
+    // connection on a timer) from one that was built and then drained, which
+    // is the whole question a buffer setting is asked to answer. Durations
+    // only; no URL.
+    _logPlayback(
+      'live reconnect attempt=$_reconnectAttempt force=$force kind=$kind '
+      'ahead=${_bufferedAheadMs()}ms',
+    );
     try {
       final stream = await _freshLiveStream();
       if (!mounted) return;
@@ -2682,6 +2757,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     } catch (error) {
       _logPlayback('live reconnect failed: ${_redactPlayback('$error')}');
     }
+  }
+
+  /// Milliseconds of media buffered ahead of the playhead on the media_kit
+  /// `_player`, or `-1` where that player is idle because a separate engine
+  /// owns playback (Android/iOS native, Linux native mpv) and its buffer
+  /// numbers describe nothing.
+  int _bufferedAheadMs() {
+    if (_separateEngineOwnsPlayback || _linuxNativeSession != null) return -1;
+    final state = _player.state;
+    final ahead = state.buffer - state.position;
+    return ahead.isNegative ? 0 : ahead.inMilliseconds;
   }
 
   /// The stream to use for a live reload: freshly re-resolved when the caller
@@ -3269,6 +3355,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _goToLive() async {
     if (!_isLive) return;
+    // An explicit jump to the live edge is the reload a pending EOF was
+    // waiting for; letting it stand would reconnect again a tick later.
+    _endedPending = false;
     final stream = await _freshLiveStream();
     if (!mounted) return;
     if (_linuxNativeSession != null) {

@@ -27,11 +27,13 @@ connection; if only one fails, it's that stream.
 ## It reconnects on its own, repeatedly
 
 That means the stream is dropping and the app is picking it back up. Raise the
-source's **buffer** setting to High — it gives the player more slack when the
-connection is uneven.
+source's **buffer** setting to Large, or Extra large — it gives the player more
+slack when the connection is uneven.
 
-If it happens on every channel of one provider but not another, it's the
-provider.
+If raising it changes nothing, the buffer is not the problem: either the
+connection never gets far enough ahead to fill one, or the provider is closing
+the stream on its own schedule. If it happens on every channel of one provider
+but not another, it's the provider.
 
 ## The guide is empty or says "guide unavailable"
 
