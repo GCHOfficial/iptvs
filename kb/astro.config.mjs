@@ -1,6 +1,38 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Astro hashes the scripts it bundles, but not `<script is:inline>` ones, and
+// Starlight ships several of those on purpose — they run before first paint
+// to restore the stored theme, the synced tab, the sidebar scroll position
+// (a deferred module would flash the wrong state first). Unhashed, the CSP
+// blocks every one of them. Hashing them here, from the installed Starlight's
+// own sources, keeps the list in step with whatever version npm resolved;
+// scripts/verify-csp.mjs then proves against the build that it matched.
+function starlightInlineScriptHashes() {
+  const root = dirname(fileURLToPath(import.meta.resolve('@astrojs/starlight')));
+  const hashes = new Set();
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name.endsWith('.astro')) {
+        const source = readFileSync(path, 'utf8');
+        for (const [, body] of source.matchAll(
+          /<script\b[^>]*\bis:inline\b[^>]*>([\s\S]*?)<\/script>/g,
+        )) {
+          hashes.add(`sha256-${createHash('sha256').update(body).digest('base64')}`);
+        }
+      }
+    }
+  };
+  visit(root);
+  return [...hashes];
+}
 
 // The public site: landing page, store badges, and the knowledge base.
 //
@@ -16,6 +48,18 @@ const site = process.env.SITE_URL ?? 'https://iptvs.click';
 
 export default defineConfig({
   site,
+  // Every component stylesheet ships as a file under /_astro, which `'self'`
+  // already allows — never as an inline <style> that the CSP has to hash.
+  // Astro's hashing has proven unable to follow its own inlining: Starlight
+  // 0.42.6 changed one import in its Footer, the page's component CSS split
+  // into different inline blocks, and the emitted policy hashed a block that
+  // was never written while omitting the Card/CardGrid one. The browser then
+  // dropped that block and the landing page's cards lost their boxes and grid
+  // with no build error. `npm run build` runs scripts/verify-csp.mjs, which
+  // fails if any inline style or script is ever left unhashed again.
+  build: {
+    inlineStylesheets: 'never',
+  },
   security: {
     // Astro emits a per-build <meta> CSP, hashing every inline script it and
     // Starlight ship (a docs page carries ~16 of them — the theme selector,
@@ -23,6 +67,9 @@ export default defineConfig({
     // realistic, which is precisely why the panel is a separate origin: there
     // the policy is a flat `script-src 'self'` with nothing inline at all.
     csp: {
+      scriptDirective: {
+        hashes: starlightInlineScriptHashes(),
+      },
       styleDirective: {
         // Shiki colours code blocks with inline `style=` attributes — 80 of
         // them on a single page here — and a style *attribute* cannot be
