@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build",
+    "build": "astro build && node scripts/verify-csp.mjs",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "verify-csp": "node scripts/verify-csp.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.6",
