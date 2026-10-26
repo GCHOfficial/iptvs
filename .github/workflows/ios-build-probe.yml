@@ -85,7 +85,7 @@ jobs:
           tail -n 400 "$RUNNER_TEMP/flutter-build-ios.log"
       - name: Upload full build log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ios-build-probe-log
           path: ${{ runner.temp }}/flutter-build-ios.log
@@ -108,7 +108,7 @@ jobs:
           echo "IPA_NAME=${IPA_NAME}" >> "$GITHUB_ENV"
       - name: Upload unsigned .ipa
         if: steps.build_ios.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ env.IPA_NAME }}
           path: ${{ env.IPA_NAME }}.ipa
@@ -150,7 +150,7 @@ jobs:
           tail -n 400 "$RUNNER_TEMP/flutter-build-ios-simulator.log"
       - name: Upload simulator build log
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ios-build-probe-simulator-log
           path: ${{ runner.temp }}/flutter-build-ios-simulator.log
