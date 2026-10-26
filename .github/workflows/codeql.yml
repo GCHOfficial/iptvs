@@ -32,7 +32,7 @@ on:
 # the bundle a candidate SHA actually ships before pinning it:
 #   gh api repos/github/codeql-action/contents/src/defaults.json?ref=<sha> \
 #     --jq '.content' | base64 -d
-# The current pin (v4.38.2) ships codeql-bundle-v2.27.1. Kotlin 2.4.0 -> 2.4.10
+# The current pin (v4.39.1) ships codeql-bundle-v2.27.3. Kotlin 2.4.0 -> 2.4.10
 # (deps#155) and then 2.4.10 -> 2.4.20 (deps#220) are each exactly the kind of
 # upgrade that required moving the pin.
 #
