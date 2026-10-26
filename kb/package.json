@@ -19,8 +19,6 @@
   },
   "overrides": {
     "postcss-selector-parser": "^7.1.7",
-    "miniflare": {
-      "undici": "^7.30.1"
-    }
+    "undici@^7.0.0": "^7.30.1"
   }
 }
