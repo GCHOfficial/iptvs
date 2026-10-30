@@ -15,7 +15,7 @@
     "sharp": "^0.35.5"
   },
   "devDependencies": {
-    "wrangler": "^4.152.0"
+    "wrangler": "^4.153.0"
   },
   "overrides": {
     "postcss-selector-parser": "^7.1.7",
