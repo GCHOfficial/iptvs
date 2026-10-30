@@ -355,6 +355,97 @@ void main() {
       expect(db.vault.decryptCount, before + 1);
       await db.close();
     });
+
+    test('a catalog longer than one insert chunk keeps order and locators', () async {
+      // Covers both halves of the ANR fix at once: the locators are sealed in
+      // bulk off the calling isolate, and the rows reach SQLite in several
+      // bounded `batch.commit`s inside the one transaction. Sized past both
+      // `kInlineLocatorSealRows` (256) and the 1000-row insert chunk, with the
+      // category list crossing a chunk boundary too, because the categories are
+      // read back by rowid (CLAUDE.md "Category order") and a chunk committed
+      // out of list order would be invisible on a short list.
+      const count = 2300;
+      final db = await AppDatabase.openAt(dbPath());
+      final categories = [
+        for (var i = 0; i < count; i++)
+          Category(id: 'c$i', title: 'Cat ${count - i}'),
+      ];
+      final channels = [
+        for (var i = 0; i < count; i++)
+          Channel(
+            id: 'ch$i',
+            name: 'Channel $i',
+            number: i,
+            categoryId: 'c$i',
+            extra: {'url': '$url?i=$i'},
+          ),
+      ];
+      await db.replaceLibrary('src1', 'Src', categories, channels);
+
+      expect(
+        (await db.readCategories('src1')).map((c) => c.id),
+        categories.map((c) => c.id),
+        reason: 'chunked commits must stay in list order',
+      );
+      final sealed = await db.readChannels('src1');
+      expect(sealed, hasLength(count));
+      expect(sealed.every((c) => hasSealedLocator(c.extra)), isTrue);
+      for (final i in const [0, 1, 999, 1000, 1001, 2299]) {
+        final row = sealed.firstWhere((c) => c.id == 'ch$i');
+        expect((await db.revealChannel(row)).extra['url'], '$url?i=$i');
+      }
+
+      // The sealed models round-trip back through the bulk path unchanged.
+      await db.replaceLibrary('src1', 'Src', categories, sealed);
+      final again = await db.readChannels('src1');
+      expect(
+        {for (final c in again) c.id: c.extra['secretLocator']},
+        {for (final c in sealed) c.id: c.extra['secretLocator']},
+      );
+      await db.close();
+    });
+
+    test('a media list longer than one insert chunk keeps order', () async {
+      const kind = ContentKind.movie;
+      const count = 2300;
+      final db = await AppDatabase.openAt(dbPath());
+      final categories = [
+        for (var i = 0; i < count; i++)
+          MediaCategory(id: 'c$i', title: 'Cat ${count - i}', kind: kind),
+      ];
+      final items = [
+        for (var i = 0; i < count; i++)
+          MediaItem(
+            id: 'm$i',
+            title: 'Item $i',
+            kind: kind,
+            extra: {'cmd': '$url?m=$i'},
+          ),
+      ];
+      await db.replaceMediaLibrary(
+        'src1',
+        kind,
+        categories,
+        items,
+        loadedPages: 1,
+        totalPages: 1,
+      );
+
+      expect(
+        (await db.readMediaCategories('src1', kind)).map((c) => c.id),
+        categories.map((c) => c.id),
+      );
+      final read = await db.readMediaItems('src1', kind);
+      expect(read.map((i) => i.id), items.map((i) => i.id));
+      expect(read.every((i) => hasSealedLocator(i.extra)), isTrue);
+      expect(
+        (await db.revealMediaItem(
+          read.firstWhere((i) => i.id == 'm1500'),
+        )).extra['cmd'],
+        '$url?m=1500',
+      );
+      await db.close();
+    });
   });
 
   group('AppDatabase favorites', () {

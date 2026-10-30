@@ -175,7 +175,14 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `replaceEpgStream`, and don't write the `sources` row with `INSERT OR REPLACE` (it destroys
   columns the writer doesn't own — see `replaceLibrary`).
 - **`lib/data/app_database.dart`** — local SQLite cache keyed by `Source.id`, versioned schema
-  with hand-rolled `onUpgrade`. See "Database migrations" below.
+  with hand-rolled `onUpgrade`. See "Database migrations" below. **Catalog-sized writes flush in
+  `_libraryInsertChunk` (1000) row chunks** (`replaceLibrary`, `replaceMediaLibrary`,
+  `appendMediaItems`; the EPG paths have their own `_epgInsertChunk`): on Android sqflite is a
+  MethodChannel, so one batch carrying a 250k-channel catalog is a single
+  `StandardMessageCodec` message encoded on the UI isolate and decoded into the Java heap — the
+  second shipped ANR. A `batch.commit` inside a transaction does **not** COMMIT, so chunking
+  changes neither atomicity nor the `onlyIfAbsent` predicate's evaluation inside the transaction;
+  the chunks must stay in **list order** (see "Category order").
 - **`lib/data/*_client.dart`** + **`metadata_provider.dart`** — `MetadataProvider`s enriching
   `MediaItem`s with posters/overviews/ratings. `ratingsOnly` providers (MDBList) only contribute
   ratings and run after a visual provider has matched.
@@ -346,7 +353,17 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   locator-consuming path. Write paths must survive a *sealed* model round-tripping back through
   them (`protectSecretLocators` preserves the existing ciphertext when it finds no plaintext
   locator); `resetEnrichedMediaDisplayFields` relies on this. On-disk format is unchanged — this
-  is a model-lifetime contract, not a schema one. Pinned by `test/sealed_locator_reveal_test.dart`,
+  is a model-lifetime contract, not a schema one.
+  **Writing seals in bulk, off the calling isolate, before the transaction opens.**
+  `protectSecretLocatorsBulk` splits the maps inline (no crypto), then hands only the *locator*
+  submaps to a worker in `kLocatorSealChunkRows` (10k) chunks, skipping the hop below
+  `kInlineLocatorSealRows` (256) where the spawn would dominate — the raw key crosses so the
+  worker can rebuild it with `newSecretKeyFromBytes` and keep the round-key memoization (never
+  log it). `cryptography`'s pure-Dart AES-GCM completes *synchronously* behind its Future, so the
+  old one-`await`-per-row loop never yielded to the event loop and — in `replaceLibrary` — ran
+  *inside* the write transaction, holding the single shared sqflite connection for a whole
+  catalog's crypto. That was a shipped ANR (`DartAesGcm._ghash`). Don't reintroduce a per-row
+  seal on a list-sized write path, and don't move one back inside a transaction. Pinned by `test/sealed_locator_reveal_test.dart`,
   the "AppDatabase sealed locators" group in `test/persistence_test.dart` (including a
   `SecretLocatorVault.decryptCount` assertion that a bulk read decrypts *nothing*), and
   `test/secret_locator_vault_test.dart`.
@@ -728,7 +745,10 @@ order from it (`favorites_order.dart`), the favorites list reshuffled too.
 
 The **invariant that makes an implicit rowid sound is that these tables are never patched in
 place**: `replaceLibrary`/`replaceMediaLibrary` delete the source's rows and re-insert the whole
-list, in list order, in one transaction, so SQLite hands out ascending rowids along it. A stored
+list, in list order, in one transaction, so SQLite hands out ascending rowids along it. (The inserts are flushed in
+bounded chunks inside that one transaction — `_libraryInsertChunk` — which stays order-preserving
+only because the chunks commit in list order and the categories are flushed before the first row
+chunk. Keep both when touching those loops.) A stored
 `position` column would be a second copy of a number the table already has, bought with a
 migration. **If a path is ever added that updates a category row in place, add the column
 instead.** (`replaceMediaLibrary`'s paged `parentId != null` branch re-inserts categories without
