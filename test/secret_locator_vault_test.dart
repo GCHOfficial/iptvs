@@ -90,4 +90,81 @@ void main() {
     });
     expect(vault.decryptCount, 1);
   });
+
+  /// The bulk path must be row-for-row indistinguishable from calling
+  /// [protectSecretLocators] on each entry — it is the only thing writing the
+  /// cache now, and the on-disk blob format is unchanged.
+  Future<void> bulkMatchesSingle(int rows, {required String why}) async {
+    final vault = SecretLocatorVault();
+    final extras = <Map<String, dynamic>>[];
+    for (var i = 0; i < rows; i++) {
+      switch (i % 4) {
+        case 0:
+          extras.add({'url': 'https://example.invalid/live/$i?t=s$i', 'n': i});
+        case 1:
+          // No locator at all (Xtream live): must come back untouched.
+          extras.add({'streamId': '$i', 'tvgId': 'c$i'});
+        case 2:
+          // Already sealed: the existing ciphertext has to be carried over.
+          extras.add(
+            await protectSecretLocators({'cmd': '/media/$i.mpg'}, vault),
+          );
+        default:
+          extras.add({'cmd': '/media/$i.mpg', 'url': 'http://x.invalid/$i'});
+      }
+    }
+    final bulk = await protectSecretLocatorsBulk(extras, vault);
+    expect(bulk, hasLength(rows), reason: why);
+    for (var i = 0; i < rows; i++) {
+      final one = await protectSecretLocators(extras[i], vault);
+      // AES-GCM uses a random nonce, so the ciphertexts differ by design;
+      // compare the non-locator half exactly and the sealed half by what it
+      // opens to.
+      expect(
+        {...bulk[i]}..remove(secretLocatorKey),
+        {...one}..remove(secretLocatorKey),
+        reason: why,
+      );
+      expect(
+        bulk[i].containsKey(secretLocatorKey),
+        one.containsKey(secretLocatorKey),
+        reason: why,
+      );
+      if (i % 4 == 2) {
+        // Carried verbatim, not re-encrypted.
+        expect(bulk[i][secretLocatorKey], extras[i][secretLocatorKey]);
+      }
+      if (bulk[i].containsKey(secretLocatorKey)) {
+        expect(
+          await restoreSecretLocators(bulk[i], vault),
+          await restoreSecretLocators(one, vault),
+          reason: why,
+        );
+      }
+    }
+  }
+
+  test('bulk seal matches the single-row path below the inline threshold', () {
+    return bulkMatchesSingle(
+      kInlineLocatorSealRows - 1,
+      why: 'inline (no isolate hop)',
+    );
+  });
+
+  test('bulk seal matches the single-row path across isolate chunks', () {
+    // Past the inline threshold, so this is the real `compute` path. (The
+    // chunk size itself is exercised by the 2300-row catalog in
+    // persistence_test.dart; spawning enough rows to cross
+    // `kLocatorSealChunkRows` here would only re-test the same loop.)
+    return bulkMatchesSingle(
+      kInlineLocatorSealRows + 7,
+      why: 'worker isolate',
+    );
+  });
+
+  test('an empty list needs no key and no worker', () async {
+    final vault = SecretLocatorVault();
+    expect(await protectSecretLocatorsBulk(const [], vault), isEmpty);
+    expect(vault.decryptCount, 0);
+  });
 }

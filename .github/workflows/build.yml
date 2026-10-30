@@ -166,6 +166,15 @@ jobs:
         run: flutter build apk --debug --flavor development --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=development --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Verify development manifest excludes self-update capability
         run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-development-debug.apk development
+      # The plain-JUnit harness under android/app/src/test/kotlin/ (pure logic
+      # extracted from the native player). Nothing else compiles or runs those
+      # sources — the APK builds only compile `main` — so without this step a
+      # Kotlin test could be broken or never run and every check stay green.
+      # Placed after the first `flutter build apk`, which generates the
+      # uncommitted `android/gradlew` and `local.properties` it needs.
+      - name: Kotlin unit tests
+        working-directory: android
+        run: ./gradlew :app:testDevelopmentDebugUnitTest
       - name: Build non-distributable GitHub-direct APK
         run: flutter build apk --debug --flavor githubDirect --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=githubDirect
       - name: Verify GitHub-direct identity and updater capability

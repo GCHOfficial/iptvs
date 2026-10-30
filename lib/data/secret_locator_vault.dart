@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Encrypts provider-owned playback locators before they enter the SQLite
@@ -62,6 +62,13 @@ class SecretLocatorVault {
   }
 
   Future<void> ensureKey() => _secretKey().then((_) {});
+
+  /// The raw 32-byte key, for the bulk seal worker only (it must rebuild the
+  /// key inside its own isolate to get round-key memoization). Private on
+  /// purpose: only this library's `_sealLocators` may read it, and nothing
+  /// anywhere may log it.
+  Future<Uint8List> _keyBytes() async =>
+      Uint8List.fromList(await (await _secretKey()).extractBytes());
 
   Future<String> encrypt(Map<String, String> locators) async {
     if (locators.isEmpty) return '';
@@ -139,6 +146,122 @@ Future<Map<String, dynamic>> protectSecretLocators(
     regular[secretLocatorKey] = existingEncrypted;
   }
   return regular;
+}
+
+/// Fewer locator-carrying rows than this are sealed inline on the calling
+/// isolate: spawning a worker and copying the job both ways would dominate a
+/// handful of AES-GCM seals. Same reasoning as the provider parsers'
+/// `_isolateJsonThreshold`, expressed in rows rather than bytes because the
+/// work here is per-row crypto, not one buffer.
+const kInlineLocatorSealRows = 256;
+
+/// Locator maps per isolate hop. Bounds the message copied in each direction
+/// (and the worker's output list) on a 250k-channel catalog, and lets the
+/// event loop run between hops so even a worst-case write stays interactive.
+const kLocatorSealChunkRows = 10000;
+
+/// Bulk counterpart of [protectSecretLocators].
+///
+/// Why it exists: `cryptography`'s pure-Dart `AesGcm` completes synchronously
+/// behind its `Future`, so `await`ing one seal per row never yields to the
+/// event loop — 50k–250k of them on the UI isolate is an ANR
+/// (`DartAesGcm._ghash` at the top of the stack). This splits the maps on the
+/// calling isolate (cheap, no crypto) and hands only the *locator* submaps to
+/// a worker in bounded chunks, so the non-locator half of every `extra` is
+/// never copied across.
+///
+/// Semantics are row-for-row identical to calling [protectSecretLocators] on
+/// each entry — including the preserve-existing-ciphertext behaviour an
+/// already-sealed model depends on (`resetEnrichedMediaDisplayFields`) — and
+/// the on-disk blob is byte-compatible: the same nonce||ct||mac concatenation
+/// under the same key.
+Future<List<Map<String, dynamic>>> protectSecretLocatorsBulk(
+  List<Map<String, dynamic>> extras,
+  SecretLocatorVault vault,
+) async {
+  if (extras.isEmpty) return const [];
+  final regulars = <Map<String, dynamic>>[];
+  final carried = <int, String>{};
+  final pending = <Map<String, String>>[];
+  final pendingAt = <int>[];
+  for (var i = 0; i < extras.length; i++) {
+    final extra = extras[i];
+    final locators = <String, String>{};
+    final regular = <String, dynamic>{};
+    final existingEncrypted = extra[secretLocatorKey]?.toString();
+    for (final entry in extra.entries) {
+      if (_secretLocatorFields.contains(entry.key) && entry.value is String) {
+        locators[entry.key] = entry.value as String;
+      } else if (entry.key != secretLocatorKey) {
+        regular[entry.key] = entry.value;
+      }
+    }
+    regulars.add(regular);
+    if (locators.isEmpty) {
+      // Nothing plaintext to seal: carry any ciphertext the model already had
+      // (a sealed model round-tripping back through a write path).
+      if (existingEncrypted != null && existingEncrypted.isNotEmpty) {
+        carried[i] = existingEncrypted;
+      }
+    } else {
+      pending.add(locators);
+      pendingAt.add(i);
+    }
+  }
+  carried.forEach((i, value) => regulars[i][secretLocatorKey] = value);
+  if (pending.isEmpty) return regulars;
+  final sealed = await _sealLocators(pending, vault);
+  for (var k = 0; k < sealed.length; k++) {
+    regulars[pendingAt[k]][secretLocatorKey] = sealed[k];
+  }
+  return regulars;
+}
+
+Future<List<String>> _sealLocators(
+  List<Map<String, String>> locators,
+  SecretLocatorVault vault,
+) async {
+  if (locators.length < kInlineLocatorSealRows) {
+    return [for (final one in locators) await vault.encrypt(one)];
+  }
+  // The raw key crosses the isolate boundary so the worker can rebuild it with
+  // `newSecretKeyFromBytes` — the algorithm-built subtype AES round-key
+  // expansion memoizes against (see `SecretLocatorVault._secretKey`). A
+  // `SecretKey` instance itself carries no such memoization into a fresh
+  // isolate. Key material is never logged, here or in the worker.
+  final keyBytes = await vault._keyBytes();
+  final out = <String>[];
+  for (var start = 0; start < locators.length; start += kLocatorSealChunkRows) {
+    final end = start + kLocatorSealChunkRows;
+    final chunk = locators.sublist(
+      start,
+      end < locators.length ? end : locators.length,
+    );
+    out.addAll(await compute(_sealLocatorChunk, (keyBytes, chunk)));
+  }
+  return out;
+}
+
+/// Worker body: one key expansion per chunk, then a seal per row. Top-level
+/// and pure so it can run under [compute].
+Future<List<String>> _sealLocatorChunk(
+  (Uint8List, List<Map<String, String>>) job,
+) async {
+  final algorithm = AesGcm.with256bits();
+  final key = await algorithm.newSecretKeyFromBytes(job.$1);
+  final out = <String>[];
+  for (final locators in job.$2) {
+    if (locators.isEmpty) {
+      out.add('');
+      continue;
+    }
+    final box = await algorithm.encrypt(
+      utf8.encode(jsonEncode(locators)),
+      secretKey: key,
+    );
+    out.add(base64UrlEncode(box.concatenation()));
+  }
+  return out;
 }
 
 Future<Map<String, dynamic>> restoreSecretLocators(

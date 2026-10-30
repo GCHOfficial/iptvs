@@ -34,6 +34,56 @@ back to the embedded `media_kit` surface if unavailable. The native player is a 
   `jniLibs.pickFirsts` keeps this `libmpv.so` over media_kit's (verify it has
   `pl_dovi_metadata`).
 
+**`MpvController` reads mpv off the main thread — the fix for a shipped ANR.** Every
+synchronous `MPVLib.getProperty*` is an `mpv_get_property` that blocks the calling thread until
+the **mpv core** answers, and the core is busiest at exactly the moments these fire:
+`MPV_EVENT_FILE_LOADED` and `MPV_EVENT_VIDEO_RECONFIG`/`AUDIO_RECONFIG` land while the demuxer is
+probing a freshly opened live stream. `refreshTracks` is `3 + 4N` such reads and `refreshMediaInfo`
+about ten, and both used to run inside the controller's `post { … }` — i.e. **on the main thread**.
+Play vitals reported it as `Input dispatching timed out` with `MpvController.refreshTracks` on top
+of the stack. They now run on **`reader`**, a single daemon thread (`iptvs-mpv-read`) the
+controller owns, and only the finished `MpvTrackSnapshot`/`MpvMediaSnapshot` is `post`ed to the
+main thread — `PlayerUiState` is Compose state and is still written there and nowhere else. The
+cheap scalar observers (`time-pos`, `pause`, `volume`, `eof-reached`) keep going straight to main:
+they read nothing from mpv.
+
+**Why not mpv's own event thread.** libmpv's client API is thread-safe and reading from the event
+thread wouldn't deadlock the *core*, but `MPVLib` dispatches `event`/`eventProperty` inside a
+`synchronized` block over its observer list, and `removeObserver` — which `destroy()` calls from
+the main thread — takes that same monitor. A blocking read inside the callback would move the
+stall from `refreshTracks` onto `destroy()` rather than remove it; it would also hold up every
+other property event behind one slow read, and `nativeDestroy` is `mpv_terminate_destroy` plus a
+`pthread_join` of that very thread. So the callbacks stay non-blocking and only hand work to
+`reader`.
+
+**Use-after-destroy is prevented by ordering, not by locking.** `destroy()` nulls the (volatile)
+`mpv` field on the main thread and *then* queues the teardown onto the same FIFO `reader`: a read
+already queued re-reads the field, finds null and does nothing; a read already running finishes
+before the teardown task starts. No background read can reach a destroyed handle, and no lock is
+shared with the event thread.
+
+**`destroy()` deliberately stays synchronous for its caller** (bounded by `DESTROY_WAIT_MS`,
+1.5 s — well under the 5 s input-dispatch budget, far above a healthy teardown). The blocking
+`stop`/`detachSurface`/`mpv_terminate_destroy` runs on `reader`, but the main thread waits for it,
+because the two things that make an async teardown unsafe can't be settled off-device: the
+engine's `SurfaceView` is torn down by the framework right after `release()` returns, so the VO
+must have released its `ANativeWindow` by then; and `HdrPlayerActivity.rebuildEngineForZap`
+constructs a fresh `MpvEngine` in the same call, so returning early would briefly run **two**
+libmpv cores holding two provider connections — which a single-connection account refuses, the
+same reason the zap settle path is stop → resolve → play. If the bound does expire (a wedged
+core), the reader thread finishes the teardown and the `DebugCounters` decrement on its own and
+the main thread stops waiting rather than being killed. Note `MpvEngine` is never part of
+`SharedEngine` adoption — the shared engine is `ExoPlayerEngine` only, and `fallbackToMpv`
+un-adopts through `SharedEngine.invalidateFromFullscreen` first — so no hand-back path is involved.
+
+The pure half of all this is extracted Android-free into
+`player/MpvTrackMapping.kt` (`mapMpvTracks`, `mpvTrackLabel`/`mpvLanguageLabel`,
+`mpvDynamicRangeLabel`/`isHdrRangeLabel`, `mpvCodecLabel`) and pinned by
+`MpvTrackMappingTest` in the plain-JUnit harness, like `PlayerBackPolicy`/`ReconnectPolicy`.
+`MpvMediaSnapshot`'s nullable fields are load-bearing: a null leaves the previously shown badge
+standing rather than blanking the row mid-reconfigure, which is what the old inline `if (it > 0)`
+guards did.
+
 **Buffer policy (time-to-first-frame).** `ExoPlayerEngine` builds its `ExoPlayer` with an explicit
 `DefaultLoadControl` fed from the pure `ExoBufferPolicy` object (same file, pinned by
 `ExoBufferPolicyTest`). Without it media3's defaults apply, and
@@ -3129,7 +3179,12 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   uncounted — it has no independent teardown (disposing the `Player` releases it) — and on Android
   is now built lazily, only if the embedded fallback actually renders.
 - **Kotlin** (`android/.../player/DebugCounters.kt`, `BuildConfig.DEBUG`-gated `AtomicInteger`s):
-  `exoEngines`/`mpvEngines` (constructor ↔ now-idempotent `release()`), `previewViews`
+  `exoEngines`/`mpvEngines` (constructor ↔ now-idempotent `release()`), `mpvReaders`
+  (`MpvController`'s `iptvs-mpv-read` thread — incremented in the controller's `init`, so a failed
+  `MPVLib.create` is still counted because the thread exists either way, and decremented by the
+  **last task the executor runs**, not by `destroy()` returning: `destroy()` only waits for that
+  task with a timeout, and decrementing on the timeout would read zero while the thread was still
+  alive), `previewViews`
   (`PreviewPlatformView` init/dispose), `progressTickers` (launch ↔ `invokeOnCompletion`),
   `sharedEngineLive` (the `SharedEngine.engine` setter — a single choke point, so the adoption
   handoff stays balanced).

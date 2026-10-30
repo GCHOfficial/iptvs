@@ -5,8 +5,9 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Debug-only lifecycle counters for the native player: playback engines, the
- * preview platform view, the fullscreen progress-ticker coroutine, and the
- * [SharedEngine]'s live engine slot. A Dart-driven integration-test soak reads
+ * preview platform view, [MpvController]'s off-main-thread property reader, the
+ * fullscreen progress-ticker coroutine, and the [SharedEngine]'s live engine
+ * slot. A Dart-driven integration-test soak reads
  * [snapshot] across repeated open/close cycles to assert nothing leaks (e.g. a
  * disposed preview still holding an `ExoPlayerEngine`).
  *
@@ -18,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 object DebugCounters {
     private val exoEngines = AtomicInteger(0)
     private val mpvEngines = AtomicInteger(0)
+    private val mpvReaders = AtomicInteger(0)
     private val previewViews = AtomicInteger(0)
     private val progressTickers = AtomicInteger(0)
     private val sharedEngineLive = AtomicInteger(0)
@@ -36,6 +38,22 @@ object DebugCounters {
 
     fun decMpvEngine() {
         if (BuildConfig.DEBUG) mpvEngines.decrementAndGet()
+    }
+
+    /**
+     * [MpvController]'s off-main-thread property reader. Incremented in the
+     * controller's `init` (so a failed `MPVLib.create` is still counted — the
+     * thread exists either way) and decremented by the **last task** the
+     * executor runs, not by `destroy()` returning: `destroy()` only waits for
+     * that task with a timeout, and a counter that decremented on the timeout
+     * would read zero while the thread was still alive.
+     */
+    fun incMpvReader() {
+        if (BuildConfig.DEBUG) mpvReaders.incrementAndGet()
+    }
+
+    fun decMpvReader() {
+        if (BuildConfig.DEBUG) mpvReaders.decrementAndGet()
     }
 
     fun incPreviewView() {
@@ -68,6 +86,7 @@ object DebugCounters {
         return mapOf(
             "exoEngines" to exoEngines.get(),
             "mpvEngines" to mpvEngines.get(),
+            "mpvReaders" to mpvReaders.get(),
             "previewViews" to previewViews.get(),
             "progressTickers" to progressTickers.get(),
             "sharedEngineLive" to sharedEngineLive.get(),

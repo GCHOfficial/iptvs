@@ -1547,9 +1547,9 @@ class AppDatabase {
     int totalPages = 1,
     bool onlyIfAbsent = false,
   }) async {
-    final protectedExtras = [
-      for (final item in items) await protectSecretLocators(item.extra, _vault),
-    ];
+    final protectedExtras = await protectSecretLocatorsBulk([
+      for (final item in items) item.extra,
+    ], _vault);
     var wrote = true;
     await _db.transaction((txn) async {
       if (onlyIfAbsent &&
@@ -1592,7 +1592,15 @@ class AppDatabase {
         );
       }
 
-      final batch = txn.batch();
+      var batch = txn.batch();
+      var n = 0;
+      Future<void> flush() async {
+        if (n == 0) return;
+        await batch.commit(noResult: true);
+        batch = txn.batch();
+        n = 0;
+      }
+
       if (categoryId == null) {
         for (final c in categories) {
           batch.insert('media_categories', {
@@ -1601,7 +1609,12 @@ class AppDatabase {
             'id': c.id,
             'title': c.title,
           }, conflictAlgorithm: ConflictAlgorithm.replace);
+          if (++n >= _libraryInsertChunk) await flush();
         }
+        // Flushed before the first item chunk and in list order, so the
+        // categories keep ascending rowids along the list — `readMediaCategories`
+        // reads them back that way (CLAUDE.md "Category order").
+        await flush();
       }
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
@@ -1617,7 +1630,9 @@ class AppDatabase {
           ),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
+        if (++n >= _libraryInsertChunk) await flush();
       }
+      await flush();
       batch.insert('media_sync', {
         'source_id': sourceId,
         'kind': kind.name,
@@ -1696,9 +1711,9 @@ class AppDatabase {
     required int loadedPages,
     required int totalPages,
   }) async {
-    final protectedExtras = [
-      for (final item in items) await protectSecretLocators(item.extra, _vault),
-    ];
+    final protectedExtras = await protectSecretLocatorsBulk([
+      for (final item in items) item.extra,
+    ], _vault);
     await _db.transaction((txn) async {
       final startOrder = await _nextMediaDisplayOrder(
         txn,
@@ -1708,7 +1723,8 @@ class AppDatabase {
         parentId,
       );
 
-      final batch = txn.batch();
+      var batch = txn.batch();
+      var n = 0;
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
         batch.insert(
@@ -1723,6 +1739,11 @@ class AppDatabase {
           ),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
+        if (++n >= _libraryInsertChunk) {
+          await batch.commit(noResult: true);
+          batch = txn.batch();
+          n = 0;
+        }
       }
       batch.insert('media_sync', {
         'source_id': sourceId,
@@ -1805,9 +1826,13 @@ class AppDatabase {
     List<MediaItem> items,
   ) async {
     if (items.isEmpty) return;
+    final protectedExtras = await protectSecretLocatorsBulk([
+      for (final item in items) item.extra,
+    ], _vault);
     final batch = _db.batch();
-    for (final item in items) {
-      final extra = await protectSecretLocators(item.extra, _vault);
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      final extra = protectedExtras[i];
       batch.update(
         'media_items',
         {
@@ -1846,13 +1871,17 @@ class AppDatabase {
       whereArgs: sourceId == null ? null : [sourceId],
     );
     if (rows.isEmpty) return;
+    final raws = [for (final row in rows) _decodeExtra(row['extra'])];
+    // The maps stay SEALED: none of the display fields below live in the
+    // locator set, and re-running the protect pass over a sealed map finds no
+    // plaintext locators and preserves the existing ciphertext verbatim. So
+    // this rewrite never decrypts — and never encrypts either, which is why
+    // the bulk pass short-circuits its worker entirely here.
+    final protectedExtras = await protectSecretLocatorsBulk(raws, _vault);
     final batch = _db.batch();
-    for (final row in rows) {
-      // `raw` stays SEALED: none of the display fields below live in the
-      // locator set, and re-running `protectSecretLocators` over a sealed map
-      // finds no plaintext locators and preserves the existing ciphertext
-      // verbatim (`existingEncrypted`). So this rewrite never decrypts.
-      final raw = _decodeExtra(row['extra']);
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final raw = raws[i];
       final title =
           _firstString(raw, [
             'providerTitle',
@@ -1861,7 +1890,7 @@ class AppDatabase {
             'title',
           ]) ??
           row['title'] as String;
-      final protectedExtra = await protectSecretLocators(raw, _vault);
+      final protectedExtra = protectedExtras[i];
       batch.update(
         'media_items',
         {
@@ -2006,6 +2035,20 @@ class AppDatabase {
     extra: extra,
   );
 
+  /// Rows per `batch.commit` inside a catalog-replacing transaction.
+  ///
+  /// On Android every sqflite call crosses a MethodChannel, so a batch holding
+  /// a whole 250k-channel catalog is one `StandardMessageCodec` message
+  /// encoded on the UI isolate and decoded into the Java heap — an ANR with
+  /// `StandardMessageCodec.writeValue` on top of the stack. Flushing in
+  /// bounded chunks keeps every statement inside the surrounding transaction
+  /// (`batch.commit` here does not COMMIT; it executes the pending statements
+  /// against the open transaction — same trick as [_epgInsertChunk]), so
+  /// atomicity is unchanged. Chunks must be committed in list order:
+  /// `readCategories`/`readChannels` depend on ascending rowids following the
+  /// list (CLAUDE.md "Category order").
+  static const _libraryInsertChunk = 1000;
+
   /// Replace all cached channels/categories for a source in one transaction.
   ///
   /// With [onlyIfAbsent] the replace becomes a **seed**: it commits only when
@@ -2027,6 +2070,15 @@ class AppDatabase {
     List<Channel> channels, {
     bool onlyIfAbsent = false,
   }) async {
+    // Seal every locator BEFORE the transaction opens. `cryptography`'s
+    // pure-Dart AES-GCM completes synchronously behind its Future, so one
+    // `await`ed seal per row neither yields to the event loop nor overlaps
+    // with anything — doing that inside the write transaction held the single
+    // sqflite connection (which serialises every read in the app) for the
+    // whole catalog's crypto. The media paths always did it this way.
+    final protectedExtras = await protectSecretLocatorsBulk([
+      for (final ch in channels) ch.extra,
+    ], _vault);
     var wrote = true;
     await _db.transaction((txn) async {
       if (onlyIfAbsent && await _hasChannelCache(txn, sourceId)) {
@@ -2044,16 +2096,30 @@ class AppDatabase {
         whereArgs: [sourceId],
       );
 
-      final batch = txn.batch();
+      var batch = txn.batch();
+      var n = 0;
+      Future<void> flush() async {
+        if (n == 0) return;
+        await batch.commit(noResult: true);
+        batch = txn.batch();
+        n = 0;
+      }
+
       for (final c in categories) {
         batch.insert('categories', {
           'source_id': sourceId,
           'id': c.id,
           'title': c.title,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
+        if (++n >= _libraryInsertChunk) await flush();
       }
-      for (final ch in channels) {
-        final extra = await protectSecretLocators(ch.extra, _vault);
+      // Categories are flushed before the first channel chunk, and the chunks
+      // run in list order, so SQLite hands out ascending rowids along the list
+      // exactly as one giant batch did (CLAUDE.md "Category order").
+      await flush();
+      for (var i = 0; i < channels.length; i++) {
+        final ch = channels[i];
+        final extra = protectedExtras[i];
         batch.insert('channels', {
           'source_id': sourceId,
           'id': ch.id,
@@ -2064,8 +2130,9 @@ class AppDatabase {
           'extra': extra.isEmpty ? null : jsonEncode(extra),
           'archive_days': ch.archiveDays,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
+        if (++n >= _libraryInsertChunk) await flush();
       }
-      await batch.commit(noResult: true);
+      await flush();
       // Upsert the sources row WITHOUT touching epg_synced_at (or any future
       // column this method doesn't own). INSERT OR REPLACE deletes the row
       // first, which nulled EPG freshness on every channel refresh. Explicit

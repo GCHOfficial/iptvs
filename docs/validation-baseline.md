@@ -271,8 +271,62 @@ measures SQLite + `jsonDecode` + model construction only — it is **not**
 comparable to the left-hand column as a like-for-like crypto measurement, and a
 future change that reintroduces read-time decryption will not show up as a
 number regression here but as a failure of the counting assertion in
-`test/persistence_test.dart` ("a bulk read decrypts nothing"). The write side
-still encrypts once per row, which is why `libraryWriteMs` is unmoved.
+`test/persistence_test.dart` ("a bulk read decrypts nothing").
+
+### Write side: bulk locator sealing + chunked batches
+
+Two Play-vitals ANRs ("Input dispatching timed out") landed on this write path,
+and both were fixed together:
+
+- **`DartAesGcm._ghash` on top of the stack.** `replaceLibrary` sealed one
+  locator per channel with an `await`ed `protectSecretLocators`, *inside* the
+  write transaction, on the UI isolate. `cryptography`'s pure-Dart `AesGcm`
+  completes synchronously behind its `Future`, so 50k–250k of those never yield
+  to the event loop — and they held the single shared sqflite connection's
+  write transaction (which serialises every read in the app) for the whole
+  catalog's crypto. `protectSecretLocatorsBulk`
+  (`lib/data/secret_locator_vault.dart`) now splits the maps on the calling
+  isolate (no crypto) and hands only the *locator* submaps to a worker in
+  chunks of `kLocatorSealChunkRows` (10,000), skipping the hop entirely below
+  `kInlineLocatorSealRows` (256) where the spawn would dominate. The raw 32-byte
+  key crosses into the worker so it can rebuild the key with
+  `newSecretKeyFromBytes` and keep the round-key memoization described above;
+  key material is never logged. The channel path also seals **before** the
+  transaction opens, as the media paths always did. On-disk format is unchanged
+  (same nonce||ct||mac concatenation), including the preserve-existing-ciphertext
+  branch `resetEnrichedMediaDisplayFields` relies on.
+- **`StandardMessageCodec.writeValue` on top of the stack.** On Android sqflite
+  is a MethodChannel, and `replaceLibrary`/`replaceMediaLibrary`/
+  `appendMediaItems` each built ONE batch holding every category and row —
+  a single giant message encoded on the UI isolate and decoded into the Java
+  heap. They now flush in `_libraryInsertChunk` (1,000) row chunks, the same
+  trick the EPG paths already used: `batch.commit` inside a transaction does not
+  COMMIT, so atomicity, the `onlyIfAbsent` predicate's evaluation inside the
+  transaction, and ascending rowids along the list (categories are read back by
+  rowid — CLAUDE.md "Category order") are all preserved. Categories are flushed
+  before the first row chunk so their rowids still lead.
+
+Re-measured on `DEV-Linux-1` (Flutter 3.47.7 / Dart 3.13.5, sqflite_common_ffi),
+same 50,000-channel / 100,000-programme fixture, three runs each:
+
+| | `libraryWriteMs` | `channelReadMs` | `epgWriteMs` | `nowNextMs` |
+|---|---:|---:|---:|---:|
+| Before (per-row seal inside the txn, one giant batch) | 1,725 / 1,736 / 1,761 | 143 | 648–693 | 359–385 |
+| After (bulk seal before the txn, 1,000-row chunks) | 973 / 976 / 977 | 128–141 | 663–701 | 373–378 |
+
+Caveats on that number. The host runs sqflite through FFI, so **none** of the
+improvement can be the MethodChannel chunking — that half of the fix is
+unmeasurable here and needs an on-device Android run to confirm. What the host
+run does show is that moving the seals out of the transaction and off the
+per-row `await` treadmill roughly halves the wall clock on its own; the
+decomposition between "crypto in a worker" and "no event-loop ping-pong against
+the open transaction" was not isolated. The ANR fix is about *where* the work
+runs, not about this number.
+
+**Still to verify on hardware:** the two ANR clusters disappearing from Play
+vitals, and `libraryWriteMs` / main-thread stall on the low-end Android TV box
+for a 250k-channel catalog (where the Java-heap decode of the old single batch,
+not the crypto, was likely the larger half).
 
 The 3,433 → 143 ms drop came in two independently revertable steps, both
 measured on the same host and fixture:
