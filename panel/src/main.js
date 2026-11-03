@@ -2,7 +2,7 @@
 // panel is framed (the meta CSP cannot enforce `frame-ancestors`).
 import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
-import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubForDisplay, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
+import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, diagnosticsDeleteOutcome, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubForDisplay, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
 import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
@@ -1352,9 +1352,15 @@ async function revokeDevice(id) {
 // itself, so every value is escaped on the way into the markup and the body is
 // rendered as TEXT, never as HTML (see `openDiagnostics`).
 //
-// There is deliberately **no delete control**: the owner has not approved a
-// developer delete path and no such RPC exists. Logs age out on their own
-// `expires_at`. Don't add a button for a function that isn't there.
+// Each row carries a **Delete**, behind a confirm. It calls
+// `support_delete_diagnostics` — the one hole in an otherwise insert-only table,
+// open to a seeded `support_readers` account and nothing else — and then
+// re-renders the list **from the server**, never by splicing the row out of the
+// local array: the server is the only thing that knows whether the delete
+// actually landed, and another tab may have changed the inbox meanwhile. Logs
+// still age out on their own `expires_at`; this is for clearing one that has
+// already been read, so a user's provider address and viewing history stop
+// sitting on disk for the balance of the 30 days.
 
 // Chunk size for painting a long body. A 256 KiB log appended in one go blocks
 // the frame; sliced across animation frames the first screenful paints at once.
@@ -1389,6 +1395,8 @@ async function renderSupport() {
     el.onclick = () => openDiagnostics(el.dataset.open, el);
   for (const el of view().querySelectorAll('[data-copy]'))
     el.onclick = () => copyDiagnostics(el.dataset.copy);
+  for (const el of view().querySelectorAll('[data-del]'))
+    el.onclick = () => deleteDiagnostics(el.dataset.del);
 }
 
 function supportRow(d) {
@@ -1414,6 +1422,7 @@ function supportRow(d) {
         <div class="actions">
           <button data-open="${esc(d.code)}" class="ghost">Open</button>
           <button data-copy="${esc(d.code)}" class="ghost">Copy</button>
+          <button data-del="${esc(d.code)}" class="ghost danger">Delete</button>
         </div>
       </div>
       <div class="diag-body"></div>
@@ -1497,6 +1506,26 @@ async function copyDiagnostics(code) {
   } catch {
     toast('Could not copy — open the log and copy it manually.', true);
   }
+}
+
+async function deleteDiagnostics(code) {
+  // `confirm` renders text, never markup — and the code is server-generated
+  // from a 31-symbol alphabet, unlike every other value on this tab.
+  if (!confirm(`Delete report ${code}? The log is removed from the server and cannot be recovered.`))
+    return;
+  const { data, error } = await supabase.rpc('support_delete_diagnostics', { p_code: code });
+  if (error) {
+    logError(error, 'support');
+    return toast(friendlyError(error), true);
+  }
+  // Drop the cached body before anything else. Codes are minted at random and
+  // a deleted one can be minted again, so a stale entry here would eventually
+  // show one report's log under another's code.
+  supportBodies.delete(code);
+  const outcome = diagnosticsDeleteOutcome(data);
+  toast(outcome.message, !outcome.deleted);
+  // The server is the only thing that knows what the inbox now holds.
+  renderSupport();
 }
 
 // --------------------------------------------------------------- account

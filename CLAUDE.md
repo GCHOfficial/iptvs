@@ -658,6 +658,15 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   — `FORCE` would make every one of those RPCs silently read and write nothing. Defence in depth is
   the table-level `REVOKE` (which also strips TRUNCATE — RLS does not filter TRUNCATE). Rationale
   in docs/cloud-sync.md.
+- **A new trigger function must be revoked from `anon, authenticated`, not just `public`.**
+  Supabase's default privileges grant those two roles EXECUTE *directly* on every function created
+  in `public`, so the usual `revoke … from public` leaves them holding it. Nothing is exploitable
+  (a function `returns trigger` can only be called as a trigger, and PostgREST never exposes one) —
+  it is advisor hygiene, swept in `..._diagnostics_delete.sql` and pinned forward by
+  `01_baseline_invariants`. **Revoking EXECUTE never stops a trigger firing**: the function is
+  permission-checked at `CREATE TRIGGER`, and firing it goes through a cached `FmgrInfo` that fmgr
+  invokes without a privilege check — `15_profiles_favorites_revision.test.sql` demonstrates it,
+  writing `sources`/`profiles` as `authenticated` and asserting on what the triggers did.
 - **Secrets are isolated + optionally E2EE (Phase 2/3 — implemented; docs/cloud-sync.md).** The
   cloud `sources.fields`/`metadata_configs.config` rows carry only **broad** keys (a server strip
   trigger enforces it); secret keys (`secret_keys.dart`: mac/username/password/playlistUrl/epgUrl/
@@ -767,8 +776,12 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   trusting the transaction-local sweep flag — and it carries **no column `CHECK`s**, because a CHECK
   violation's "Failing row contains (...)" DETAIL would echo the whole log body. Reads are
   `support_list_diagnostics`/`support_get_diagnostics`, gated on a `support_readers` row seeded by
-  hand from the dashboard: **empty = nobody reads anything**, and there is deliberately **no
-  developer delete RPC**. The `D-XXXXXX` code is an **identifier, not a bearer token** (no
+  hand from the dashboard: **empty = nobody reads anything**. A reader may also
+  **delete** one report (`support_delete_diagnostics`, `..._diagnostics_delete.sql`, the panel's
+  per-row Delete) — the promised *third sweep mode* rather than a loosening: a client can set the
+  `iptvs.diagnostics_sweep` GUC all it likes and still holds no table privilege to delete with, and
+  the `'support'` branch re-checks `is_support_reader()`, so a dashboard session (no JWT, no
+  `auth.uid()`) is still refused and "the guard binds the table owner" survives. The `D-XXXXXX` code is an **identifier, not a bearer token** (no
   non-developer read path exists); the QR encodes the bare code, never a URL. Client-side the anon
   role comes for free — `supabase_flutter` falls back to the publishable key as the bearer when
   there is no session — so `submitDiagnostics` must never call `ensureAnonSession()`. The LAN

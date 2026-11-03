@@ -43,8 +43,9 @@ enum _SendPhase { consent, sending, sent, failed }
 ///
 /// **Cancel autofocuses, and Send is one D-pad step away.** This is the one
 /// screen in the app where the destructive-by-default reading is the right one:
-/// the action is irreversible (there is no unsend, and no developer delete
-/// path), its subject is the user's own viewing history, and the screen is
+/// the action is irreversible *to the user* (there is no unsend, and the
+/// developer-side delete added later is not something the device can ask
+/// for), its subject is the user's own viewing history, and the screen is
 /// reached by someone pressing buttons on a remote. Autofocusing the primary
 /// action — which every other dialog in this app does, including the update
 /// prompt — would make a single stray OK press publish a log. A remote user

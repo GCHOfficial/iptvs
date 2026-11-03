@@ -490,6 +490,32 @@ then raising **Auth → Rate Limits → email sent**.
 > table-level `REVOKE` in `..._tenant_isolation.sql`, which also strips **TRUNCATE** — RLS does not
 > filter TRUNCATE at all, so holding it on an RLS-protected table is a latent full-wipe primitive.
 
+### Trigger functions are revoked from the client roles too
+
+`revoke … from public` is not enough on a Supabase project. A fresh project runs
+`alter default privileges in schema public grant all on functions to anon, authenticated,
+service_role`, so every function created afterwards carries a **direct** grant to those two roles
+that revoking from `PUBLIC` leaves untouched. Most migrations here revoke from `public, anon` (or
+all three) explicitly; the trigger functions were the set that did not, and the advisor flagged
+`touch_profile_snapshot_revision` (`SECURITY DEFINER`) for it. `..._diagnostics_delete.sql` sweeps
+all fourteen, and `01_baseline_invariants.test.sql` asserts the property so the next one added
+cannot quietly reintroduce it.
+
+Nothing was exploitable: a function `returns trigger` cannot be called as an RPC — Postgres answers
+"trigger functions can only be called as triggers" — and PostgREST does not expose one. This is
+attack-surface hygiene.
+
+**Revoking EXECUTE does not stop a trigger firing.** The trigger's function is resolved and
+permission-checked when the trigger is *created*; firing it goes through `ExecCallTriggerFunc`,
+which invokes a cached `FmgrInfo` directly, and fmgr performs no privilege checks — SQL-level
+EXECUTE is only consulted where a function is named in a parsed query. The schema already relied on
+that (`sources_sync_secret_profile`, `pairings_reap`, `diagnostics_validate` and
+`diagnostics_immutable` were revoked from both roles in earlier migrations), and the suite proves it
+empirically: `15_profiles_favorites_revision.test.sql` writes `public.sources`/`public.profiles`
+directly as `authenticated` and asserts on what `sources_validate`, `profiles_touch_updated_at` and
+the `SECURITY DEFINER` `touch_profile_snapshot_revision` did — as a role holding no EXECUTE on any
+of them. `service_role` is left alone: it bypasses RLS by design and never ships to a client.
+
 ## Diagnostics submission ("Send diagnostics")
 
 `20261103000000_diagnostics.sql` + `lib/data/diagnostics_upload.dart` +
@@ -559,12 +585,59 @@ mode flag the submit RPC sets (`iptvs.diagnostics_sweep`, the same `set_config(.
 - `'expire'` — the row is past `expires_at`. This is the 30-day expiry being *implemented*, not an
   exception to it.
 - `'evict'` — the row is older than the 72 h floor and the table is at its ceiling.
+- `'support'` — a seeded support reader is deleting the report through
+  `support_delete_diagnostics` (below).
 
-The guard re-checks the row's own eligibility rather than trusting the flag, which is the point: a
-bug in the sweep's `WHERE` clause cannot take a fresh submission. It fires for every role
-**including the table owner**, so it binds the dashboard too. A developer-initiated delete is
-deliberately **not** in scope (the owner has not approved one); adding it later means adding a third
-mode here — a visible, reviewable change — rather than relaxing anything.
+The first two guards re-check the **row's** own eligibility rather than trusting the flag, which is
+the point: a bug in the sweep's `WHERE` clause cannot take a fresh submission. It fires for every
+role **including the table owner**, so it binds the dashboard too.
+
+### The developer delete
+
+`20261104000000_diagnostics_delete.sql`. `support_delete_diagnostics(p_code)` is the third sweep
+mode the original migration promised — the shape a developer delete would take if it were ever
+approved. It was, and nothing in the guard was relaxed to add it.
+
+Why it exists: the inbox is a working queue, and a report that has been read and acted on is a
+user's provider address, source and profile names and viewing history sitting on disk for the
+balance of its 30 days for no reason. Deleting it is strictly the safer direction for that data.
+
+It is `SECURITY DEFINER` with `search_path = ''`, takes no `DEFAULT`s, raises
+`iptvs: not authorised` (a `check_violation`) unless `is_support_reader()`, normalises the code
+**exactly** as `support_get_diagnostics` does (`upper(btrim(coalesce(…, '')))`, so a code read off a
+phone call in lower case finds the same row through both), deletes that one row by primary key, and
+returns whether a row went. Granted to `authenticated` only, revoked from `public`/`anon`.
+
+Three deliberate non-features:
+
+- **Not rate-limited.** `submit_diagnostics` is metered because `anon` can call it with no subject
+  to bound. The only caller here is a row somebody put in `support_readers` from the dashboard, so a
+  limiter would add a failure mode ("couldn't delete, try later") without bounding anything — the
+  same reason the two support *read* RPCs carry none.
+- **Expiry is not filtered.** `support_get_diagnostics` hides an expired body because serving it
+  would break the 30-day promise; deleting a row the lazy sweep has not reached only helps that
+  promise along.
+- **An unknown code is not an error**, it returns `false`. That is the ordinary outcome of two
+  browser tabs open on one inbox, or a report that expired between the list being drawn and Delete
+  being pressed.
+
+**Why a client cannot abuse the flag.** `iptvs.diagnostics_sweep` is a GUC and `set_config` is
+callable by anyone, so "can a client set it to `'support'`?" is the wrong question — it can. The
+flag is worth nothing on its own, for two independent reasons:
+
+1. **No client role holds any table privilege on `public.diagnostics`.** A DELETE from a client
+   session is refused by the grant system *before* any trigger runs. The only DELETE statements that
+   can reach this trigger at all are the ones inside a `SECURITY DEFINER` function owned by the
+   table owner — the submit RPC's sweep and eviction, and this one.
+2. **The `'support'` branch re-checks the caller**, with `is_support_reader()`. `SECURITY DEFINER`
+   switches the effective *role*, not `request.jwt.claims`, so that question is answered about the
+   caller even inside the RPC. A privileged hand at the dashboard has no JWT, `auth.uid()` is null,
+   and the branch stays shut — so "the guard binds the table owner too" survives the new mode. (The
+   honest bound, unchanged: a role that can `drop trigger` was never held by this trigger. The guard
+   makes an accidental delete impossible and a deliberate one a reviewable change.)
+
+Pinned by `supabase/tests/18_diagnostics_delete.test.sql`, which asserts both of those directly —
+including the table owner, flag set by hand and claims cleared, still being refused.
 
 There are **no column `CHECK` constraints** on this table, on purpose: a CHECK violation's `DETAIL`
 is "Failing row contains (...)", which here would echo the entire log body back over the wire.
@@ -636,7 +709,15 @@ boundary. There is no linkification, and long bodies are appended in chunks acro
 so a 256 KiB log does not jank the tab. Every metadata field is `esc()`-escaped for the same reason
 the server bounds them — an unauthenticated caller chose them.
 
-There is **no delete control**, because there is no delete RPC.
+Each row carries **Open**, **Copy** and **Delete**. Delete is behind a `confirm()` naming the code
+(plain text, never markup — and the code is the one value on this tab the server generated), calls
+`support_delete_diagnostics`, drops the cached body for that code (codes are minted at random and a
+deleted one can be minted again, so a stale cache entry would eventually show one report's log under
+another's code), and then **re-renders the list from the server** rather than splicing the row out
+of the local array — the server is the only thing that knows what the inbox now holds. `false` is
+reported as "That report was already gone", not as a failure (`diagnosticsDeleteOutcome`,
+`panel/src/validate.js`, unit-tested). Like the availability probe, none of this runs from an auth
+listener.
 
 ### The LAN fallback
 

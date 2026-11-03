@@ -610,6 +610,29 @@ export function scrubForDisplay(s) {
   return String(s ?? '').replace(DISPLAY_UNSAFE_RE, '\uFFFD');
 }
 
+/// What `support_delete_diagnostics` answered, as something to show the user.
+///
+/// The RPC returns a plain boolean: true if a row went, false if the code
+/// matched nothing. **False is not an error** \u2014 it is the ordinary outcome of
+/// two browser tabs open on the same inbox, or of a report that expired between
+/// the list being drawn and Delete being pressed \u2014 so it gets a plain,
+/// non-alarming line of its own rather than the error toast a failed call
+/// deserves. The distinction is the whole reason this is a function: a caller
+/// that only checked `error` would cheerfully claim it had deleted something
+/// that was never there.
+///
+/// Coerces defensively: the value arrives as JSON over the wire, and anything
+/// that is not a literal `true` (or the string a stricter-typed proxy might
+/// hand back) is read as "nothing was deleted", which is the safe direction \u2014
+/// it understates, and the re-rendered list is the real answer either way.
+export function diagnosticsDeleteOutcome(data) {
+  const deleted = data === true || data === 'true';
+  return {
+    deleted,
+    message: deleted ? 'Report deleted.' : 'That report was already gone.',
+  };
+}
+
 /// One control of the source form, as HTML.
 ///
 /// A `password: true` field gets a **reveal toggle** beside it. The panel
