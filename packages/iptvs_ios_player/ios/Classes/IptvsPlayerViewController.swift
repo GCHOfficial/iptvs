@@ -252,11 +252,17 @@ final class IptvsPlayerViewController: UIViewController {
   /// having to duplicate `AvPlayerEngine`'s own per-item bookkeeping.
   private var pendingLatencyResetReason: LiveLatencyResetReason = .load
 
-  /// The drift reading at the last sample, so the controller can detect the
-  /// one tick that *crosses* ``kLiveDriftWarnMs`` (`LiveLatencyLogging
+  /// The **delay** reading at the last sample, so the controller can detect
+  /// the one tick that *crosses* ``kLiveDriftWarnMs`` (`LiveLatencyLogging
   /// .crossedWarnThreshold`) without a separate latched bool — reset to `0`
   /// alongside the tracker so a fresh load can cross the threshold again.
-  private var lastSampledDriftMs: Int64 = 0
+  /// Wave 2 (`live-latency-wave2-contract.md` (a)): the "behind" crossing this
+  /// drives is now on `delayMs`, not `driftMs` — a connect-time backlog alone
+  /// can cross the warn threshold even on an honest 1x stream (S2 in
+  /// `LiveLatencyTests`), and the diagnostics line exists to surface exactly
+  /// that. The ``liveSynced`` latch is unaffected — it stays keyed on drift
+  /// (see ``PlayerChromeState/liveSynced``).
+  private var lastSampledDelayMs: Int64 = 0
 
   /// Wall clock of the last periodic "live latency" export, so the 60s cadence
   /// in `live-latency-contract.md` is measured from a reset rather than from
@@ -857,42 +863,59 @@ final class IptvsPlayerViewController: UIViewController {
     }
   }
 
-  /// One tick of the wave-1 live-latency contract: fold the engine's current
-  /// position/buffering into ``latencyTracker``, push the formatted figures
-  /// into the chrome, and emit the two tick-driven diagnostics lines (the
-  /// one-shot "just crossed the warn threshold" line and the 60s periodic
-  /// export). The reset-triggered "live latency reset" line is emitted
-  /// separately, by ``resetLiveLatency(reason:nowMs:)``.
+  /// One tick of the live-latency contract: fold the engine's current
+  /// position/buffering/buffered-ahead cushion into ``latencyTracker``, push
+  /// the formatted figures into the chrome, and emit the two tick-driven
+  /// diagnostics lines (the one-shot "just crossed the warn threshold" line
+  /// and the 60s periodic export). The reset-triggered "live latency reset"
+  /// line is emitted separately, by ``resetLiveLatency(reason:nowMs:)``.
+  ///
+  /// Wave 2 (`live-latency-wave2-contract.md` (a)): `aheadMs` now also feeds
+  /// the tracker itself (it folds into ``LiveLatencyTracker/backlogMs``), not
+  /// only the chrome; the badge/info row and the "behind" crossing read
+  /// ``LiveLatencyTracker/delayMs`` rather than ``LiveLatencyTracker/driftMs``,
+  /// while the ``PlayerChromeState/liveSynced`` latch still reads `driftMs`
+  /// (``PlayerChromeState/applyLiveLatency(driftMs:delayMs:aheadMs:)`` takes
+  /// both). This controller never calls ``LiveLatencyTracker/credit(_:)`` and
+  /// never reports `catchingUp: true` — there is no mpv in-cache skip and no
+  /// ExoPlayer-style catch-up speed-up on this engine (`live-latency-wave2
+  /// -contract.md` (b)/(e) are mpv/ExoPlayer-only) — so `creditedMs` stays `0`
+  /// for the life of every iOS session.
   private func sampleLiveLatency(nowMs: Int64) {
+    let aheadMs = engine.bufferedAheadMs
     latencyTracker.sample(
       LiveLatencySample(
         nowMs: nowMs,
         positionMs: engine.positionMs,
         isPlaying: engine.isPlaying,
         isBuffering: engine.isBuffering || liveDropped
-      )
+      ),
+      aheadMs: aheadMs
     )
     let driftMs = latencyTracker.driftMs
-    let aheadMs = engine.bufferedAheadMs
-    uiState.batch { $0.applyLiveLatency(driftMs: driftMs, aheadMs: aheadMs) }
+    let delayMs = latencyTracker.delayMs
+    uiState.batch { $0.applyLiveLatency(driftMs: driftMs, delayMs: delayMs, aheadMs: aheadMs) }
 
-    if LiveLatencyLogging.crossedWarnThreshold(previousDriftMs: lastSampledDriftMs, currentDriftMs: driftMs) {
+    if LiveLatencyLogging.crossedWarnThreshold(previousDriftMs: lastSampledDelayMs, currentDriftMs: delayMs) {
       emitDiagnostic(
         LiveLatencyLogging.behindLine(
           driftMs: driftMs,
           aheadMs: aheadMs,
           stalls: latencyTracker.stalls,
           stalledMs: latencyTracker.stalledMs,
-          discontinuities: latencyTracker.discontinuities
+          discontinuities: latencyTracker.discontinuities,
+          delayMs: delayMs,
+          backlogMs: latencyTracker.backlogMs,
+          creditedMs: latencyTracker.creditedMs
         )
       )
     }
-    lastSampledDriftMs = driftMs
+    lastSampledDelayMs = delayMs
 
     guard engine.isPlaying, nowMs - lastLatencyLogMs >= LiveLatencyLogging.periodicIntervalMs else {
       return
     }
-    guard LiveLatencyLogging.shouldLogPeriodic(driftMs: driftMs, aheadMs: aheadMs) else { return }
+    guard LiveLatencyLogging.shouldLogPeriodic(delayMs: delayMs, aheadMs: aheadMs) else { return }
     lastLatencyLogMs = nowMs
     emitDiagnostic(
       LiveLatencyLogging.periodicLine(
@@ -900,7 +923,10 @@ final class IptvsPlayerViewController: UIViewController {
         aheadMs: aheadMs,
         stalls: latencyTracker.stalls,
         stalledMs: latencyTracker.stalledMs,
-        discontinuities: latencyTracker.discontinuities
+        discontinuities: latencyTracker.discontinuities,
+        delayMs: delayMs,
+        backlogMs: latencyTracker.backlogMs,
+        creditedMs: latencyTracker.creditedMs
       )
     )
   }
@@ -917,7 +943,7 @@ final class IptvsPlayerViewController: UIViewController {
       )
     }
     latencyTracker.reset()
-    lastSampledDriftMs = 0
+    lastSampledDelayMs = 0
     lastLatencyLogMs = nowMs
     pendingLatencyResetReason = .load
   }

@@ -8,7 +8,7 @@ import Foundation
 /// latches false at, alongside the pre-existing pause rule.
 public let kLiveDriftWarnMs: Int64 = 30_000
 
-/// One tick's engine facts, fed into ``LiveLatencyTracker/sample(_:)``.
+/// One tick's engine facts, fed into ``LiveLatencyTracker/sample(_:aheadMs:)``.
 ///
 /// `isPlaying` only matters for establishing the baseline (see that type's
 /// doc); once a baseline exists, drift accumulates from `nowMs`/`positionMs`
@@ -20,11 +20,31 @@ public struct LiveLatencySample: Equatable, Sendable {
   public let isPlaying: Bool
   public let isBuffering: Bool
 
-  public init(nowMs: Int64, positionMs: Int64, isPlaying: Bool, isBuffering: Bool) {
+  /// Wave 2 (`live-latency-wave2-contract.md` (a)): true while the caller is
+  /// deliberately running media time faster than wall time to shrink a
+  /// backlog (ExoPlayer's 1.05x catch-up). A sample flagged `catchingUp`
+  /// that isn't also a discontinuity earns **catch-up credit**
+  /// (`max(0, dMedia - dWall)`), added to ``LiveLatencyTracker/creditedMs``.
+  /// Defaults `false` so every wave-1 call site keeps compiling and keeps its
+  /// old behaviour unchanged. **This controller never sets it true** — iOS has
+  /// no catch-up speed-up (`live-latency-wave2-contract.md` (e) is
+  /// ExoPlayer-only) — but the tracker implements the full shared contract
+  /// regardless, since `LiveLatencyTests` pins it directly against the
+  /// contract's parity scenarios.
+  public let catchingUp: Bool
+
+  public init(
+    nowMs: Int64,
+    positionMs: Int64,
+    isPlaying: Bool,
+    isBuffering: Bool,
+    catchingUp: Bool = false
+  ) {
     self.nowMs = nowMs
     self.positionMs = positionMs
     self.isPlaying = isPlaying
     self.isBuffering = isBuffering
+    self.catchingUp = catchingUp
   }
 }
 
@@ -69,8 +89,39 @@ public struct LiveLatencySample: Equatable, Sendable {
 /// calling it if `driftMs >= LiveLatencyLogging.resetLogMinDriftMs` — the
 /// contract requires the about-to-be-discarded figure to survive in the
 /// diagnostics log, but only once it's worth printing.
+///
+/// **Wave 2** (`live-latency-wave2-contract.md` (a)) extends this with the
+/// **backlog** a provider can hand over *before* the first frame — a
+/// connect-time cushion of already-stale data that `driftMs` alone can't see,
+/// since drift only measures delay added *after* baseline. ``aheadMs`` (media
+/// buffered ahead of the playhead) is a lower bound on that backlog, so every
+/// baselined sample folds `aheadMs + creditedMs - driftMs` into a running
+/// maximum, ``backlogMs``. ``delayMs`` — `max(0, backlogMs + driftMs -
+/// creditedMs)` — is the number every surface now shows the viewer; it can
+/// never double-count a pause (a provider queuing data during a pause raises
+/// `ahead` *with* `drift`, leaving the sum unmoved) and stays honest after a
+/// verified in-cache skip followed by a refill, because the credit from that
+/// skip is subtracted back out once the backlog it exposed rebuilds.
+/// ``creditedMs`` is delay deliberately removed: either a measured jump after
+/// a verified skip (``credit(_:)``) or, while a sample reports
+/// ``LiveLatencySample/catchingUp``, the per-tick gain from running media
+/// time faster than wall time. Nothing else ever reduces it.
 public struct LiveLatencyTracker: Equatable, Sendable {
   public private(set) var driftMs: Int64 = 0
+
+  /// Delay deliberately credited back — see the type doc. Grows only through
+  /// ``credit(_:)`` and the catch-up-credit branch of ``sample(_:aheadMs:)``;
+  /// nothing else moves it, and ``reset()`` is the only way it returns to
+  /// zero.
+  public private(set) var creditedMs: Int64 = 0
+
+  /// Running maximum of `aheadMs + creditedMs - driftMs` over every baselined
+  /// sample (a sample taken where ``aheadMs`` was unknown, i.e. negative, is
+  /// skipped rather than folded in as zero — see the type doc). Starts at `0`
+  /// and only rises, which is what makes it safe to read at any time rather
+  /// than only after a full session.
+  public private(set) var backlogMs: Int64 = 0
+
   public private(set) var hasBaseline: Bool = false
   public private(set) var stalls: Int = 0
   public private(set) var stalledMs: Int64 = 0
@@ -89,15 +140,44 @@ public struct LiveLatencyTracker: Equatable, Sendable {
 
   public init() {}
 
-  /// Clears every accumulated figure back to a fresh tracker's values.
+  /// `max(0, backlogMs + driftMs - creditedMs)` — the lower-bound delay figure
+  /// every surface displays and diagnostics logs in wave 2
+  /// (`live-latency-wave2-contract.md` (a)). Derived rather than stored: it is
+  /// a pure function of the three accumulators above, recomputed fresh on
+  /// every read so it can never drift out of sync with them.
+  public var delayMs: Int64 {
+    max(0, backlogMs + driftMs - creditedMs)
+  }
+
+  /// Clears every accumulated figure back to a fresh tracker's values —
+  /// including ``creditedMs`` and ``backlogMs`` (wave 2's reset clears them
+  /// too, per `live-latency-wave2-contract.md` (a): "Reset ... clears
+  /// `creditedMs` and `backlogMs` too").
   public mutating func reset() {
     self = LiveLatencyTracker()
+  }
+
+  /// Credits back a measured delay reduction — the mpv in-cache-skip path's
+  /// verified jump (`live-latency-wave2-contract.md` (b) step 2: "call
+  /// `tracker.credit(P2 - P)`"). Negative input is clamped to `0`; credit only
+  /// ever grows. **Unused on iOS in wave 2** — there is no mpv surface here to
+  /// skip on — but implemented so the type matches the shared contract and so
+  /// `LiveLatencyTests` can pin the S4 parity scenario directly.
+  public mutating func credit(_ ms: Int64) {
+    creditedMs += max(0, ms)
   }
 
   /// Folds in one tick. Safe — and required — to call on every surface tick
   /// (~0.5–1s) regardless of play/buffer state; see the type doc for why a
   /// paused or stalled sample must still be fed in rather than skipped.
-  public mutating func sample(_ sample: LiveLatencySample) {
+  ///
+  /// `aheadMs` is the engine-read buffered-ahead cushion at this same tick —
+  /// kept as a parameter here rather than a field of `LiveLatencySample`
+  /// because, as in wave 1, it is engine-read and not tracker-derived; wave 2
+  /// is the first thing that needs it *inside* the tracker, to fold into
+  /// ``backlogMs``. A negative value (unknown) skips only the backlog fold —
+  /// drift/discontinuity/stall accounting are unaffected.
+  public mutating func sample(_ sample: LiveLatencySample, aheadMs: Int64) {
     defer { updateStallAccounting(sample) }
 
     guard hasBaseline else {
@@ -120,6 +200,22 @@ public struct LiveLatencyTracker: Equatable, Sendable {
       discontinuities += 1
     } else {
       driftMs += max(0, dWall - dMedia)
+      // Catch-up credit (`live-latency-wave2-contract.md` (a)): only while
+      // the caller reports `catchingUp` and only on a non-discontinuity tick,
+      // where `dMedia` is a trustworthy measure of how much media time this
+      // tick actually consumed.
+      if sample.catchingUp {
+        creditedMs += max(0, dMedia - dWall)
+      }
+    }
+
+    // Backlog folds in on every baselined sample, discontinuities included —
+    // the contract's "every baselined sample" has no carve-out for one, and a
+    // discontinuity sample's `aheadMs`/`creditedMs`/`driftMs` are just as real
+    // a reading as any other tick's.
+    if aheadMs >= 0 {
+      let candidate = aheadMs + creditedMs - driftMs
+      if candidate > backlogMs { backlogMs = candidate }
     }
   }
 
@@ -220,7 +316,7 @@ public enum LiveLatencyLogging {
   public static let aheadLogThresholdMs: Int64 = 30_000
   /// Drift (ms) that alone justifies a periodic line, even with a healthy
   /// buffer.
-  public static let driftLogThresholdMs: Int64 = 5_000
+  public static let delayLogThresholdMs: Int64 = 5_000
   /// Drift (ms) a reset must have measured before ``resetLine`` is worth
   /// printing. Below this a reset is noise — a healthy stream resets with a
   /// few tens of milliseconds of jitter on nearly every reconnect/zap, and an
@@ -231,32 +327,49 @@ public enum LiveLatencyLogging {
 
   /// Whether this tick's figures are worth a periodic export. The caller still
   /// owns the 60s cadence and the "only while live and playing" gate — this is
-  /// only the content gate (`live-latency-contract.md`: "only if driftMs >=
-  /// 5000 || aheadMs >= 30000").
-  public static func shouldLogPeriodic(driftMs: Int64, aheadMs: Int64) -> Bool {
-    driftMs >= driftLogThresholdMs || aheadMs >= aheadLogThresholdMs
+  /// only the content gate (`live-latency-contract.md`: "only if delayMs >=
+  /// 5000 || aheadMs >= 30000"; wave 2 moved the gate from drift to delay).
+  public static func shouldLogPeriodic(delayMs: Int64, aheadMs: Int64) -> Bool {
+    delayMs >= delayLogThresholdMs || aheadMs >= aheadLogThresholdMs
   }
 
-  /// `"live latency drift=<ms>ms ahead=<ms>ms stalls=<n> stalled=<ms>ms disc=<n>"`.
+  /// `"live latency drift=<ms>ms ahead=<ms>ms stalls=<n> stalled=<ms>ms
+  /// disc=<n> delay=<ms>ms backlog=<ms>ms credited=<ms>ms"`. Wave 2
+  /// (`live-latency-wave2-contract.md` (a)) adds the three trailing fields
+  /// after `drift=`'s existing group — the caller passes
+  /// ``LiveLatencyTracker/delayMs``/``LiveLatencyTracker/backlogMs``/
+  /// ``LiveLatencyTracker/creditedMs`` from the same tracker `driftMs`/
+  /// `stalls`/`stalledMs`/`discontinuities` came from.
   public static func periodicLine(
     driftMs: Int64,
     aheadMs: Int64,
     stalls: Int,
     stalledMs: Int64,
-    discontinuities: Int
+    discontinuities: Int,
+    delayMs: Int64,
+    backlogMs: Int64,
+    creditedMs: Int64
   ) -> String {
     "live latency drift=\(driftMs)ms ahead=\(aheadMs)ms stalls=\(stalls)"
       + " stalled=\(stalledMs)ms disc=\(discontinuities)"
+      + " delay=\(delayMs)ms backlog=\(backlogMs)ms credited=\(creditedMs)ms"
   }
 
   /// Same content as ``periodicLine``, prefixed for the one-shot "just crossed
-  /// the warn threshold this session" line.
+  /// the warn threshold this session" line. Wave 2: the crossing itself is now
+  /// detected on `delayMs` (``crossedWarnThreshold``'s caller passes `delayMs`
+  /// for both `previousDriftMs`/`currentDriftMs`), per
+  /// `live-latency-wave2-contract.md` (a) — "The 'behind' crossing is now
+  /// `delayMs >= kLiveDriftWarnMs`".
   public static func behindLine(
     driftMs: Int64,
     aheadMs: Int64,
     stalls: Int,
     stalledMs: Int64,
-    discontinuities: Int
+    discontinuities: Int,
+    delayMs: Int64,
+    backlogMs: Int64,
+    creditedMs: Int64
   ) -> String {
     "live latency behind "
       + periodicLine(
@@ -264,7 +377,10 @@ public enum LiveLatencyLogging {
         aheadMs: aheadMs,
         stalls: stalls,
         stalledMs: stalledMs,
-        discontinuities: discontinuities
+        discontinuities: discontinuities,
+        delayMs: delayMs,
+        backlogMs: backlogMs,
+        creditedMs: creditedMs
       )
   }
 
