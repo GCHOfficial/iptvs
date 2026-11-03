@@ -54,8 +54,20 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   `BEFORE UPDATE OR DELETE` trigger that binds the table owner too and re-checks each row's own
   eligibility rather than trusting the sweep's flag. Reads go through `support_list_diagnostics` /
   `support_get_diagnostics`, gated on a row in `support_readers` — **empty by default, so nobody can
-  read anything**. There is deliberately **no developer delete RPC**. Read
+  read anything**. Read
   [docs/cloud-sync.md](../docs/cloud-sync.md) "Diagnostics submission" before changing any of it.
+- **Developer delete + trigger-grant sweep** (`..._diagnostics_delete.sql`) — two privilege-surface
+  changes to the above. `support_delete_diagnostics(p_code)` lets a seeded `support_readers` account
+  delete one report (the panel's per-row **Delete**); it is the **third sweep mode** the previous
+  migration said a delete would have to be, not a loosening — a client may set the
+  `iptvs.diagnostics_sweep` GUC freely and still holds no table privilege to delete with, and the
+  `'support'` branch re-checks `is_support_reader()`, so a dashboard session (no JWT) is refused and
+  the guard still binds the table owner. The second half revokes EXECUTE on **every trigger function
+  in `public`** from `anon`/`authenticated` — Supabase's default privileges grant those roles
+  directly, so the earlier `revoke … from public` left them holding it. Nothing was exploitable (a
+  `returns trigger` function cannot be called as an RPC) and **revoking does not stop a trigger
+  firing** — EXECUTE is checked at `CREATE TRIGGER`, not when the trigger runs.
+  `01_baseline_invariants.test.sql` pins the property forward.
 - **Account deletion** (`..._account_deletion.sql`) — the panel's
   `delete_account` RPC removes only the signed-in real account. Owner foreign
   keys cascade its cloud data, and the RPC also removes the anonymous auth
@@ -84,7 +96,9 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
    Confirm with `select count(*) from public.support_readers;` — it must be exactly the accounts you
    intend. The panel's **Support** tab appears on its own once this row exists (it probes
    `support_list_diagnostics` and hides itself when that fails). To revoke, delete the row; access
-   stops immediately and nothing is cached.
+   stops immediately and nothing is cached. A reader can also **delete** a report from that tab
+   (`support_delete_diagnostics`) — the only delete path on the table besides the machine's own
+   expiry and eviction.
 6. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
    the only expected warnings are the intentional `SECURITY DEFINER` RPCs (the three
    pairing RPCs, `push_sources`/`push_metadata`/`push_favorites`, and `set_device_profile`,
@@ -97,6 +111,22 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
      session would have been worse, and `01_baseline_invariants.test.sql`, which pins that grant in
      both directions (it exists here, and nowhere else). The three diagnostics tables also report
      `rls_enabled_no_policy`, like the original five RPC-only tables; that is the design.
+   - **One finding that is now fixed rather than expected:** the advisor used to flag trigger
+     functions in `public` as still executable by `anon`/`authenticated`
+     (`touch_profile_snapshot_revision` by name, being `SECURITY DEFINER`). The earlier migrations
+     revoked them `from public` only, which leaves the direct grants Supabase's default privileges
+     hand those roles. `..._diagnostics_delete.sql` revokes all fourteen from both roles, and
+     `01_baseline_invariants.test.sql` asserts no trigger function in `public` is executable by
+     either — so a new one must carry the revoke or CI fails. The triggers themselves are
+     unaffected: EXECUTE is checked at `CREATE TRIGGER`, not when the trigger fires.
+   - **Not applicable: `auth_leaked_password_protection`.** No surface uses passwords. The
+     panel signs in only with magic links (`signInWithOtp`) and devices sign in anonymously
+     (`signInAnonymously`); there is no `signInWithPassword` anywhere. HIBP checking would only
+     ever apply to someone calling the auth API directly to put a password on their own account,
+     which nothing in this schema trusts. Passwords and magic links share Supabase's one Email
+     provider, so there is no separate "passwords off" switch to prefer instead, and "Allow new
+     users to sign up" must stay on because `signInWithOtp` creates panel accounts.
+     (Triaged 2026-11-03.)
 
 > **Applying a migration out-of-band? Repair the version afterward.** When you apply a
 > migration file through the **MCP `apply_migration` tool** or the **dashboard SQL editor**
@@ -173,7 +203,14 @@ pgTAP suite in `supabase/tests/` — prefer extending that over re-checking by h
       account with no `support_readers` row **and for a legitimately paired device**; a seeded
       reader reads the body verbatim and loses access the moment the row is deleted.
 - [ ] A `diagnostics` row cannot be UPDATEd or DELETEd **by anyone, including the table owner**,
-      except by the submit RPC's own expiry sweep (past `expires_at`) or ceiling eviction (past the
-      72 h floor) — and setting the sweep flag by hand still cannot take an ineligible row.
+      except by the submit RPC's own expiry sweep (past `expires_at`), its ceiling eviction (past
+      the 72 h floor), or `support_delete_diagnostics` — and setting the sweep flag by hand still
+      cannot take an ineligible row.
+- [ ] `support_delete_diagnostics` raises `iptvs: not authorised` for a non-reader account and for a
+      paired device, is unreachable by `anon`, deletes exactly one row for a seeded reader and
+      returns `false` the second time — and the table owner, with the sweep flag set to `'support'`
+      by hand and no JWT, is still refused by the trigger.
+- [ ] No function in `public` that returns `trigger` is executable by `anon` or `authenticated`,
+      and every trigger still fires.
 - [ ] An oversized body is refused with the **limit** in the message and **none of the body**.
 - [ ] The 121st submission in the hour is refused globally, and allowed again once the window rolls.
