@@ -641,18 +641,31 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// native HDR Activity owns playback), so nothing must read this field until
   /// the embedded fallback is actually taking over — see
   /// [_ensureEmbeddedController] and the ordering in [_playbackSurface].
-  late final VideoController? _controller = _usesWindowsNativeSurface
-      ? null
-      : (widget.existingController ??
-            VideoController(
-              _player,
-              configuration: VideoControllerConfiguration(
-                // GNU/Linux defaults to `auto`, which can select fragile
-                // zero-copy paths. Match the proven Windows policy: use the
-                // safest available VA-API/VDPAU path and fall back cleanly.
-                hwdec: Platform.isLinux ? 'auto-safe' : null,
-              ),
-            ));
+  late final VideoController? _controller = _buildEmbeddedController();
+
+  /// True once this route built a [VideoController] of its *own* (rather than
+  /// adopting the preview's). On Android that controller is a Flutter
+  /// `SurfaceProducer`, released only when [_player]'s `dispose()` drains
+  /// media_kit's `release` list — so the counter balancing it lives in
+  /// [_disposePlayerNonBlocking]'s `.then`, not in `dispose()` itself.
+  bool _ownsController = false;
+
+  VideoController? _buildEmbeddedController() {
+    if (_usesWindowsNativeSurface) return null;
+    final adopted = widget.existingController;
+    if (adopted != null) return adopted;
+    _ownsController = true;
+    ResourceCounters.incMediaKitVideoControllers();
+    return VideoController(
+      _player,
+      configuration: VideoControllerConfiguration(
+        // GNU/Linux defaults to `auto`, which can select fragile
+        // zero-copy paths. Match the proven Windows policy: use the
+        // safest available VA-API/VDPAU path and fall back cleanly.
+        hwdec: Platform.isLinux ? 'auto-safe' : null,
+      ),
+    );
+  }
 
   /// Forces the lazily-built [_controller] into existence. Called on the
   /// embedded-fallback path *before* [_configureNativePlayer] applies the
@@ -3679,18 +3692,24 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _disposePlayerNonBlocking() {
+    // An adopted player is the caller's; so is the controller that came with
+    // it (`existingPlayer`/`existingController` are always passed together),
+    // so nothing here is this route's to count down.
     if (!_ownsPlayer) return;
+    // media_kit's `VideoController` has no `dispose()` — disposing the player
+    // is what drains `player.platform.release` into `VideoOutputManager.Dispose`
+    // and releases the Android SurfaceProducer. So the controller's count
+    // comes off exactly here, once that future completes.
+    void released() {
+      ResourceCounters.decMediaKitPlayers();
+      if (_ownsController) ResourceCounters.decMediaKitVideoControllers();
+    }
+
     final platform = _player.platform;
     if (Platform.isWindows && platform is NativePlayer) {
-      unawaited(
-        platform
-            .dispose(synchronized: false)
-            .then((_) => ResourceCounters.decMediaKitPlayers()),
-      );
+      unawaited(platform.dispose(synchronized: false).then((_) => released()));
     } else {
-      unawaited(
-        _player.dispose().then((_) => ResourceCounters.decMediaKitPlayers()),
-      );
+      unawaited(_player.dispose().then((_) => released()));
     }
   }
 
