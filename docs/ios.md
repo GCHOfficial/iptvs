@@ -901,6 +901,25 @@ session doesn't re-pay the same cost rediscovering them from scratch.
   nil` first and calls the completion directly when there's nothing to dismiss (the real case:
   PiP dismisses this controller while keeping it alive), rather than trusting `dismiss` to do it.
 
+### Live latency (wave 1)
+
+Measured natively, with the same spec and parity vectors as every other surface (docs/player.md
+"Live latency"):
+- `LiveLatency.swift` in `IptvsPlayerCore` holds the tracker; `AvPlayerEngine.bufferedAheadMs`
+  supplies the cushion.
+- It's sampled from the 500 ms watchdog ticker (`pollWatchdogs`), never the progress tick, which
+  stops with the timebase exactly when drift accrues.
+- Resets ride `.started` through `pendingLatencyResetReason`, which covers the first load and the
+  reconnect reload. `goToLive()`'s seek-only branch resets directly.
+- `PlayerChromeState.applyLiveLatency` only ever *clears* `liveSynced`, and `resetLiveLatency` is
+  the only thing that sets it again.
+- The controller **ignores a `liveSynced` pushed by Dart** in `setControlState`: Dart doesn't drive
+  this surface, so its value is always "synced", and honouring it unlatched the gate on every EPG
+  push.
+- Gaps: no `zap` or `claim` reset (no iOS zap input; the engine switch is a teardown), and the mpv
+  fallback is measured by Dart, not here.
+- Only CI's iOS build probe compiles this; nothing has run on a device.
+
 ### Known parity gaps
 
 Accepted, to be documented as a platform tier rather than tracked as bugs. The full hybrid ships
