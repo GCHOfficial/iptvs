@@ -57,6 +57,7 @@ class XtreamSource
     implements
         Source,
         BatchedEpgSource,
+        EpgByteReporting,
         CatchupSource,
         SourceCapabilityReporter,
         RefreshableSource {
@@ -93,6 +94,12 @@ class XtreamSource
     ..autoUncompress = false;
   final Map<String, Future<List<MediaItem>>> _mediaListCache = {};
   String? _providerCatchupTimezone;
+
+  /// See [EpgByteReporting]. Reset at the start of each [_guideFeeds] call and
+  /// summed as each XMLTV guide finishes downloading.
+  int? _lastEpgCompressedBytes;
+  @override
+  int? get lastEpgCompressedBytes => _lastEpgCompressedBytes;
 
   // Stalker portals usually return compact provider pages, often around
   // 14 rows. Xtream's common API does not expose equivalent paging, so keep
@@ -290,6 +297,10 @@ class XtreamSource
   /// — a panel guide that covers only part of the catalog is the usual reason
   /// to add one.
   List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    // See [EpgByteReporting]: reset here, so a guide list that turns out empty
+    // reports null (nothing downloaded) rather than a stale figure from the
+    // previous refresh.
+    _lastEpgCompressedBytes = null;
     final urls = <String>[
       _xmltvUri.toString(),
       for (final url in extraEpgUrls)
@@ -308,6 +319,8 @@ class XtreamSource
           // [epgNameIndexFor].
           nameToChannelIds: i == 0 ? const {} : names,
           token: token,
+          onDownloaded: (bytes) =>
+              _lastEpgCompressedBytes = (_lastEpgCompressedBytes ?? 0) + bytes,
         ),
     ];
   }
@@ -579,11 +592,12 @@ class XtreamSource
     File destination,
   ) async {
     final operation = HttpOperation(policy);
-    final bytes = await operation.readToFile(
-      await _open(uri, operation),
-      destination,
+    final resp = await _open(uri, operation);
+    final bytes = await operation.readToFile(resp, destination);
+    DiagnosticsLog.instance.add(
+      'http:${policy.name}',
+      'body_bytes=$bytes content_encoding=${contentEncodingLabel(resp)}',
     );
-    DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
   }
 
   Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {

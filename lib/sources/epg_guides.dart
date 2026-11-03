@@ -62,6 +62,13 @@ EpgGuideFeed xmltvGuideFeed({
   required Map<String, List<String>> nameToChannelIds,
   LoadToken? token,
   Directory? tempDirectory,
+  /// Reports the guide's downloaded (as-transmitted, i.e. still gzipped if the
+  /// server sent it that way) byte count once [download] finishes — a cheap
+  /// `file.length()` stat, not a second copy of the body. Fed to
+  /// [EpgByteReporting] so `LibraryRepository._ensureEpg` can sum every
+  /// guide's cost into the exportable `ingestion compressed_bytes=…` line
+  /// instead of leaving it `unknown`. Never called on a failed download.
+  void Function(int bytes)? onDownloaded,
 }) => EpgGuideFeed(
   url: url,
   open: () async* {
@@ -79,6 +86,13 @@ EpgGuideFeed xmltvGuideFeed({
         throw HttpWorkloadException(
           '${error.message}. Use a per-country or per-provider guide instead.',
         );
+      }
+      if (onDownloaded != null) {
+        try {
+          onDownloaded(await file.length());
+        } catch (_) {
+          // A diagnostics stat is never worth failing a guide over.
+        }
       }
       yield* parseXmltvFileBatched(
         file,
