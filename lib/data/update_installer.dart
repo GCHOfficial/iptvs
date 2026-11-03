@@ -71,7 +71,7 @@ class UpdateInstaller {
       throw const FormatException('Unapproved update host');
     }
     final dir = await getTemporaryDirectory();
-    final file = File(p.join(dir.path, artifact.filename));
+    final file = File(artifactDownloadPath(dir.path, artifact));
     final partial = File('${file.path}.partial');
     if (await partial.exists()) await partial.delete();
     final operation = HttpOperation(
@@ -264,6 +264,29 @@ mv "$backup" "$target"
 chmod 0755 "$target"
 "$target" >/dev/null 2>&1 &
 ''';
+
+/// Where [artifact] is downloaded to: directly inside [tempDir], or not at all.
+///
+/// `ReleaseManifest.parse` already pins the filename to
+/// `iptvs-<d.d.d>-<platform>`, but `ReleaseArtifact` has a public constructor,
+/// so the path is contained here too rather than trusting every caller: a
+/// filename with a separator, `..`, or a leading dot is refused before it can
+/// name a file outside the temp directory.
+String artifactDownloadPath(String tempDir, ReleaseArtifact artifact) {
+  final name = artifact.filename;
+  if (name.isEmpty ||
+      name.startsWith('.') ||
+      name.contains('/') ||
+      name.contains(r'\') ||
+      p.basename(name) != name) {
+    throw const FormatException('Unsafe update filename');
+  }
+  final path = p.join(tempDir, name);
+  if (!p.isWithin(tempDir, path)) {
+    throw const FormatException('Unsafe update filename');
+  }
+  return path;
+}
 
 /// Revalidates a previously downloaded APK before resuming installation.
 ///
