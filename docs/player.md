@@ -98,6 +98,76 @@ the Activity's watchdog reload the source — so pushing them toward the stall t
 ordinary underruns into a reconnect loop. The ≥4x margin between them is what the JUnit test pins,
 along with the ordering `DefaultLoadControl.Builder` asserts at build time.
 
+**Media-source modules: a missing one is a *crash*, not an "unsupported" error.**
+`DefaultMediaSourceFactory` picks a `MediaSource.Factory` from the URI's inferred content type and
+loads it **reflectively** — `Class.forName("androidx.media3.exoplayer.dash.DashMediaSource$Factory")`
+and friends, inside `DelegateFactoryLoader.loadSupplier`. The `ClassNotFoundException` is wrapped
+into an `IllegalStateException` and thrown straight out of `Player.setMediaItem`, i.e. out of
+`ExoPlayerEngine.load`, which on a cold open runs inside `HdrPlayerActivity.onCreate` — so it
+surfaces as an `ActivityThread.performLaunchActivity` crash before the first frame. That shipped:
+Play issue `ef0b3cb0ad7e333376287b5673cfaeeb`, 8 reports / 5 users on vc10, all sharing the
+`DashMediaSource$Factory` signature — i.e. a provider serving `.mpd`.
+`android/app/build.gradle.kts` therefore declares **`media3-exoplayer-dash`** beside `-hls`, and
+`MediaSourceModulesTest` pins the exact reflective class names so dropping the dependency fails CI
+rather than a user's TV box.
+
+**SmoothStreaming and RTSP are deliberately left out**, and `ExoPlayerEngine.load` is what makes
+that safe: `player.stop()` / `setMediaItem` / `prepare` run inside a `try`, and **any** `Throwable`
+from them posts `triggerFallback()` — the existing `onUnsupportedVideo` → `fallbackToMpv()` path —
+instead of propagating. libmpv plays both containers (RTSP noticeably better than ExoPlayer does),
+there is no evidence of either shape in the vitals data, and `.ism` is effectively extinct in IPTV,
+so a second ExoPlayer module would be dex weight on a universal APK for a format panels stopped
+serving. The catch is `Throwable` rather than `Exception` because the same shape arrives as
+`NoClassDefFoundError` when a class is stripped rather than absent, and the fallback is *posted*
+rather than invoked inline because the host's handler releases this very engine — running it
+synchronously would return into a released player. The diagnostic line names the exception type
+only, never the locator.
+
+**The blocking surface detach is media3's, it is bounded at 2 s, and it is deliberately not
+shortened.** When a `SurfaceView` that is a player's video output is destroyed — the channel-list
+window stopping behind the fullscreen Activity, a Home press, a preview platform view disposing —
+`ExoPlayerImpl$ComponentListener.surfaceDestroyed` calls `setVideoOutputInternal(null)`, which
+posts `MSG_SET_VIDEO_OUTPUT` to the playback thread and **blocks the main thread** on a
+`ConditionVariable` until it is acknowledged, for at most
+`ExoPlayer.Builder.DEFAULT_DETACH_SURFACE_TIMEOUT_MS` (**2000 ms**). Play issue
+`f0fd023f5f7a72eb4427264529091802` (1 report, Strong Leap-S3, vc12) is a thread dump caught exactly
+there, with the playback thread inside `MediaCodecAudioRenderer.processOutputBuffer` →
+`MediaCodec.releaseOutputBuffer`.
+
+Three things rule out the obvious fix. First, **2 s cannot reach a 5 s input-dispatch ANR on its
+own** — a single detach is bounded, and an ANR trace is a snapshot, so the dump may simply have
+caught the main thread passing through a longer stretch of work. Second, lowering
+`setDetachSurfaceTimeoutMs` is not free: on timeout `setVideoOutputInternal` calls `stopInternal`
+with an `ExoTimeoutException` (`TIMEOUT_OPERATION_DETACH_SURFACE`, `ERROR_CODE_TIMEOUT`), which
+reaches `onPlayerError` → `onRecoverableError` → a forced live reconnect — so a cheaper timeout
+buys a *stopped stream* on exactly the slow box it was meant to help, and there is no "don't
+block" value either: `ConditionVariable.blockUninterruptible` returns `isOpen` immediately for any
+`timeoutMs <= 0`, so both `0` and `C.TIME_UNSET` mean "fail every detach". Third, that block is
+what guarantees the renderer has stopped writing into the `Surface` before the framework tears its
+`BLASTBufferQueue` down — and the other side of that trade is also in vitals, as
+`501b3071d31635aabfb98d73e65fbe3f`: a SIGSEGV in
+`SurfaceComposerClient::Transaction::getLayerState` under `BLASTBufferQueue::acquireNextBufferLocked`
+→ `MediaCodec::onReleaseOutputBuffer` (1 report, Xiaomi TV Box S, vc10), i.e. a codec rendering into
+a surface whose `SurfaceControl` is already gone. Shortening the detach makes that crash *more*
+likely, not less.
+
+Detaching the surface ourselves ahead of the traversal does not help either: `clearVideoSurfaceView`
+is the same blocking call on the same thread, and the only place early enough to pre-empt the
+traversal is `MainActivity.onStop` — where releasing the engine would destroy the `SharedEngine`
+adoption the fullscreen Activity depends on (the channel-list window stops *because* that Activity
+covered it).
+
+So the behaviour is unchanged and the gap is closed with **measurement**:
+`ExoPlayerEngine.attachWithDetachProbe` registers one `SurfaceHolder.Callback` **before** media3's
+and one **after** (a `SurfaceView` invokes `surfaceDestroyed` in registration order), bracketing
+exactly that call, and emits `surface detach blocked main <n>ms` into the exportable log when it
+exceeds `DETACH_REPORT_MS` (250 ms). It is installed on the preview surface by
+`attachPreviewSurface` and on the Activity's own `PlayerView` surface by `attachOwnSurface`, and
+removed by `claimViewSurface`'s re-install, `clearPreviewSurface` and `release`. A healthy detach is
+sub-millisecond and stays out of the 800-entry ring; the next report of this ANR will say whether
+the block was really two seconds or whether the dump merely caught it in passing. **Until a report
+carries that line, treat the diagnosis as unconfirmed.**
+
 **The Dart embedded media_kit surface is a fallback only on Android.** `MainActivity`'s
 `iptvs/native_hdr_player` `open` handler always replies `true` — engine selection, including the
 mpv fallback, happens *inside* `HdrPlayerActivity` — so `_tryOpenNativeHdrPlayer` returns false
@@ -1873,6 +1943,50 @@ its mouse-hover auto-preview.) The preview engine is stopped when the app itself
 back-exits (Dart lifecycle observer in `channel_list_screen` + a finishing-`MainActivity.onStop`
 safety net in Kotlin) so no audio survives behind the launcher.
 
+### The preview must never materialise a media_kit texture it will not render
+
+Reading `LivePreviewController.controller` *constructs* the `VideoController`, and on Android
+that allocates a Flutter `SurfaceProducer`, which below API 29 is backed by a `SurfaceTexture`.
+media_kit's `VideoController` has no `dispose()`. The only thing that releases that producer is
+the owning `Player.dispose()`, which drains `player.platform.release` into
+`VideoOutputManager.Dispose`. `MediaKitVideoPlugin.onDetachedFromEngine` does **not** dispose its
+outputs, so a producer still registered when the engine is destroyed becomes garbage with
+`released == false`.
+
+Flutter's `SurfaceTextureSurfaceProducer.finalize` then calls `release()` **inline on the
+FinalizerDaemon thread**. `SurfaceTextureRegistryEntry`'s finalizer, by contrast, deliberately
+posts that work to the platform thread. Releasing off-thread races the engine's own
+external-texture teardown, and that is the shipped SIGSEGV in `ConsumerBase::onLastStrongRef` on
+API-28 TV boxes: Play issues `379c714f…` and `4f063acb…` (MiBox S, Mi TV Stick, KSTB6020), on
+v0.1.61 and v0.1.70.
+
+Two rules keep it from happening:
+
+- **`PreviewVideo` renders through `previewSurfaceFor`.** Its `hasEmbeddedPlayer` input is
+  structural: every path that legitimately shows the embedded preview calls `player.open(...)`
+  before it publishes `stream`. So a stream with no embedded player is always a transient, and
+  it draws black instead of allocating a producer.
+- **`stop()` never lets the surface fields disagree.** It used to flip `nativeActive` false on
+  its own and leave `stream` standing across the `_stopNative()` round trip. For that whole
+  window the panel's gate still said "draw the video", so any rebuild took the embedded branch.
+  `nativeActive` now stays true until the engine has stopped, and every field is cleared
+  together afterwards.
+  - Keeping it true also keeps the native `SurfaceView` mounted until then. Clearing first would
+    unmount the view while the shared engine is still decoding into it, and that view's
+    `surfaceDestroyed` is media3's blocking main-thread detach (see "Android").
+  - `_stoppingNative` makes native events that land mid-stop inert, which was the other job of
+    the early flip.
+  - A `start()` that supersedes the stop (`_requestId`) keeps its own state.
+
+`stop()`'s two callers are the app-background hook and `_openLivePlayer`'s pre-fullscreen stop,
+which are exactly the paths that end with the engine going away.
+
+**Residual exposure.** A session that genuinely used the media_kit fallback (DV P5, or a failed
+native launch) and exits before `Player.dispose()` completes can still leave a producer behind.
+Closing that needs a patched `media_kit_video`, which would dispose all outputs in
+`onDetachedFromEngine`. The `c533e446…` pin's Android sources are byte-identical to pub 2.0.1,
+so it would be a new fork, which is not taken yet.
+
 ### Three things that made the TV handoff look like a reconnect
 
 Both are Android-TV-shaped for the same structural reason: **the preview→fullscreen handoff only
@@ -3232,3 +3346,12 @@ demo streams). On Android, `PlayerScreen.debugSoakAutoCloseMs` (debug-only, pass
 `soakAutoCloseMs` on the native `open` call → `EXTRA_SOAK_AUTOCLOSE_MS`) makes
 `HdrPlayerActivity` finish itself each cycle so the soak runs unattended; the extra is inert in
 release builds.
+
+`mediaKitVideoControllers` counts the media_kit `VideoController`s this app constructed. It is
+separate from `mediaKitPlayers` because a `VideoController` has no `dispose()` of its own: the
+decrement sits in the `.then` of the owning player's `dispose()`, which is the moment
+`VideoOutputManager.Dispose` has actually released the Android `VideoOutput`. A controller still
+counted after an open/close cycle is a leaked `SurfaceTexture`, i.e. the API-28 finalizer crash
+in "Live preview + seamless handoff (Android)". Only a route that built its *own* controller
+counts one (`PlayerScreen._ownsController`); an adopted `existingController` belongs to the
+preview.
