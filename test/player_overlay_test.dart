@@ -30,6 +30,8 @@ void main() {
     bool canFavorite = false,
     bool favorite = false,
     bool liveSynced = true,
+    String liveDelayBadge = 'LIVE',
+    String liveDelayInfo = '',
     Programme? epgNow,
     Programme? epgNext,
     String? sourceName,
@@ -76,6 +78,8 @@ void main() {
               canFavorite: canFavorite,
               favorite: favorite,
               liveSynced: liveSynced,
+              liveDelayBadge: liveDelayBadge,
+              liveDelayInfo: liveDelayInfo,
               zap: zap,
               quickList: quickList,
               zapEnabled: zapEnabled,
@@ -314,6 +318,97 @@ void main() {
       await pumpOverlay(tester, isLive: true, canFavorite: false);
       expect(find.byIcon(Icons.star_rounded), findsNothing);
       expect(find.byIcon(Icons.star_outline_rounded), findsNothing);
+    });
+  });
+
+  // Wave 1 of the live-latency work: the badge names the delay once the
+  // stream has drifted, the info panel grows a "Live delay" row, and
+  // "Go to live" appears because `liveSynced` now carries the latched drift
+  // rule from `PlayerScreen` (docs/player.md "Live latency").
+  group('live delay', () {
+    testWidgets('the badge prints the pushed label verbatim', (tester) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        liveDelayBadge: 'LIVE -1:23',
+      );
+      expect(find.text('LIVE -1:23'), findsOneWidget);
+      expect(find.text('LIVE'), findsNothing);
+    });
+
+    testWidgets('an un-pushed badge stays the bare pill', (tester) async {
+      await pumpOverlay(tester, isLive: true);
+      expect(find.text('LIVE'), findsOneWidget);
+    });
+
+    testWidgets('a drifted badge is greyed and brings "Go to live" with it', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        liveDelayBadge: 'LIVE -0:45',
+      );
+      expect(find.text('LIVE -0:45'), findsOneWidget);
+      expect(find.text('Go to live'), findsOneWidget);
+    });
+
+    testWidgets('the badge stays in the top-bar cluster however long it gets', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        liveDelayBadge: 'LIVE -1:02:03',
+        sourceName: 'Provider',
+      );
+      final badge = tester.getRect(find.text('LIVE -1:02:03'));
+      final source = tester.getRect(find.text('Provider'));
+      // Same row, and still second in the cluster (source, LIVE, …).
+      expect(badge.center.dy, closeTo(source.center.dy, 1));
+      expect(badge.left, greaterThan(source.left));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the info panel grows a "Live delay" row on live', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveDelayInfo: '1:23 · buffer 24s',
+      );
+      await tester.tap(find.byIcon(Icons.info_outline));
+      await tester.pump();
+      expect(find.text('Live delay'), findsOneWidget);
+      expect(find.text('1:23 · buffer 24s'), findsOneWidget);
+    });
+
+    testWidgets('VOD never shows the row, even if a value is passed', (
+      tester,
+    ) async {
+      await pumpOverlay(
+        tester,
+        isLive: false,
+        liveDelayInfo: '1:23 · buffer 24s',
+      );
+      await tester.tap(find.byIcon(Icons.info_outline));
+      await tester.pump();
+      expect(find.text('Stream information'), findsOneWidget);
+      expect(find.text('Live delay'), findsNothing);
+    });
+
+    testWidgets('an empty value omits the row rather than drawing a blank', (
+      tester,
+    ) async {
+      await pumpOverlay(tester, isLive: true);
+      await tester.tap(find.byIcon(Icons.info_outline));
+      await tester.pump();
+      expect(find.text('Stream information'), findsOneWidget);
+      expect(find.text('Live delay'), findsNothing);
     });
   });
 

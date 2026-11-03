@@ -614,6 +614,11 @@ void main() {
                   // are all conditional, and this is the only sweep that
                   // renders the row with the real font.
                   liveSynced: false,
+                  // And the widest the LIVE badge ever gets — an hour-plus
+                  // of drift, which is the only badge in the cluster whose
+                  // text grows at runtime.
+                  liveDelayBadge: 'LIVE -1:02:03',
+                  liveDelayInfo: '1:02:03 · buffer 120s',
                   zapEnabled: true,
                   onOpenQuickList: () {},
                   zap: zap,

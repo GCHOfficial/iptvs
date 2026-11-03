@@ -146,6 +146,19 @@ class PlayerVideoSurface extends StatefulWidget {
   final bool favorite;
   final bool liveSynced;
 
+  /// The LIVE badge's text, already formatted by [PlayerScreen] from the live
+  /// latency tracker: `LIVE`, or `LIVE -1:23` once the stream has drifted past
+  /// `kLiveDriftWarnMs`. This overlay **prints it**, exactly as the Windows GDI
+  /// and Lua renderers do — one formatter, in `live_latency.dart`, for all
+  /// four surfaces. Defaults to the pre-latency behaviour (a bare `LIVE`),
+  /// which is also what a route whose engine Dart doesn't measure passes.
+  final String liveDelayBadge;
+
+  /// The Stream information panel's "Live delay" value (`1:23 · buffer 24s`),
+  /// or empty to **omit the row** — VOD, and any surface whose engine computes
+  /// its own delay natively.
+  final String liveDelayInfo;
+
   /// In-player live-zapping banner state (Phase 3), or null on any route that
   /// doesn't zap (VOD, catch-up, a live open with no zap range). See
   /// [ZapBannerState].
@@ -215,6 +228,8 @@ class PlayerVideoSurface extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    this.liveDelayBadge = 'LIVE',
+    this.liveDelayInfo = '',
     this.zap,
     this.quickList,
     this.zapEnabled = false,
@@ -332,6 +347,8 @@ class PlayerVideoSurfaceState extends State<PlayerVideoSurface> {
             canFavorite: widget.canFavorite,
             favorite: widget.favorite,
             liveSynced: widget.liveSynced,
+            liveDelayBadge: widget.liveDelayBadge,
+            liveDelayInfo: widget.liveDelayInfo,
             zap: widget.zap,
             quickList: widget.quickList,
             zapEnabled: widget.zapEnabled,
@@ -477,6 +494,8 @@ class EmbeddedPlayerControls extends StatefulWidget {
     required this.canFavorite,
     required this.favorite,
     required this.liveSynced,
+    this.liveDelayBadge = 'LIVE',
+    this.liveDelayInfo = '',
     this.zap,
     this.quickList,
     this.zapEnabled = false,
@@ -501,6 +520,19 @@ class EmbeddedPlayerControls extends StatefulWidget {
   final bool canFavorite;
   final bool favorite;
   final bool liveSynced;
+
+  /// The LIVE badge's text, already formatted by [PlayerScreen] from the live
+  /// latency tracker: `LIVE`, or `LIVE -1:23` once the stream has drifted past
+  /// `kLiveDriftWarnMs`. This overlay **prints it**, exactly as the Windows GDI
+  /// and Lua renderers do — one formatter, in `live_latency.dart`, for all
+  /// four surfaces. Defaults to the pre-latency behaviour (a bare `LIVE`),
+  /// which is also what a route whose engine Dart doesn't measure passes.
+  final String liveDelayBadge;
+
+  /// The Stream information panel's "Live delay" value (`1:23 · buffer 24s`),
+  /// or empty to **omit the row** — VOD, and any surface whose engine computes
+  /// its own delay natively.
+  final String liveDelayInfo;
 
   /// In-player live-zapping banner state (Phase 3), or null on any route that
   /// doesn't zap. See [ZapBannerState].
@@ -1420,7 +1452,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     final source = sourceBadgeLabel(widget.sourceName);
     return [
       if (source != null) _badge(source),
-      if (widget.isLive) _LiveBadge(synced: widget.liveSynced),
+      if (widget.isLive)
+        _LiveBadge(synced: widget.liveSynced, label: widget.liveDelayBadge),
       if (resolution != null) _badge(resolution),
       if (hdr != null) _badge(hdr),
       if (fps != null) _badge(fps),
@@ -2434,6 +2467,13 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
       // "25fps", so the panel was the only thing disagreeing with itself.
       if (video.fps case final fps? when fps > 0)
         ('Frame rate', '${trimmedDecimal(fps)} FPS'),
+      // Live only, and last: it is the one row about *this session* rather
+      // than about the stream, and it carries the buffer depth beside the
+      // delay (the network-ish fact this panel otherwise has none of). Empty
+      // means the engine isn't one Dart measures — omitted like every other
+      // unanswerable row rather than drawn as a placeholder.
+      if (widget.isLive && widget.liveDelayInfo.isNotEmpty)
+        ('Live delay', widget.liveDelayInfo),
     ];
   }
 
@@ -2810,9 +2850,14 @@ class PlayerErrorOverlay extends StatelessWidget {
 }
 
 class _LiveBadge extends StatelessWidget {
-  const _LiveBadge({this.synced = true});
+  const _LiveBadge({this.synced = true, this.label = 'LIVE'});
 
+  /// Greys the pill. Orthogonal to [label]: a user pause greys a badge that
+  /// still reads `LIVE`, while a latched drift greys one that names the delay.
   final bool synced;
+
+  /// Already formatted by `liveDelayBadgeLabel` — printed, never derived.
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -2822,14 +2867,19 @@ class _LiveBadge extends StatelessWidget {
         color: synced ? AppColors.live : Colors.white24,
         borderRadius: BorderRadius.circular(4),
       ),
-      child: const Row(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
-          SizedBox(width: 5),
+          const Icon(Icons.fiber_manual_record, size: 8, color: Colors.white),
+          const SizedBox(width: 5),
           Text(
-            'LIVE',
-            style: TextStyle(
+            label,
+            // The badge row is a fixed-height strip and this is the one badge
+            // whose text grows (`LIVE` -> `LIVE -1:02:03`), so it clips rather
+            // than reflowing the cluster underneath it.
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 11,
               fontWeight: FontWeight.w700,
