@@ -765,8 +765,9 @@ media_kit's own smaller default.
 
 `ExoBufferPolicyTest` pins this as a **forward-looking** invariant rather than as a fact about
 `max`: any preset holding more than `high` must name a finite `targetBufferBytes` and must not
-prioritize time over size — and `low`/`normal`/`high` must still be `C.LENGTH_UNSET` + `true`,
-byte-for-byte what shipped before the cap existed.
+prioritize time over size. Since wave 2, `normal` and `high` also carry byte caps (48/64 MiB, still
+prioritising time over size; see "Byte caps for `normal` and `high`"), and only `low` is
+`C.LENGTH_UNSET`.
 
 **What the hint says, and why.** `max` is what a user reaches for when nothing else helped, so
 its subtitle names the two causes it cannot touch: a connection that never gets far enough ahead
@@ -781,8 +782,9 @@ arbitrary preset.
 
 ### `normal` means *exactly* as before
 
-On both engines. `ExoBufferPolicy.forPreset(NORMAL)` returns the four previously hardcoded
-numbers (pinned by name in `ExoBufferPolicyTest`), and `mpvBufferOptions(normal)` is an **empty
+On both engines, for its **durations**. `ExoBufferPolicy.forPreset(NORMAL)` returns the four
+previously hardcoded durations (pinned by name in `ExoBufferPolicyTest`); since wave 2 it also
+carries a 48 MiB byte cap, which only binds where the old tuning risked an OOM. And `mpvBufferOptions(normal)` is an **empty
 map** so mpv keeps its own defaults rather than being handed a tuning that merely resembles them.
 An install that never touches the setting is unaffected, and returning the tile to Normal removes
 the key rather than storing it.
@@ -824,6 +826,24 @@ the key rather than storing it.
 `ExoBufferPolicyTest` asserts every invariant for **every** preset. That is the point of the file
 now: the dangerous edit is no longer "someone changed a constant", it is "someone added a preset
 that looks reasonable in isolation and quietly violates the stall margin".
+
+
+### Byte caps for `normal` and `high` (wave 2)
+
+Every preset but `low` now names a `targetBufferBytes`: `normal` 48 MiB, `high` 64 MiB, `max`
+64 MiB. Durations, start gates and `cache-secs` are unchanged.
+- **Why:** without a cap media3 bounds the allocation only by `maxBufferMs x bitrate`. A
+  backlog provider fills that at once, so the old "survivable at 90 s" reasoning, which assumed a
+  1x sender, no longer held on 2 GiB boxes.
+- **`prioritizeTimeOverSize` stays true** for `normal`/`high`. In `DefaultLoadControl.
+  shouldContinueLoading` (1.11.1, L769–806) that flag is read only below `minBufferUs`; above it,
+  loading stops on `maxBufferUs || targetBufferSizeReached` regardless.
+- `ExoBufferPolicyTest`'s forward invariant is now "every preset above `low` caps its bytes".
+
+**A deeper preset can also mean more delay.** On a provider that front-loads a connect backlog,
+playback starts at the backlog's oldest frame, and a deeper cushion holds more of it. The Large and
+Extra large hints say so. The fix for that delay is "Go to live" (mpv) or catch-up (Android), not a
+shallower buffer: a smaller readahead doesn't make the provider hold less.
 
 ## The handoff's return leg
 
@@ -3324,19 +3344,28 @@ shared-engine preview is untouched.
   styling, which is a separate signal: a pause greys a badge that still reads `LIVE`.
 - **The Stream information panel** gains a last, live-only row: `Live delay` → `1:23 · buffer 24s`,
   or just `1:23` when the cushion is unknown.
-- **How to read a user's screenshot of that row:**
-  - `delay ≈ 0 with a large buffer` (e.g. `0:00 · buffer 30s`): the provider sent a backlog at
-    connect and playback started at its oldest frame. The viewer is about the buffer amount behind
-    live even though the badge says `LIVE`; wave 1's drift does not count this (see the open design
-    work).
-  - `delay ≫ buffer`: accumulated stall or pause drift. This is what "Go to live" fixes.
-  - `delay ≈ 0, small buffer, stutter`: a decode or network problem, covered by the `fps=` /
-    `dropped=` lines.
+- **How to read a user's screenshot of that row** (from wave 2 the delay *includes* the backlog):
+  - `delay ≈ buffer` (e.g. `0:30 · buffer 30s`): the provider sent a backlog at connect and
+    playback started at its oldest frame. On mpv surfaces "Go to live" trims it; on Android,
+    catch-up recovers it. The exported line shows `drift≈0` beside a large `delay`.
+  - `delay ≫ buffer`: accumulated stall or pause drift (`drift` close to `delay` in the export).
+    "Go to live" fixes it.
+  - `delay` and buffer both small, with stutter: a decode or network problem, covered by the
+    `fps=` / `dropped=` lines.
+  - Wave 1 builds (0.1.74) showed drift alone, where a backlog read as `0:00 · buffer 30s`.
 
 ### Diagnostics (exportable, credential-free)
 
-- `live latency drift=…ms ahead=…ms stalls=n stalled=…ms disc=n`: every 60 s while playing, and
-  only when worth saying (`drift ≥ 5 s` or `ahead ≥ 30 s`).
+- `live latency drift=…ms delay=…ms backlog=…ms credited=…ms ahead=…ms stalls=n stalled=…ms
+  disc=n`: every 60 s while playing, and only when worth saying (`delay ≥ 5 s` or `ahead ≥ 30 s`;
+  gated on delay since wave 2, or a pure-backlog session wrote nothing). `drift` stays beside
+  `delay` because they answer different support questions: `delay=76000 drift=0` is a provider
+  backlog, `delay=76000 drift=74000` is a link that stalled its way there.
+- `live latency skip jumped=…ms ahead_before=…ms` / `live latency skip unavailable
+  reason=<small|unknown|unverified>`: the mpv in-cache skip, on a user "Go to live" only.
+- `live catchup on ahead=…ms target=…ms` / `live catchup off reason=<inrange|notlive|preview|
+  hlslive|audio|paused|buffering|reconnecting|zapsettling|handoff|unsupported>`: Android catch-up,
+  on change only.
 - The same line prefixed `live latency behind `: on the first threshold crossing.
 - `live latency reset reason=<load|reconnect|zap|golive|engine|claim> drift=…ms stalls=n`: when a
   measurement with **at least 1 s** of drift is discarded (`kLiveLatencyResetLogMinDriftMs` /
@@ -3357,13 +3386,100 @@ shared-engine preview is untouched.
 - mpv's cushion depends on mpv publishing `demuxer-cache-duration`. Where it doesn't, `ahead` is −1
   and the row prints the delay alone.
 
-**What this changes in playback: nothing.** No buffer preset, `LoadControl`, `cache-secs`, speed,
-reconnect policy, watchdog timing or handoff window moves. The one visible change in behaviour is
-the one intended: "Go to live" can now appear without a pause. Pinned by
-`test/live_latency_test.dart`, Kotlin `LiveLatencyTest`, Swift `LiveLatencyTests` (all six parity
-vectors), the "live delay" cases in `test/player_overlay_test.dart`,
-`test/linux_native_session_test.dart`, the real-font sweep in `test/layout_overflow_test.dart`,
-and section 9 of `linux/mpv/overlay_layout_test.lua`.
+- `delayMs` is a **lower bound**, never an estimate of the true live edge. A provider that holds a
+  backlog but never lets our cushion grow is under-reported.
+
+### Wave 2: the delay counts the connect backlog
+
+Drift counts only delay added *after* the first frame. Providers commonly answer a live request
+with a **connect backlog** sent faster than real time (one measured provider sent ~76 s), and
+playback starts at that backlog's oldest frame on every engine, whatever the buffer preset says.
+A smaller readahead does **not** reduce it: the backlog waits on the provider's side (measured with
+a 1x paced reader, which stayed ~47 s behind). So wave 2 measures a delay, and removes it where
+the engine allows, instead of shrinking any buffer.
+
+- **`creditedMs`** is delay deliberately removed. It grows only through `credit(ms)` (the
+  *measured* jump of a verified in-cache skip) and samples the caller marks `catchingUp`
+  (`max(0, dMedia − dWall)`, ExoPlayer's speed-up). Otherwise nothing is credited; wave 1's
+  "media briefly ahead never credits drift back" stands.
+- **`backlogMs`** is `max` over every baselined sample (skipping `ahead < 0`) of
+  `ahead + credited − drift`, floored at 0, and only rises. Since `delay = L0 + drift − credited`
+  and `ahead <= delay`, this bounds the connect backlog `L0` from below. It's folded in **after** the
+  sample's own drift and credit, which is what keeps a pause from being counted twice (a 1x
+  provider queueing during a pause raises `ahead` *with* `drift`). It stays honest across a skip
+  followed by a refill.
+- **`delayMs = max(0, backlog + drift − credited)`** drives the badge, the info row, the "behind"
+  crossing and the periodic log gate. `credit` releases the warn latch but is **not** a reset.
+- Five tracker parity scenarios (S1–S5: honest 1x, burst, pause, skip then refill, catch-up) are
+  asserted with the same numbers in Dart, Kotlin and Swift.
+
+**The latch, per surface.** `liveSynced` goes false on the pause rule, on drift ≥ 30 s anywhere,
+and on **delay** ≥ 30 s **only where the surface can trim**: every mpv surface Dart drives, plus
+Linux native. On ExoPlayer and iOS a backlog delay is **shown, not offered**, because a reload
+re-receives the backlog and the chip would lie. ExoPlayer recovers it by catch-up instead.
+
+### "Go to live" on mpv: the in-cache skip
+
+On an mpv surface the backlog is already downloaded, so "Go to live" steps over it instead of
+reconnecting. `seek <t> absolute+keyframes` on a live TS lands inside the demuxer cache with no new
+HTTP request and A/V intact, and the cache refills from the backlog the provider still holds
+(verified with mpv 0.41 / FFmpeg 9 and this app's live options). ExoPlayer can't: media3 1.11.1
+`ProgressiveMediaPeriod.seekToUs` treats any seek on non-seekable / progressive-live media as t=0
+and restarts the load.
+
+The decision is pure (`lib/player/live_trim.dart`, `test/live_trim_test.dart`). It applies to the
+embedded and Windows-native `_player` and to Linux native:
+1. Read `time-pos` P and `demuxer-cache-duration` A **fresh** (never `demuxer-cache-time`). If
+   `A − 2000 >= 5000`, seek to `P + A − 2000`, clamped at 0.
+2. 300 ms later, re-read `time-pos`. A move of at least half the jump verifies it. Then
+   `credit(P2 − P)`, log `skip jumped=`, and set `liveSynced` true.
+3. Anything else falls through to the unchanged reload, logging `skip unavailable reason=`. The
+   skip must never leave a press unanswered.
+
+Suppressed while reconnecting (including an EOF that already owes a reload), while `zap.settling`,
+during a Windows/Linux surface escalation, while the tracker is un-baselined (this route's handoff
+window), and **while paused**: the reload resumes at the live edge, while a trim would leave the
+picture frozen. Never automatic. The Android mpv fallback keeps its reload.
+
+### Android catch-up (ExoPlayer)
+
+ExoPlayer's only lever against a backlog is the playback clock, so `HdrPlayerActivity` plays
+**1.05x** (pitch-corrected by media3's Sonic) until the cushion is back where the preset asks. That
+recovers about 3 s per minute. It's deliberately not faster: the ceiling is "never noticed by
+someone who didn't ask for it". Owner decision, 2026-11-03.
+
+`CatchUpPolicy` / `CatchUpController` (pure, JUnit-pinned) decide it on the existing 500 ms ticker.
+- **Thresholds:** engage above `ExoBufferPolicy.forPreset(preset).minBufferMs + 10 s`, disengage
+  at `minBufferMs`. The target is the preset's own cushion: a user who picks Large asked for that
+  much; catch-up only recovers what they didn't ask for. The gap between the thresholds stops
+  the rate wavering.
+- **Vetoes.** Any one forces 1.0, it doesn't merely refuse to engage:
+  - not live, the preview, and HLS (`isCurrentMediaItemLive()`, where media3 runs its own
+    `LivePlaybackSpeedControl`);
+  - paused, buffering, reconnecting (including a re-resolve in flight), zap settling, and
+    `FrameLivenessWatch.inHandoffWindow`;
+  - audio that isn't PCM-decodable.
+- **The audio gate is an allow-list:** AAC, MP1/MP2/MP3, Opus, Vorbis, FLAC, raw PCM. It fails
+  closed. `DefaultAudioSink` won't re-time passthrough/offload audio, so AC-3/E-AC-3/DTS would
+  desync. MIME types arrive lowercased (`MimeTypes.normalizeMimeType`), so the list matches
+  `audio/mpeg-l2`.
+- **Read-back:** one second after engaging, `getPlaybackParameters().speed` must read 1.05. An
+  immediate read only sees the stored request; the device's answer comes back through
+  `DefaultMediaClock`. A speed that never took disables catch-up for the session, logged once.
+- **Resets:** speed returns to 1.0 at every tracker reset point and on every engine swap or
+  release. The load-bearing one is the shared-engine handback, so the preview can never inherit
+  1.05x.
+- **Crediting:** the tracker is told `catchingUp` one tick behind the decision, so the recovery is
+  credited rather than read as jitter.
+
+**What wave 2 changes in playback:**
+- a user "Go to live" on mpv may be an in-cache seek instead of a reload;
+- ExoPlayer may play at 1.05x;
+- FFmpeg no longer reconnects a live body in place (see "Live auto-reconnect");
+- ExoPlayer `normal`/`high` gain byte caps (see "Buffer presets").
+
+No preset duration, `cache-secs`, `demuxer-max-bytes`, start gate, `ReconnectPolicy` timing or
+handoff window moves.
 
 ## Headers and logging
 
@@ -3395,6 +3511,14 @@ What a live TS connection does at its end depends on how the provider ends it:
   "clean EOF, `ahead=0ms`" shape.
 
 Both were reproduced with mpv 0.41 / FFmpeg 9 against a local length-less TS server (2026-11-03).
+
+**So FFmpeg never reconnects a live body in place** (`stream-lavf-o: reconnect_streamed=0`, Dart
+`kLiveMpvOptions` and Kotlin `MpvLiveOptions.STREAM_LAVF_O`, kept equal and pinned by tests).
+Providers answer a live TS with a close-delimited body (measured: `Connection: close`, no length),
+so every end looks premature and FFmpeg retries the **post-redirect** URL, whose per-connection
+token is already spent. On a backlog provider a retry that succeeds splices older content in. Live
+recovery is the app watchdog's, which re-resolves first. `reconnect=1` stays, and VOD never
+receives `kLiveMpvOptions`.
 
 ## MethodChannel handler ownership
 
