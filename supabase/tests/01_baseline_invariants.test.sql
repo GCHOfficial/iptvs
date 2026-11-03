@@ -6,7 +6,7 @@
 
 begin;
 
-select plan(24);
+select plan(25);
 
 -- ---------------------------------------------------------------------------
 -- RLS is enabled on every table in `public` (deny-by-default is the whole
@@ -61,6 +61,52 @@ select is(
   ),
   '{}'::text[],
   'every SECURITY DEFINER function in public pins search_path to empty'
+);
+
+-- ---------------------------------------------------------------------------
+-- No trigger function in `public` is executable by a client role
+-- (20261104000000_diagnostics_delete.sql's advisor sweep).
+--
+-- A function `returns trigger` cannot be called as an RPC — Postgres answers
+-- "trigger functions can only be called as triggers" and PostgREST never
+-- exposes one — so nothing here was exploitable. It is attack-surface hygiene,
+-- and the reason it is an invariant rather than a one-off cleanup is that it is
+-- the state a new function arrives in: Supabase's
+-- `alter default privileges ... grant all on functions to anon, authenticated`
+-- grants both roles *directly*, so the usual `revoke ... from public` (which
+-- strips only the built-in PUBLIC grant) leaves them holding EXECUTE. Eight of
+-- the fourteen carried no revoke at all and two carried that partial one. The
+-- next trigger function added will inherit the same two grants unless someone
+-- remembers; this assertion is that memory.
+--
+-- **Revoking EXECUTE does not stop a trigger firing.** The function is resolved
+-- and permission-checked when the trigger is CREATEd; firing it goes through
+-- `ExecCallTriggerFunc`, which invokes a cached `FmgrInfo` directly, and fmgr
+-- does no privilege checking — SQL-level EXECUTE is only consulted where a
+-- function is named in a parsed query. The suite proves that empirically too:
+-- `15_profiles_favorites_revision.test.sql` writes `public.sources` and
+-- `public.profiles` directly as `authenticated` and asserts on what
+-- `sources_validate`, `profiles_touch_updated_at` and the SECURITY DEFINER
+-- `touch_profile_snapshot_revision` did — as a role holding no EXECUTE on any
+-- of them.
+--
+-- `rls_auto_enable` is excluded by name for continuity with the assertion
+-- above; it is Supabase's own EVENT trigger function, so it returns
+-- `event_trigger` rather than `trigger` and the type filter already skips it.
+-- Reported as the array of offenders so a failure names them.
+select is(
+  (
+    select coalesce(array_agg(distinct p.proname::text order by p.proname::text), '{}'::text[])
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      cross join unnest(array['anon', 'authenticated']) as r(name)
+     where n.nspname = 'public'
+       and p.prorettype = 'pg_catalog.trigger'::regtype
+       and p.proname <> 'rls_auto_enable'
+       and has_function_privilege(r.name::name, p.oid, 'EXECUTE')
+  ),
+  '{}'::text[],
+  'no trigger function in public is executable by anon or authenticated'
 );
 
 -- ---------------------------------------------------------------------------
