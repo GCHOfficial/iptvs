@@ -537,41 +537,58 @@ else
   # resume and the first arrow could let it — and a Right with the chrome down
   # is "previous channel", not a focus move.
   key KEYCODE_MEDIA_PLAY_PAUSE 1
+  # Walk to the chip and press OK *at once*. The live chrome auto-hides 4.5 s
+  # after the last key (PlayerControls HIDE_DELAY_LIVE). A screenshot between
+  # focusing the chip and pressing OK took long enough on a slow emulator that
+  # OK only re-revealed the chrome, whose default focus is play/pause, which
+  # read as a passing focus hand-back with no go-live at all. So the
+  # screenshot comes after the press, the go-live reload is what counts as the
+  # press having happened, and the focus check is only meaningful after it.
+  # One retry re-walks, since the first attempt may lose the race.
   MF=$(mark)
   FOUND_CHIP=0
-  for _ in $(seq 1 10); do
-    key KEYCODE_DPAD_RIGHT 0.8
-    if since "$MF" | grep -q 'overlay focus=Go to live'; then FOUND_CHIP=1; break; fi
+  WENT_LIVE=0
+  for attempt in 1 2; do
+    MA=$(mark)
+    for _ in $(seq 1 10); do
+      key KEYCODE_DPAD_RIGHT 0.4
+      if since "$MA" | grep -q 'overlay focus=Go to live'; then FOUND_CHIP=1; break; fi
+    done
+    [ "$FOUND_CHIP" = "1" ] || break
+    MG=$(mark)
+    key KEYCODE_DPAD_CENTER 0.2
+    for _ in $(seq 1 20); do
+      if since "$MG" | grep -q 'live latency reset reason=golive'; then WENT_LIVE=1; break; fi
+      sleep 0.5
+    done
+    [ "$WENT_LIVE" = "1" ] && break
+    note "go-live press $attempt did not reload (chrome probably hid first); re-walking"
   done
   shot "go-to-live"
-  if [ "$FOUND_CHIP" = "1" ]; then
+  if [ "$FOUND_CHIP" != "1" ]; then
+    soft_fail "'Go to live' never appeared/focused after a ${PAUSE_SECONDS}s pause"
+    { echo "--- overlay focus trace while hunting the chip ---"; since "$MF" | grep 'overlay focus=' | tail -20; } >>"$OUT/crashes.txt" || true
+  elif [ "$WENT_LIVE" != "1" ]; then
     pass "'Go to live' chip is present and focusable after the pause"
-    MG=$(mark)
-    key KEYCODE_DPAD_CENTER 2
-    # It is the one control that removes itself while focused, so it hands
-    # focus to play/pause on the press. Without that the D-pad is stranded
-    # until Back (CLAUDE.md "Player", docs/tv-navigation.md).
+    soft_fail "pressing 'Go to live' never produced a go-live reload (2 attempts)"
+  else
+    pass "'Go to live' chip is present and focusable after the pause"
+    RESET=$(first_match "$MG" 'live latency reset reason=golive')
+    pass "go-live reload ran: ${RESET##*] }"
+    DRIFT=$(printf '%s' "$RESET" | sed -n 's/.*drift=\([0-9]\{1,\}\)ms.*/\1/p')
+    if [ -n "$DRIFT" ] && [ "$DRIFT" -ge 30000 ]; then
+      pass "discarded drift was ${DRIFT}ms (>= the 30s threshold that armed the chip)"
+    else
+      soft_fail "go-live discarded drift=${DRIFT:-unknown}ms, expected >= 30000"
+    fi
+    # Only now does a play/pause focus line prove the hand-back rather than a
+    # chrome reveal.
     if since "$MG" | grep -q 'overlay focus=Play/Pause'; then
       pass "focus landed on play/pause after activating 'Go to live'"
     else
-      fail "'Go to live' was activated but focus did not land on play/pause (D-pad stranding regression)"
+      fail "'Go to live' reloaded but focus did not land on play/pause (D-pad stranding regression)"
       { echo "--- overlay focus trace after go-live ---"; since "$MG" | grep 'overlay focus=' | head -10; } >>"$OUT/crashes.txt" || true
     fi
-    if since "$MG" | grep -q 'live latency reset reason=golive'; then
-      RESET=$(first_match "$MG" 'live latency reset reason=golive')
-      pass "go-live reload ran: ${RESET##*] }"
-      DRIFT=$(printf '%s' "$RESET" | sed -n 's/.*drift=\([0-9]\{1,\}\)ms.*/\1/p')
-      if [ -n "$DRIFT" ] && [ "$DRIFT" -ge 30000 ]; then
-        pass "discarded drift was ${DRIFT}ms (>= the 30s threshold that armed the chip)"
-      else
-        soft_fail "go-live discarded drift=${DRIFT:-unknown}ms, expected >= 30000"
-      fi
-    else
-      soft_fail "no 'live latency reset reason=golive' line after activating the chip"
-    fi
-  else
-    soft_fail "'Go to live' never appeared/focused after a ${PAUSE_SECONDS}s pause"
-    { echo "--- overlay focus trace while hunting the chip ---"; since "$MF" | grep 'overlay focus=' | tail -20; } >>"$OUT/crashes.txt" || true
   fi
   scan_health "$M" "latency scenario" || true
 fi
