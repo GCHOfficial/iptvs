@@ -116,9 +116,32 @@ class PlayerUiState(
     // whenever the picture and the screen share a shape, which is most viewing.
     var aspect by mutableStateOf(AspectMode.Fill)
 
-    // Live-edge sync: true while at the live edge, false once the user has paused
-    // (and thus fallen behind). Drives the grey LIVE badge + the go-to-live button.
+    // Live-edge sync: true while at the live edge, false once the viewer has
+    // fallen behind it — by pausing, or by accumulating LiveLatency.WARN_MS of
+    // drift through rebuffering. Drives the grey LIVE badge + the go-to-live
+    // button.
+    //
+    // **Latched:** nothing sets this back to true except a reset point (go-live,
+    // a reconnect reload, a zap settle, a new open). That hysteresis is
+    // mandatory rather than tidy — the "Go to live" chip removes itself while
+    // focused and hands focus to play/pause, so a value that oscillated around
+    // a threshold would strand the D-pad every time it crossed.
     var liveSynced by mutableStateOf(true)
+
+    /**
+     * Delay accumulated since this stream's first frame, in ms
+     * ([LiveLatencyTracker]). 0 for VOD and before playback has progressed.
+     */
+    var liveDriftMs by mutableStateOf(0L)
+
+    /** Buffered cushion ahead of the playhead in ms, or -1 when unknown. */
+    var liveAheadMs by mutableStateOf(-1L)
+
+    /** Top-bar badge text: `LIVE`, or `LIVE -1:23` once genuinely behind. */
+    fun liveDelayBadge(): String = LiveLatency.badgeLabel(liveDriftMs)
+
+    /** Stream-info row value: `1:23 · buffer 24s`, or the delay alone. */
+    fun liveDelayInfo(): String = LiveLatency.infoValue(liveDriftMs, liveAheadMs)
 
     // Favorite toggle (live channels only). `canFavorite` gates the overlay star
     // button; `isFavorite` is its current state. The Dart host owns the store —

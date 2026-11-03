@@ -26,6 +26,8 @@ import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
+import com.gchofficial.iptvs.player.LiveLatencyReset
+import com.gchofficial.iptvs.player.LiveLatencyTracker
 import com.gchofficial.iptvs.player.LiveLocator
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
@@ -268,6 +270,16 @@ class HdrPlayerActivity : ComponentActivity() {
     private val playbackStats = PlaybackStatsSampler()
 
     /**
+     * How far behind the live edge this session has drifted
+     * ([LiveLatencyTracker]).
+     *
+     * Measurement only: it feeds the LIVE badge, the info panel's "Live delay"
+     * row and the latched `liveSynced` gate behind "Go to live". It changes no
+     * buffer, no decision the reconnect watchdog makes, and no clock.
+     */
+    private val liveLatency = LiveLatencyTracker()
+
+    /**
      * Periodic frame-rate/drop line while playing.
      *
      * Rides the existing ticker rather than adding a timer, and only while the
@@ -292,6 +304,57 @@ class HdrPlayerActivity : ComponentActivity() {
             rendered = active.renderedFrameCount,
             dropped = active.droppedFrameCount,
         )?.let { logNative("playback $it") }
+    }
+
+    /**
+     * One live-latency tick, on the same ticker as [samplePlaybackStats].
+     *
+     * Everything it needs is already on hand: the engine's playhead and
+     * cushion, and the two flags the overlay is already showing. Nothing here
+     * blocks (mpv's figures are latched property events, ExoPlayer's are local
+     * reads on the player's own thread), and nothing here is sampled off a live
+     * stream.
+     *
+     * The latch is the whole of the `liveSynced` rule on this side: drift never
+     * decreases, so `behind` can only ever go false→true, and only
+     * [resetLiveLatency]'s callers put the chip away again.
+     */
+    private fun sampleLiveLatency() {
+        if (!uiState.isLive) return
+        val active = engine ?: return
+        // -1 is "no playhead yet": a stream still opening, or an mpv engine
+        // between `loadfile` and its first `time-pos`. Sampling it would bank
+        // the open as drift.
+        val position = active.mediaPositionMs()
+        if (position < 0L) return
+        val ahead = active.bufferedAheadMs()
+        liveLatency.sample(
+            nowMs = System.currentTimeMillis(),
+            positionMs = position,
+            isPlaying = uiState.isPlaying,
+            isBuffering = uiState.isBuffering,
+            aheadMs = ahead,
+        )?.let { logNative(it) }
+        uiState.liveDriftMs = liveLatency.driftMs
+        uiState.liveAheadMs = ahead
+        if (liveLatency.behind) uiState.liveSynced = false
+    }
+
+    /**
+     * Starts the measurement over because the stream underneath is being
+     * replaced — the contract's reset points, each named in the log line so an
+     * export says *why* a 90-second drift was discarded.
+     *
+     * Sets `liveSynced` back to true for the same reason: every caller is a
+     * path that re-opens the source at the live edge, which is precisely what
+     * the "Go to live" chip would have done.
+     */
+    private fun resetLiveLatency(reason: String) {
+        liveLatency.reset(reason)?.let { logNative(it) }
+        if (!::uiState.isInitialized) return
+        uiState.liveDriftMs = 0L
+        uiState.liveAheadMs = -1L
+        if (uiState.isLive) uiState.liveSynced = true
     }
 
     /**
@@ -470,8 +533,14 @@ class HdrPlayerActivity : ComponentActivity() {
                 sharedEngine.renderedFrameCount,
             )
             logNative("handoff frame watch armed=$armed")
+            // The preview measures nothing in wave 1, so the drift clock starts
+            // at the claim: whatever the preview accumulated is unknown to this
+            // side, and inventing a number for it would be worse than starting
+            // the viewer's fullscreen session from zero.
+            resetLiveLatency(LiveLatencyReset.CLAIM)
         } else {
             startWithExoPlayer()
+            resetLiveLatency(LiveLatencyReset.LOAD)
             // VOD resume: jump to the saved position once the engine loads.
             // ExoPlayer remembers a seek issued right after load/prepare.
             val resumeMs = intent.getLongExtra(EXTRA_RESUME_MS, 0L)
@@ -533,6 +602,9 @@ class HdrPlayerActivity : ComponentActivity() {
         // when I went fullscreen", and previously logcat-only.
         logNative("engine fallback from=exo to=mpv adopted=$adoptedShared")
         frameLiveness.reset()
+        // A different engine means a different playhead: mpv's `time-pos`
+        // starts from the new stream, so the old reference is meaningless.
+        resetLiveLatency(LiveLatencyReset.ENGINE)
         if (adoptedShared) {
             // The adopted engine can't decode this stream, so the shared preview
             // engine is dead too: release it through the holder, which tells the
@@ -720,6 +792,11 @@ class HdrPlayerActivity : ComponentActivity() {
             // The round trip is asynchronous, so restart the stall clock when
             // the reload actually begins rather than when it was requested.
             stalledSinceMs = System.currentTimeMillis()
+            // Same instant, same reason: a reload drops the buffer and resumes
+            // at the live edge, so the drift it was carrying is gone — and the
+            // reset is deferred to here rather than taken at the decision so a
+            // long re-resolve round trip is not measured as new drift.
+            resetLiveLatency(LiveLatencyReset.RECONNECT)
             engine?.load(url, subtitles)
         }
     }
@@ -922,6 +999,10 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.reconnecting = false
         uiState.liveSynced = true
         uiState.videoUnsupported = false
+        // A different channel's timeline entirely. Resets `liveSynced` too,
+        // which the line above already did — harmless, and it keeps every
+        // reset point going through one door.
+        resetLiveLatency(LiveLatencyReset.ZAP)
 
         if (rebuild) {
             rebuildEngineForZap()
@@ -957,6 +1038,10 @@ class HdrPlayerActivity : ComponentActivity() {
      * zap is not new evidence about that.
      */
     private fun rebuildEngineForZap() {
+        // A no-op in practice — `applyZap` has already reset for the zap — but
+        // the rule is "every engine swap resets", and leaving one swap outside
+        // it is how the next caller inherits a stale reference.
+        resetLiveLatency(LiveLatencyReset.ENGINE)
         val wasMpv = engine is MpvEngine
         if (adoptedShared) {
             adoptedShared = false
@@ -1044,7 +1129,20 @@ class HdrPlayerActivity : ComponentActivity() {
         onGoLive = {
             if (uiState.isLive) {
                 val started = withFreshLiveLocator { engine?.load(url, subtitles) }
-                if (started) uiState.liveSynced = true
+                // The reset moves with `liveSynced`, and both only on a press
+                // that actually started a reload. They cannot be split: leaving
+                // the old drift standing while the chip goes away would have
+                // the very next tick latch `liveSynced` false again — the chip
+                // the viewer just pressed reappearing under their thumb, which
+                // is the flicker the latch exists to prevent. And a press that
+                // started nothing (a reconnect already in flight owns the next
+                // reload) must leave both exactly as they were. The wait itself
+                // is still measured: the tracker re-baselines from here, so the
+                // frozen playhead banks the round trip as the lag it is.
+                if (started) {
+                    resetLiveLatency(LiveLatencyReset.GO_LIVE)
+                    uiState.liveSynced = true
+                }
             }
         },
         // Toggled locally **and** reported straight away.
@@ -1072,6 +1170,7 @@ class HdrPlayerActivity : ComponentActivity() {
                 engine?.syncProgress()
                 pollLiveReconnect()
                 samplePlaybackStats()
+                sampleLiveLatency()
                 // Faster while a frozen renderer is still attributable to the
                 // fullscreen surface claim: that window is judged on
                 // HANDOFF_POST_FRAME_STALL_MS, which the base cadence cannot

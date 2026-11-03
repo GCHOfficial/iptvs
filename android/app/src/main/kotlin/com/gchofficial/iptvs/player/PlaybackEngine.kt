@@ -39,6 +39,29 @@ interface PlaybackEngine {
     fun syncProgress() {}
 
     /**
+     * Media buffered **ahead of the playhead**, in ms, or **-1** when the
+     * engine can't say.
+     *
+     * Deliberately not [PlayerUiState.bufferedMs], which is a buffered
+     * *position* on the media timeline: the same number on VOD, and on a live
+     * stream whose timeline starts at an arbitrary offset, not the same number
+     * at all. [LiveLatencyTracker] reports this figure verbatim and never
+     * computes with it, so -1 costs an attribution field and nothing else.
+     */
+    fun bufferedAheadMs(): Long = -1L
+
+    /**
+     * The playhead's media position in ms, or **-1** before the engine has one.
+     *
+     * The second half of the drift measurement: wall-clock time that this
+     * number failed to account for is, by definition, delay the viewer has
+     * accumulated. -1 is "don't sample yet" rather than position zero — a
+     * stream that has not reported a position has not started, and treating
+     * that as the origin would bank the whole open as drift.
+     */
+    fun mediaPositionMs(): Long = -1L
+
+    /**
      * Frames the video renderer has actually put on screen since this engine
      * loaded, or **-1** when the engine can't report it (no video renderer, or
      * no counter of its own).
