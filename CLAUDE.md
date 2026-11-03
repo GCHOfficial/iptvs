@@ -419,12 +419,30 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   catalogs ≥256 KB go bytes-in→typed-list-out through top-level workers
   (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels` and, for its portal-wide `get_epg_info`, `_ingestStalkerEpg`) — the
   dynamic JSON graph never crosses the isolate boundary; smaller payloads parse inline (isolate
-  spawn would dominate). Downloaded XMLTV guides go **to a temp file, never to memory**
-  (`xmltvGuideFeed` → `readToFile`), and the worker inflates and event-parses them from disk
+  spawn would dominate). Downloaded XMLTV guides go **to a file, never to memory**
+  (`xmltvGuideFeed` → `downloadXmltvGuide` → `readToFile`), and the worker inflates and
+  event-parses them from disk
   (`parseXmltvFileBatched`), skipping unmatched programmes at the start tag — so a guide's size
   costs disk and parse time, not RAM (`kEpgWorkload` 512 MiB body / 4 GiB decoded; don't
   reintroduce a whole-body read on that path — docs/sources.md "Guide size"). Batches stay
   bounded (single in-flight batch by design) on their way into `replaceEpgStream`.
+  **Guide downloads ask for gzip and are conditional.** `downloadXmltvGuide` (shared by M3U,
+  Xtream and Stalker) sends `Accept-Encoding: gzip` explicitly, because these clients'
+  deliberate `autoUncompress = false` — which keeps `dart:io`'s unbounded decoder out — also
+  suppresses the default header, so a guide arrived uncompressed however the server was
+  configured (a real export: 196,725,492 bytes on *every* refresh). The body is stored as
+  received and inflated from its magic bytes, so `Content-Encoding: gzip` and a `.xml.gz` served
+  as-is both work, and the 512 MiB ceiling now bounds *compressed* bytes while the decoded one is
+  enforced on each inflation pass. Each guide's last body is kept **per URL** in the app-private
+  cache (`data/epg_guide_cache.dart`, `getApplicationCacheDirectory()`, file names
+  `sha256(url)` — **never** the URL, which carries credentials — sidecar device-local, never
+  `SourceConfig.settings`), revalidated with `If-None-Match`/`If-Modified-Since`, and **a 304 is
+  fed to the parser exactly as a fresh download would have been**, so the EPG contract above is
+  untouched. Per guide, because the merge is rebuilt whole each refresh. Eviction is a size cap
+  with LRU — not `invalidateEpg`, which exists to redo the *merge* and leaves the bytes valid.
+  Anything unusable (no cache dir, bad sidecar, length mismatch, an unasked-for 304) falls back
+  to an unconditional download and never fails a refresh. Pinned by
+  `test/epg_guide_cache_test.dart`.
   Sources with a batched guide implement the optional `BatchedEpgSource` capability interface —
   deliberately separate from `Source`, since `implements` doesn't inherit default bodies.
   Don't add new parse/map work on the main isolate for provider-sized payloads, and don't

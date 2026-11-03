@@ -42,7 +42,11 @@ Stream<List<int>> _chunksOf(Uint8List data) async* {
 /// to disk. Exactly one of the two is set. Both cross an isolate boundary
 /// cheaply — a path is a string, and in-memory input is only ever small or a
 /// test fixture.
-typedef _GuideInput = ({Uint8List? bytes, String? path});
+///
+/// [maxDecodedBytes] rides along rather than being read from [kEpgWorkload] in
+/// the worker because a spawned isolate starts with its own globals: a ceiling
+/// a test lowered on this side would silently not apply on that one.
+typedef _GuideInput = ({Uint8List? bytes, String? path, int maxDecodedBytes});
 
 /// The guide's raw bytes, decompressed if it is gzip, as a stream.
 ///
@@ -54,9 +58,19 @@ typedef _GuideInput = ({Uint8List? bytes, String? path});
 /// countries" guide (~192 MB compressed, ~1.7 GB decompressed) was roughly
 /// 1.9 GB of heap on hardware that is routinely a 2 GiB TV box.
 ///
-/// [kEpgWorkload]'s decoded ceiling still applies, as a bound on *work* — a
-/// tiny gzip can still expand without limit, and the count is kept here, on
-/// the decoded stream, rather than trusted to any header.
+/// [_GuideInput.maxDecodedBytes] ([kEpgWorkload]'s decoded ceiling in
+/// production) still applies, as a bound on *work* — a tiny gzip can still
+/// expand without limit, and the count is kept here, on the decoded stream,
+/// rather than trusted to any header. It is applied to **every** inflation
+/// pass, not only the last, so a bomb cannot hide behind one.
+///
+/// Gzip is detected from the bytes, never from a header, which is what lets one
+/// path serve both a body the server compressed for transport
+/// (`Content-Encoding: gzip`, now that guide requests ask for it) and a
+/// `.xml.gz` file served as-is. The two can arrive **together** — a server that
+/// compresses an already-compressed file — so a second pass is attempted when
+/// the first one's output is itself gzip. Two passes and no more: a third would
+/// be a crafted file, not a guide.
 Future<Stream<List<int>>> _decodedGuideBytes(_GuideInput input) async {
   final Stream<List<int>> raw;
   final bool gzipped;
@@ -74,8 +88,46 @@ Future<Stream<List<int>>> _decodedGuideBytes(_GuideInput input) async {
     }
     raw = file.openRead();
   }
-  final decoded = gzipped ? raw.transform(gzip.decoder) : raw;
-  return _boundedBytes(decoded, kEpgWorkload.maximumDecodedBytes);
+  final maximum = input.maxDecodedBytes;
+  if (!gzipped) return _boundedBytes(raw, maximum);
+  var decoded = _boundedBytes(raw.transform(gzip.decoder), maximum);
+  final (stillGzip, rest) = await _peekGzip(decoded);
+  decoded = stillGzip
+      ? _boundedBytes(rest.transform(gzip.decoder), maximum)
+      : rest;
+  return decoded;
+}
+
+/// [source] unchanged, plus whether its first two bytes are the gzip magic.
+///
+/// Buffers only the chunks needed to see two bytes, then replays them ahead of
+/// the rest — so the lazy, backpressured read the whole guide path depends on
+/// is preserved.
+Future<(bool, Stream<List<int>>)> _peekGzip(Stream<List<int>> source) async {
+  final iterator = StreamIterator<List<int>>(source);
+  final head = <List<int>>[];
+  final magic = <int>[];
+  while (magic.length < 2 && await iterator.moveNext()) {
+    head.add(iterator.current);
+    for (final byte in iterator.current) {
+      magic.add(byte);
+      if (magic.length == 2) break;
+    }
+  }
+  Stream<List<int>> rest() async* {
+    try {
+      for (final chunk in head) {
+        yield chunk;
+      }
+      while (await iterator.moveNext()) {
+        yield iterator.current;
+      }
+    } finally {
+      await iterator.cancel();
+    }
+  }
+
+  return (isGzipBytes(magic), rest());
 }
 
 Stream<List<int>> _boundedBytes(Stream<List<int>> source, int maximum) async* {
@@ -109,13 +161,22 @@ Future<Stream<List<XmlEvent>>> _guideEvents(_GuideInput input) async =>
 /// fallback for guide channels whose id isn't one of our `tvg-id`s — the whole
 /// point of a *third-party* guide, whose ids never line up with the provider's.
 /// Omitting it leaves exact `tvg-id` matching only.
+///
+/// [maxDecodedBytes] bounds the *inflated* guide, [kEpgWorkload]'s ceiling by
+/// default (see `_decodedGuideBytes`); lowered only by tests, since the value
+/// has to travel to the worker isolate rather than be read there.
 Future<List<Programme>> parseXmltv(
   Uint8List bytes,
   Map<String, String> tvgIdToChannelId, {
   Map<String, List<String>> nameToChannelIds = const {},
+  int? maxDecodedBytes,
 }) {
   final args = (
-    (bytes: bytes, path: null) as _GuideInput,
+    (
+      bytes: bytes,
+      path: null,
+      maxDecodedBytes: maxDecodedBytes ?? kEpgWorkload.maximumDecodedBytes,
+    ) as _GuideInput,
     tvgIdToChannelId,
     nameToChannelIds,
   );
@@ -380,19 +441,21 @@ Stream<List<Programme>> parseXmltvBatched(
   Map<String, List<String>> nameToChannelIds = const {},
   int batchSize = _defaultEpgBatchSize,
   LoadToken? token,
+  int? maxDecodedBytes,
 }) async* {
   if (token?.isCancelled ?? false) throw const LoadCancelledException();
+  final ceiling = maxDecodedBytes ?? kEpgWorkload.maximumDecodedBytes;
 
   if (!isGzipBytes(bytes) && bytes.length < _isolateXmltvThreshold) {
     yield await _parseXmltvAll((
-      (bytes: bytes, path: null),
+      (bytes: bytes, path: null, maxDecodedBytes: ceiling),
       tvgIdToChannelId,
       nameToChannelIds,
     ));
     return;
   }
   yield* _parseInWorker(
-    (bytes: bytes, path: null),
+    (bytes: bytes, path: null, maxDecodedBytes: ceiling),
     tvgIdToChannelId,
     nameToChannelIds,
     batchSize,
@@ -410,10 +473,15 @@ Stream<List<Programme>> parseXmltvFileBatched(
   Map<String, List<String>> nameToChannelIds = const {},
   int batchSize = _defaultEpgBatchSize,
   LoadToken? token,
+  int? maxDecodedBytes,
 }) async* {
   if (token?.isCancelled ?? false) throw const LoadCancelledException();
   yield* _parseInWorker(
-    (bytes: null, path: file.path),
+    (
+      bytes: null,
+      path: file.path,
+      maxDecodedBytes: maxDecodedBytes ?? kEpgWorkload.maximumDecodedBytes,
+    ),
     tvgIdToChannelId,
     nameToChannelIds,
     batchSize,

@@ -29,16 +29,28 @@ void main() {
     for (var i = 0; i < count; i++) 'channel.$i': 'ch$i',
   };
 
+  /// Adapts a plain "write this file" fake to [GuideDownload]: every test in
+  /// this group is about the disk/parse half, so they all answer 200 with no
+  /// validators — which is also what keeps them uncached (see
+  /// `EpgGuideCacheSlot.publish`).
+  GuideDownload writing(
+    Future<void> Function(Uri uri, File destination) body,
+  ) => (uri, destination, {ifNoneMatch, ifModifiedSince}) async {
+    await body(uri, destination);
+    return (statusCode: 200, etag: null, lastModified: null);
+  };
+
   EpgGuideFeed feedOf(
     Future<void> Function(Uri uri, File destination) download, {
     Map<String, String>? map,
     void Function(int bytes)? onDownloaded,
   }) => xmltvGuideFeed(
     url: 'http://guide.example/epg.xml.gz',
-    download: download,
+    download: writing(download),
     tvgIdToChannelId: map ?? channelMap(40),
     nameToChannelIds: const {},
     tempDirectory: temp,
+    openCache: () async => null,
     onDownloaded: onDownloaded,
   );
 

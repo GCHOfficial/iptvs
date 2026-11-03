@@ -10,6 +10,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../data/diagnostics_log.dart';
+import '../data/epg_guide_cache.dart';
 import '../data/load_token.dart';
 import '../data/net.dart';
 import 'source.dart';
@@ -41,6 +42,122 @@ class EpgGuideFeed {
   final String? url;
 }
 
+/// What a conditional guide request got back. The byte count is deliberately
+/// absent: the caller stats the file it asked for, which is the one number a
+/// 304 and a 200 can both be measured by.
+typedef GuideDownloadResult = ({
+  /// 200 or 304. Anything else has already been thrown by the downloader.
+  int statusCode,
+  String? etag,
+  String? lastModified,
+});
+
+/// The owning source's fetch of one guide URL into one file.
+///
+/// Conditional when [ifNoneMatch]/[ifModifiedSince] are given: a `304 Not
+/// Modified` writes nothing to [destination] and reports itself through
+/// [GuideDownloadResult.statusCode], while any other non-200 throws as before.
+typedef GuideDownload =
+    Future<GuideDownloadResult> Function(
+      Uri uri,
+      File destination, {
+      String? ifNoneMatch,
+      String? ifModifiedSince,
+    });
+
+/// Fetches an XMLTV guide into [destination] over [client].
+///
+/// Shared by M3U, Xtream and Stalker because the three had byte-identical
+/// copies of it and the conditional-request handling must not drift between
+/// them. Each source still owns its own [HttpClient] (timeouts, proxy) and its
+/// own [userAgent] — Stalker's deliberately bypasses the portal transport here,
+/// so no MAC cookie or Bearer token can reach a user-supplied guide host.
+///
+/// **`Accept-Encoding: gzip` is sent explicitly**, because every one of those
+/// clients sets `autoUncompress = false` — which, besides keeping `dart:io`'s
+/// unbounded decoder out of the app, also suppresses the default
+/// `Accept-Encoding` `dart:io` would otherwise have sent. So until this line
+/// existed, a guide arrived uncompressed however the server was configured: a
+/// real export showed a 196,725,492-byte body on **every** refresh. The body
+/// is written to disk exactly as received and inflated later by the parser
+/// worker from its magic bytes (`parseXmltvFileBatched`), so this app's
+/// bounded decode stays the only decoder and a `.xml.gz` served as-is still
+/// works. [kEpgWorkload]'s body ceiling now bounds *compressed* bytes; its
+/// decoded ceiling is still enforced during inflation.
+///
+/// Logs `status=`, `content_encoding=` and `body_bytes=` for every guide, so an
+/// export can tell a full download from a revalidated one.
+Future<GuideDownloadResult> downloadXmltvGuide({
+  required HttpClient client,
+  required Uri uri,
+  required File destination,
+  String? userAgent,
+  String? ifNoneMatch,
+  String? ifModifiedSince,
+  HttpWorkloadPolicy policy = kEpgWorkload,
+}) async {
+  final operation = HttpOperation(policy);
+  final request = await operation.wait(client.getUrl(uri));
+  request.headers.set(HttpHeaders.acceptEncodingHeader, 'gzip');
+  if (userAgent != null) {
+    request.headers.set(HttpHeaders.userAgentHeader, userAgent);
+  }
+  if (ifNoneMatch != null) {
+    request.headers.set(HttpHeaders.ifNoneMatchHeader, ifNoneMatch);
+  }
+  if (ifModifiedSince != null) {
+    // `dart:io` parses this header itself and throws on anything it does not
+    // recognise, so a server whose `Last-Modified` we stored verbatim but
+    // cannot re-emit degrades to an ETag-only (or unconditional) request
+    // rather than to a failed refresh.
+    try {
+      request.headers.set(
+        HttpHeaders.ifModifiedSinceHeader,
+        HttpDate.parse(ifModifiedSince),
+      );
+    } catch (_) {
+      // Unparseable; send nothing for it.
+    }
+  }
+  final response = await operation.wait(request.close());
+  final encoding = contentEncodingLabel(response);
+  if (response.statusCode == HttpStatus.notModified) {
+    // A 304 has no body, but an unread response still holds its socket out of
+    // the pool — the same reason the error path below drains.
+    await response.drain<void>();
+    DiagnosticsLog.instance.add(
+      'http:${policy.name}',
+      'status=304 content_encoding=$encoding body_bytes=0',
+    );
+    return (
+      statusCode: HttpStatus.notModified,
+      // RFC 9110 says a 304 carries the validators; when it doesn't, the
+      // caller keeps the ones it already had rather than losing them.
+      etag: response.headers.value(HttpHeaders.etagHeader) ?? ifNoneMatch,
+      lastModified:
+          response.headers.value(HttpHeaders.lastModifiedHeader) ??
+          ifModifiedSince,
+    );
+  }
+  if (response.statusCode != HttpStatus.ok) {
+    // Drain before throwing: an unread body never returns its socket to the
+    // pool, so a guide URL that 404s leaks one per EPG refresh.
+    await response.drain<void>();
+    // redactUrl strips credentials providers embed in the guide URL.
+    throw StateError('HTTP ${response.statusCode} fetching ${redactUrl(uri)}');
+  }
+  final bytes = await operation.readToFile(response, destination);
+  DiagnosticsLog.instance.add(
+    'http:${policy.name}',
+    'status=200 content_encoding=$encoding body_bytes=$bytes',
+  );
+  return (
+    statusCode: HttpStatus.ok,
+    etag: response.headers.value(HttpHeaders.etagHeader),
+    lastModified: response.headers.value(HttpHeaders.lastModifiedHeader),
+  );
+}
+
 /// An [EpgGuideFeed] over an XMLTV URL.
 ///
 /// [download] is the owning source's own fetch — each source already has one
@@ -49,66 +166,158 @@ class EpgGuideFeed {
 /// without opening a second [HttpClient] or duplicating any of that setup.
 ///
 /// The guide goes **to disk, not to memory**: [download] streams the body into
-/// a temporary file and the parser worker reads it back from there, inflating
-/// gzip as it goes. Holding the whole compressed and then the whole
-/// decompressed body is what used to cap guides at 128 MB — an "all countries"
-/// guide (~192 MB compressed, ~1.7 GB decompressed) was ~1.9 GB of heap on a
-/// 2 GiB TV box. Now its size costs disk while it is parsed and parse time,
-/// and the file is deleted however the feed ends (done, failed or cancelled).
+/// a file and the parser worker reads it back from there, inflating gzip as it
+/// goes. Holding the whole compressed and then the whole decompressed body is
+/// what used to cap guides at 128 MB — an "all countries" guide (~192 MB
+/// compressed, ~1.7 GB decompressed) was ~1.9 GB of heap on a 2 GiB TV box.
+/// Now its size costs disk while it is parsed, and parse time.
+///
+/// **Where that file lives decides whether the next refresh has to download at
+/// all.** With an [EpgGuideCache] (the normal case) the body is downloaded
+/// into, and parsed from, that URL's own slot in the app-private cache
+/// directory — no copy — and the next refresh revalidates it with
+/// `If-None-Match`/`If-Modified-Since`. A **304 is fed to the parser exactly
+/// as a fresh download would have been**: the same `parseXmltvFileBatched`
+/// over the same kind of file, so `mergeEpgGuides` and `replaceEpgStream` see
+/// precisely the programmes a 200 would have produced and none of the EPG
+/// contract moves. This is per guide on purpose — the merge is rebuilt whole on
+/// every refresh, so one guide being unchanged says nothing about the others.
+///
+/// Without a cache (no app-private directory, or none injected in a test) the
+/// body goes to a temp directory deleted however the feed ends, which is what
+/// this always did.
 EpgGuideFeed xmltvGuideFeed({
   required String url,
-  required Future<void> Function(Uri uri, File destination) download,
+  required GuideDownload download,
   required Map<String, String> tvgIdToChannelId,
   required Map<String, List<String>> nameToChannelIds,
   LoadToken? token,
   Directory? tempDirectory,
-  /// Reports the guide's downloaded (as-transmitted, i.e. still gzipped if the
-  /// server sent it that way) byte count once [download] finishes — a cheap
-  /// `file.length()` stat, not a second copy of the body. Fed to
+
+  /// Resolves the body cache. Defaults to the process-wide one; a test injects
+  /// its own directory, and returning null keeps every download unconditional.
+  Future<EpgGuideCache?> Function()? openCache,
+
+  /// Reports the guide's on-disk byte count — as transmitted, i.e. still
+  /// gzipped when the server sent it that way — once the body is in hand,
+  /// whether it was just downloaded or **reused from cache behind a 304**. A
+  /// cheap `file.length()` stat, not a second copy of the body. Fed to
   /// [EpgByteReporting] so `LibraryRepository._ensureEpg` can sum every
   /// guide's cost into the exportable `ingestion compressed_bytes=…` line
-  /// instead of leaving it `unknown`. Never called on a failed download.
+  /// instead of leaving it `unknown`. Never called when the guide could not be
+  /// obtained at all.
   void Function(int bytes)? onDownloaded,
 }) => EpgGuideFeed(
   url: url,
   open: () async* {
-    final dir = await (tempDirectory ?? Directory.systemTemp).createTemp(
-      'iptvs_guide_',
-    );
+    final uri = Uri.parse(url);
+    final cache = await (openCache ?? resolveEpgGuideCache)();
+    EpgGuideCacheSlot? slot;
+    Directory? scratch;
     try {
-      final file = File('${dir.path}/guide');
-      try {
-        await download(Uri.parse(url), file);
-      } on HttpWorkloadException catch (error) {
-        // What the user needs is the way out, not the number. Most publishers
-        // of a combined guide also publish per-country files two orders of
-        // magnitude smaller, and one of those is what a player wants.
-        throw HttpWorkloadException(
-          '${error.message}. Use a per-country or per-provider guide instead.',
+      if (cache != null) slot = await cache.slotFor(url);
+      final File target;
+      if (slot != null) {
+        target = slot.downloadFile;
+      } else {
+        scratch = await (tempDirectory ?? Directory.systemTemp).createTemp(
+          'iptvs_guide_',
         );
+        target = File('${scratch.path}/guide');
+      }
+
+      var result = await _fetchGuide(
+        download,
+        uri,
+        target,
+        ifNoneMatch: slot?.etag,
+        ifModifiedSince: slot?.lastModified,
+      );
+      File body;
+      if (result.statusCode == HttpStatus.notModified) {
+        final cached = await slot?.usableBody();
+        if (cached != null) {
+          body = cached;
+          DiagnosticsLog.instance.add(
+            'epg',
+            'guide ${redactUrl(url)} unchanged (304), reusing the cached body',
+          );
+        } else {
+          // A 304 we cannot honour — the cached body went missing, no longer
+          // matches its sidecar, or the server answered one we never asked
+          // for. Never a failed refresh: ask again without validators.
+          DiagnosticsLog.instance.add(
+            'epg',
+            'guide ${redactUrl(url)} answered 304 with no usable cached body; '
+                'downloading it in full',
+          );
+          result = await _fetchGuide(download, uri, target);
+          if (result.statusCode != HttpStatus.ok) {
+            throw StateError(
+              'HTTP ${result.statusCode} fetching ${redactUrl(uri)}',
+            );
+          }
+          body = await _publish(slot, result) ?? target;
+        }
+      } else {
+        body = await _publish(slot, result) ?? target;
       }
       if (onDownloaded != null) {
         try {
-          onDownloaded(await file.length());
+          onDownloaded(await body.length());
         } catch (_) {
           // A diagnostics stat is never worth failing a guide over.
         }
       }
       yield* parseXmltvFileBatched(
-        file,
+        body,
         tvgIdToChannelId,
         nameToChannelIds: nameToChannelIds,
         token: token,
       );
     } finally {
-      try {
-        await dir.delete(recursive: true);
-      } catch (_) {
-        // A temp file the OS will reap is not worth failing a guide over.
+      // Deletes only an unpublished download; a cached body stays for the next
+      // refresh to revalidate.
+      await slot?.release();
+      if (scratch != null) {
+        try {
+          await scratch.delete(recursive: true);
+        } catch (_) {
+          // A temp file the OS will reap is not worth failing a guide over.
+        }
       }
     }
   },
 );
+
+Future<GuideDownloadResult> _fetchGuide(
+  GuideDownload download,
+  Uri uri,
+  File destination, {
+  String? ifNoneMatch,
+  String? ifModifiedSince,
+}) async {
+  try {
+    return await download(
+      uri,
+      destination,
+      ifNoneMatch: ifNoneMatch,
+      ifModifiedSince: ifModifiedSince,
+    );
+  } on HttpWorkloadException catch (error) {
+    // What the user needs is the way out, not the number. Most publishers of a
+    // combined guide also publish per-country files two orders of magnitude
+    // smaller, and one of those is what a player wants.
+    throw HttpWorkloadException(
+      '${error.message}. Use a per-country or per-provider guide instead.',
+    );
+  }
+}
+
+Future<File?> _publish(EpgGuideCacheSlot? slot, GuideDownloadResult result) =>
+    slot == null
+    ? Future.value()
+    : slot.publish(etag: result.etag, lastModified: result.lastModified);
 
 /// Feeds [guides] into one stream, in priority order, with **at most one guide
 /// per channel**.

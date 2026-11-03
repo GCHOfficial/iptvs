@@ -142,26 +142,93 @@ save confirmation says.
 
 ### Guide size: disk and parse time, not memory
 
-Every downloaded XMLTV guide — provider and user-added alike — is **streamed to a temp file**
-(`xmltvGuideFeed` → the source's `_downloadToFile`/`_downloadGuide` → `HttpOperation.readToFile`)
-and parsed from there on the worker isolate (`parseXmltvFileBatched`), which inflates gzip as it
-reads. Only the file *path* crosses the isolate boundary; the temp directory is deleted however
-the feed ends. The guide used to be held whole — compressed body, then decompressed body — which
-is why `kEpgWorkload` stopped at 128 MiB / 512 MiB: an "all countries" guide (~192 MB compressed,
-~1.7 GB decompressed) was ~1.9 GB of heap on a 2 GiB TV box. The limits are now **512 MiB body
-(disk) / 4 GiB decoded (a bound on parse work)**, 30-minute download deadline, 20 s idle timeout
-unchanged.
+Every downloaded XMLTV guide — provider and user-added alike — is **streamed to a file**
+(`xmltvGuideFeed` → each source's `_downloadGuide` → the shared `downloadXmltvGuide` →
+`HttpOperation.readToFile`) and parsed from there on the worker isolate
+(`parseXmltvFileBatched`), which inflates gzip as it reads. Only the file *path* crosses the
+isolate boundary. The guide used to be held whole — compressed body, then decompressed body —
+which is why `kEpgWorkload` stopped at 128 MiB / 512 MiB: an "all countries" guide (~192 MB
+compressed, ~1.7 GB decompressed) was ~1.9 GB of heap on a 2 GiB TV box. The limits are now
+**512 MiB body / 4 GiB decoded (a bound on parse work)**, 30-minute download deadline, 20 s idle
+timeout unchanged. The body ceiling bounds the bytes **as transmitted**, i.e. compressed ones
+since the request now asks for gzip; the decoded ceiling is enforced on every inflation pass.
 
-Every guide download's as-transmitted byte count and declared `Content-Encoding`
-(`gzip`/`identity`) are logged beside the existing `[http:epg] body_bytes=…` line
-(`contentEncodingLabel`, `data/net.dart`) — none of these sources' `HttpClient`s set
-`autoUncompress`/`Accept-Encoding` (deliberately `false`, so the bounded isolate-decoded gzip
-path in `net.dart` is the only decoder, never `dart:io`'s unbounded one), so a server gzipping a
-guide only ever does so unprompted; this line is how an export can tell whether one did. The
-total across every guide reaches `LibraryRepository._ensureEpg`'s `ingestion compressed_bytes=…`
-line (previously always `unknown` for the batched/merged path) through the optional
-`EpgByteReporting` capability — `xmltvGuideFeed`'s `onDownloaded` callback (a cheap `file.length()`
-stat once `download` finishes, never on a failed one) sums into each source's own
+### Compression and conditional GET
+
+Both live in `downloadXmltvGuide` (`sources/epg_guides.dart`), which M3U, Xtream and Stalker all
+call — three byte-identical copies of the old fetch, and conditional-request handling is not
+something that may drift between them. Each source still supplies its own `HttpClient` and its
+own `User-Agent`; Stalker's still deliberately bypasses the portal transport, so no MAC cookie or
+Bearer token reaches a user-supplied guide host.
+
+**`Accept-Encoding: gzip` is sent explicitly.** Every one of those clients sets
+`autoUncompress = false` — on purpose, so the bounded isolate-decoded gzip path in `net.dart`
+stays the only decoder and never `dart:io`'s unbounded one — but that *also* suppresses the
+default `Accept-Encoding` `dart:io` would have sent. The result, visible in a real diagnostics
+export, was a third-party guide arriving as a **196,725,492-byte uncompressed body on every
+refresh**, competing with a 4K live stream for bandwidth at app start. The body is written to
+disk exactly as received and inflated later from its magic bytes, never from a header — which is
+what lets one path serve a transport-compressed body and a `.xml.gz` served as-is alike. The two
+can now arrive **together** (a server that compresses an already-compressed file), so
+`_decodedGuideBytes` takes a second inflation pass when the first one's output is itself gzip;
+two passes and no more, each bounded, because a third would be a crafted file rather than a
+guide. A server that ignores the header is unaffected.
+
+**Each guide is then revalidated rather than re-downloaded.** `downloadXmltvGuide` sends
+`If-None-Match`/`If-Modified-Since` from the last body's validators, and **a 304 is fed to the
+parser exactly as a fresh download would have been** — the same `parseXmltvFileBatched` over the
+same kind of file — so `mergeEpgGuides` and `replaceEpgStream` see precisely the programmes a 200
+would have produced. None of the EPG contract moves: a 304 is never an empty guide, a guide that
+fails before yielding is still skipped, one that fails mid-feed still rethrows, and a cancelled
+feed still ends in `LoadCancelledException`. It is **per guide**, because the merge is rebuilt
+whole on every refresh and one guide being unchanged says nothing about the others.
+`ingestion compressed_bytes=…` sums reused bodies alongside downloaded ones (what the guide
+*cost on disk*, not what crossed the wire); the per-guide
+`[http:epg] status=200|304 content_encoding=… body_bytes=…` line is what separates the two in an
+export.
+
+**The cache** (`data/epg_guide_cache.dart`) lives in `getApplicationCacheDirectory()/epg_guides`
+— app-private, and deliberately **not** `getTemporaryDirectory()`, which every platform here
+reaps behind the app's back and which would turn conditional GETs into full downloads at random.
+A body is downloaded straight into its slot and parsed from there, so a reuse costs no copy.
+Three things are load-bearing:
+
+* **File names are `sha256(url)`, never the URL.** A guide URL routinely carries the provider's
+  credentials (`xmltv.php?username=…&password=…`), and a cache directory is readable by anything
+  that can read the app's storage, lands in device backups, and is the first thing a support
+  request screenshots. The sidecar (`<hash>.meta`) holds `etag`, `last_modified` and `bytes` and
+  nothing else — no URL. It is device-local and must **never** move into `SourceConfig.settings`,
+  which rides the source row into the cloud.
+* **Nothing here can fail a refresh.** No cache directory, an unreadable sidecar, a body whose
+  length disagrees with its sidecar (the corruption test, which also covers the crash window
+  between writing the sidecar and renaming the new body over the old), a 304 answered to a
+  request that carried no validator — each one degrades to an unconditional download. A guide
+  whose response carried neither validator is not cached at all: it could never be revalidated,
+  so the body would be pure disk cost.
+* **Eviction is a size cap with LRU** (`kEpgGuideCacheMaxBytes`, 256 MiB — roughly ten times the
+  realistic working set of a provider guide plus one or two gzipped top-ups), sweeping stale
+  `.part` files from killed processes as it goes. Chosen over the two alternatives on purpose.
+  Nothing here can see the *configured* set — sources are built per card and per profile, a cloud
+  pull rewrites `fields['epgUrls']` with no local event, and two sources can share a URL — so
+  "delete what nobody references" would need a global enumeration of every profile's sources to
+  reach the conclusion a cap reaches by itself: an entry nobody revalidates stops being touched
+  and ages out. And `AppDatabase.invalidateEpg` is the *wrong* hook: it fires when the guide
+  **list** is saved, and its job is to redo the merge (the claim order changed), not to dispute
+  the bytes — the body for a URL that is still configured is still exactly what the server would
+  send, so clearing it there would throw away the one download the user's edit did not
+  invalidate. Only a cap also bounds the disk a 200 MB guide can take, which is the number that
+  matters on a 2 GiB TV box. A body larger than the whole cap is parsed but never stored, and a
+  set of guides that jointly exceeds the cap simply re-downloads across refreshes — today's
+  behaviour, never worse.
+
+`.part` names are unique per attempt: refreshes are serialised by `AppDatabase.epgIngest`, but
+two sources can be configured with the same guide URL and `readToFile` deletes its destination
+before writing, so a shared name would let one download truncate the other's.
+
+The total across every guide reaches `LibraryRepository._ensureEpg`'s
+`ingestion compressed_bytes=…` line through the optional `EpgByteReporting` capability —
+`xmltvGuideFeed`'s `onDownloaded` callback (a cheap `file.length()` stat on the body in hand,
+downloaded or reused, never on a guide that could not be obtained) sums into each source's own
 `lastEpgCompressedBytes`, reset at the top of `_guideFeeds`. `decoded_bytes` stays `unknown`:
 nothing tracks a true decompressed-XML byte total end to end (the parser inflates and discards as
 it goes), and `ProgrammeSpool.bytes` is a different, smaller quantity — the re-serialized

@@ -192,7 +192,8 @@ class StalkerSource
   bool _profileLoaded = false;
 
   /// See [EpgByteReporting]. Reset at the start of each [_guideFeeds] call and
-  /// summed as each XMLTV top-up guide finishes downloading — the portal's
+  /// summed as each XMLTV top-up guide's body comes in hand, downloaded or
+  /// reused from the conditional-GET cache behind a 304 — the portal's
   /// own guide (`_portalEpg`) carries no comparable byte count, since it's
   /// JSON pages through the portal transport, not a single HTTP body.
   int? _lastEpgCompressedBytes;
@@ -420,24 +421,25 @@ class StalkerSource
   /// token. Those are the portal's credentials, and an arbitrary user-supplied
   /// host must never receive them. Only the profile's `User-Agent` carries
   /// over, since some guide hosts reject a default one.
-  Future<void> _downloadGuide(Uri uri, File destination) async {
-    final operation = HttpOperation(kEpgWorkload);
-    final req = await operation.wait(_http.getUrl(uri));
-    req.headers.set(HttpHeaders.userAgentHeader, profile.userAgent);
-    final resp = await operation.wait(req.close());
-    if (resp.statusCode != 200) {
-      // Drain before throwing: an unread body never returns its socket to the
-      // pool, so a guide URL that 404s leaks one per EPG refresh.
-      await resp.drain<void>();
-      throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
-    }
-    // Streamed to disk, never held — see `xmltvGuideFeed`.
-    final bytes = await operation.readToFile(resp, destination);
-    DiagnosticsLog.instance.add(
-      'http:${kEpgWorkload.name}',
-      'body_bytes=$bytes content_encoding=${contentEncodingLabel(resp)}',
-    );
-  }
+  /// Streamed to disk, never held — see `xmltvGuideFeed` — and conditional
+  /// when the body cache has validators for this URL. [downloadXmltvGuide] is
+  /// the shared fetch M3U and Xtream use, taking *this* source's [HttpClient]
+  /// and nothing else of the portal's: the only thing that carries over is the
+  /// emulated profile's `User-Agent`, since some guide hosts reject a default
+  /// one.
+  Future<GuideDownloadResult> _downloadGuide(
+    Uri uri,
+    File destination, {
+    String? ifNoneMatch,
+    String? ifModifiedSince,
+  }) => downloadXmltvGuide(
+    client: _http,
+    uri: uri,
+    destination: destination,
+    userAgent: profile.userAgent,
+    ifNoneMatch: ifNoneMatch,
+    ifModifiedSince: ifModifiedSince,
+  );
 
   /// Stalker keys EPG by channel id directly, so `channels` isn't needed.
   /// Bulk EPG for all channels for the next few hours, keyed by channel id.

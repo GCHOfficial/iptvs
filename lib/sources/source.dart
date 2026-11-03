@@ -551,9 +551,12 @@ abstract interface class BatchedEpgSource {
 /// contribute a real figure.
 abstract interface class EpgByteReporting {
   /// Total as-transmitted (still gzipped, if the server sent it that way)
-  /// bytes downloaded across every guide in the last [BatchedEpgSource.epgBatched]
-  /// call, or null when nothing is known yet (no call made) or nothing in that
-  /// call carried a knowable byte count.
+  /// bytes of every guide body the last [BatchedEpgSource.epgBatched] call put
+  /// in hand — **downloaded or reused from the conditional-GET cache behind a
+  /// 304** — or null when nothing is known yet (no call made) or nothing in
+  /// that call carried a knowable byte count. It is what the guides cost on
+  /// disk, not what crossed the wire; the per-guide
+  /// `[http:epg] status=200|304 …` lines are what separate the two.
   int? get lastEpgCompressedBytes;
 }
 
