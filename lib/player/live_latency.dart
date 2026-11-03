@@ -50,6 +50,15 @@ const int _kPeriodicLogMs = 60000;
 const int _kPeriodicLogMinDriftMs = 5000;
 const int _kPeriodicLogMinAheadMs = 30000;
 
+/// A reset must have measured at least this much drift before it is worth
+/// printing a `live latency reset` line. Below it a reset is noise — a
+/// healthy stream resets with a few tens of milliseconds of ordinary jitter
+/// on nearly every reconnect/zap, and an export full of `drift=29ms` lines
+/// buries the resets that actually matter. Parity constant with Kotlin's
+/// `LiveLatency.RESET_LOG_MIN_DRIFT_MS` and Swift's
+/// `LiveLatencyLogging.resetLogMinDriftMs`.
+const int kLiveLatencyResetLogMinDriftMs = 1000;
+
 /// Accumulates how far behind the live edge playback has fallen **since this
 /// stream's first frame**, from samples taken on whatever tick the surface
 /// already runs (0.5–1 s here; the natives mirror it on theirs).
@@ -105,6 +114,12 @@ class LiveLatencyTracker {
   /// focused and hands focus on, so a gate that oscillated around the
   /// threshold would take the D-pad with it (docs/tv-navigation.md).
   bool get warned => _warned;
+
+  /// Whether a reset discarding [driftMs] right now is worth a diagnostics
+  /// line — [kLiveLatencyResetLogMinDriftMs] or more. The caller
+  /// ([resetLogLine]'s call site) checks this *before* [reset], since [reset]
+  /// zeroes [driftMs] itself.
+  bool get hasResetWorthLogging => _driftMs >= kLiveLatencyResetLogMinDriftMs;
 
   /// Folds one sample in. Returns true on the **first** sample that crosses
   /// [kLiveDriftWarnMs] in this session, which is the caller's cue to write the
@@ -224,7 +239,8 @@ class LiveLatencyTracker {
   /// The first-crossing line: the same facts, flagged.
   String get behindLogLine => 'live latency behind $logLine';
 
-  /// The line written when a session with measured drift is reset.
+  /// The line written when a session is reset with drift worth logging — see
+  /// [hasResetWorthLogging], which the caller checks first.
   String resetLogLine(String reason) => liveLatencyResetLogLine(
     reason: reason,
     driftMs: _driftMs,

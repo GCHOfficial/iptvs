@@ -10,6 +10,7 @@ import '../data/net.dart';
 import '../sources/source.dart';
 import 'buffer_preset.dart';
 import 'mpv_options.dart';
+import 'upstream_eof.dart';
 
 /// Native Linux presentation backend selected from the desktop session.
 enum LinuxNativeBackend { wayland, x11 }
@@ -216,6 +217,24 @@ class LinuxNativeSession {
     if (seconds == null || seconds.isNaN || seconds < 0) return -1;
     return (seconds * 1000).round();
   }
+
+  /// Whether the file this session opened with is live — set once in
+  /// [_start] and read by [_startPositionPoll] to gate the upstream-EOF
+  /// check below (see `upstream_eof.dart`): VOD has no "upstream" to drop.
+  bool _isLive = false;
+
+  /// Whether this session's `live upstream ended` line has already been
+  /// written. See [resetUpstreamEofLogged].
+  bool _upstreamEofLogged = false;
+
+  /// Resets the upstream-EOF once-flag. A reconnect or a zap reloads this
+  /// *same* mpv process with `loadfile replace` rather than spawning a new
+  /// session (see `player_screen.dart`'s `_reconnectLive`/`_zapPlay`), so the
+  /// flag would otherwise still read "already logged" against a demuxer that
+  /// just reopened against a fresh connection. Called from
+  /// `player_screen.dart`'s `_resetLiveLatency`, which already fires at every
+  /// one of those points.
+  void resetUpstreamEofLogged() => _upstreamEofLogged = false;
 
   final Map<int, Completer<Object?>> _requests = {};
   final StreamController<String> _controlEvents =
@@ -433,6 +452,7 @@ class LinuxNativeSession {
     Duration? resumeFrom,
     BufferPreset bufferPreset = BufferPreset.normal,
   }) async {
+    _isLive = stream.isLive;
     final temp = Directory.systemTemp;
     _socketPath = p.join(
       temp.path,
@@ -585,6 +605,22 @@ class LinuxNativeSession {
         _lastCacheSeconds =
             await _getPropertyNumber('demuxer-cache-duration') ??
             _lastCacheSeconds;
+        // See `upstream_eof.dart`: the demuxer's own EOF (the provider
+        // closing the connection) can arrive well before mpv's `eof-reached`
+        // (this player's "I've run out of cached media to play"), so logging
+        // only the latter loses exactly the gap an export needs. Cheap to
+        // read alongside the two properties above, and skipped for good once
+        // logged for this session (see [resetUpstreamEofLogged]).
+        if (_isLive && !_upstreamEofLogged) {
+          final eof = await getPropertyBool('demuxer-cache-state/eof');
+          if (eof == true) {
+            _upstreamEofLogged = true;
+            DiagnosticsLog.instance.add(
+              'player',
+              upstreamEofLogLine(lastBufferedAheadMs),
+            );
+          }
+        }
       } finally {
         _pollingPosition = false;
       }

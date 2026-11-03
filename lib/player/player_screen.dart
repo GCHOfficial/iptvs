@@ -22,6 +22,7 @@ import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
+import 'upstream_eof.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
 
@@ -779,6 +780,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
 
+  /// Whether this live session has already written its `live upstream ended`
+  /// line (see [_pollUpstreamEof]) — logged once per session, reset
+  /// alongside the latency tracker in [_resetLiveLatency].
+  bool _upstreamEofLogged = false;
+  bool _pollingUpstreamEof = false;
+
   /// True while a *native* surface owns playback, so [_playbackSurface] renders
   /// a bare black fill instead of the embedded media_kit surface.
   ///
@@ -805,6 +812,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _nativeTeardownScheduled = false;
   bool _loggedActiveVo = false;
   bool _loggedHwdec = false;
+  /// The last *printed* video-params line — either a complete `video
+  /// format=…` line or the `video cleared` sentinel — so logging stays
+  /// change-only across both. An incomplete, non-null params set (mpv filling
+  /// fields in one at a time while a stream opens) never reaches here at all;
+  /// see the `videoParams` listener in [initState].
   String? _lastVideoParamsLog;
   // HDR10+ detection (Windows/mpv). mpv has no clean "has HDR10+" flag, so we
   // infer it from the ST2094-40 scene dynamic-metadata sub-properties — which are
@@ -991,6 +1003,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         // Deliberately the same tick rather than a second timer: a latency
         // sample must never be able to reorder, delay or skip a reconnect.
         _sampleLiveLatency();
+        // Fire-and-forget: an mpv property read is async, but nothing it
+        // reads or writes feeds the reconnect decision below, so it must
+        // never be awaited into this tick.
+        unawaited(_pollUpstreamEof());
         _pollLiveReconnect();
       });
       ResourceCounters.incReconnectTimers();
@@ -1093,16 +1109,25 @@ class _PlayerScreenState extends State<PlayerScreen>
     _subs.add(
       _player.stream.videoParams.listen((params) {
         // mpv re-emits identical video-params repeatedly; only log on change so
-        // the exportable diagnostics log stays readable.
-        final line =
-            'video format=${params.hwPixelformat ?? params.pixelformat} '
-            'w=${params.w} h=${params.h} display=${params.dw}x${params.dh} '
-            'primaries=${params.primaries} gamma=${params.gamma} '
-            'sigPeak=${params.sigPeak} matrix=${params.colormatrix} '
-            'levels=${params.colorlevels}';
-        if (line != _lastVideoParamsLog) {
-          _lastVideoParamsLog = line;
-          _logPlayback(line);
+        // the exportable diagnostics log stays readable. It also emits this
+        // event *while still filling the fields in* as a stream opens (format
+        // first, then w/h, then the scaled display size) — a half-filled
+        // params set logged `video format=null w=null h=null display=nullxnull
+        // …` to the owner's export twice in a row for no reason. Log only a
+        // **complete** set ([hasCompleteVideoParams]), or, once every one of
+        // these fields has gone back to null (a file unload,
+        // [isClearedVideoParams]), a single `video cleared` line instead —
+        // both share the same change-only dedupe.
+        if (hasCompleteVideoParams(params)) {
+          final line = videoParamsLogLine(params);
+          if (line != _lastVideoParamsLog) {
+            _lastVideoParamsLog = line;
+            _logPlayback(line);
+          }
+        } else if (isClearedVideoParams(params) &&
+            _lastVideoParamsLog != 'video cleared') {
+          _lastVideoParamsLog = 'video cleared';
+          _logPlayback('video cleared');
         }
         unawaited(_logActiveVideoOutput());
         unawaited(_probeHdr10Plus(params));
@@ -2859,10 +2884,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// never happened.
   void _resetLiveLatency(String reason) {
     if (!_isLive) return;
-    if (_latency.driftMs > 0) _logPlayback(_latency.resetLogLine(reason));
+    if (_latency.hasResetWorthLogging) {
+      _logPlayback(_latency.resetLogLine(reason));
+    }
     _latency.reset();
     _lastDelayBadge = 'LIVE';
     _lastDelayInfo = '';
+    // Every reset point here is a new stream or a new engine instance for
+    // this one — a fresh demuxer whose own EOF hasn't been seen yet — so the
+    // upstream-EOF once-flag resets alongside it (see [_pollUpstreamEof]).
+    _upstreamEofLogged = false;
+    _linuxNativeSession?.resetUpstreamEofLogged();
   }
 
   /// One latency sample, taken on the 1 Hz live poll the reconnect watchdog
@@ -2935,6 +2967,39 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (dropsSync) unawaited(_syncNativeControlState());
     }
     if (mounted) setState(() {});
+  }
+
+  /// Polls mpv's demuxer-level EOF signal on the same 1 Hz tick as the
+  /// reconnect watchdog and the latency sample (see [initState]) — no timer
+  /// of its own. See `upstream_eof.dart` for why this is a different moment
+  /// from the player's own `completed`/`eof-reached`, which the `stream.
+  /// completed` listener already handles. Live media_kit surfaces only: the
+  /// Linux native mpv process is a separate OS process, polled by
+  /// [LinuxNativeSession] instead (see its own poll), and Android/iOS native
+  /// engines are out of scope here.
+  Future<void> _pollUpstreamEof() async {
+    if (!mounted ||
+        !_isLive ||
+        _upstreamEofLogged ||
+        _pollingUpstreamEof ||
+        _linuxNativeSession != null ||
+        _separateEngineOwnsPlayback) {
+      return;
+    }
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    _pollingUpstreamEof = true;
+    try {
+      final raw = await platform.getProperty('demuxer-cache-state/eof');
+      if (!mounted || _upstreamEofLogged || !parseMpvEofFlag(raw)) return;
+      _upstreamEofLogged = true;
+      _logPlayback(upstreamEofLogLine(_bufferedAheadMs()));
+    } catch (_) {
+      // Property unavailable on this mpv build, or the player was mid-teardown
+      // when asked — nothing to report either way.
+    } finally {
+      _pollingUpstreamEof = false;
+    }
   }
 
   /// The stream to use for a live reload: freshly re-resolved when the caller

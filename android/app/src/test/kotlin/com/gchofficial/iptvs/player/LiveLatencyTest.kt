@@ -351,6 +351,27 @@ class LiveLatencyTrackerTest {
     }
 
     @Test
+    fun `a reset below the reset-log threshold says nothing`() {
+        val t = LiveLatencyTracker().baseline()
+        // A 500ms stall: ordinary jitter, well under RESET_LOG_MIN_DRIFT_MS.
+        t.tick(1_000, 500)
+        assertEquals(500L, t.driftMs)
+        assertNull(t.reset(LiveLatencyReset.RECONNECT))
+    }
+
+    @Test
+    fun `a reset exactly at the reset-log threshold reports it`() {
+        val t = LiveLatencyTracker().baseline()
+        // A 1000ms stall: exactly RESET_LOG_MIN_DRIFT_MS, so it is worth a line.
+        t.tick(1_500, 500)
+        assertEquals(1_000L, t.driftMs)
+        assertEquals(
+            "live latency reset reason=reconnect drift=1000ms stalls=0",
+            t.reset(LiveLatencyReset.RECONNECT),
+        )
+    }
+
+    @Test
     fun `a reset drops the reference point, so the gap across it is not drift`() {
         val t = LiveLatencyTracker().baseline()
         t.tick(5_500, 500)

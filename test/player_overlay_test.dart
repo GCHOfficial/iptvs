@@ -654,6 +654,61 @@ void main() {
     });
   });
 
+  // The exportable `video format=…`/`video cleared` line: mpv emits
+  // `videoParams` repeatedly while still filling its fields in as a stream
+  // opens, and only a complete set — or every field gone back to null — is
+  // worth a line.
+  group('video-params log gating', () {
+    test('a fully populated set is complete', () {
+      const params = VideoParams(
+        pixelformat: 'hevc',
+        w: 3840,
+        h: 2160,
+        dw: 3840,
+        dh: 2160,
+      );
+      expect(hasCompleteVideoParams(params), isTrue);
+      expect(isClearedVideoParams(params), isFalse);
+      expect(
+        videoParamsLogLine(params),
+        'video format=hevc w=3840 h=2160 display=3840x2160 primaries=null '
+        'gamma=null sigPeak=null matrix=null levels=null',
+      );
+    });
+
+    test('hwPixelformat wins over the software pixelformat', () {
+      const params = VideoParams(
+        pixelformat: 'hevc',
+        hwPixelformat: 'nv12',
+        w: 1920,
+        h: 1080,
+        dw: 1920,
+        dh: 1080,
+      );
+      expect(videoParamsLogLine(params), startsWith('video format=nv12 '));
+    });
+
+    test('a half-filled set (mid-open) is neither complete nor cleared', () {
+      const formatOnly = VideoParams(pixelformat: 'hevc');
+      expect(hasCompleteVideoParams(formatOnly), isFalse);
+      expect(isClearedVideoParams(formatOnly), isFalse);
+
+      const sizeMissingDisplay = VideoParams(
+        pixelformat: 'hevc',
+        w: 1920,
+        h: 1080,
+      );
+      expect(hasCompleteVideoParams(sizeMissingDisplay), isFalse);
+      expect(isClearedVideoParams(sizeMissingDisplay), isFalse);
+    });
+
+    test('an all-null set is cleared', () {
+      const params = VideoParams();
+      expect(hasCompleteVideoParams(params), isFalse);
+      expect(isClearedVideoParams(params), isTrue);
+    });
+  });
+
   // Phase 3 of in-player live zapping: the shared Flutter overlay's own
   // render of the zap banner (docs/player.md "Live zapping"). Mirrors the
   // Kotlin `PlayerControls.kt`/`PlayerUiState.kt` zap-banner tests.

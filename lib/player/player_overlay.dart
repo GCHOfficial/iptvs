@@ -723,6 +723,55 @@ String playerClockLabel(DateTime now, {required bool dated}) {
   return '${days[now.weekday - 1]} ${now.day} ${months[now.month - 1]} · $hm';
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostics: the exportable `video format=…`/`video cleared` line.
+//
+// mpv's `videoParams` event fires repeatedly while still filling its fields
+// in as a stream opens (pixel format first, then `w`/`h`, then the scaled
+// `dw`/`dh`) — logging every one of those was `video format=null w=null
+// h=null display=nullxnull …` twice in a row for no reason. Only a
+// *complete* set is worth the line; once every field has gone back to null
+// (a file unload) a single `video cleared` replaces it. Public and pure so
+// the decision is testable without a live mpv instance
+// (`test/player_overlay_test.dart`).
+// ---------------------------------------------------------------------------
+
+/// Whether [params] carries every field the `video format=…` line prints:
+/// pixel format (hardware, falling back to software) and both the raw and
+/// display-scaled size.
+bool hasCompleteVideoParams(VideoParams params) {
+  final format = params.hwPixelformat ?? params.pixelformat;
+  return format != null &&
+      params.w != null &&
+      params.h != null &&
+      params.dw != null &&
+      params.dh != null;
+}
+
+/// Whether every field [hasCompleteVideoParams] checks has gone back to
+/// null — mpv's shape for a file unload.
+bool isClearedVideoParams(VideoParams params) {
+  final format = params.hwPixelformat ?? params.pixelformat;
+  return format == null &&
+      params.w == null &&
+      params.h == null &&
+      params.dw == null &&
+      params.dh == null;
+}
+
+/// The `video format=…` line for a *complete* [params] set. Callers check
+/// [hasCompleteVideoParams] first — this does not itself guard against a
+/// half-filled set, so its output would otherwise print the same
+/// `format=null …` noise this exists to stop.
+String videoParamsLogLine(VideoParams params) {
+  final format = params.hwPixelformat ?? params.pixelformat;
+  return 'video format=$format '
+      'w=${params.w} h=${params.h} display=${params.dw}x${params.dh} '
+      'primaries=${params.primaries} gamma=${params.gamma} '
+      'sigPeak=${params.sigPeak} matrix=${params.colormatrix} '
+      'levels=${params.colorlevels}';
+}
+
 /// Width below which the control row can no longer carry its optional pieces:
 /// the volume slider collapses to the mute button and "Go to live" drops its
 /// text label. Applies on **both** paths, and is measured against the bar's
