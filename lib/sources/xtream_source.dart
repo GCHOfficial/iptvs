@@ -96,7 +96,8 @@ class XtreamSource
   String? _providerCatchupTimezone;
 
   /// See [EpgByteReporting]. Reset at the start of each [_guideFeeds] call and
-  /// summed as each XMLTV guide finishes downloading.
+  /// summed as each XMLTV guide's body comes in hand — downloaded, or reused
+  /// from the conditional-GET cache behind a 304.
   int? _lastEpgCompressedBytes;
   @override
   int? get lastEpgCompressedBytes => _lastEpgCompressedBytes;
@@ -313,7 +314,7 @@ class XtreamSource
       for (var i = 0; i < urls.length && i < kMaxEpgGuides; i++)
         xmltvGuideFeed(
           url: urls[i],
-          download: (uri, file) => _downloadToFile(uri, kEpgWorkload, file),
+          download: _downloadGuide,
           tvgIdToChannelId: tvgIds,
           // The panel's own guide keeps exact `tvg-id` matching only — see
           // [epgNameIndexFor].
@@ -584,21 +585,22 @@ class XtreamSource
     return operation.readBytes(await _open(uri, operation));
   }
 
-  /// Streams [uri]'s body into [destination] without holding it in memory —
-  /// the XMLTV path, whose guides can run to hundreds of MB.
-  Future<void> _downloadToFile(
+  /// Streams a guide's body into [destination] without holding it in memory,
+  /// conditionally when the body cache has validators for it. Shared with M3U
+  /// and Stalker — see [downloadXmltvGuide], which also sends the
+  /// `Accept-Encoding: gzip` this client's `autoUncompress = false` suppresses.
+  Future<GuideDownloadResult> _downloadGuide(
     Uri uri,
-    HttpWorkloadPolicy policy,
-    File destination,
-  ) async {
-    final operation = HttpOperation(policy);
-    final resp = await _open(uri, operation);
-    final bytes = await operation.readToFile(resp, destination);
-    DiagnosticsLog.instance.add(
-      'http:${policy.name}',
-      'body_bytes=$bytes content_encoding=${contentEncodingLabel(resp)}',
-    );
-  }
+    File destination, {
+    String? ifNoneMatch,
+    String? ifModifiedSince,
+  }) => downloadXmltvGuide(
+    client: _http,
+    uri: uri,
+    destination: destination,
+    ifNoneMatch: ifNoneMatch,
+    ifModifiedSince: ifModifiedSince,
+  );
 
   Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {
     final req = await operation.wait(_http.getUrl(uri));

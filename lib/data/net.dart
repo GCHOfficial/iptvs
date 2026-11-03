@@ -61,6 +61,10 @@ const kPlaylistWorkload = HttpWorkloadPolicy(
 /// inflated on the fly (`xmltvGuideFeed`, `parseXmltvFileBatched`), so neither
 /// number below is a memory budget any more — the body ceiling is disk, and the
 /// decoded ceiling is parse *time*, the one cost that still grows with a guide.
+/// The body half bounds the bytes **as transmitted**, which since guide
+/// requests started sending `Accept-Encoding: gzip` (`downloadXmltvGuide`) are
+/// usually compressed ones; the decoded half is enforced separately, on every
+/// inflation pass, so a compressed body cannot become a decompression bomb.
 /// Sized to take a combined "all countries" guide (~200 MB compressed, ~1.7 GB
 /// decompressed) with headroom. The total timeout covers the download only; a
 /// stalled server is still cut off by the 20 s idle timeout.
