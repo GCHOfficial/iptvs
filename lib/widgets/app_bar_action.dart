@@ -21,6 +21,7 @@ class AppBarAction extends StatelessWidget {
     required this.label,
     required this.onPressed,
     this.tooltip,
+    this.autofocus = false,
   });
 
   final IconData icon;
@@ -34,10 +35,21 @@ class AppBarAction extends StatelessWidget {
 
   final VoidCallback? onPressed;
 
+  /// Takes focus when its route first builds.
+  ///
+  /// Honoured by **both** forms, which is the point: this widget's contract is
+  /// that the breakpoint changes how an action looks and never where focus
+  /// goes, and an autofocus that only existed above the breakpoint would
+  /// silently drop a screen's D-pad entry point on a phone. Screens that use
+  /// it set it on exactly one action — autofocus is a race between whoever
+  /// mounts first, not a preference several widgets can hold.
+  final bool autofocus;
+
   @override
   Widget build(BuildContext context) {
     if (!isWideLayout(MediaQuery.sizeOf(context))) {
       return IconButton(
+        autofocus: autofocus,
         tooltip: tooltip ?? label,
         icon: Icon(icon),
         onPressed: onPressed,
@@ -46,6 +58,7 @@ class AppBarAction extends StatelessWidget {
     final button = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: TextButton.icon(
+        autofocus: autofocus,
         onPressed: onPressed,
         icon: Icon(icon, size: 20),
         label: Text(label, maxLines: 1, softWrap: false),
