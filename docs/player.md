@@ -3221,6 +3221,125 @@ Dart leaves `resolveAgain` unwired for VOD (only live channels pass it,
 exactly what a VOD retry wants, at the cost of one extra method call and no VOD-specific branch on
 the Swift side.
 
+## Live latency
+
+**Live delay is measured, not inferred, and it is what makes "Go to live" appear.** Live MPEG-TS
+arrives at about 1×. Every rebuffer, pause or second in the background adds its own duration to
+how far behind live the viewer is, permanently, and nothing in the app subtracts it. Until this
+section existed, `liveSynced` went false **only on a user pause**. So a viewer who had drifted
+90 s through rebuffering saw a green LIVE pill and no "Go to live" chip: the shipped bug behind
+"it's delayed even on live" (issue #243's reports, which the buffer presets did not fix). This is
+wave 1, **measurement only**. Catch-up by speed (wave 2) and an opt-in automatic jump to live
+(wave 3) come after it, and only once these numbers say what users actually see.
+
+### The tracker (one spec, five implementations)
+
+`LiveLatencyTracker` is pure and has five implementations: `lib/player/live_latency.dart`,
+Kotlin `player/LiveLatency.kt`, Swift `IptvsPlayerCore/LiveLatency.swift`, and, through Dart's
+pushed strings, the C++ and Lua renderers. All of them assert the same six parity vectors. It is
+sampled on each surface's existing tick:
+
+- **It baselines on the first sample that is playing *and* whose media advanced.** The wait for a
+  first frame is the open, not lag.
+- **Each later sample adds `max(0, dWall − dMedia)`.** There is **no cap on `dWall`**: a long gap
+  with no media progress (a pause, a stall, the app in the background) *is* real lag.
+- **`dMedia < −500` or `dMedia > dWall + 2000` is a discontinuity.** The tracker re-anchors, keeps
+  the drift already banked, and adds nothing. A PCR jump, splice or seek must neither charge nor
+  credit the viewer.
+- **`stalls` / `stalledMs` are attribution only.** They never feed the arithmetic.
+- **`aheadMs`** comes from each engine: Exo `totalBufferedDuration`, mpv
+  `demuxer-cache-duration`, media_kit's `_bufferedAheadMs()`, and on AVPlayer the end of the
+  `loadedTimeRanges` range holding `currentTime`, minus `currentTime`. −1 means unknown.
+
+### `liveSynced` now means "at the live edge", and it is latched
+
+`liveSynced` goes false on the existing pause rule **or** at `kLiveDriftWarnMs` (30 s) of drift.
+Once false it **stays false until a reset**. That hysteresis is mandatory: "Go to live" is the
+one control that removes itself while focused and hands focus to play/pause
+(docs/tv-navigation.md), so a gate that oscillated around the threshold would take the D-pad with
+it.
+
+**Resets** (drift 0, unbaselined, counters and latch cleared) happen on:
+- a new open (`load`)
+- a reconnect reload (`reconnect`)
+- a settled zap (`zap`)
+- "Go to live" (`golive`)
+- an engine swap or fallback (`engine`)
+- the preview→fullscreen claim (`claim`)
+
+One asymmetry is deliberate. On Android every reset point reopens the stream at the live edge, so
+it also sets `liveSynced` true. Dart's `_resetLiveLatency` does *not*: its `engine` reset is
+Windows' and Linux's surface escalation, which keeps the same stream playing, so it must not undo
+a user's pause. Go-live, reload, zap and reconnect still restore sync at their own sites.
+
+**Neither preview measures anything.** The fullscreen clock starts at the claim. The Android
+shared-engine preview is untouched.
+
+### Who computes, who prints
+
+- **Android `HdrPlayerActivity`** computes natively, sampled on the existing 500 ms ticker beside
+  `samplePlaybackStats()`. `PlaybackEngine.bufferedAheadMs()` / `mediaPositionMs()` supply the
+  inputs:
+  - ExoPlayer answers from `getTotalBufferedDuration()` / `getCurrentPosition()`.
+  - mpv **latches** `time-pos` and `demuxer-cache-duration` from property events into volatile
+    fields. A blocking `mpv_get_property` on main is exactly the ANR `MpvController`'s threading
+    rule exists to prevent (cluster A).
+- **iOS `IptvsPlayerViewController`** computes natively, sampled from the 500 ms watchdog ticker
+  rather than the progress tick, because the progress tick stops with the timebase, which is
+  exactly when drift accrues. It no longer honours a `liveSynced` pushed by Dart: Dart's value is
+  always "synced" for a surface it doesn't drive, and taking it would unlatch the gate on every
+  EPG push. iOS has no `zap` or `claim` reset yet (no iOS zap input; the AVPlayer↔mpv switch is
+  a full teardown). It measures AVPlayer only; the mpv fallback is Dart's.
+- **Dart** computes for every media_kit surface: embedded, the **Windows native HWND** (the same
+  `_player` through a `vo` swap), the Android/iOS media_kit fallbacks, and **Linux native mpv**.
+  For Linux native mpv it polls `demuxer-cache-duration` beside `time-pos` on
+  `LinuxNativeSession`'s 1 Hz IPC tick, a poll that now runs for live as well as VOD. The sample
+  runs on the existing 1 s `_reconnectTimer` poll, *before* the watchdog's decision, and touches
+  nothing the watchdog reads.
+- **Dart pushes preformatted strings** to the two renderers it drives: `liveDelayBadge` and
+  `liveDelayInfo`, on Windows `setControlState` and in the Linux `iptvs-state` JSON. Those
+  renderers **print, never format or derive**, as with the quick list. Missing keys fall back to
+  today's behaviour: badge `LIVE`, no row.
+
+### What the user sees, the same on every surface
+
+- **The LIVE badge** reads `LIVE`, or `LIVE -1:23` once drifted. It uses an **ASCII hyphen-minus,
+  never U+2212**, for the GDI and libass faces. It keeps each surface's greyed-when-unsynced
+  styling, which is a separate signal: a pause greys a badge that still reads `LIVE`.
+- **The Stream information panel** gains a last, live-only row: `Live delay` → `1:23 · buffer 24s`,
+  or just `1:23` when the cushion is unknown.
+- **How to read a user's screenshot of that row:**
+  - `buffer ≈ delay` means a provider that bursts at connect and a deep preset holding it (suggest
+    a smaller buffer preset).
+  - `delay ≫ buffer` means accumulated stall drift, the case "Go to live" fixes and that waves 2
+    and 3 target.
+  - `delay ≈ 0` with stutter is a decode problem, already covered by the `fps=` / `dropped=` lines.
+
+### Diagnostics (exportable, credential-free)
+
+- `live latency drift=…ms ahead=…ms stalls=n stalled=…ms disc=n`: every 60 s while playing, and
+  only when worth saying (`drift ≥ 5 s` or `ahead ≥ 30 s`).
+- The same line prefixed `live latency behind `: on the first threshold crossing.
+- `live latency reset reason=<load|reconnect|zap|golive|engine|claim> drift=…ms stalls=n`: when a
+  measurement with drift is discarded.
+
+### Known measurement limits
+
+- On a sliding HLS window, Exo's `currentPosition` can step back when the window advances. That
+  tick counts as a discontinuity, so drift can be under-counted by at most one tick per window
+  update. It never over-counts. Progressive TS is unaffected, and the `disc=` count makes this
+  visible.
+- mpv's cushion depends on mpv publishing `demuxer-cache-duration`. Where it doesn't, `ahead` is −1
+  and the row prints the delay alone.
+
+**What this changes in playback: nothing.** No buffer preset, `LoadControl`, `cache-secs`, speed,
+reconnect policy, watchdog timing or handoff window moves. The one visible change in behaviour is
+the one intended: "Go to live" can now appear without a pause. Pinned by
+`test/live_latency_test.dart`, Kotlin `LiveLatencyTest`, Swift `LiveLatencyTests` (all six parity
+vectors), the "live delay" cases in `test/player_overlay_test.dart`,
+`test/linux_native_session_test.dart`, the real-font sweep in `test/layout_overflow_test.dart`,
+and section 9 of `linux/mpv/overlay_layout_test.lua`.
+
 ## Headers and logging
 
 Playback headers (e.g. a MAG `User-Agent` / `Referer` for Stalker) are passed both to

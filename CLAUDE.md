@@ -1008,6 +1008,23 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   exactly; 16:9/4:3 would need a hand-computed layer transform (docs/ios.md). Android's player
   theme sets `windowLayoutInDisplayCutoutMode=shortEdges` so video reaches into the notch — safe
   only because the Compose overlay insets itself with `safeDrawingPadding()`.
+- **Live delay is measured per session, and it is what makes "Go to live" appear** (wave 1 of
+  the live-latency work; docs/player.md "Live latency").
+  - `LiveLatencyTracker` (Dart `player/live_latency.dart`, Kotlin `LiveLatency.kt`, Swift
+    `LiveLatency.swift`, one spec, six shared parity vectors) baselines on first media progress,
+    then banks `max(0, dWall − dMedia)` per tick. **No cap on `dWall`**: a pause, stall or
+    background gap *is* lag. A media jump re-anchors and adds nothing.
+  - `liveSynced` now means "at the live edge": the old pause rule **or** drift ≥ 30 s, **latched**
+    until a reset (load, reconnect, zap, golive, engine, claim), because the chip removes itself
+    while focused. It used to be pause-only, so a stream that drifted through rebuffering showed a
+    green LIVE and no chip.
+  - Badge `LIVE` / `LIVE -1:23` (**ASCII hyphen-minus**) and a live-only `Live delay` info row
+    (`1:23 · buffer 24s`), the same on all five surfaces.
+  - Android's Activity and iOS's controller compute their own. **Dart computes for every
+    media_kit surface and Linux native mpv**, and pushes preformatted `liveDelayBadge` /
+    `liveDelayInfo` to Windows and Linux, whose renderers print only. iOS ignores Dart's
+    `liveSynced`. Previews measure nothing.
+  - **Measurement only:** no buffer, speed, reconnect, watchdog or handoff change.
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,
