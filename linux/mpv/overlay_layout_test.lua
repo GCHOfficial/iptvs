@@ -899,6 +899,88 @@ check(key('UP', false, {list = CLOSED}) == 'zap:up',
 check(key('LEFT', false, {list = CLOSED}) == 'zap:list',
   'and LEFT goes back to opening it')
 
+-- ===== 9. live latency wave 1: the delay badge + info row ====================
+--
+-- Dart pushes two preformatted strings (`liveDelayBadge`, `liveDelayInfo`);
+-- this script prints them verbatim and never formats or derives a delay
+-- itself, the same rule as the quick list. Missing/empty keys fall back to
+-- today's behaviour: a plain "LIVE" pill and no info row.
+
+local delayed_state = {}
+for k, v in pairs(live_state) do delayed_state[k] = v end
+delayed_state.liveSynced = false
+delayed_state.liveDelayBadge = 'LIVE -1:23'
+
+local delayed_events = render_with(delayed_state)
+local delayed_badge = find_text(delayed_events, 'LIVE -1:23')
+check(delayed_badge ~= nil, 'the LIVE badge prints the pushed delay text verbatim')
+
+-- Exact text, not a prefix match: the fallback case below must draw a bare
+-- "LIVE", not "LIVE -1:23" left over from a stale push.
+local function exact_text(events, needle)
+  for _, item in ipairs(texts(events)) do
+    if item.text == needle then return item end
+  end
+  return nil
+end
+
+check(exact_text(delayed_events, 'LIVE') == nil,
+  'with a delay pushed, the badge is the full string, not a bare "LIVE"')
+
+-- A state with no `liveDelayBadge` at all (every scenario above this one, and
+-- every push from an older Dart build) keeps drawing the plain pill.
+local no_key_events = render_with(live_state)
+check(exact_text(no_key_events, 'LIVE') ~= nil,
+  'missing liveDelayBadge falls back to a bare "LIVE" pill')
+check(find_text(no_key_events, 'LIVE -') == nil,
+  'missing liveDelayBadge draws no delay suffix')
+
+-- The strip/transport clearance (section 1) must still hold once the badge
+-- text in the unrelated top bar grows — the two rows must never interact.
+local delayed_next_line = find_text(delayed_events, 'Next · ')
+local delayed_transport_y = lowest_icon_y(delayed_events)
+if delayed_transport_y and delayed_next_line then
+  local gap = (delayed_transport_y - 22) - delayed_next_line.y
+  check(gap > 12,
+    string.format('the strip still clears the transport row with a delay badge (gap %.0fpx)', gap))
+end
+
+-- The info-panel "Live delay" row, present only when pushed and only while
+-- live, right alongside the other stream-information rows.
+seam.set_info_open(true)
+local info_with_delay = render_with({
+  title = 'CALLE 13 HD',
+  sourceName = 'CandyCloud',
+  isLive = true,
+  liveSynced = false,
+  aspectLabel = 'Fit',
+  liveDelayInfo = '0:30 · buffer 25s',
+})
+check(find_text(info_with_delay, 'Live delay') ~= nil,
+  'the info panel shows a "Live delay" row when liveDelayInfo is pushed')
+check(find_text(info_with_delay, '0:30 · buffer 25s') ~= nil,
+  'the row prints the pushed value verbatim')
+
+local info_without_delay = render_with({
+  title = 'CALLE 13 HD',
+  sourceName = 'CandyCloud',
+  isLive = true,
+  liveSynced = true,
+  aspectLabel = 'Fit',
+})
+check(find_text(info_without_delay, 'Live delay') == nil,
+  'no liveDelayInfo pushed → no "Live delay" row')
+
+local info_vod_with_delay = render_with({
+  title = 'Some Film',
+  isLive = false,
+  aspectLabel = 'Fit',
+  liveDelayInfo = '0:30 · buffer 25s',
+}, {['duration'] = 5400, ['time-pos'] = 1200})
+check(find_text(info_vod_with_delay, 'Live delay') == nil,
+  'VOD shows no "Live delay" row even if one were pushed')
+seam.set_info_open(false)
+
 print('')
 if failures > 0 then
   print(failures .. ' check(s) failed')
