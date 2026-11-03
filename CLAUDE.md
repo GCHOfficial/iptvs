@@ -364,7 +364,10 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   old one-`await`-per-row loop never yielded to the event loop and — in `replaceLibrary` — ran
   *inside* the write transaction, holding the single shared sqflite connection for a whole
   catalog's crypto. That was a shipped ANR (`DartAesGcm._ghash`). Don't reintroduce a per-row
-  seal on a list-sized write path, and don't move one back inside a transaction. Pinned by `test/sealed_locator_reveal_test.dart`,
+  seal on a list-sized write path, and don't move one back inside a transaction. That includes
+  `_migrateLegacyCacheSecrets`, the one-shot repair that runs when `SecretLocatorVault.generatedNewKey`
+  (a pre-sealing upgrade, or a backup-restored install whose key didn't survive): it sealed per
+  row inside its own transaction until it moved to the bulk path too. Pinned by `test/sealed_locator_reveal_test.dart`,
   the "AppDatabase sealed locators" group in `test/persistence_test.dart` (including a
   `SecretLocatorVault.decryptCount` assertion that a bulk read decrypts *nothing*), and
   `test/secret_locator_vault_test.dart`.
@@ -408,7 +411,7 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `test/persistence_test.dart`.
 - **Large provider payloads are ingested one-pass off the main isolate.** Xtream/Stalker
   catalogs ≥256 KB go bytes-in→typed-list-out through top-level workers
-  (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels`) — the
+  (`decodeLiveChannelsBytes`/`decodeMediaItemsBytes`, Stalker `_ingestStalkerChannels` and, for its portal-wide `get_epg_info`, `_ingestStalkerEpg`) — the
   dynamic JSON graph never crosses the isolate boundary; smaller payloads parse inline (isolate
   spawn would dominate). Downloaded XMLTV guides go **to a temp file, never to memory**
   (`xmltvGuideFeed` → `readToFile`), and the worker inflates and event-parses them from disk
@@ -1103,8 +1106,32 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   encodes items with mpv `%n%` raw-length quoting (`MpvOptionEncoding`).
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
+- **Every container ExoPlayer serves needs its media3 module declared.** `DefaultMediaSourceFactory`
+  loads factories reflectively, so a missing module is a `ClassNotFoundException` out of
+  `setMediaItem`, i.e. an Activity-launch crash (how `.mpd` channels crashed on v0.1.61).
+  `-exoplayer`, `-hls` and `-dash` are declared. SmoothStreaming and RTSP deliberately are not, and
+  reach mpv because `ExoPlayerEngine.load` catches any `Throwable` and *posts* `triggerFallback()`
+  (the fallback releases this engine). Pinned by `MediaSourceModulesTest`.
+- **Don't touch `setDetachSurfaceTimeoutMs`.** media3 blocks main on `surfaceDestroyed` for up to
+  2 s, and that block is what stops a codec rendering into a torn-down `BLASTBufferQueue` (a shipped
+  SIGSEGV). On timeout media3 *stops the player*, and `<= 0` fails every detach, so there is no
+  cheaper setting, only a worse one. `ExoPlayerEngine.attachWithDetachProbe` logs
+  `surface detach blocked main <n>ms` above 250 ms instead.
+- **The Android preview must never materialise a media_kit texture it won't render.** Reading
+  `LivePreviewController.controller` constructs a Flutter `SurfaceProducer` whose only release is
+  the owning `Player.dispose()`. One that reaches the GC finalizer is released off the platform
+  thread by `SurfaceTextureSurfaceProducer.finalize` (API < 29) and SIGSEGVs in
+  `ConsumerBase::onLastStrongRef`, a shipped crash on API-28 boxes. `PreviewVideo` renders through
+  `previewSurfaceFor` (no embedded branch without an embedded player), and `stop()` keeps
+  `nativeActive` true until the engine has stopped, so the surface fields never disagree and the
+  native view isn't unmounted under a running decoder. Counted by
+  `ResourceCounters.mediaKitVideoControllers`. docs/player.md has the detail.
+- The bundled Inter faces are packaged **uncompressed** (`androidResources.noCompress`): a deflated
+  font is inflated on the thread that first lays out text in it, which is Flutter's UI thread (a
+  shipped ANR). It costs ~1.3 MB installed, since the faces ride in both `res/font/` and
+  `flutter_assets`.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in
-  the layer that owns it — Dart `ResourceCounters` (media_kit players, the live watchdog timer,
+  the layer that owns it — Dart `ResourceCounters` (media_kit players and their video controllers, the live watchdog timer,
   channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
   `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays`/`windowsOverlayDibs` (the last is
   the cached overlay back-buffer DIB), Swift (`iosAvPlayers`/`iosPlayerControllers`/
@@ -1233,6 +1260,12 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   zap banner (`draw_zap_banner`/`draw_channel_identity_row`) and the key policy
   (`zap_key_command`) and the quick list (`draw_quick_list`, its 40-row slice), exercised through a test-only seam the module exports rather than by
   simulating real mpv key dispatch.
+- **Reading Android ANR traces: Dart runs on the Android main thread** (Flutter 3.47 merges the
+  UI thread into it, and the raster thread too while a hybrid-composition platform view, e.g. the
+  preview, is mounted). Microtasks run inside the looper's native callback, so the *Java* frame of
+  nearly every ANR reads `MessageQueue.nativePollOnce` and Play groups unrelated stalls under one
+  "main thread idle" issue. Read main's **native** frames. Version codes are the Google Play
+  workflow's run number (vc12 = v0.1.70).
 - Credential-shaped test fixtures (`username=u&password=p` in URL literals) trip GitGuardian on
   every PR that adds one — it's a false positive to dismiss in their dashboard, or avoid the
   literal `username=…&password=…` pattern when the parser under test doesn't need it.
