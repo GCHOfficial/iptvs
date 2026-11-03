@@ -573,6 +573,43 @@ export const esc = (s) =>
   String(s ?? '').replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// Characters that let a log body lie about its own content when it is printed
+// into a terminal-shaped view:
+//
+//   \u0000-\u0008, \u000B-\u001F  C0 controls, minus \t and \n
+//   \u007F, \u0080-\u009F         DEL and the C1 controls (8-bit CSI lives here)
+//   \u202A-\u202E, \u2066-\u2069   bidi embeddings/overrides and isolates
+//
+// `\r` is deliberately NOT exempt: on a terminal it returns the cursor to the
+// start of the line, so `error\rok   ` reads as "ok" while carrying "error" —
+// which is exactly the class of lie this is here to stop. A log that genuinely
+// has CRLF line endings therefore shows a replacement char before each newline;
+// that is the intended, visible trade.
+const DISPLAY_UNSAFE_RE =
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g;
+
+/// Replaces every character that could make a log body misrepresent itself with
+/// U+FFFD, one replacement char per offending character (so offsets and length
+/// are preserved and a truncated line still lines up with its neighbours).
+///
+/// A submitted diagnostics log is attacker-influenced text by construction —
+/// anyone who installs the app can send one — and it is read in the developer's
+/// own signed-in panel. An ANSI escape (`\u001B[` … or the 8-bit `\u009B`) or a
+/// bidi override can make a line read as something it is not, or hide content
+/// after it entirely, so a planted line could impersonate the app's own output
+/// or conceal the line that matters.
+///
+/// This is a **display** scrub and explicitly not a security boundary on its
+/// own: the body is still rendered with `textContent` on a `<pre>`, never
+/// `innerHTML`, and is never linkified. That is what stops markup and
+/// navigation; this only stops the text from lying about itself.
+///
+/// Coerces like [esc], so a null/undefined/number body renders rather than
+/// throwing.
+export function scrubForDisplay(s) {
+  return String(s ?? '').replace(DISPLAY_UNSAFE_RE, '\uFFFD');
+}
+
 /// One control of the source form, as HTML.
 ///
 /// A `password: true` field gets a **reveal toggle** beside it. The panel
