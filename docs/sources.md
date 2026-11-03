@@ -152,6 +152,23 @@ is why `kEpgWorkload` stopped at 128 MiB / 512 MiB: an "all countries" guide (~1
 (disk) / 4 GiB decoded (a bound on parse work)**, 30-minute download deadline, 20 s idle timeout
 unchanged.
 
+Every guide download's as-transmitted byte count and declared `Content-Encoding`
+(`gzip`/`identity`) are logged beside the existing `[http:epg] body_bytes=…` line
+(`contentEncodingLabel`, `data/net.dart`) — none of these sources' `HttpClient`s set
+`autoUncompress`/`Accept-Encoding` (deliberately `false`, so the bounded isolate-decoded gzip
+path in `net.dart` is the only decoder, never `dart:io`'s unbounded one), so a server gzipping a
+guide only ever does so unprompted; this line is how an export can tell whether one did. The
+total across every guide reaches `LibraryRepository._ensureEpg`'s `ingestion compressed_bytes=…`
+line (previously always `unknown` for the batched/merged path) through the optional
+`EpgByteReporting` capability — `xmltvGuideFeed`'s `onDownloaded` callback (a cheap `file.length()`
+stat once `download` finishes, never on a failed one) sums into each source's own
+`lastEpgCompressedBytes`, reset at the top of `_guideFeeds`. `decoded_bytes` stays `unknown`:
+nothing tracks a true decompressed-XML byte total end to end (the parser inflates and discards as
+it goes), and `ProgrammeSpool.bytes` is a different, smaller quantity — the re-serialized
+programme rows, not the source guide — so it would be a misleading stand-in. Stalker's own portal
+guide (`get_epg_info`) reports nothing here either, since it isn't a single HTTP body; only its
+XMLTV top-ups contribute.
+
 The parse itself is event-level (`_GuideExtractor` in `xmltv.dart`): a programme's channel,
 start and stop are read off its start tag, and one that can't contribute is skipped by depth
 counting without building — or even entity-decoding — its subtree. That matters because a

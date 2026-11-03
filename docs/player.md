@@ -3154,6 +3154,17 @@ watchdogs** because the platforms play through different stacks:
   genuine live EOF and must reconnect — `_reconnectLive` reopens `_player` on the HWND surface,
   the same reopen `_goToLive` already does. (Earlier this counted plain `_nativePlaybackLaunched`, which is true on Windows
   native and wrongly froze HDR-live on the last frame.)
+
+  **A separate, diagnostics-only line names the moment *upstream* ended, ahead of the player's own
+  EOF.** `live upstream ended ahead=…ms` (`upstream_eof.dart`): mpv's `demuxer-cache-state`
+  sub-property `eof` goes true as soon as the HTTP read feeding the demuxer closes, which can be
+  well before `eof-reached` — the player keeps playing from whatever media was still cached ahead
+  of the playhead. An owner's export showed the reconnect line's `ahead=0ms` after the cushion had
+  visibly sat around 30s for minutes, with nothing recording when the provider actually dropped the
+  connection versus when the app ran out of buffer to hide it. Polled on the same 1 Hz tick
+  (`platform.getProperty`, `NativePlayer` only), logged **once per live session** (reset at every
+  point `_resetLiveLatency` already resets at), and changes nothing about reconnect timing or
+  thresholds — it is purely an earlier timestamp for the same drop.
 - **Linux native** in `player_screen.dart` too, but the mpv process is a *separate OS process*
   whose media_kit `_player` is idle, so the watchdog is driven off mpv's JSON-IPC signals
   (`LinuxNativeSession.playbackEvents`, a `LinuxNativePlaybackSignal` stream). `end-file` with
@@ -3169,7 +3180,12 @@ watchdogs** because the platforms play through different stacks:
   on the last frame indefinitely, and mpv's own network-timeout before an `end-file error` can be
   ~60s — the `paused-for-cache` stall path lets the watchdog reconnect at the 8s threshold
   instead of waiting for that. The reload is a `loadfile <url> replace` on the native session
-  (same URL the embedded watchdog reopens, same call "Go to live" uses).
+  (same URL the embedded watchdog reopens, same call "Go to live" uses). It polls the same
+  `demuxer-cache-state/eof` sub-property beside `time-pos`/`demuxer-cache-duration` on its own
+  1 Hz IPC tick (`LinuxNativeSession._startPositionPoll`) and writes the same `live upstream
+  ended ahead=…ms` line, once per session (`resetUpstreamEofLogged`, called from
+  `player_screen.dart`'s `_resetLiveLatency` since a reconnect/zap reloads this *same* mpv
+  process rather than spawning a new one).
 
 The **live preview** gets the same clean-EOF resilience in miniature: `LivePreviewController`
 listens to its player's `completed` stream and auto-restarts the *same* channel (a fresh
@@ -3309,11 +3325,13 @@ shared-engine preview is untouched.
 - **The Stream information panel** gains a last, live-only row: `Live delay` → `1:23 · buffer 24s`,
   or just `1:23` when the cushion is unknown.
 - **How to read a user's screenshot of that row:**
-  - `buffer ≈ delay` means a provider that bursts at connect and a deep preset holding it (suggest
-    a smaller buffer preset).
-  - `delay ≫ buffer` means accumulated stall drift, the case "Go to live" fixes and that waves 2
-    and 3 target.
-  - `delay ≈ 0` with stutter is a decode problem, already covered by the `fps=` / `dropped=` lines.
+  - `delay ≈ 0 with a large buffer` (e.g. `0:00 · buffer 30s`): the provider sent a backlog at
+    connect and playback started at its oldest frame. The viewer is about the buffer amount behind
+    live even though the badge says `LIVE`; wave 1's drift does not count this (see the open design
+    work).
+  - `delay ≫ buffer`: accumulated stall or pause drift. This is what "Go to live" fixes.
+  - `delay ≈ 0, small buffer, stutter`: a decode or network problem, covered by the `fps=` /
+    `dropped=` lines.
 
 ### Diagnostics (exportable, credential-free)
 
@@ -3321,7 +3339,14 @@ shared-engine preview is untouched.
   only when worth saying (`drift ≥ 5 s` or `ahead ≥ 30 s`).
 - The same line prefixed `live latency behind `: on the first threshold crossing.
 - `live latency reset reason=<load|reconnect|zap|golive|engine|claim> drift=…ms stalls=n`: when a
-  measurement with drift is discarded.
+  measurement with **at least 1 s** of drift is discarded (`kLiveLatencyResetLogMinDriftMs` /
+  Kotlin `RESET_LOG_MIN_DRIFT_MS` / Swift `LiveLatencyLogging.resetLogMinDriftMs`). Below that a
+  reset is noise — a healthy stream resets with a few tens of milliseconds of ordinary jitter on
+  nearly every reconnect/zap, and an export full of `drift=29ms` lines buried the resets that
+  actually mattered.
+- `live upstream ended ahead=…ms`: see "Live auto-reconnect" — the demuxer-level EOF, which can
+  land before the player's own `eof-reached`/`completed`. Diagnostics only; does not affect
+  reconnect timing.
 
 ### Known measurement limits
 
