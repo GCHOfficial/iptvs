@@ -19,9 +19,20 @@ jobs:
     runs-on: ubuntu-latest
     environment: google-play
     steps:
+      # Validated before anything else runs, and read through env below rather
+      # than interpolated, because this job holds the upload signing secrets.
+      - name: Validate version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Version must be MAJOR.MINOR.PATCH (digits only)."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           lfs: true # libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar)
+          persist-credentials: false
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -67,13 +78,16 @@ jobs:
           IPTVS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
           IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
           IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
-        run: flutter build appbundle --release --flavor googlePlay --build-name ${{ inputs.version }} --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+          BUILD_NAME: ${{ inputs.version }}
+        run: flutter build appbundle --release --flavor googlePlay --build-name "$BUILD_NAME" --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
       - name: Verify bundle identity and upload signature
         env:
           EXPECTED_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
         run: ./tool/verify_google_play_bundle.sh build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab build/app/intermediates/merged_manifests/googlePlayRelease/processGooglePlayReleaseManifest/AndroidManifest.xml
       - name: Name artifact
-        run: cp build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab iptvs-player-${{ inputs.version }}-google-play.aab
+        env:
+          BUILD_NAME: ${{ inputs.version }}
+        run: cp build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab "iptvs-player-$BUILD_NAME-google-play.aab"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: google-play-${{ inputs.version }}
