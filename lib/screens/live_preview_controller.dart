@@ -567,7 +567,14 @@ class LivePreviewController extends ChangeNotifier {
       stream = null;
     });
     try {
-      DiagnosticsLog.instance.add(
+      // `addAndPrint`, not `add`: this and the native-engine line below are the
+      // only trace that the preview path ran at all, and on a device driven
+      // from outside the app (`flutter run`, or the Android TV emulator CI job
+      // in `tool/android_tv_emulator_check.sh` pressing OK over `adb`)
+      // "nothing in the console" and "the code never ran" are otherwise the
+      // same observation. Same redaction either way; the console half is
+      // debug-only, so an exported log is unchanged.
+      DiagnosticsLog.instance.addAndPrint(
         'library',
         'preview live source=${activeRepo.source.name} channel=${channel.name} id=${channel.id}',
       );
@@ -632,7 +639,13 @@ class LivePreviewController extends ChangeNotifier {
         'bufferPreset': _bufferPreset.storageName,
       });
       if (opened == true) {
-        DiagnosticsLog.instance.add('library', 'preview native engine open');
+        // Mirrored to the console for the same reason as the `preview live`
+        // line above: on Android this is the only statement that the shared
+        // engine — the thing fullscreen later adopts — was actually opened.
+        DiagnosticsLog.instance.addAndPrint(
+          'library',
+          'preview native engine open',
+        );
         return true;
       }
       return false;

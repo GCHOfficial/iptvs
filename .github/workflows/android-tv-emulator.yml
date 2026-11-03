@@ -1,0 +1,207 @@
+name: Android TV emulator
+
+# The TV-only Android flows have no other gate. There is no Android TV box to
+# test on, so a KVM-accelerated emulator on a Linux runner is the only place
+# the D-pad navigation, the live preview -> fullscreen shared-engine handoff,
+# the Back ladder out of the player, the "Go to live" chip and in-player
+# zapping are ever exercised end to end. `tool/android_tv_emulator_check.sh`
+# does the driving; this file only builds an APK and brings emulators up.
+#
+# Deliberately NOT part of `build.yml`: it costs an emulator boot plus a few
+# minutes of scripted playback, and most PRs touch none of it. Keep it
+# **non-required** in branch protection — an emulator that fails to boot, or a
+# public demo stream that is briefly unreachable, must not block a merge.
+#
+# WHAT IT DOES NOT COVER — stated here as well as in
+# docs/validation-baseline.md so nobody reads a green tick as more than it is:
+# an emulator has no hardware HEVC/Dolby Vision decoders, no vendor codecs, no
+# HDR output path, no real memory pressure and no passthrough audio. Decoder
+# selection, dynamic-range signalling and the catch-up audibility checks still
+# need real hardware.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'lib/player/**'
+      - 'lib/screens/**'
+      - 'tool/android_tv_emulator_check.sh'
+      - '.github/workflows/android-tv-emulator.yml'
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: >-
+          Fail the run on the behavioural checks too (preview start, engine
+          adoption, the "Go to live" chip). Off by default because they also
+          depend on the runner reaching and decoding the public demo streams.
+        type: boolean
+        default: false
+  schedule:
+    # Mondays, 05:27 UTC. Catches rot in the emulator images, the demo stream
+    # fixtures and the action pins even when nobody touches android/ or lib/.
+    - cron: '27 5 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  # Built once and handed to both emulator legs, rather than rebuilt per leg:
+  # the build is the long pole and the APK is identical for both.
+  build-apk:
+    name: Build development debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # The libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar) is in Git
+          # LFS and the Android build cannot link without it.
+          lfs: true
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - run: flutter pub get
+      # A *debug* build on purpose, and with no Supabase config:
+      #  * debug keeps `kDebugMode` / `BuildConfig.DEBUG` on, which is what
+      #    mirrors the app's diagnostics to logcat and enables the Compose
+      #    overlay's focus trace — the script's whole observation channel.
+      #  * debug is also what makes `run-as` work for artifact collection.
+      #  * leaving Supabase out removes a boot-time network dependency from a
+      #    run that is about TV input and playback lifecycle, nothing else.
+      #    The driver's first-run key sequence copes with the cloud row being
+      #    present or absent either way.
+      - name: Build development debug APK (universal, includes x86_64)
+        run: >-
+          flutter build apk --debug --flavor development
+          --build-number ${{ github.run_number }}
+          --dart-define=DISTRIBUTION_CHANNEL=development
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-emulator-apk
+          path: build/app/outputs/flutter-apk/app-development-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  drive:
+    name: ${{ matrix.name }}
+    needs: build-apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # API 28 is where the SurfaceTexture finalizer crash lived, so it is
+          # the level that matters most — but there is **no x86_64 Android TV
+          # system image below API 36**. The `android-tv` repository ships
+          # 32-bit `x86` only for API 21..34 (checked against
+          # dl.google.com/android/repository/sys-img/android-tv/sys-img2-1.xml)
+          # and Flutter has not shipped a 32-bit x86 Android engine for years,
+          # so an `android-28;android-tv;x86` AVD simply cannot run this app.
+          #
+          # API 28 therefore runs on `google_apis;x86_64` with a TV screen
+          # profile and D-pad-only input. `isTelevision` is false there (it is
+          # not a TV image), so the two-pane layout comes from the window size
+          # instead of the TV branch — same UI, same key handling, same
+          # preview/handoff path. The script asserts `wide=true` rather than
+          # assuming it.
+          - name: API 28 (google_apis x86_64, TV screen, D-pad only)
+            api-level: 28
+            target: google_apis
+            arch: x86_64
+            # A 1920x1080 TV panel on a phone system image. This is what puts
+            # the app on the wide two-pane layout (`isWideLayout`), which is
+            # where the category pane and the preview panel — and therefore the
+            # shared-engine preview path — exist at all.
+            profile: tv_1080p
+          # The only x86_64 Android TV image that exists. This is the leg that
+          # proves `isTelevision` / UiModeManager / leanback detection and the
+          # TV layout on a genuine TV system image.
+          - name: API 36 (android-tv x86_64)
+            api-level: 36
+            target: android-tv
+            arch: x86_64
+            # Deliberately blank: the TV system image's own default AVD is
+            # already a television, and forcing `--device` on it only adds a
+            # way for AVD creation to fail.
+            profile: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tv-emulator-apk
+          path: apk
+      # The emulator needs /dev/kvm to be usable by the runner user; without
+      # this the AVD falls back to software emulation and nothing finishes
+      # inside the time budget.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # Only `sdkmanager`/`avdmanager` run here (the APK is prebuilt), and the
+      # emulator runner's own documentation pins JDK 17 for them.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Run the TV flow check
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          profile: ${{ matrix.profile }}
+          cores: 2
+          ram-size: 2048M
+          disk-size: 6G
+          # Replaces the action's defaults; `-no-snapshot` keeps every run a
+          # cold boot so a half-written snapshot can never make a failure
+          # unreproducible.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          # Invoked through `bash` rather than relying on the file mode: the
+          # script is bash-specific (arrays, `local`) and this way a lost
+          # executable bit is a non-event.
+          script: |
+            bash tool/android_tv_emulator_check.sh \
+              --apk apk/app-development-debug.apk \
+              --out "$RUNNER_TEMP/tv-artifacts" \
+              --label "api${{ matrix.api-level }}-${{ matrix.target }}" \
+              ${{ (github.event_name == 'workflow_dispatch' && inputs.strict) && '--strict' || '' }}
+      - name: Collect artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-emulator-api${{ matrix.api-level }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/tv-artifacts
+          if-no-files-found: warn
+          retention-days: 14

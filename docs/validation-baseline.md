@@ -167,9 +167,81 @@ from a Linux unit-test run.
 | CI-Linux | Analyze/unit tests | GitHub-hosted Ubuntu | Runner-dependent | None | Existing |
 | DEV-Linux-1 | Host ingestion baseline | Linux 7.1.3, Ryzen 7 7840HS | 14 GiB | None | Captured 2026-07-14 |
 | TV-Low-AVD-1 | Android TV API 36 emulator | 2 virtual cores | 2 GiB | 1920×1080, 320 dpi, D-pad | Captured 2026-07-15 |
+| CI-TV-AVD-36 | `android-tv;x86_64` API 36 emulator (CI) | 2 virtual cores | 2 GiB | `tv_1080p`, D-pad only | Automated — see below |
+| CI-TV-AVD-28 | `google_apis;x86_64` API 28 emulator (CI) | 2 virtual cores | 2 GiB | `tv_1080p`, D-pad only | Automated — see below |
 | Phone-AVD-1 | Android phone | Pixel-class emulator, 4 virtual cores | 2 GiB | Touch + system Back | Captured 2026-07-15 |
 | Win-SDR | Windows x64 | Owner development devices | Not recorded | SDR, keyboard, mouse | Extensively exercised before PR 0 |
 | Win-HDR | Windows x64 | Owner development devices | Not recorded | HDR, keyboard, mouse | Extensively exercised before PR 0 |
+
+## Android TV emulator CI
+
+The owner has no Android TV box. The emulator job is therefore the **only**
+automated place the television-only flows are exercised at all, and the only
+reason a D-pad regression in them can fail a check rather than a user report.
+
+- Workflow: [`.github/workflows/android-tv-emulator.yml`](../.github/workflows/android-tv-emulator.yml)
+- Driver: [`tool/android_tv_emulator_check.sh`](../tool/android_tv_emulator_check.sh) — plain
+  `adb`, runnable locally against any attached device or AVD
+  (`tool/android_tv_emulator_check.sh --serial … --apk …`).
+- Triggers: PRs touching `android/**`, `lib/player/**`, `lib/screens/**`, the script or the
+  workflow; `workflow_dispatch`; a weekly cron. **Keep it non-required**: an emulator that fails
+  to boot, or a briefly unreachable public demo stream, must not block a merge.
+
+### Which system image, and why not API 28 on a TV image
+
+API 28 is the level that matters most (the SurfaceTexture finalizer crash lived there), but
+Google ships **no x86_64 Android TV system image below API 36** — the `android-tv` repository
+(`dl.google.com/android/repository/sys-img/android-tv/sys-img2-1.xml`) carries 32-bit `x86` only
+for API 21–34, and Flutter has not shipped a 32-bit x86 Android engine for years, so an
+`android-28;android-tv;x86` AVD cannot run this app at all. The matrix therefore splits the two
+things an "Android TV emulator" was wanted for:
+
+| Leg | Image | What only this leg gives |
+|---|---|---|
+| API 28 | `system-images;android-28;google_apis;x86_64`, `tv_1080p` profile, D-pad-only input | The API-28 runtime/texture path. `isTelevision` is **false** here — it is not a TV image — so the two-pane layout comes from the window-size branch of `isWideLayout`, not the TV branch. The script asserts `wide=true` from the app's own `layout window=…` line rather than assuming it. |
+| API 36 | `system-images;android-36;android-tv;x86_64` | A genuine TV image: `UiModeManager`/leanback detection (`device class television=true`), the TV layout and the leanback launcher category. |
+
+### What the run actually asserts
+
+Everything is observed through logcat; the app already prints each of these in a debug build
+(`DiagnosticsLog.addAndPrint`, `_logPlayback`, the native `logNative` relay), and none of them
+carries a URL, header or credential:
+
+| Scenario | Assertion |
+|---|---|
+| First run reaches a playable catalogue | `[iptvs.library] device class television=…`, then `[iptvs.library] layout window=… wide=… tv=…`. `DemoSource` is selectable with no provider and no credentials (profile picker → Skip → "Use demo streams"), which is what makes a catalogue possible at all. |
+| OK on a channel starts a preview (×5, with Home + relaunch between) | `[iptvs.library] preview live source=… channel=… id=…`, plus `preview native engine open` for the shared engine. |
+| Preview → fullscreen → Back (×5) | `HdrPlayerActivity` becomes the resumed activity (`dumpsys`), `iptvs.shared: fullscreen adopted the shared preview engine` once per cycle, and ≤4 Back presses leave the player. |
+| Pause ≥35 s, resume, "Go to live" | `native live latency behind drift=…` (the one-shot crossing of `LiveLatency.WARN_MS`), the chip reachable by D-pad, `native live latency reset reason=golive drift=…` with `drift ≥ 30000`, and — the invariant with no other observable effect — focus landing on play/pause afterwards. |
+| Channel up/down | `[iptvs.player] zap play source=… channel=… id=…` per settled zap. |
+| Throughout | `FATAL EXCEPTION` attributed to the package, `ANR in <pkg>`, a tombstone naming the package (`>>> <pkg> <<<`), and any unexpected pid change all fail the run. |
+
+Artifacts per leg: full logcat, a crash excerpt, screenshots at every step, `meminfo`, and a
+`run-as` listing of the app data directory.
+
+**Assertion strength.** The health checks (crash / ANR / native crash / process death / reaching
+the channel list / escaping the player with Back) always fail the run. The *behavioural* checks
+additionally depend on the runner reaching and decoding the public demo streams, so they report
+loudly but set the exit status only under `--strict` (`workflow_dispatch` input, or
+`IPTVS_TVEMU_STRICT=1` locally). Promote them to strict once a first green run has shown the
+mechanisms work on the hosted runner.
+
+### What it does not validate
+
+An emulator is a software renderer on a server. It has:
+
+- **no hardware HEVC/AV1/Dolby-Vision decoders and no vendor codecs** — nothing here says anything
+  about decoder selection, the ExoPlayer→mpv fallback on undecodable video, or the libdovi path;
+- **no HDR output path** — no PQ/HLG signalling, no embedded→native escalation decision, no
+  panel mode switch;
+- **no real memory pressure** — the ANR/OOM classes that produced the shipped regressions
+  (`DartAesGcm._ghash`, the 250k-channel `StandardMessageCodec` message) need a real low-end box;
+- **no passthrough audio** — the catch-up audibility and AC-3/E-AC-3 checks are unaffected by it;
+- **no real remote** — `adb shell input keyevent` injects the same key codes, but not a vendor
+  remote's repeat timing, its extra keys, or its IME behaviour.
+
+Those remain owner-run on hardware, as does
+`integration_test/player_soak_test.dart` (see docs/player.md).
 
 ## Metrics to retain
 

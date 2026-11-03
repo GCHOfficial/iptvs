@@ -76,7 +76,9 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import android.util.Log
 import android.view.View
+import com.gchofficial.iptvs.BuildConfig
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -721,6 +723,29 @@ private fun Scrubber(
 
 // ---- Reusable controls ------------------------------------------------------
 
+/**
+ * Debug-only trace of where the overlay's D-pad focus has got to: one line per
+ * focus *gain*, naming the control by the same accessible name it already
+ * declares.
+ *
+ * It exists for the Android TV emulator CI job
+ * (`tool/android_tv_emulator_check.sh`), which drives this overlay through
+ * `adb shell input keyevent` and otherwise has no way to tell which control is
+ * focused. The Compose semantics tree would answer that, but only through a
+ * UiAutomation dump, and a running player — progress bar, clock badge, video —
+ * never reaches the window-idle state such a dump waits for. It is also the
+ * *only* observable effect of the one invariant that matters most here: "Go to
+ * live" hands focus to play/pause before it removes itself (see [RightCluster]),
+ * which changes nothing else about the player's state.
+ *
+ * `BuildConfig.DEBUG`-gated exactly like [DebugCounters], so release builds emit
+ * nothing and pay only the flag check. Credential-free by construction — the
+ * argument is a fixed English control name, never stream or provider data.
+ */
+internal fun logOverlayFocus(name: String) {
+    if (BuildConfig.DEBUG) Log.i("iptvs.focus", "overlay focus=$name")
+}
+
 @Composable
 fun IconControlButton(
     icon: ImageVector,
@@ -738,7 +763,10 @@ fun IconControlButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = withFocus
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) logOverlayFocus(contentDescription)
+            }
             .clickable(onClick = onClick),
     ) {
         Icon(
@@ -773,6 +801,7 @@ fun TextControlButton(
             .background(if (focused) PlayerColors.ButtonBgFocused else PlayerColors.ButtonBg)
             .onFocusChanged {
                 focused = it.isFocused
+                if (it.isFocused) logOverlayFocus(contentDescription)
                 onFocusChanged?.invoke(it.isFocused)
             }
             .clickable(onClick = onClick)

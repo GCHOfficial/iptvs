@@ -3656,3 +3656,24 @@ counted after an open/close cycle is a leaked `SurfaceTexture`, i.e. the API-28 
 in "Live preview + seamless handoff (Android)". Only a route that built its *own* controller
 counts one (`PlayerScreen._ownsController`); an adopted `existingController` belongs to the
 preview.
+
+### The emulator job's view of this overlay
+
+The soak above needs a human to attach a device. The **Android TV emulator CI job**
+(`.github/workflows/android-tv-emulator.yml`, driven by `tool/android_tv_emulator_check.sh`) is
+the unattended half: it presses D-pad keys over `adb` and reads the native player back out of
+logcat — the `logNative` relay lines (`surface claim mode=`, `live latency behind`,
+`live latency reset reason=golive`), `iptvs.shared`'s "fullscreen adopted the shared preview
+engine", and Dart's `zap play`. Two things exist only for it:
+
+- `LivePreviewController` mirrors its `preview live …` and `preview native engine open` lines to
+  the console (`DiagnosticsLog.addAndPrint`), because on Android they are the only statement that
+  the shared engine was opened at all.
+- `PlayerControls.logOverlayFocus` prints one `iptvs.focus: overlay focus=<control>` line per
+  focus *gain*, `BuildConfig.DEBUG`-gated. A UiAutomation dump would give the same answer from the
+  Compose semantics tree, but a running player never reaches the window-idle state such a dump
+  waits for — and "Go to live" handing focus to play/pause before it removes itself has **no
+  other observable effect**, so without the trace that invariant is untestable off a real remote.
+
+What the emulator cannot see — decoders, HDR, memory pressure, passthrough — is listed in
+docs/validation-baseline.md "Android TV emulator CI".
