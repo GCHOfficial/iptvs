@@ -24,6 +24,10 @@ import com.gchofficial.iptvs.player.AspectMode
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.BufferPreset
+import com.gchofficial.iptvs.player.CatchUpController
+import com.gchofficial.iptvs.player.CatchUpPolicy
+import com.gchofficial.iptvs.player.CatchUpSample
+import com.gchofficial.iptvs.player.ExoBufferPolicy
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
 import com.gchofficial.iptvs.player.LiveLatencyReset
@@ -280,6 +284,32 @@ class HdrPlayerActivity : ComponentActivity() {
     private val liveLatency = LiveLatencyTracker()
 
     /**
+     * The one thing in this wave that changes playback rather than reporting
+     * it: ExoPlayer's 1.05x recovery of a provider's connect backlog
+     * ([CatchUpPolicy]).
+     *
+     * Lives on the Activity rather than in the engine because every veto it
+     * needs is Activity state — the reconnect watchdog, the zap gate, the
+     * handoff window — and because the engine is swapped under it (mpv
+     * fallback, zap rebuild) while the session's "this device ignores speed"
+     * verdict has to survive that.
+     */
+    private val catchUp = CatchUpController()
+
+    /**
+     * Whether playback ran above real time across the interval the *next*
+     * tracker sample will measure.
+     *
+     * One tick behind the decision on purpose: the media/wall difference a
+     * sample sees was produced by the speed that was in force while that
+     * interval elapsed, not by the one about to be applied. Crediting it
+     * against the new decision would bank a tick of recovery that had not
+     * happened yet — and, on the tick catch-up disengages, one that never
+     * would.
+     */
+    private var catchingUpLastTick = false
+
+    /**
      * Periodic frame-rate/drop line while playing.
      *
      * Rides the existing ticker rather than adding a timer, and only while the
@@ -316,28 +346,110 @@ class HdrPlayerActivity : ComponentActivity() {
      * stream.
      *
      * The latch is the whole of the `liveSynced` rule on this side: drift never
-     * decreases, so `behind` can only ever go false→true, and only
-     * [resetLiveLatency]'s callers put the chip away again.
+     * decreases, so [LiveLatencyTracker.driftBehind] can only ever go
+     * false→true, and only [resetLiveLatency]'s callers put the chip away
+     * again.
+     *
+     * It also carries the catch-up tick, because the two are one measurement
+     * loop: catch-up acts on the cushion this function has already read, and
+     * the tracker needs to be told what catch-up did in order to credit it.
      */
     private fun sampleLiveLatency() {
-        if (!uiState.isLive) return
-        val active = engine ?: return
-        // -1 is "no playhead yet": a stream still opening, or an mpv engine
-        // between `loadfile` and its first `time-pos`. Sampling it would bank
-        // the open as drift.
-        val position = active.mediaPositionMs()
-        if (position < 0L) return
-        val ahead = active.bufferedAheadMs()
-        liveLatency.sample(
-            nowMs = System.currentTimeMillis(),
-            positionMs = position,
-            isPlaying = uiState.isPlaying,
-            isBuffering = uiState.isBuffering,
-            aheadMs = ahead,
-        )?.let { logNative(it) }
-        uiState.liveDriftMs = liveLatency.driftMs
-        uiState.liveAheadMs = ahead
-        if (liveLatency.behind) uiState.liveSynced = false
+        val active = engine
+        val nowMs = System.currentTimeMillis()
+        val ahead = active?.bufferedAheadMs() ?: -1L
+        if (uiState.isLive && active != null) {
+            // -1 is "no playhead yet": a stream still opening, or an mpv engine
+            // between `loadfile` and its first `time-pos`. Sampling it would
+            // bank the open as drift.
+            val position = active.mediaPositionMs()
+            if (position >= 0L) {
+                liveLatency.sample(
+                    nowMs = nowMs,
+                    positionMs = position,
+                    isPlaying = uiState.isPlaying,
+                    isBuffering = uiState.isBuffering,
+                    aheadMs = ahead,
+                    catchingUp = catchingUpLastTick,
+                )?.let { logNative(it) }
+                uiState.liveDelayMs = liveLatency.delayMs
+                uiState.liveAheadMs = ahead
+                // **Drift, not delay.** A reload cannot remove a backlog — the
+                // reconnect re-receives it — so offering the chip for one would
+                // promise a fix this engine does not have. The backlog is shown
+                // in the badge and recovered by catch-up instead; see
+                // [LiveLatencyTracker.driftBehind].
+                if (liveLatency.driftBehind) uiState.liveSynced = false
+            }
+        }
+        // Outside the position guard: a stream with no playhead yet is exactly
+        // one that must not be left running fast, and the vetoes below are what
+        // put it back.
+        catchingUpLastTick = sampleCatchUp(nowMs, ahead)
+    }
+
+    /**
+     * One catch-up tick: decide the playback rate, apply it only when it moves,
+     * and report what it is doing to the tracker.
+     *
+     * Returns whether playback will be above real time over the interval that
+     * starts now.
+     */
+    private fun sampleCatchUp(nowMs: Long, aheadMs: Long): Boolean {
+        // ExoPlayer only. The libmpv fallback has its own clock and its own
+        // cache semantics, and wave 2 deliberately leaves that surface alone —
+        // it keeps the reload, and it does not trim.
+        val exo = engine as? ExoPlayerEngine
+        if (exo == null) {
+            catchUp.reset()
+            return false
+        }
+        val decision = catchUp.decide(
+            CatchUpSample(
+                nowMs = nowMs,
+                aheadMs = aheadMs,
+                // The preset's own sustained cushion: a user who asked to
+                // buffer deeply asked to watch further behind, and catch-up
+                // recovers only the delay they did not ask for.
+                targetMs = ExoBufferPolicy.forPreset(bufferPreset).minBufferMs.toLong(),
+                isLive = uiState.isLive,
+                isPlaying = uiState.isPlaying,
+                isBuffering = uiState.isBuffering,
+                // A re-resolve in flight is a reload that has not landed yet;
+                // the engine is about to be handed a different stream.
+                reconnecting = uiState.reconnecting || resolveGate.inFlight,
+                zapSettling = zapSettlingNow(nowMs),
+                inHandoffWindow = frameLiveness.inHandoffWindow(nowMs),
+                // This Activity is the only thing that ever ticks catch-up, and
+                // it runs only while it owns the surface: an adopted engine is
+                // serving *this* fullscreen session, not the faceless preview.
+                // What keeps the promise that the preview never runs fast is
+                // [resetCatchUp] on the handback, not a flag sampled here.
+                sharedPreview = false,
+                engineManagesLiveOffset = exo.mediaItemIsLive(),
+                audioSampleMimeType = exo.selectedAudioSampleMimeType(),
+                actualSpeed = exo.effectivePlaybackSpeed(),
+            ),
+        )
+        if (decision.changed) exo.applyPlaybackSpeed(decision.speed)
+        decision.log?.let { logNative(it) }
+        return decision.catchingUp
+    }
+
+    /**
+     * Back to real time, and forget the engagement.
+     *
+     * Called from every [LiveLatencyTracker] reset point (the stream under the
+     * engine is being replaced) and from the shared-engine handback (the engine
+     * is about to be someone else's). The second one is the load-bearing case:
+     * an adopted engine handed back at 1.05x would leave the **preview** — a
+     * faceless, muted surface nobody is watching for its timing — running fast
+     * for the rest of its life, with nothing on screen to explain it.
+     */
+    private fun resetCatchUp() {
+        catchUp.reset()
+        catchingUpLastTick = false
+        (engine as? ExoPlayerEngine)?.applyPlaybackSpeed(CatchUpPolicy.NORMAL_SPEED)
     }
 
     /**
@@ -351,8 +463,12 @@ class HdrPlayerActivity : ComponentActivity() {
      */
     private fun resetLiveLatency(reason: String) {
         liveLatency.reset(reason)?.let { logNative(it) }
+        // Same door, same instant: the thing catch-up was recovering is gone,
+        // and a rate carried into a new stream would be measured against a
+        // backlog it was never earned on.
+        resetCatchUp()
         if (!::uiState.isInitialized) return
-        uiState.liveDriftMs = 0L
+        uiState.liveDelayMs = 0L
         uiState.liveAheadMs = -1L
         if (uiState.isLive) uiState.liveSynced = true
     }
@@ -1341,6 +1457,9 @@ class HdrPlayerActivity : ComponentActivity() {
      */
     private fun handBackSharedEngine() {
         if (!adoptedShared) return
+        // Real time first, while the engine is still reachable: the preview
+        // about to resume on it must never inherit this session's catch-up.
+        resetCatchUp()
         adoptedShared = false
         engine = null
         SharedEngine.fullscreenDetached()
@@ -1378,6 +1497,11 @@ class HdrPlayerActivity : ComponentActivity() {
             // surface; the engine keeps playing across the return.
             handBackSharedEngine()
         } else {
+            // Real time first even here, where the engine is about to be
+            // destroyed: the rule is "no engine leaves this Activity running
+            // fast", and an exit path that is an exception to it is the one a
+            // future refactor turns into a leak.
+            resetCatchUp()
             engine?.release()
         }
         engine = null

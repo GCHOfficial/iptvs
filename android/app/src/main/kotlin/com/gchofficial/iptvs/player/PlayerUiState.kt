@@ -121,6 +121,14 @@ class PlayerUiState(
     // drift through rebuffering. Drives the grey LIVE badge + the go-to-live
     // button.
     //
+    // **Drift, not [liveDelayMs].** The chip's action here is a reload, which
+    // resumes at the live edge of what the provider is sending *now* — and a
+    // provider that sends a connect backlog sends it again, so a reload cannot
+    // remove that half of the delay. Offering the chip for it would promise a
+    // fix ExoPlayer does not have (it cannot seek forward in a live
+    // progressive source either). The backlog is shown in the badge and
+    // recovered by CatchUpPolicy instead. See LiveLatencyTracker.driftBehind.
+    //
     // **Latched:** nothing sets this back to true except a reset point (go-live,
     // a reconnect reload, a zap settle, a new open). That hysteresis is
     // mandatory rather than tidy — the "Go to live" chip removes itself while
@@ -129,19 +137,24 @@ class PlayerUiState(
     var liveSynced by mutableStateOf(true)
 
     /**
-     * Delay accumulated since this stream's first frame, in ms
-     * ([LiveLatencyTracker]). 0 for VOD and before playback has progressed.
+     * How far behind the broadcast this stream is, in ms
+     * ([LiveLatencyTracker.delayMs]) — the provider's connect backlog plus
+     * everything this session added, minus anything given back. 0 for VOD and
+     * before playback has progressed.
+     *
+     * Not the same number as the `liveSynced` latch reads: that one is drift
+     * alone, because a reload can remove drift and cannot remove a backlog.
      */
-    var liveDriftMs by mutableStateOf(0L)
+    var liveDelayMs by mutableStateOf(0L)
 
     /** Buffered cushion ahead of the playhead in ms, or -1 when unknown. */
     var liveAheadMs by mutableStateOf(-1L)
 
     /** Top-bar badge text: `LIVE`, or `LIVE -1:23` once genuinely behind. */
-    fun liveDelayBadge(): String = LiveLatency.badgeLabel(liveDriftMs)
+    fun liveDelayBadge(): String = LiveLatency.badgeLabel(liveDelayMs)
 
     /** Stream-info row value: `1:23 · buffer 24s`, or the delay alone. */
-    fun liveDelayInfo(): String = LiveLatency.infoValue(liveDriftMs, liveAheadMs)
+    fun liveDelayInfo(): String = LiveLatency.infoValue(liveDelayMs, liveAheadMs)
 
     // Favorite toggle (live channels only). `canFavorite` gates the overlay star
     // button; `isFavorite` is its current state. The Dart host owns the store —

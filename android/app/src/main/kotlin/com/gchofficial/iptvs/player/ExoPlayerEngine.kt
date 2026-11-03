@@ -53,11 +53,12 @@ enum class BufferPreset {
     /**
      * The deepest cushion, for a link that still stalls on [HIGH].
      *
-     * It is the only preset that also bounds the buffer in **bytes** — see
-     * [ExoBufferPolicy.Durations.targetBufferBytes]. With
-     * `prioritizeTimeOverSizeThresholds` left on, a two-minute ceiling is
-     * bounded only by duration x bitrate, and on a 20 Mbps channel that is
-     * far more than a 2 GiB TV box can spare.
+     * It is the only preset that lets the **bytes alone** decide when the
+     * buffer is full — see [ExoBufferPolicy.Durations.prioritizeTimeOverSize].
+     * Every preset but [LOW] names a byte ceiling; this is the one deep enough
+     * that a starving player must not be allowed past it even to reach its
+     * playable cushion, because at two minutes x 20 Mbps the overshoot is more
+     * than a 2 GiB TV box can spare.
      */
     MAX;
 
@@ -130,23 +131,38 @@ object ExoBufferPolicy {
         val forPlaybackMs: Int,
         val afterRebufferMs: Int,
         /**
-         * `C.LENGTH_UNSET` for every preset but [BufferPreset.MAX], where it is
-         * the point.
+         * The allocation ceiling, in bytes. `C.LENGTH_UNSET` only for
+         * [BufferPreset.LOW], whose 25 s duration ceiling is its own bound.
          *
-         * With [prioritizeTimeOverSize] on (every other preset), media3 judges
-         * "full" purely by duration, so the allocation is bounded only by
-         * `maxBufferMs x bitrate`. At [BufferPreset.MAX]'s two-minute ceiling a
-         * 20 Mbps channel would ask for ~300 MB, on hardware that is routinely
-         * a 2 GiB Android TV box — an OOM, not a deeper buffer. Capping the
-         * bytes degrades it gracefully instead: the loader stops at whichever
-         * limit binds first, exactly as the mpv side is bounded by media_kit's
-         * `demuxer-max-bytes`.
+         * Without one, media3 bounds the allocation at `maxBufferMs x bitrate`
+         * and nothing else. IPTV bitrates are not ours to predict: the same
+         * preset is a 3 Mbps SD channel on one source and a 25 Mbps UHD feed on
+         * the next, so `NORMAL`'s 50 s is ~19 MB in one case and ~156 MB in the
+         * other — on hardware that is routinely a 2 GiB Android TV box. The cap
+         * is what makes a duration ceiling safe to state at all; the loader
+         * stops at whichever limit binds first, exactly as the mpv side is
+         * bounded by media_kit's `demuxer-max-bytes`.
+         *
+         * **It does not shorten the buffer on ordinary channels.** 48 MiB is
+         * ~50 s of a 8 Mbps stream and far more of anything below it, so the
+         * duration remains the binding limit for the bitrates this app actually
+         * meets; the cap only engages where the alternative was an OOM.
          */
         val targetBufferBytes: Int = C.LENGTH_UNSET,
         /**
-         * The shared default is [PRIORITIZE_TIME_OVER_SIZE] (spelled as a
-         * literal here only because a nested class should not have to reach
-         * into its enclosing object to state its own default).
+         * Whether a buffer **below `minBufferMs`** keeps filling past
+         * [targetBufferBytes].
+         *
+         * Narrower than it sounds, and the narrowness is why every preset but
+         * the deepest can keep it `true` while still being byte-capped. In
+         * media3 1.11.1 `DefaultLoadControl.shouldContinueLoading`, the flag is
+         * read only on the `bufferedDurationUs < minBufferUs` branch; once the
+         * buffer is *above* `minBufferUs` the next branch stops loading on
+         * `bufferedDurationUs >= maxBufferUs || targetBufferSizeReached`, with
+         * no reference to the flag at all. So the byte cap always bounds the
+         * steady-state buffer, and the flag only decides whether a *starving*
+         * player may exceed it to reach a playable cushion — which it should,
+         * right up until the depth being asked for is itself the hazard.
          *
          * @see targetBufferBytes
          */
@@ -187,6 +203,7 @@ object ExoBufferPolicy {
             maxBufferMs = 50_000,
             forPlaybackMs = 1_000,
             afterRebufferMs = 2_000,
+            targetBufferBytes = NORMAL_PRESET_TARGET_BUFFER_BYTES,
         )
         // A deep cushion for a link that stutters. Same start gates as NORMAL
         // on purpose — see above; this buys stall resistance, not latency, and
@@ -197,9 +214,10 @@ object ExoBufferPolicy {
             maxBufferMs = 90_000,
             forPlaybackMs = 1_000,
             afterRebufferMs = 2_000,
+            targetBufferBytes = HIGH_PRESET_TARGET_BUFFER_BYTES,
         )
-        // Deeper still, and the first preset where the duration ceiling alone
-        // is not a safe bound — hence the byte cap and the switch away from
+        // Deeper still, and the first preset where even a starving player
+        // must be held to the byte cap — hence the switch away from
         // prioritising time over size. Start gates unchanged from NORMAL, for
         // the same reason HIGH leaves them alone.
         BufferPreset.MAX -> Durations(
@@ -222,12 +240,30 @@ object ExoBufferPolicy {
     const val MAX_PRESET_TARGET_BUFFER_BYTES = 64 * 1024 * 1024
 
     /**
+     * The same ceiling for [BufferPreset.HIGH]. Equal to [BufferPreset.MAX]'s
+     * on purpose: a cap is a statement about the *device's* memory, not about
+     * how deep the user asked to buffer, and 90 s at 6 Mbps already reaches
+     * 64 MiB on a channel that is not unusual.
+     */
+    const val HIGH_PRESET_TARGET_BUFFER_BYTES = 64 * 1024 * 1024
+
+    /**
+     * And for [BufferPreset.NORMAL]: 48 MiB, ~50 s of an 8 Mbps stream, so the
+     * default install's duration ceiling still binds first on everything short
+     * of a UHD feed. Lower than the deeper presets because this is the preset
+     * that runs on every device including the cheapest, and nobody chose it.
+     */
+    const val NORMAL_PRESET_TARGET_BUFFER_BYTES = 48 * 1024 * 1024
+
+    /**
      * Judge the buffer by duration rather than by allocated bytes: IPTV bitrates
      * vary wildly between providers/channels, and a byte-based threshold makes
      * time-to-first-frame a function of the bitrate instead of a fixed budget.
      *
      * The default every preset but [BufferPreset.MAX] takes — see
-     * [Durations.targetBufferBytes] for why the deepest one cannot.
+     * [Durations.prioritizeTimeOverSize] for how narrow it actually is (it
+     * governs only a buffer below `minBufferMs`), and why the deepest preset
+     * still cannot afford it.
      */
     const val PRIORITIZE_TIME_OVER_SIZE = true
 
@@ -1057,7 +1093,76 @@ class ExoPlayerEngine(
         }
     }
 
-    override fun setSpeed(value: Float) = player.setPlaybackSpeed(value)
+    override fun setSpeed(value: Float) = applyPlaybackSpeed(value)
+
+    /**
+     * Sets the playback rate, surviving a released player.
+     *
+     * Guarded for the same reason [bufferedAheadMs] is: the host's 500 ms
+     * ticker holds `engine`, and an mpv fallback or a zap rebuild releases this
+     * one mid-session — and unlike the readouts, this one is also called from
+     * the Activity's teardown, after the decision to release has been taken.
+     */
+    fun applyPlaybackSpeed(value: Float) {
+        if (released) return
+        runCatching { player.setPlaybackSpeed(value) }
+    }
+
+    /**
+     * The rate playback is **effectively** running at, which is not always the
+     * one that was asked for.
+     *
+     * `setPlaybackSpeed` stores the request synchronously, so reading it back
+     * in the same call stack proves nothing. media3's `DefaultMediaClock`
+     * re-reads the audio renderer's actual parameters on each `doSomeWork` and
+     * propagates the truth back into `playbackInfo` — which for passthrough or
+     * tunnelled audio is `PlaybackParameters.DEFAULT`, because
+     * `DefaultAudioSink` will not re-time audio it is not decoding. A tick or
+     * two later, therefore, this is the device's real answer, and
+     * [CatchUpController] is built around waiting for it.
+     */
+    fun effectivePlaybackSpeed(): Float {
+        if (released) return CatchUpPolicy.NORMAL_SPEED
+        return runCatching { player.playbackParameters.speed }
+            .getOrDefault(CatchUpPolicy.NORMAL_SPEED)
+    }
+
+    /**
+     * media3's own verdict that the current item is a live stream *it* is
+     * steering (`Player.isCurrentMediaItemLive()` — true for HLS/DASH with a
+     * declared live offset, false for the progressive MPEG-TS most providers
+     * send).
+     *
+     * A catch-up veto: where media3 runs its own `LivePlaybackSpeedControl`
+     * against a target offset, a second speed controller on top of it is two
+     * loops fighting over one clock.
+     */
+    fun mediaItemIsLive(): Boolean {
+        if (released) return false
+        return runCatching { player.isCurrentMediaItemLive }.getOrDefault(false)
+    }
+
+    /**
+     * `sampleMimeType` of the **selected** audio track, or null when nothing is
+     * selected yet (before the first `onTracksChanged`) or the player is gone.
+     *
+     * Read from `currentTracks` rather than cached from [rebuildTracks]
+     * because the question is what the audio *renderer* is being fed right now:
+     * an adaptive switch or a user track change moves it, and the catch-up gate
+     * that reads it must fail closed on anything it cannot currently see.
+     */
+    fun selectedAudioSampleMimeType(): String? {
+        if (released) return null
+        return runCatching<String?> {
+            for (group in player.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_AUDIO) continue
+                for (i in 0 until group.length) {
+                    if (group.isTrackSelected(i)) return@runCatching group.getTrackFormat(i).sampleMimeType
+                }
+            }
+            null
+        }.getOrNull()
+    }
 
     override fun applyAspect(mode: AspectMode) {
         val frame = contentFrame ?: return
