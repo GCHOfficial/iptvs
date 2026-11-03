@@ -464,22 +464,25 @@ local function badge(ass, right_x, cy, text)
     return w + px(6)
 end
 
--- The LIVE pill (_LiveBadge): dot + "LIVE", filled `live` when synced, greyed
--- (white24) when behind. It lives in the **top bar's badge cluster** on every
--- surface, so [live_pill_badge] is what the overlay actually calls; this
--- left-anchored form and its width are kept separate because the badge run is
--- laid out right-to-left.
-local function live_pill_width()
-    return px(8) * 2 + px(4) * 2 + px(5) + measure('LIVE', fs(11))
+-- The LIVE pill (_LiveBadge): dot + "LIVE" (or, when Dart has pushed
+-- `liveDelayBadge`, that preformatted text, e.g. "LIVE -1:23" — this overlay
+-- prints it verbatim and never formats or derives the delay itself, same rule
+-- as the quick list), filled `live` when synced, greyed (white24) when
+-- behind. It lives in the **top bar's badge cluster** on every surface, so
+-- [live_pill_badge] is what the overlay actually calls; this left-anchored
+-- form and its width are kept separate because the badge run is laid out
+-- right-to-left.
+local function live_pill_width(text)
+    return px(8) * 2 + px(4) * 2 + px(5) + measure(text or 'LIVE', fs(11))
 end
 
-local function live_pill(ass, x, cy, synced)
+local function live_pill(ass, x, cy, synced, text)
     local font_px = fs(11)
     local dot_r = px(4)
     local pad_h = px(8)
     local gap = px(5)
-    local text = 'LIVE'
-    local w = live_pill_width()
+    text = text or 'LIVE'
+    local w = live_pill_width(text)
     local h = font_px + px(6)
     local x1, x2 = x, x + w
     local y1, y2 = cy - h / 2, cy + h / 2
@@ -500,9 +503,9 @@ end
 -- Right-anchored LIVE pill for the top-bar badge run, matching [badge]'s
 -- contract exactly (right edge in, width-plus-gap out) so the two can be mixed
 -- in one right-to-left pass.
-local function live_pill_badge(ass, right_x, cy, synced)
-    local w = live_pill_width()
-    live_pill(ass, right_x - w, cy, synced)
+local function live_pill_badge(ass, right_x, cy, synced, text)
+    local w = live_pill_width(text)
+    live_pill(ass, right_x - w, cy, synced, text)
     return w + px(6)
 end
 
@@ -1090,7 +1093,11 @@ local function render()
     end
     add_text_badge(source_badge(state.sourceName))
     if state.isLive then
-        table.insert(badge_items, {live = true, synced = state.liveSynced})
+        -- `liveDelayBadge` is Dart-preformatted (e.g. "LIVE -1:23"); a missing
+        -- or empty key is today's behaviour, the plain "LIVE" text.
+        local live_text = state.liveDelayBadge
+        if type(live_text) ~= 'string' or live_text == '' then live_text = 'LIVE' end
+        table.insert(badge_items, {live = true, synced = state.liveSynced, text = live_text})
     end
     add_text_badge(resolution_badge(vw, vh))
     add_text_badge(hdr_badge(dr))
@@ -1101,7 +1108,7 @@ local function render()
     for i = #badge_items, 1, -1 do
         local item = badge_items[i]
         if item.live then
-            bx = bx - live_pill_badge(ass, bx, icon_cy, item.synced)
+            bx = bx - live_pill_badge(ass, bx, icon_cy, item.synced, item.text)
         else
             bx = bx - badge(ass, bx, icon_cy, item.text)
         end
@@ -1282,6 +1289,14 @@ local function render()
         }
         if fps and fps > 0 then
             table.insert(rows, {'Frame rate', string.format('%.3f FPS', fps)})
+        end
+        -- `liveDelayInfo` is Dart-preformatted (e.g. "0:30 · buffer 25s") —
+        -- printed verbatim, never derived here. No buffer/network row exists
+        -- above to sit after, so this lands at the end of the live rows; a
+        -- missing/empty key (older Dart, stream before first frame, VOD)
+        -- omits the row entirely.
+        if state.isLive and type(state.liveDelayInfo) == 'string' and state.liveDelayInfo ~= '' then
+            table.insert(rows, {'Live delay', state.liveDelayInfo})
         end
 
         local panel_w = px(320)
@@ -1782,6 +1797,10 @@ _G.iptvs_overlay_test = {
     -- the only way to prove that a half-typed number keeps the banner up by
     -- itself (mpv's timers never run under the harness).
     set_banner_visible = function(value) zap_banner_visible = value end,
+    -- The 'i' key binding is not reachable from the harness either; this
+    -- opens the stream-information panel directly so its rows can be
+    -- asserted on.
+    set_info_open = function(value) info_open = value end,
 }
 mp.add_forced_key_binding('i', 'iptvs-info', function()
     info_open = not info_open

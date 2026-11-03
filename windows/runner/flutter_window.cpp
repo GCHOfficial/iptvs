@@ -258,6 +258,13 @@ struct NativeControlState {
   std::wstring epg_next_title;
   double epg_next_start_ms = 0.0;
   double epg_next_stop_ms = 0.0;
+  // Live delay (docs/player.md "Live latency"): preformatted strings pushed
+  // by Dart, which owns the drift tracker and the formatters — this renderer
+  // only prints them. Empty means "unknown"/VOD: the top-bar badge falls back
+  // to plain "LIVE" and the info-panel row is omitted, exactly like a build
+  // that predates this field.
+  std::wstring live_delay_badge;
+  std::wstring live_delay_info;
 };
 
 NativeControlState g_native_control_state;
@@ -1845,6 +1852,12 @@ std::vector<std::pair<std::wstring, std::wstring>> InfoRows() {
     }
     rows.push_back({L"Audio", audio});
   }
+  // Live delay (docs/player.md "Live latency"): Dart's preformatted value,
+  // printed verbatim; live only, and omitted whenever Dart has nothing to
+  // say (VOD, or a live stream before its first progress sample).
+  if (s.is_live && !s.live_delay_info.empty()) {
+    rows.push_back({L"Live delay", s.live_delay_info});
+  }
   return rows;
 }
 
@@ -2758,8 +2771,18 @@ void PaintNativeControlBar(HWND hwnd, int control_kind) {
   if (g_native_control_state.is_live) {
     // Red at the live edge; grey once behind (paired with the go-to-live button).
     const bool synced = g_native_control_state.live_synced;
+    // `live_delay_badge` is Dart's preformatted suffix ("LIVE" or
+    // "LIVE -1:23") — this renderer prints it, never derives it. The leading
+    // dot is this surface's own decoration and stays fixed either way.
+    // `DrawBadge` measures the text itself (GetTextExtentPoint32), so a wider
+    // string such as "LIVE -1:02:03" simply claims more stacked width and
+    // never overlaps the next badge.
+    const std::wstring live_text =
+        g_native_control_state.live_delay_badge.empty()
+            ? L"\x25CF LIVE"
+            : L"\x25CF " + g_native_control_state.live_delay_badge;
     badge_right -= DrawBadge(
-        paint_hdc, badge_right, top_cy, L"\x25CF LIVE",
+        paint_hdc, badge_right, top_cy, live_text,
         synced ? RGB(255, 64, 112) : RGB(74, 80, 94),
         synced ? RGB(255, 255, 255) : RGB(200, 205, 216));
   }
@@ -4304,6 +4327,13 @@ void FlutterWindow::UpdateNativeControlState(
       EncodableDoubleArg(args, "epgNextStartMs", 0.0);
   g_native_control_state.epg_next_stop_ms =
       EncodableDoubleArg(args, "epgNextStopMs", 0.0);
+  // Live delay rides along the same way: default to empty on every push so a
+  // value never outlives the stream (VOD, or a live stream before first
+  // progress) that produced it.
+  g_native_control_state.live_delay_badge =
+      EncodableStringArg(args, "liveDelayBadge", L"");
+  g_native_control_state.live_delay_info =
+      EncodableStringArg(args, "liveDelayInfo", L"");
 
   if (BottomControlsHeight() != prev_bottom_height) {
     native_controls_region_dirty_ = true;
