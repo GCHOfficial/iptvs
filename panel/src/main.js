@@ -2,7 +2,7 @@
 // panel is framed (the meta CSP cannot enforce `frame-ancestors`).
 import './framebust.js';
 import { supabase, KIND_FIELDS } from './supabase.js';
-import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
+import { METADATA_SECRET_KEYS, SOURCE_SECRET_KEYS, carryUnrenderedSecrets, clearStashedPairingCode, deviceNeedsKey, deviceProvisionState, esc, friendlyError, kindHasSecret, pairingCodeFromUrl, readStashedPairingCode, scrubForDisplay, scrubUrls, sessionIdentityChanged, passwordFieldHtml, setPasswordReveal, sourceFieldHtml, splitFields, stashPairingCode, togglePasswordReveal, urlWithoutPairingCode, validateSource, xtreamCredentialsFromPlaylistUrl } from './validate.js';
 import * as secrets from './secrets.js';
 import { CloudCryptoError } from './crypto.js';
 import { hashPin, isValidPin, PIN_LENGTH } from './pin.js';
@@ -52,6 +52,22 @@ if (pendingPairCode) tab = 'devices';
 let profiles = null;
 let currentProfileId = localStorage.getItem('iptvs_profile') || null;
 
+// Whether this account may read submitted diagnostics — i.e. whether it is the
+// app developer's. Tri-state: `null` means "not probed yet", and the probe runs
+// once per signed-in identity inside `render()`.
+//
+// There is no client-side way to know who the developer is, and there must not
+// be: the answer is `support_list_diagnostics` raising `iptvs: not authorised`
+// for everyone else, which is the same check that guards the data. So the tab is
+// shown only once that RPC has actually succeeded — an unauthorised account
+// never sees it, and a backend without the RPC at all behaves identically.
+let supportAvailable = null;
+// Scrubbed log bodies already fetched this session, keyed by code — so Copy
+// after Open costs no second round trip. Declared here, beside the flag the
+// auth listener resets with it, rather than down in the Support section: the
+// listener is registered before that point and must not see it in its TDZ.
+const supportBodies = new Map();
+
 // The unlocked content key auto-locks after idle or on sign-out; re-render so
 // the Security section and any locked secret placeholders update.
 secrets.setLockChangeHandler(() => render());
@@ -72,6 +88,8 @@ supabase.auth.onAuthStateChange((_event, s) => {
   session = s;
   if (!changed) return;
   profiles = null; // reload per session
+  supportAvailable = null; // re-probe: authorisation belongs to the identity
+  supportBodies.clear(); // never carry fetched log bodies across an auth change
   secrets.lock(); // never carry an unlocked CK across an auth change
   render();
 });
@@ -106,6 +124,14 @@ const profileName = (id) =>
 async function render() {
   if (!session) return renderLogin();
   if (profiles === null) await ensureProfiles();
+  // Probe once per identity, here rather than in an auth listener: the listener
+  // is gated on `sessionIdentityChanged` precisely so it does NOT rebuild the
+  // app on every tab switch, and hanging a probe off it would either re-render
+  // behind the user's back or never run on the `getSession()` path.
+  if (supportAvailable === null) {
+    const { error } = await supabase.rpc('support_list_diagnostics', { p_limit: 1 });
+    supportAvailable = !error;
+  }
   app.innerHTML = `
     <header class="bar">
       <span class="brand">
@@ -118,6 +144,7 @@ async function render() {
         ${navButton('security', 'Security')}
         ${navButton('profiles', 'Profiles')}
         ${navButton('devices', 'Devices')}
+        ${supportAvailable ? navButton('support', 'Support') : ''}
         ${navButton('account', 'Account')}
       </nav>
       <select id="profile" class="profile-select" title="Active profile">
@@ -143,6 +170,9 @@ async function render() {
   else if (tab === 'security') renderSecurity();
   else if (tab === 'profiles') renderProfiles();
   else if (tab === 'devices') renderDevices();
+  // Unauthorised (or unprobed) accounts fall through to the default view rather
+  // than rendering an empty Support tab for a tab button that isn't drawn.
+  else if (tab === 'support' && supportAvailable) renderSupport();
   else renderAccount();
 }
 
@@ -1309,6 +1339,164 @@ async function revokeDevice(id) {
   const { error } = await supabase.from('devices').delete().eq('device_uid', id);
   if (error) { logError(error); return toast(friendlyError(error), true); }
   renderDevices();
+}
+
+// --------------------------------------------------------------- support
+//
+// Diagnostics logs submitted from the app, readable only by the developer
+// account (`support_list_diagnostics` raises `iptvs: not authorised` for anyone
+// else — see the `supportAvailable` probe).
+//
+// EVERYTHING on this tab is attacker-controlled. An anonymous install chooses
+// its own app version, platform, channel and install hint, and writes the body
+// itself, so every value is escaped on the way into the markup and the body is
+// rendered as TEXT, never as HTML (see `openDiagnostics`).
+//
+// There is deliberately **no delete control**: the owner has not approved a
+// developer delete path and no such RPC exists. Logs age out on their own
+// `expires_at`. Don't add a button for a function that isn't there.
+
+// Chunk size for painting a long body. A 256 KiB log appended in one go blocks
+// the frame; sliced across animation frames the first screenful paints at once.
+const LOG_CHUNK_CHARS = 16000;
+
+const nextFrame = (fn) =>
+  typeof requestAnimationFrame === 'function' ? requestAnimationFrame(fn) : setTimeout(fn, 0);
+
+/// A body size as KiB, for display. Server-derived but still rendered through
+/// `esc` at the call site like every other column.
+function kibLabel(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '';
+  return `${(n / 1024).toFixed(1)} KiB`;
+}
+
+async function renderSupport() {
+  view().innerHTML = '<p class="muted">Loading…</p>';
+  const { data, error } = await supabase.rpc('support_list_diagnostics', { p_limit: 100 });
+  if (error) {
+    logError(error, 'support');
+    return (view().innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`);
+  }
+  const rows = Array.isArray(data) ? data : [];
+  view().innerHTML = `
+    <p class="muted hint">Diagnostics logs sent from the app, newest first. Each one
+    expires on its own and disappears from this list.</p>
+    <div class="rows">
+      ${rows.length ? rows.map(supportRow).join('') : '<p class="muted">No diagnostics submitted.</p>'}
+    </div>`;
+  for (const el of view().querySelectorAll('[data-open]'))
+    el.onclick = () => openDiagnostics(el.dataset.open, el);
+  for (const el of view().querySelectorAll('[data-copy]'))
+    el.onclick = () => copyDiagnostics(el.dataset.copy);
+}
+
+function supportRow(d) {
+  const meta = [
+    (d.created_at || '').slice(0, 10),
+    d.app_version,
+    d.platform,
+    d.channel,
+    d.is_tv ? 'TV' : '',
+    d.install_hint,
+    kibLabel(d.body_bytes),
+  ]
+    .filter((x) => x != null && String(x) !== '')
+    .map((x) => esc(x))
+    .join(' · ');
+  return `
+    <div class="diag">
+      <div class="row">
+        <div>
+          <div class="title diag-code">${esc(d.code)}</div>
+          <div class="muted">${meta}</div>
+        </div>
+        <div class="actions">
+          <button data-open="${esc(d.code)}" class="ghost">Open</button>
+          <button data-copy="${esc(d.code)}" class="ghost">Copy</button>
+        </div>
+      </div>
+      <div class="diag-body"></div>
+    </div>`;
+}
+
+/// Fetches one log body and returns it scrubbed for display, or null when it is
+/// gone (expired) and `undefined` when the call failed (already reported).
+async function fetchScrubbedBody(code) {
+  const cached = supportBodies.get(code);
+  if (cached !== undefined) return cached;
+  const { data, error } = await supabase.rpc('support_get_diagnostics', { p_code: code });
+  if (error) {
+    logError(error, 'support');
+    toast(friendlyError(error), true);
+    return undefined;
+  }
+  const body = typeof data === 'string' ? data : '';
+  if (!body) return null;
+  const scrubbed = scrubForDisplay(body);
+  supportBodies.set(code, scrubbed);
+  return scrubbed;
+}
+
+async function openDiagnostics(code, btn) {
+  const host = btn.closest('.diag')?.querySelector('.diag-body');
+  if (!host) return;
+  let scrubbed = supportBodies.get(code);
+  if (scrubbed === undefined) {
+    host.innerHTML = '<p class="muted">Loading…</p>';
+    const { data, error } = await supabase.rpc('support_get_diagnostics', { p_code: code });
+    if (error) {
+      logError(error, 'support');
+      host.innerHTML = `<p class="error">${esc(friendlyError(error))}</p>`;
+      return;
+    }
+    const body = typeof data === 'string' ? data : '';
+    if (!body) {
+      // Null/empty is an expiry, not a failure — the row outlives the body.
+      host.innerHTML = '<p class="muted">This log is no longer available.</p>';
+      return;
+    }
+    scrubbed = scrubForDisplay(body);
+    supportBodies.set(code, scrubbed);
+  }
+
+  host.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.className = 'log-body';
+  // Scrubbed, then set as TEXT — innerHTML is never used for a body, and
+  // nothing in it is linkified. The first slice goes in synchronously so the
+  // visible screenful paints on this frame; the rest follows below.
+  pre.textContent = scrubbed.slice(0, LOG_CHUNK_CHARS);
+  host.appendChild(pre);
+  appendBodyChunks(pre, scrubbed, LOG_CHUNK_CHARS);
+}
+
+/// Appends the remainder of `text` to `pre` one slice per animation frame, so a
+/// 256 KiB log does not jank the tab. Stops as soon as the `<pre>` leaves the
+/// document — closing the row or switching tabs must not keep the loop alive.
+function appendBodyChunks(pre, text, from) {
+  let i = from;
+  const step = () => {
+    if (!pre.isConnected || i >= text.length) return;
+    pre.appendChild(document.createTextNode(text.slice(i, i + LOG_CHUNK_CHARS)));
+    i += LOG_CHUNK_CHARS;
+    nextFrame(step);
+  };
+  if (i < text.length) nextFrame(step);
+}
+
+async function copyDiagnostics(code) {
+  const scrubbed = await fetchScrubbedBody(code);
+  if (scrubbed === undefined) return; // already reported
+  if (scrubbed === null) return toast('This log is no longer available.', true);
+  try {
+    // The *scrubbed* text, same as what is on screen — a copy that re-introduced
+    // the escapes would just move the problem into the next window.
+    await navigator.clipboard.writeText(scrubbed);
+    toast('Copied');
+  } catch {
+    toast('Could not copy — open the log and copy it manually.', true);
+  }
 }
 
 // --------------------------------------------------------------- account

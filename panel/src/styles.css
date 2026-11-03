@@ -227,6 +227,39 @@ button.danger-solid { background: var(--danger); color: #fff; }
 .gensaved { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 0; }
 .gensaved input { width: auto; margin-top: 3px; }
 
+/* Support tab: a submitted diagnostics log. The row and its (initially empty)
+   body share one card, so an opened log reads as part of the submission rather
+   than as a floating panel. */
+.diag { background: var(--panel); border-radius: 10px; }
+.diag .row { background: transparent; }
+.diag-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 2px;
+}
+.diag-body:empty { display: none; }
+.diag-body { padding: 0 14px 12px; }
+
+/* The log body itself. Attacker-influenced text, rendered as TEXT in a <pre>
+   (never innerHTML, never linkified) and scrubbed by `scrubForDisplay`.
+   It wraps rather than scrolling sideways so a long credential-shaped token
+   cannot blow out the layout, and is height-bounded with its own scroll so a
+   256 KiB log does not bury the rest of the list. */
+.log-body {
+  margin: 0;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-lo);
+  background: var(--bg);
+  border: 1px solid var(--panel-hi);
+  border-radius: 8px;
+}
+
 .strength { margin: 4px 0 10px; font-size: 0.85rem; color: var(--text-lo); min-height: 1em; }
 .strength.s0, .strength.s1 { color: var(--danger); }
 .strength.s2 { color: #e2a33c; }
