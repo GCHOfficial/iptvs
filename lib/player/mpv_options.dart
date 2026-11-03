@@ -8,6 +8,19 @@ import 'package:media_kit/media_kit.dart';
 /// the fullscreen player and the live preview player so both get the same
 /// resilience.
 ///
+/// **`reconnect_streamed=0`, deliberately.** FFmpeg's in-place reconnect
+/// cannot help a live IPTV stream and actively harms it. Providers answer with
+/// a close-delimited body, so *every* end of stream looks "premature" to
+/// FFmpeg, and it reconnects to the **post-redirect** URL — whose
+/// per-connection token a portal has already spent, so the retry is refused
+/// and the demuxer sits there retrying a URL that can never work again. Where
+/// it does reconnect, on a provider that front-loads a backlog, it splices
+/// *older* content in: the audio timestamps reset and A/V desyncs (reproduced
+/// locally). Live recovery belongs to the app's own watchdog, which
+/// **re-resolves** first and so comes back with a fresh token. `reconnect=1`
+/// stays on: it still covers a connection that drops mid-body with a known
+/// content length, which is the case FFmpeg's retry is actually good at.
+///
 /// `reconnect_at_eof` must stay out of `stream-lavf-o`: an HLS live stream's
 /// manifest is a *finite* HTTP resource, and with that flag ffmpeg (verified on
 /// FFmpeg 8 / mpv 0.41) treats its EOF as an error and reconnects forever, so
@@ -23,7 +36,7 @@ const Map<String, String> kLiveMpvOptions = {
   'cache-on-disk': 'no',
   'demuxer-max-back-bytes': '0',
   'network-timeout': '15',
-  'stream-lavf-o': 'reconnect=1,reconnect_streamed=1,reconnect_delay_max=5',
+  'stream-lavf-o': 'reconnect=1,reconnect_streamed=0,reconnect_delay_max=5',
   'demuxer-lavf-analyzeduration': '3',
   'demuxer-lavf-probesize': '10000000',
   'demuxer-lavf-o':

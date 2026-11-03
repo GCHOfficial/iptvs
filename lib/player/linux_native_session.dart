@@ -218,6 +218,34 @@ class LinuxNativeSession {
     return (seconds * 1000).round();
   }
 
+  /// A **fresh** `time-pos` read, in milliseconds, bypassing the 1 Hz poll
+  /// above.
+  ///
+  /// The in-cache "Go to live" skip (`live_trim.dart`) computes its target
+  /// from the playhead and then checks 300 ms later that the playhead really
+  /// moved — both ends of that measurement against a value that may be a
+  /// second old would make a healthy skip read as a failed one, and could
+  /// aim the seek a second short. Also refreshes the poll's cache, since a
+  /// read this moment is strictly better than the one it holds.
+  Future<int?> readPositionMs() async {
+    final seconds = await _getPropertyNumber('time-pos');
+    if (seconds == null || seconds.isNaN) return null;
+    _lastPositionSeconds = seconds;
+    return (seconds * 1000).round();
+  }
+
+  /// A **fresh** `demuxer-cache-duration` read, in milliseconds, or `-1` when
+  /// mpv won't answer — the same "unknown" convention as
+  /// [lastBufferedAheadMs], whose polled value is the fallback.
+  Future<int> readBufferedAheadMs() async {
+    final seconds = await _getPropertyNumber('demuxer-cache-duration');
+    if (seconds == null || seconds.isNaN || seconds < 0) {
+      return lastBufferedAheadMs;
+    }
+    _lastCacheSeconds = seconds;
+    return (seconds * 1000).round();
+  }
+
   /// Whether the file this session opened with is live — set once in
   /// [_start] and read by [_startPositionPoll] to gate the upstream-EOF
   /// check below (see `upstream_eof.dart`): VOD has no "upstream" to drop.

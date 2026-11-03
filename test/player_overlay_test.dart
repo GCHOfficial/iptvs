@@ -355,6 +355,75 @@ void main() {
       expect(find.text('Go to live'), findsOneWidget);
     });
 
+    /// The [InkWell] behind a control, so its focus node can be driven and
+    /// read directly — these controls deliberately exclude their descendants'
+    /// semantics, so there is no focusable node to query any other way.
+    InkWell inkFor(WidgetTester tester, Finder child) => tester.widget<InkWell>(
+      find.ancestor(of: child, matching: find.byType(InkWell)).first,
+    );
+
+    testWidgets('"Go to live" hands focus to play/pause on the press', (
+      tester,
+    ) async {
+      // It is the one control in the row that removes itself while you are
+      // standing on it. On a D-pad that left no focused node in the overlay
+      // and no arrow key did anything until Back tore the player down
+      // (docs/tv-navigation.md, "A control that removes itself must hand
+      // focus on first").
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        onGoLive: () {},
+      );
+      final goLive = inkFor(tester, find.text('Go to live'));
+      goLive.focusNode!.requestFocus();
+      await tester.pump();
+      expect(goLive.focusNode!.hasFocus, isTrue);
+
+      await tester.tap(find.text('Go to live'));
+      await tester.pump();
+      expect(
+        inkFor(tester, find.byIcon(Icons.play_arrow)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('and again when it vanishes for some other reason', (
+      tester,
+    ) async {
+      // The reconnect watchdog reaching the live edge by itself, or the
+      // in-cache skip verifying a few hundred milliseconds after the press:
+      // `liveSynced` goes true underneath a focused chip.
+      await pumpOverlay(tester, isLive: true, liveSynced: false);
+      inkFor(tester, find.text('Go to live')).focusNode!.requestFocus();
+      await tester.pump();
+
+      await pumpOverlay(tester, isLive: true, liveSynced: true);
+      expect(find.text('Go to live'), findsNothing);
+      expect(
+        inkFor(tester, find.byIcon(Icons.play_arrow)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('a press that never had focus plants none', (tester) async {
+      // A mouse click or a finger must not leave a focus ring on a control
+      // the user never walked to.
+      await pumpOverlay(
+        tester,
+        isLive: true,
+        liveSynced: false,
+        onGoLive: () {},
+      );
+      await tester.tap(find.text('Go to live'));
+      await tester.pump();
+      expect(
+        inkFor(tester, find.byIcon(Icons.play_arrow)).focusNode!.hasFocus,
+        isFalse,
+      );
+    });
+
     testWidgets('the badge stays in the top-bar cluster however long it gets', (
       tester,
     ) async {

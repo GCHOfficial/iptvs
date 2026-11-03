@@ -17,6 +17,7 @@ import '../sources/source.dart';
 import 'channel_owner.dart';
 import 'ios_engine.dart';
 import 'live_latency.dart';
+import 'live_trim.dart';
 import 'live_zap_controller.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
@@ -2874,13 +2875,26 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// `LIVE -1:23` once drifted past [kLiveDriftWarnMs]. Each surface keeps its
   /// own greyed-when-unsynced styling; this is only the label.
   String get _liveDelayBadge =>
-      _measuresLiveLatency ? liveDelayBadgeLabel(_latency.driftMs) : 'LIVE';
+      _measuresLiveLatency ? liveDelayBadgeLabel(_latency.delayMs) : 'LIVE';
 
   /// The Stream information panel's "Live delay" value. Empty means **omit the
   /// row** — VOD, and any surface whose engine Dart doesn't measure.
   String get _liveDelayInfo => _measuresLiveLatency
-      ? liveDelayInfoValue(_latency.driftMs, _latency.aheadMs)
+      ? liveDelayInfoValue(_latency.delayMs, _latency.aheadMs)
       : '';
+
+  /// Whether this surface can actually *remove* delay without a reload — i.e.
+  /// whether offering "Go to live" for a backlog delay would be honest.
+  ///
+  /// Every surface Dart measures is a libmpv one (media_kit is libmpv on every
+  /// platform, and the Linux native window is mpv itself), and mpv can seek
+  /// forward inside its own demuxer cache on a live TS. So here the two
+  /// questions have the same answer — but they are **not** the same question,
+  /// and the natives prove it: ExoPlayer and AVPlayer measure the same delay
+  /// and cannot trim it, so on those surfaces a backlog is shown and not
+  /// offered (a reload would simply re-receive the backlog and the chip would
+  /// be lying). See `live_trim.dart` and docs/player.md "Live latency".
+  bool get _canTrimLiveCache => _measuresLiveLatency;
 
   /// Starts a new live-latency session. [reason] is one of the contract's
   /// `load|reconnect|zap|golive|engine|claim`, and a session that had measured
@@ -2934,6 +2948,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       aheadMs = _bufferedAheadMs();
       playing = _player.state.playing;
     }
+    // `catchingUp` is deliberately never set here: the catch-up speed-up is
+    // ExoPlayer's (docs/player.md "Live catch-up"), and nothing on a Dart-driven
+    // mpv surface ever plays faster than 1x — this surface removes delay by
+    // trimming its cache instead, which reports itself through
+    // [LiveLatencyTracker.credit].
     final crossed = _latency.sample(
       nowMs: now,
       positionMs: positionMs,
@@ -2946,7 +2965,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (_latency.takePeriodicLog(nowMs: now, playing: playing)) {
       _logPlayback(_latency.logLine);
     }
-    _publishLiveLatency(dropSync: crossed);
+    // Two rules, OR'd. Accumulated **drift** drops sync on any surface — that
+    // delay is this app's doing and a reload really does fix it. The
+    // backlog-inclusive **delay** drops it only where the surface can trim,
+    // because offering "Go to live" for a provider backlog it would only
+    // re-receive is a control that lies. Both are level tests rather than
+    // edges, which is safe because `_liveSynced` latches false itself; only
+    // the `behind` *line* is edge-triggered, by the tracker's own latch.
+    final behind =
+        crossed ||
+        _latency.driftMs >= kLiveDriftWarnMs ||
+        (_canTrimLiveCache && _latency.delayMs >= kLiveDriftWarnMs);
+    _publishLiveLatency(dropSync: behind);
   }
 
   /// Applies the latched drift half of [_liveSynced] and pushes a *changed*
@@ -3607,8 +3637,175 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  /// Whether an in-cache skip is off the table right now, whatever the cache
+  /// looks like.
+  ///
+  /// A reconnect (or an EOF that has already decided one is owed) is on its
+  /// way to a fresh connection, and trimming a cache that is about to be
+  /// thrown away buys nothing while risking a seek into the dying demuxer's
+  /// tail. A settling zap has *deliberately stopped* the stream it is about to
+  /// replace. An escalation is mid-swap between two surfaces. And
+  /// `!_latency.baselined` is this route's handoff window: every
+  /// preview→fullscreen claim, engine swap and reload calls
+  /// [_resetLiveLatency], so an un-baselined tracker means no media has moved
+  /// on *this* session yet — there is nothing to trim and `time-pos` describes
+  /// the previous one.
+  bool get _liveTrimSuppressed =>
+      _reconnecting ||
+      _endedPending ||
+      (_zap?.settling ?? false) ||
+      _windowsEscalating ||
+      _linuxEscalating ||
+      !_latency.baselined;
+
+  /// "Go to live" without a reload: step the playhead forward over the
+  /// backlog mpv has already downloaded.
+  ///
+  /// Returns true when the skip was made **and verified**, i.e. the caller
+  /// must not go on to reload. Every other outcome — a surface that can't
+  /// trim, a suppression, an unreadable or too-shallow cache, a seek that
+  /// didn't take — returns false and falls through to the reload path
+  /// unchanged. The fallback is the point: this is an optimisation over a
+  /// control that already worked, and it must never be able to leave the
+  /// press unanswered. See `live_trim.dart` for the arithmetic and the
+  /// evidence.
+  ///
+  /// Never automatic. The watchdog's reconnect and the zap settle keep their
+  /// reloads; only the user's own press reaches here.
+  Future<bool> _tryLiveCacheSkip() async {
+    if (!_canTrimLiveCache || _liveTrimSuppressed) return false;
+    final session = _linuxNativeSession;
+    final platform = _player.platform;
+    if (session == null && platform is! NativePlayer) return false;
+
+    // Read both ends fresh. The 1 Hz latency sample's figures are up to a
+    // second old, and this computes a seek target *and* the distance it must
+    // be seen to move — stale inputs would aim short and then fail their own
+    // verification.
+    Future<int?> readPosition() async => session != null
+        ? session.readPositionMs()
+        : _mpvPropertyMs(platform as NativePlayer, 'time-pos');
+
+    final int? positionMs;
+    final int aheadMs;
+    try {
+      // **A paused stream keeps the reload.** Trimming its cache would answer
+      // "Go to live" by moving the playhead and leaving the picture frozen
+      // where the user paused it, while the reload has always resumed at the
+      // live edge — and the verification below would be reading a playhead
+      // that nothing but the seek itself moves. The native session has no
+      // local mirror of mpv's pause state, so ask mpv, exactly as
+      // [_togglePlayback] does.
+      final playing = session != null
+          ? (await session.getPropertyBool('pause')) == false
+          : _player.state.playing;
+      if (!playing) return false;
+      positionMs = await readPosition();
+      aheadMs = session != null
+          ? await session.readBufferedAheadMs()
+          : await _mpvPropertyMs(
+                  platform as NativePlayer,
+                  'demuxer-cache-duration',
+                ) ??
+                -1;
+    } catch (_) {
+      _logPlayback(liveTrimUnavailableLogLine(LiveTrimUnavailable.unknown));
+      return false;
+    }
+    if (!mounted) return false;
+    if (positionMs == null) {
+      _logPlayback(liveTrimUnavailableLogLine(LiveTrimUnavailable.unknown));
+      return false;
+    }
+
+    final decision = decideLiveTrim(positionMs: positionMs, aheadMs: aheadMs);
+    if (!decision.canSkip) {
+      _logPlayback(liveTrimUnavailableLogLine(decision.unavailable!));
+      return false;
+    }
+
+    // `absolute+keyframes`: a live TS has no index, so an exact seek would ask
+    // the demuxer to decode up to the target. Keyframe-accurate lands on the
+    // IDR at or before it, which is also why the verification below accepts
+    // half the requested jump.
+    final target = (decision.targetPositionMs / 1000).toStringAsFixed(3);
+    try {
+      if (session != null) {
+        await session.command(['seek', target, 'absolute+keyframes']);
+      } else {
+        await (platform as NativePlayer).command([
+          'seek',
+          target,
+          'absolute+keyframes',
+        ]);
+      }
+      await Future<void>.delayed(kTrimVerifyDelay);
+      if (!mounted) return false;
+      final after = await readPosition();
+      if (after == null) {
+        _logPlayback(
+          liveTrimUnavailableLogLine(LiveTrimUnavailable.unverified),
+        );
+        return false;
+      }
+      final jumped = after - positionMs;
+      if (!decision.verifiedBy(jumped)) {
+        _logPlayback(
+          liveTrimUnavailableLogLine(LiveTrimUnavailable.unverified),
+        );
+        return false;
+      }
+      // The **measured** jump, not the requested one: a keyframe seek lands
+      // where it lands, and crediting more than was taken would under-report
+      // the delay for the rest of the session.
+      _latency.credit(jumped);
+      _logPlayback(
+        liveTrimSkipLogLine(jumpedMs: jumped, aheadBeforeMs: aheadMs),
+      );
+    } catch (_) {
+      _logPlayback(liveTrimUnavailableLogLine(LiveTrimUnavailable.unverified));
+      return false;
+    }
+    if (!mounted) return false;
+    _restoreLiveSync();
+    return true;
+  }
+
+  /// Reads an mpv property expected to hold seconds, in milliseconds, or null
+  /// when this build/stream won't answer.
+  Future<int?> _mpvPropertyMs(NativePlayer platform, String property) async {
+    final raw = await platform.getProperty(property);
+    final seconds = double.tryParse(raw.trim());
+    if (seconds == null || seconds.isNaN) return null;
+    return (seconds * 1000).round();
+  }
+
+  /// Puts the stream back "at the live edge" for every surface this route
+  /// draws — the half of go-live that isn't the reload.
+  ///
+  /// The two natives have to be told explicitly: `liveSynced` is what gates
+  /// their "Go to live" chip, and it is a visible state change rather than a
+  /// once-a-second number, so it goes around the 2 Hz control coalescer the
+  /// same way losing sync does in [_publishLiveLatency].
+  void _restoreLiveSync() {
+    if (!mounted) return;
+    setState(() => _liveSynced = true);
+    if (_linuxNativeSession != null) {
+      unawaited(_pushLinuxOverlayState());
+    } else if (_usesWindowsNativeSurface) {
+      unawaited(_syncNativeControlState());
+    }
+  }
+
   Future<void> _goToLive() async {
     if (!_isLive) return;
+    // Try to step over the backlog inside the cache first: on an mpv surface
+    // that is a seek, against a reload's provider round trip, fresh token and
+    // emptied buffer. It answers the press itself when it verifies, and is
+    // otherwise invisible — every failure path falls through to exactly the
+    // reload this control has always done.
+    if (await _tryLiveCacheSkip()) return;
+    if (!mounted) return;
     // An explicit jump to the live edge is the reload a pending EOF was
     // waiting for; letting it stand would reconnect again a tick later.
     _endedPending = false;
