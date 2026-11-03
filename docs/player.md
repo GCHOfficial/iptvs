@@ -3377,6 +3377,25 @@ mpv's `%n%` **raw-length quoting** (UTF-8 byte counts; `MpvOptionEncoding`, pinn
 `MpvOptionEncodingTest`) since the libmpv AAR only exposes string setters. All playback logs go
 through `_logPlayback`, which redacts URLs via `_redactPlayback`.
 
+**Which mpv log lines reach the export** (`shouldRelayMpvLog`): warn and error only.
+FFmpeg-prefixed lines are dropped, because decode and demux complaints flood and fatal failures
+arrive on `stream.error`. **FFmpeg's HTTP transport lines are the exception**:
+`http: Stream ends prematurely …`, `http: Will reconnect at …`, `HTTP error <code>`. They are
+rare, and they are the only record of a connection-level event. Dropping them made an in-place
+reconnect attempt invisible by construction.
+
+What a live TS connection does at its end depends on how the provider ends it:
+- **A premature end** (the connection drops with no terminator): FFmpeg's `reconnect_streamed`
+  re-requests the stream. On a provider that answers with a fresh *backlog*, that splices older
+  content into the stream, and mpv logs `Invalid audio PTS … Reset playback due to audio
+  timestamp reset` plus an A/V desync warning.
+- **A properly terminated response** (a chunked terminator or a declared length): FFmpeg never
+  reconnects, because `reconnect_at_eof` is deliberately off. mpv's `demuxer-cache-state.eof`
+  turns true, the cache plays out, and the app's watchdog reloads at `completed`. That is the
+  "clean EOF, `ahead=0ms`" shape.
+
+Both were reproduced with mpv 0.41 / FFmpeg 9 against a local length-less TS server (2026-11-03).
+
 ## MethodChannel handler ownership
 
 The two inbound native→Dart channels — `iptvs/native_hdr_player` (Android `nativeClosed` with

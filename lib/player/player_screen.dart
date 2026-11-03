@@ -22,6 +22,7 @@ import 'mpv_options.dart';
 import 'player_overlay.dart';
 import 'resource_counters.dart';
 import 'linux_native_session.dart';
+import 'mpv_log_filter.dart';
 import 'upstream_eof.dart';
 import 'zap_command.dart';
 import 'zap_quick_list.dart';
@@ -1054,16 +1055,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     _subs.add(
       _player.stream.log.listen((entry) {
-        if (entry.level != 'warn' && entry.level != 'error') return;
         // ffmpeg-prefixed lines (UDTA/timescale demux noise, alternating
         // `hevc: Could not find ref with POC …` / `Error constructing the frame
         // RPS` decode complaints) are non-fatal diagnostics, amplified by the
         // shared libav av_log callback relaying the native engine's software
         // decode out through media_kit's log stream. Drop them at both warn and
         // error level — genuine fatal playback failures arrive on stream.error,
-        // not here. Keep non-ffmpeg warnings/errors.
-        if (entry.prefix.contains('ffmpeg')) return;
-        _logPlaybackDeduped('${entry.level} ${entry.prefix}: ${entry.text}');
+        // not here — except FFmpeg's HTTP transport lines, the only record of
+        // a reconnect attempt (see [shouldRelayMpvLog]).
+        if (!shouldRelayMpvLog(
+          level: entry.level,
+          prefix: entry.prefix,
+          text: entry.text,
+        )) {
+          return;
+        }
+        _logPlaybackDeduped(
+          '${entry.level} ${entry.prefix}: ${_redactPlayback(entry.text)}',
+        );
       }),
     );
     _subs.add(
