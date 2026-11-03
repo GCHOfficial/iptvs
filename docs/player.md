@@ -1987,6 +1987,13 @@ Closing that needs a patched `media_kit_video`, which would dispose all outputs 
 `onDetachedFromEngine`. The `c533e446…` pin's Android sources are byte-identical to pub 2.0.1,
 so it would be a new fork, which is not taken yet.
 
+**Decision (owner, 2026-11-03): no fork or vendored copy for now.** Re-check Play issue
+`379c714f…` on the first version code that carries this fix, about two weeks after it ships. If it
+recurs, fork `media-kit` at the pinned commit with that patch (pin `media_kit` and
+`media_kit_video` to the fork), and file it upstream. If it doesn't, there's nothing to maintain.
+Vendoring the package into the repo was rejected: it means thousands of lines across every
+platform to scan and update, for a ~15-line change.
+
 ### Three things that made the TV handoff look like a reconnect
 
 Both are Android-TV-shaped for the same structural reason: **the preview→fullscreen handoff only

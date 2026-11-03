@@ -467,3 +467,32 @@ it to `imageCacheSize` and threw while converting infinity to an integer.
 The card now derives finite cache dimensions from its layout constraints, and
 the shared helper defensively handles non-finite/invalid metrics. Peak RSS was
 not captured before the profile process exited and remains pending.
+
+## Play vitals clusters recorded as not app-fixable
+
+Recorded so they aren't re-investigated each round. Source: the Play Developer Reporting API
+(`errorIssues:search` / `errorReports:search`), 5 Sep – 2 Nov 2026. Play version codes are the
+Google Play workflow's run number (vc10 = v0.1.61, vc12 = v0.1.70).
+
+- **TCL G10_4K_GB_NF** (Realtek RTD2875P, 2 GB, armeabi-v7a, Android 12; the owner believes it
+  is a tablet). Issues `8a71db94…`, `9f7864ed…`, `a7eece6f…`, `abf2077e…`, `bf7bf02c…`: 5 crashes,
+  one user each, vc12.
+  - Three are `scudo::reportHeaderCorruption` aborts: the allocator metadata before a live chunk
+    was overwritten, i.e. a stray write, not a double free.
+  - The other two are SIGSEGVs in libflutter and in ART's concurrent-copying GC, the latter two
+    in the same process in the same hour.
+  - So the victims span three separate memory managers on one device. That reads as hardware or
+    a vendor driver, with the app as victim.
+  - The Skia frames (`ParagraphImpl`, `TArray<…>::~TArray`) are Impeller's text layout, not a Skia
+    backend: Flutter 3.47 has none on Android, and identical-code folding makes the printed
+    `TArray` type arbitrary.
+  - There is no on-device instrumentation path, since HWASan and MTE are arm64-only. **Owner
+    decision 2026-11-03: leave as is.**
+- **DNA Hubi Soundbox** (Broadcom BCM72180), `0a0f1ee6…`: `std::terminate` thrown out of
+  `/vendor/lib/libbcmvulkan_icd.so` (`vkCreateImageView`) while Impeller allocates a texture.
+  It's a vendor Vulkan driver; the only lever is an app-wide `ImpellerBackend=opengles`, which is
+  not worth it for one report.
+- **TCL G07**, `311b2206…` (vc10): `HandleUsingDestroyedMutex` inside `libGLES_mali.so`, with no
+  app frames.
+- **System binder stalls:** `popSystemNavigator` → `finishActivity` (`19e2673e…`) and
+  `activityTopResumedStateLost` (`5e3d58fb…`). Main is waiting on system_server.
