@@ -24,6 +24,56 @@ import '../player/player_screen.dart'
 import '../player/resource_counters.dart';
 import '../sources/source.dart';
 
+/// Which surface the live preview panel should draw for the current state.
+enum PreviewSurface {
+  /// The Android shared-engine `SurfaceView` platform view (`_NativePreviewView`).
+  native,
+
+  /// The embedded media_kit texture (`Video`), the only path off Android.
+  embedded,
+
+  /// Nothing renderable yet — draw a plain black fill.
+  none,
+}
+
+/// The rule that decides it, pure so it can be pinned without libmpv.
+///
+/// **The embedded branch is not free, and it is not reversible.** Building it
+/// reads `LivePreviewController.controller`, and *reading* that getter is what
+/// constructs the media_kit `VideoController` — which on Android allocates a
+/// Flutter `SurfaceProducer`, i.e. (below API 29) a `SurfaceTexture`
+/// registered with the engine. media_kit's `VideoController` has no `dispose()`
+/// of its own: the only thing that ever releases that producer is the owning
+/// `Player.dispose()` draining `player.platform.release`. One that is never
+/// released reaches the GC finalizer, and the engine's
+/// `SurfaceTextureSurfaceProducer.finalize` then calls `SurfaceTexture.release()`
+/// **inline on the FinalizerDaemon thread** — unlike `SurfaceTextureRegistryEntry`,
+/// which deliberately posts that work to the platform thread. That is the
+/// `ConsumerBase::onLastStrongRef` SIGSEGV seen on API-28 TV boxes.
+///
+/// So a texture must never be materialised speculatively, and on Android's
+/// happy path it must never be materialised *at all* — the native shared
+/// engine owns every preview there, and media_kit is only the per-channel
+/// fallback for video ExoPlayer cannot decode.
+///
+/// [hasEmbeddedPlayer] is the gate that makes that structural rather than
+/// incidental: every path that legitimately shows the embedded preview calls
+/// `player.open(...)` — materialising the player — *before* it publishes
+/// `stream`, so a true embedded preview always has one. A state with a stream
+/// but no embedded player is therefore always a transient: the native path
+/// mid-teardown, or the `unsupported` fallback before its `open` lands. Both
+/// used to build the embedded branch for a frame or two and leak a producer
+/// for a surface that never showed a frame.
+PreviewSurface previewSurfaceFor({
+  required bool nativeActive,
+  required bool hasEmbeddedPlayer,
+  required bool hasStream,
+}) {
+  if (nativeActive) return PreviewSurface.native;
+  if (!hasStream || !hasEmbeddedPlayer) return PreviewSurface.none;
+  return PreviewSurface.embedded;
+}
+
 /// Whether a `completed: true` from the embedded preview engine is *this*
 /// controller's to recover from.
 ///
@@ -155,6 +205,10 @@ class LivePreviewController extends ChangeNotifier {
   /// True while the native shared engine (not media_kit) owns the preview.
   bool nativeActive = false;
 
+  /// True while [stop] waits for the native engine to stop. Native events
+  /// arriving in that window belong to the stream being torn down.
+  bool _stoppingNative = false;
+
   /// Current mute state (native volume isn't readable back, so track it here).
   bool muted = true;
 
@@ -173,12 +227,22 @@ class LivePreviewController extends ChangeNotifier {
   // setProperty). On a weak TV box the default `auto-safe` silently drops to
   // software decode, playing 4K HEVC in slow-motion at ~100% CPU. Android-only;
   // other platforms keep media_kit's default.
-  VideoController get controller => _controller ??= VideoController(
-    player,
-    configuration: Platform.isAndroid
-        ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
-        : const VideoControllerConfiguration(),
-  );
+  ///
+  /// **Reading this constructs it**, and on Android that means a Flutter
+  /// `SurfaceProducer` whose only release path is the owning player's
+  /// `dispose()` — so nothing may read it speculatively. [previewSurfaceFor]
+  /// is the gate; see its doc for the API-28 finalizer crash behind the rule.
+  VideoController get controller => _controller ??= _createController();
+
+  VideoController _createController() {
+    ResourceCounters.incMediaKitVideoControllers();
+    return VideoController(
+      player,
+      configuration: Platform.isAndroid
+          ? const VideoControllerConfiguration(hwdec: kAndroidPreviewHwdec)
+          : const VideoControllerConfiguration(),
+    );
+  }
 
   StreamSubscription<VideoParams>? _hwdecProbe;
   bool _loggedHwdec = false;
@@ -592,7 +656,7 @@ class LivePreviewController extends ChangeNotifier {
   Future<dynamic> _handleNativeCall(MethodCall call) async {
     if (_disposed || call.method != 'previewEvent') return null;
     final args = call.arguments as Map?;
-    if (!nativeActive) return null;
+    if (!nativeActive || _stoppingNative) return null;
     switch (args?['event']) {
       case 'unsupported':
         // The native engine can't decode this channel's video — remember that
@@ -680,10 +744,42 @@ class LivePreviewController extends ChangeNotifier {
     // trigger (media_kit's `stop()` reports `completed: false`, but clear the
     // target anyway so a straggling event can't act on it).
     _activeChannel = null;
+    // **The surface fields never disagree across the native stop.** This used
+    // to flip `nativeActive` false on its own and leave `stream` standing
+    // across the `_stopNative()` round trip, so for that whole window the
+    // panel's gate (`stream != null && !loading && error == null`) still said
+    // "draw the video" while `nativeActive` already said "not the native one".
+    // Any rebuild in that window took the embedded branch and *constructed* a
+    // media_kit `VideoController` — a Flutter SurfaceProducer nothing here
+    // ever releases, the API-28 finalizer SIGSEGV (see [previewSurfaceFor]).
+    //
+    // So `nativeActive` now stays true until the engine has actually stopped,
+    // and everything is cleared together afterwards. Keeping it true is also
+    // what keeps the native `SurfaceView` mounted until then: clearing first
+    // would unmount it while the shared engine is still decoding into it, and
+    // that view's `surfaceDestroyed` is the blocking main-thread detach behind
+    // a shipped ANR (docs/player.md). Native events that land mid-stop are
+    // not ours to act on — that was the other job of the early flip, now
+    // `_stoppingNative`'s.
+    final requestId = _requestId;
     if (nativeActive) {
-      nativeActive = false;
-      await _stopNative();
+      _stoppingNative = true;
+      try {
+        await _stopNative();
+      } finally {
+        _stoppingNative = false;
+      }
+      // A newer start() took over while the engine stopped: its state is its
+      // own, and so is the audio session it is holding.
+      if (requestId != _requestId) return;
     }
+    _set(() {
+      nativeActive = false;
+      loading = false;
+      error = null;
+      stream = null;
+      if (clearSelection) channelId = null;
+    });
     try {
       if (_player != null) await _player!.stop();
     } catch (_) {}
@@ -692,13 +788,6 @@ class LivePreviewController extends ChangeNotifier {
     // lifecycle observer in `channel_list_screen.dart` calls `stop()`, so the
     // pause behaviour rides here rather than in a second observer.
     await _audioSession.release();
-    if (_disposed) return;
-    _set(() {
-      loading = false;
-      error = null;
-      stream = null;
-      if (clearSelection) channelId = null;
-    });
   }
 
   /// Pause/resume the preview player around fullscreen playback (no-ops if the
@@ -747,6 +836,9 @@ class LivePreviewController extends ChangeNotifier {
   /// The next [start] call builds a fresh one.
   Future<void> discardPlayer() async {
     final player = _player;
+    // The video output rides this player's `release` list, so it is released
+    // by its `dispose()` below and by nothing else — count it down there.
+    final hadController = _controller != null;
     if (nativeActive) {
       nativeActive = false;
       unawaited(_stopNative());
@@ -769,6 +861,7 @@ class LivePreviewController extends ChangeNotifier {
     if (player != null) {
       await player.dispose();
       ResourceCounters.decMediaKitPlayers();
+      if (hadController) ResourceCounters.decMediaKitVideoControllers();
     }
   }
 
@@ -793,9 +886,16 @@ class LivePreviewController extends ChangeNotifier {
     unawaited(_audioSession.release());
     _activeChannel = null;
     final player = _player;
+    final hadController = _controller != null;
     if (player != null) {
       unawaited(
-        player.dispose().then((_) => ResourceCounters.decMediaKitPlayers()),
+        player.dispose().then((_) {
+          ResourceCounters.decMediaKitPlayers();
+          // media_kit releases the Android `VideoOutput` (and with it the
+          // Flutter SurfaceProducer) from this player's `release` list, so
+          // this is the instant the texture is really gone.
+          if (hadController) ResourceCounters.decMediaKitVideoControllers();
+        }),
       );
     }
     super.dispose();
@@ -803,9 +903,11 @@ class LivePreviewController extends ChangeNotifier {
 }
 
 /// Renders the live preview's video: the native shared-engine platform view
-/// when that path is active, else the embedded media_kit texture. Build this
-/// only once the preview has loaded ([LivePreviewController.stream] != null) so
-/// the media_kit player isn't spun up while the native path is still deciding.
+/// when that path is active, the embedded media_kit texture when there really
+/// is an embedded player behind it, and a black fill otherwise. The choice is
+/// [previewSurfaceFor] and nothing else — read its doc before relaxing any of
+/// it, because the embedded branch allocates a Flutter SurfaceProducer that
+/// only the owning `Player.dispose()` can ever release.
 class PreviewVideo extends StatelessWidget {
   final LivePreviewController preview;
 
@@ -813,10 +915,20 @@ class PreviewVideo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (preview.nativeActive) {
-      return const _NativePreviewView();
+    switch (previewSurfaceFor(
+      nativeActive: preview.nativeActive,
+      hasEmbeddedPlayer: preview.hasEmbeddedPlayer,
+      hasStream: preview.stream != null,
+    )) {
+      case PreviewSurface.native:
+        return const _NativePreviewView();
+      case PreviewSurface.embedded:
+        return Video(controller: preview.controller, controls: NoVideoControls);
+      case PreviewSurface.none:
+        // Deliberately not a `Video`: reading `preview.controller` is what
+        // allocates the texture, and there is nothing to put in it yet.
+        return const ColoredBox(color: Color(0xFF000000));
     }
-    return Video(controller: preview.controller, controls: NoVideoControls);
   }
 }
 

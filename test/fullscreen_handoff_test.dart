@@ -18,6 +18,8 @@ import 'package:iptvs/screens/live_preview_controller.dart';
 /// A source that starts SDR and turns out HDR still escalates later, inside
 /// `PlayerScreen._maybeEscalateLinuxNative`.
 void main() {
+  _previewSurfaceTests();
+
   group('Linux native discovery gate', () {
     test('probes only for an adoptable same-channel HDR preview', () {
       expect(
@@ -796,6 +798,81 @@ void main() {
       expect(
         act(zapped: true, resumePreviewOnReturn: false),
         PreviewReturnAction.stop,
+      );
+    });
+  });
+}
+
+/// `previewSurfaceFor` — which surface the live preview panel draws, and why
+/// the "nothing yet" answer has to exist.
+///
+/// Play issue `379c714f3cff36eaead253ee549210ab` (API-28 TV boxes: MiBox S,
+/// Mi TV Stick, KSTB6020) is a SIGSEGV on the **FinalizerDaemon**:
+/// `SurfaceTextureSurfaceProducer.finalize` → `release` →
+/// `SurfaceTextureRegistryEntry.release` → `SurfaceTextureWrapper.release` →
+/// `SurfaceTexture.release` → `ConsumerBase::onLastStrongRef`. Below API 29
+/// Flutter's `SurfaceProducer` is the `SurfaceTexture`-backed one, and its
+/// `finalize` tears the texture down **inline on the finalizer thread** —
+/// unlike `SurfaceTextureRegistryEntry.finalize`, which deliberately only
+/// posts that work to the platform thread. The finalizer running at all means
+/// a producer reached GC unreleased.
+///
+/// The only producer this app can create on Android is media_kit's
+/// `VideoOutput`, allocated when a Dart `VideoController` is constructed — and
+/// `VideoController` has no `dispose()`: the owning `Player.dispose()` draining
+/// `player.platform.release` is the single release path. So a controller built
+/// for a surface that never renders is a texture nothing is in a hurry to free.
+///
+/// These cases pin the rule that keeps one from being built speculatively.
+void _previewSurfaceTests() {
+  group('previewSurfaceFor', () {
+    PreviewSurface surface({
+      bool nativeActive = false,
+      bool hasEmbeddedPlayer = true,
+      bool hasStream = true,
+    }) => previewSurfaceFor(
+      nativeActive: nativeActive,
+      hasEmbeddedPlayer: hasEmbeddedPlayer,
+      hasStream: hasStream,
+    );
+
+    test('the Android shared engine draws the platform view', () {
+      expect(surface(nativeActive: true), PreviewSurface.native);
+      // …and never costs a texture, even if one happens to exist from an
+      // earlier per-channel media_kit fallback.
+      expect(
+        surface(nativeActive: true, hasEmbeddedPlayer: false),
+        PreviewSurface.native,
+      );
+    });
+
+    test('a real embedded preview draws the media_kit texture', () {
+      expect(surface(), PreviewSurface.embedded);
+    });
+
+    test(
+      'a stream with no embedded player never materialises a texture',
+      () {
+        // The two transients this exists for, both Android:
+        //  * `stop()` mid-teardown — `nativeActive` already false while the
+        //    `_stopNative()` round trip is still in flight;
+        //  * the `unsupported` event — `nativeActive` cleared before the
+        //    fallback's `player.open(...)` has created the player.
+        // Every path that legitimately shows the embedded preview opens the
+        // player *before* publishing `stream`, so this state is always a
+        // transient and must draw nothing rather than allocate a producer.
+        expect(
+          surface(hasEmbeddedPlayer: false),
+          PreviewSurface.none,
+        );
+      },
+    );
+
+    test('no stream draws nothing', () {
+      expect(surface(hasStream: false), PreviewSurface.none);
+      expect(
+        surface(hasStream: false, hasEmbeddedPlayer: false),
+        PreviewSurface.none,
       );
     });
   });

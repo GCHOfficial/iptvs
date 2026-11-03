@@ -29,6 +29,7 @@ class ResourceCounters {
   );
 
   static int mediaKitPlayers = 0;
+  static int mediaKitVideoControllers = 0;
   static int reconnectTimers = 0;
   static int channelOwners = 0;
   static int linuxNativeSessions = 0;
@@ -39,6 +40,27 @@ class ResourceCounters {
 
   static void decMediaKitPlayers() {
     if (kDebugMode) mediaKitPlayers--;
+  }
+
+  /// A media_kit `VideoController` this app constructed.
+  ///
+  /// Counted separately from [mediaKitPlayers] because it is a *platform*
+  /// resource with no `dispose()` of its own: on Android it allocates a
+  /// Flutter `SurfaceProducer` — below API 29 a `SurfaceTexture`-backed one —
+  /// and the only thing that ever releases it is the owning `Player.dispose()`
+  /// draining `player.platform.release` into media_kit's
+  /// `VideoOutputManager.Dispose`. A controller still counted after a cycle is
+  /// therefore a leaked SurfaceTexture, which is what the GC finalizer later
+  /// tears down off the platform thread (the API-28 `ConsumerBase` SIGSEGV).
+  /// So the decrement belongs where that release really happens — in the
+  /// `.then` of the owning player's `dispose()` — never beside the widget that
+  /// stopped rendering it.
+  static void incMediaKitVideoControllers() {
+    if (kDebugMode) mediaKitVideoControllers++;
+  }
+
+  static void decMediaKitVideoControllers() {
+    if (kDebugMode) mediaKitVideoControllers--;
   }
 
   static void incReconnectTimers() {
@@ -73,6 +95,7 @@ class ResourceCounters {
     if (!kDebugMode) return const {};
     final result = <String, int>{
       'mediaKitPlayers': mediaKitPlayers,
+      'mediaKitVideoControllers': mediaKitVideoControllers,
       'reconnectTimers': reconnectTimers,
       'channelOwners': channelOwners,
       'linuxNativeSessions': linuxNativeSessions,
@@ -101,6 +124,7 @@ class ResourceCounters {
   @visibleForTesting
   static void resetForTest() {
     mediaKitPlayers = 0;
+    mediaKitVideoControllers = 0;
     reconnectTimers = 0;
     channelOwners = 0;
     linuxNativeSessions = 0;
