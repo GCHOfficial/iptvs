@@ -55,6 +55,14 @@ environment variables are present, and the release workflow verifies the resulti
 PR CI also runs one release build signed with that public debug key — solely so release lint
 (`lintVital*`, which debug builds skip; it broke v0.1.44) gates PRs; the APK is deleted, never uploaded;
 see `docs/android-signing.md` before touching package identity or signing.
+A **separate, non-required** workflow ([`android-tv-emulator.yml`](.github/workflows/android-tv-emulator.yml))
+drives the TV-only Android flows on KVM-accelerated emulators (`tool/android_tv_emulator_check.sh`
+over `adb`: D-pad first run → DemoSource → preview → shared-engine fullscreen → Back ladder →
+"Go to live" → zap), on PRs touching `android/**`/`lib/player/**`/`lib/screens/**`, plus dispatch
+and a weekly cron — **there is no x86_64 Android TV image below API 36**, so API 28 (the
+SurfaceTexture-finalizer level) runs on `google_apis;x86_64` with a TV screen profile and API 36 on
+the real `android-tv` image; an emulator validates input/lifecycle, never decoders, HDR or
+passthrough (docs/validation-baseline.md "Android TV emulator CI").
 Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
 exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
 running AppImage via a detached helper. See `docs/updates.md` before changing release assets.

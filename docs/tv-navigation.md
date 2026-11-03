@@ -75,7 +75,12 @@ navigation code.
   D-pad with it — no focused node was left in the overlay, so no arrow key did anything until Back
   tore the player down (docs/player.md, "hands focus to play/pause before it disappears"). Any new
   *contextual* control — one whose visibility depends on state the control itself changes — owes the
-  same treatment.
+  same treatment. On Android this is the one navigation rule with an automated gate: the TV
+  emulator job (`tool/android_tv_emulator_check.sh`) pauses a live stream past the 30 s drift
+  threshold, walks the control row to the chip and asserts the overlay's debug-only
+  `iptvs.focus: overlay focus=Play/Pause` line follows the press — the hand-back has no other
+  observable effect, so nothing else could catch its regression off a real remote
+  (docs/validation-baseline.md "Android TV emulator CI").
 - **"Go to live" now also appears when the stream has drifted, not only after a pause.** It is
   still gated on `!liveSynced`, but `liveSynced` now goes false at `kLiveDriftWarnMs` (30 s) of
   accumulated drift too, and since wave 2 at 30 s of **delay** (backlog included) on surfaces that can trim it, i.e. mpv (docs/player.md "Live latency"). The gate is **latched**: only a reset
