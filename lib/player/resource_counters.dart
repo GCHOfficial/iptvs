@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 /// Debug-only, in-process counters for player-lifecycle resources: media_kit
 /// [Player] instances, the live-reconnect watchdog [Timer] in
 /// `player_screen.dart`, [ChannelHandlerOwner] claims, and the Linux native
-/// mpv IPC sessions (`LinuxNativeSession`). Every increment/decrement helper
+/// mpv IPC sessions (`LinuxNativeSession`) — plus one resource that is not the
+/// player's but obeys the same alarm, the LAN diagnostics share's `HttpServer`
+/// (`diagnosticsShareServers`). Every increment/decrement helper
 /// is a no-op outside [kDebugMode], so this never touches release behavior.
 ///
 /// [snapshot] merges these Dart-side counts with the native debug counters
@@ -33,6 +35,7 @@ class ResourceCounters {
   static int reconnectTimers = 0;
   static int channelOwners = 0;
   static int linuxNativeSessions = 0;
+  static int diagnosticsShareServers = 0;
 
   static void incMediaKitPlayers() {
     if (kDebugMode) mediaKitPlayers++;
@@ -87,6 +90,23 @@ class ResourceCounters {
     if (kDebugMode) linuxNativeSessions--;
   }
 
+  /// The LAN diagnostics share's `HttpServer` (`DiagnosticsShareServer`).
+  ///
+  /// Not a player resource, but it belongs to exactly the same alarm: it is a
+  /// listening socket serving the diagnostics log to the local network, so a
+  /// count that fails to settle at zero is a share the user believes they
+  /// closed and which is in fact still answering. Incremented only on a
+  /// *successful* bind and decremented once in `stop()`, behind a flag — a bind
+  /// that threw must not decrement, and `stop()` races its own expiry timer by
+  /// design, so it must not decrement twice.
+  static void incDiagnosticsShareServers() {
+    if (kDebugMode) diagnosticsShareServers++;
+  }
+
+  static void decDiagnosticsShareServers() {
+    if (kDebugMode) diagnosticsShareServers--;
+  }
+
   /// Snapshot of Dart-side counters merged with the native `debugCounters`
   /// map (Android/Windows/iOS only). Empty in release; never throws — any native
   /// failure (missing method, platform exception, wrong shape) just omits the
@@ -99,6 +119,7 @@ class ResourceCounters {
       'reconnectTimers': reconnectTimers,
       'channelOwners': channelOwners,
       'linuxNativeSessions': linuxNativeSessions,
+      'diagnosticsShareServers': diagnosticsShareServers,
     };
     if (Platform.isAndroid || Platform.isWindows || Platform.isIOS) {
       try {
@@ -128,5 +149,6 @@ class ResourceCounters {
     reconnectTimers = 0;
     channelOwners = 0;
     linuxNativeSessions = 0;
+    diagnosticsShareServers = 0;
   }
 }

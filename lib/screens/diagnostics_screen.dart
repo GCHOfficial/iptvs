@@ -4,9 +4,12 @@ import 'package:flutter/services.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/app_database.dart';
+import '../data/diagnostics_upload.dart';
 import '../data/net.dart';
 import '../player/resource_counters.dart';
 import '../theme.dart';
+import '../widgets/app_bar_action.dart';
+import 'send_diagnostics_screen.dart';
 
 class DiagnosticsScreen extends StatelessWidget {
   final AppDatabase? database;
@@ -26,11 +29,34 @@ class DiagnosticsScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Diagnostics'),
+        // `AppBarAction`, not bare `IconButton`s (CLAUDE.md): on the wide
+        // layout — which is every television — these name themselves, because
+        // a remote cannot hover a tooltip and "a clipboard" and "a bin" are
+        // not obvious choices to make about your own diagnostics.
         actions: [
-          IconButton(
+          AppBarAction(
+            // Send is the reason most people reach this screen, but it is
+            // *not* the autofocus target: it leads to a route whose own
+            // default focus is Cancel, and landing a D-pad on "send my log"
+            // is the wrong first impression of a diagnostics screen.
+            label: 'Send',
+            tooltip: 'Send diagnostics to the developer',
+            icon: Icons.send_outlined,
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                // The snapshot is taken HERE, at the moment the user asks to
+                // send, and carried into the route — so the log shown beside
+                // the consent text is byte-for-byte the log that goes.
+                builder: (_) =>
+                    SendDiagnosticsScreen(snapshot: diagnosticsSnapshot()),
+              ),
+            ),
+          ),
+          AppBarAction(
             autofocus: true,
-            tooltip: 'Copy',
-            icon: const Icon(Icons.copy_outlined),
+            label: 'Copy',
+            tooltip: 'Copy the whole log to the clipboard',
+            icon: Icons.copy_outlined,
             onPressed: () {
               Clipboard.setData(ClipboardData(text: log.asText()));
               ScaffoldMessenger.of(context).showSnackBar(
@@ -38,9 +64,10 @@ class DiagnosticsScreen extends StatelessWidget {
               );
             },
           ),
-          IconButton(
-            tooltip: 'Clear',
-            icon: const Icon(Icons.delete_outline),
+          AppBarAction(
+            label: 'Clear',
+            tooltip: 'Discard the log on this device',
+            icon: Icons.delete_outline,
             onPressed: log.clear,
           ),
           const SizedBox(width: 4),

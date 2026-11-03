@@ -1,9 +1,19 @@
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 
 import 'net.dart';
+
+/// The byte ceiling the cloud `submit_diagnostics` RPC enforces server-side
+/// (`assert_diagnostics_valid`, 256 KiB).
+///
+/// The client trims to fit rather than letting the server reject: a user who
+/// has just read a consent paragraph and pressed Send should not be told their
+/// log is the wrong shape — and the oldest entries are the least likely to be
+/// about the problem they are reporting.
+const int kDiagnosticsMaxUploadBytes = 256 * 1024;
 
 class DiagnosticsEntry {
   final DateTime time;
@@ -105,5 +115,98 @@ class DiagnosticsLog extends ChangeNotifier {
       ),
     ];
     return lines.join('\n');
+  }
+
+  /// [asText], trimmed **oldest-first** to fit [maxBytes] of UTF-8.
+  ///
+  /// This is what leaves the device — uploaded to the developer, or served over
+  /// the LAN — and it is a *snapshot*: the caller takes it once, when the user
+  /// presses Send, and both paths serve that exact string. The text the user
+  /// agreed to send is therefore byte-for-byte the text that goes, which is the
+  /// only version of "shows you what it will send" that is actually true of a
+  /// log still being appended to by a running player.
+  ///
+  /// Oldest-first because the newest entries are the ones describing the
+  /// problem being reported; a report trimmed from the other end would arrive
+  /// with the evidence missing. When anything is dropped the result says so, in
+  /// the header rather than at the end: a reader scans a log from the top, and
+  /// "there is a hole here" has to arrive before the first surviving line, not
+  /// after the last.
+  ///
+  /// NUL is stripped. Postgres `text` cannot hold U+0000 at all, so a log that
+  /// somehow carried one would be refused by the driver with an error that is
+  /// *not* an `iptvs: ` message — i.e. the one failure the UI could not explain.
+  ///
+  /// Pure with respect to the log: it reads [entries] and mutates nothing.
+  String asTextBounded(int maxBytes) {
+    final header = <String>[
+      'iptvs diagnostics exported ${DateTime.now().toIso8601String()}',
+      'entries=${_entries.length}',
+    ];
+    final lines = _entries
+        .map(
+          (entry) =>
+              '${entry.time.toIso8601String()} [${entry.scope}] '
+              '${redactText(entry.message)}',
+        )
+        .map(_stripNul)
+        .toList(growable: false);
+
+    final full = [...header, '', ...lines].join('\n');
+    if (_utf8Length(full) <= maxBytes) return full;
+
+    // Keep the longest *suffix* of entries that fits, accounting for the note
+    // the trim itself costs. Accumulated newest-backwards rather than
+    // re-encoding a candidate string per step: the log is bounded at 800
+    // entries, but re-joining 800 times to measure is work for nothing.
+    var kept = 0;
+    var used = 0;
+    for (var i = lines.length - 1; i >= 0; i--) {
+      final cost = _utf8Length(lines[i]) + 1; // + the '\n' that joins it
+      // The note's size depends on the count it prints, so it is re-measured
+      // on every candidate rather than reserved once.
+      final note = _trimNote(lines.length - kept - 1);
+      // The blank element is the separator line between the header block and
+      // the entries; joining it contributes its own '\n' and nothing else.
+      final overhead = _utf8Length([...header, note, ''].join('\n'));
+      if (overhead + used + cost > maxBytes) break;
+      used += cost;
+      kept++;
+    }
+
+    final dropped = lines.length - kept;
+    final out = [
+      ...header,
+      _trimNote(dropped),
+      '',
+      ...lines.sublist(dropped),
+    ].join('\n');
+    // A ceiling small enough that even the header does not fit is not a real
+    // configuration, but it must not return something *over* the limit — the
+    // server would reject it and the user would see a failure with no cause.
+    // Cut on a UTF-8 boundary rather than a code-unit one.
+    if (_utf8Length(out) <= maxBytes) return out;
+    return _truncateUtf8(out, maxBytes);
+  }
+
+  static String _trimNote(int dropped) => '($dropped older entries trimmed '
+      'to fit)';
+
+  static String _stripNul(String value) =>
+      value.contains('\u0000') ? value.replaceAll('\u0000', '') : value;
+
+  static int _utf8Length(String value) => utf8.encode(value).length;
+
+  static String _truncateUtf8(String value, int maxBytes) {
+    if (maxBytes <= 0) return '';
+    final bytes = utf8.encode(value);
+    if (bytes.length <= maxBytes) return value;
+    var end = maxBytes;
+    // Walk back off a continuation byte (10xxxxxx) so the cut never lands
+    // inside a multi-byte sequence and produces invalid UTF-8.
+    while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+      end--;
+    }
+    return utf8.decode(bytes.sublist(0, end), allowMalformed: true);
   }
 }
