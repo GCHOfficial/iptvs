@@ -6,7 +6,9 @@ import { defineConfig, loadEnv } from 'vite';
 // via PANEL_BASE). Both stay live — shipped app builds carry the GitHub Pages
 // URL in `CloudConfig.panelUrl`, and installs are arbitrarily old.
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
+  // `VITE_` only: the config reads nothing else, and an empty prefix would load
+  // every variable in the build environment (CI secrets included) into it.
+  const env = loadEnv(mode, process.cwd(), 'VITE_');
   const supabaseUrl = (env.VITE_SUPABASE_URL || '').replace(/\/+$/, '');
   // The panel only ever connects to itself and to the project's Supabase origin
   // (PostgREST/auth over https; realtime wss is included for completeness even

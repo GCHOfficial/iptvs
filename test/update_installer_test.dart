@@ -27,6 +27,41 @@ void main() {
     );
   });
 
+  group('artifactDownloadPath', () {
+    ReleaseArtifact named(String filename) => ReleaseArtifact(
+      platform: 'android',
+      filename: filename,
+      byteSize: 5,
+      sha256: _artifact.sha256,
+    );
+
+    test('places a manifest-shaped filename directly in the temp dir', () {
+      expect(
+        artifactDownloadPath('/tmp/x', _artifact),
+        '/tmp/x/iptvs-1.4.2-android.apk',
+      );
+    });
+
+    for (final unsafe in [
+      '',
+      '.',
+      '..',
+      '../evil.apk',
+      'a/../../evil.apk',
+      'sub/evil.apk',
+      r'..\evil.apk',
+      '/etc/evil.apk',
+      '.hidden.apk',
+    ]) {
+      test('refuses "$unsafe"', () {
+        expect(
+          () => artifactDownloadPath('/tmp/x', named(unsafe)),
+          throwsFormatException,
+        );
+      });
+    }
+  });
+
   test('rejects a truncated or extended artifact', () {
     for (final size in [4, 6]) {
       expect(
