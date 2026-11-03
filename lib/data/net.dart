@@ -479,6 +479,22 @@ bool _isGzip(HttpClientResponse response, Uint8List bytes) {
       isGzipBytes(bytes);
 }
 
+/// `"gzip"` or `"identity"`, read off the response's own declared
+/// `Content-Encoding` — for diagnostics lines that want to say whether a
+/// download arrived compressed over the wire (e.g. the per-guide EPG fetch
+/// logs), as distinct from [_isGzip]'s declared-or-sniffed check that gates
+/// actual decoding. Never anything but these two labels: a `deflate`/`br`
+/// response isn't decoded by this app regardless, so it isn't worth a third
+/// label here.
+String contentEncodingLabel(HttpClientResponse response) {
+  final encoding = response.headers
+      .value(HttpHeaders.contentEncodingHeader)
+      ?.toLowerCase();
+  final isGzip =
+      encoding?.split(',').any((value) => value.trim() == 'gzip') == true;
+  return isGzip ? 'gzip' : 'identity';
+}
+
 bool isGzipBytes(List<int> bytes) =>
     bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
 

@@ -32,12 +32,14 @@ void main() {
   EpgGuideFeed feedOf(
     Future<void> Function(Uri uri, File destination) download, {
     Map<String, String>? map,
+    void Function(int bytes)? onDownloaded,
   }) => xmltvGuideFeed(
     url: 'http://guide.example/epg.xml.gz',
     download: download,
     tvgIdToChannelId: map ?? channelMap(40),
     nameToChannelIds: const {},
     tempDirectory: temp,
+    onDownloaded: onDownloaded,
   );
 
   group('xmltvGuideFeed', () {
@@ -86,6 +88,36 @@ void main() {
         ),
       );
       expect(temp.listSync(), isEmpty);
+    });
+
+    test('reports the downloaded byte count via onDownloaded', () async {
+      final xml = WorkloadFixtures.xmltv(
+        channelCount: 40,
+        programmesPerChannel: 60,
+      );
+      final body = gzip.encode(xml);
+      int? reported;
+      final feed = feedOf(
+        (_, file) => file.writeAsBytes(body),
+        onDownloaded: (bytes) => reported = bytes,
+      );
+
+      await feed.open().toList();
+
+      expect(reported, body.length);
+    });
+
+    test('never calls onDownloaded when the download fails', () async {
+      var called = false;
+      final feed = feedOf(
+        (_, _) async =>
+            throw const HttpWorkloadException('epg is 900 MB, over the limit'),
+        onDownloaded: (_) => called = true,
+      );
+
+      await expectLater(feed.open().toList(), throwsA(anything));
+
+      expect(called, isFalse);
     });
   });
 

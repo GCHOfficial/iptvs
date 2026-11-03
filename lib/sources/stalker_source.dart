@@ -150,6 +150,7 @@ class StalkerSource
     implements
         Source,
         BatchedEpgSource,
+        EpgByteReporting,
         CatchupSource,
         SourceCapabilityReporter,
         RefreshableSource {
@@ -189,6 +190,14 @@ class StalkerSource
   final Map<String, String> _vodCategoryTitles = {};
   Future<void>? _connectFuture;
   bool _profileLoaded = false;
+
+  /// See [EpgByteReporting]. Reset at the start of each [_guideFeeds] call and
+  /// summed as each XMLTV top-up guide finishes downloading — the portal's
+  /// own guide (`_portalEpg`) carries no comparable byte count, since it's
+  /// JSON pages through the portal transport, not a single HTTP body.
+  int? _lastEpgCompressedBytes;
+  @override
+  int? get lastEpgCompressedBytes => _lastEpgCompressedBytes;
 
   /// The `js` map from the most recent `get_profile`. Kept because
   /// [subscriptionExpiry] wants to read fields off the profile that
@@ -372,6 +381,10 @@ class StalkerSource
 
   /// The portal's own guide first, then any user-added XMLTV top-ups.
   List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    // See [EpgByteReporting]: reset here, so a refresh with no XMLTV top-ups
+    // reports null (nothing downloaded) rather than a stale figure from the
+    // previous one.
+    _lastEpgCompressedBytes = null;
     final feeds = <EpgGuideFeed>[
       EpgGuideFeed(
         open: () async* {
@@ -392,6 +405,8 @@ class StalkerSource
           tvgIdToChannelId: tvgIds,
           nameToChannelIds: names,
           token: token,
+          onDownloaded: (bytes) =>
+              _lastEpgCompressedBytes = (_lastEpgCompressedBytes ?? 0) + bytes,
         ),
       );
     }
@@ -420,7 +435,7 @@ class StalkerSource
     final bytes = await operation.readToFile(resp, destination);
     DiagnosticsLog.instance.add(
       'http:${kEpgWorkload.name}',
-      'body_bytes=$bytes',
+      'body_bytes=$bytes content_encoding=${contentEncodingLabel(resp)}',
     );
   }
 

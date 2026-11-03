@@ -26,6 +26,7 @@ class M3uSource
     implements
         Source,
         BatchedEpgSource,
+        EpgByteReporting,
         CatchupSource,
         SourceCapabilityReporter,
         RefreshableSource {
@@ -51,6 +52,12 @@ class M3uSource
   List<Category>? _categories;
   String? _headerEpgUrl;
   CatchupCapability _catchupCapability = CatchupCapability.unsupported;
+
+  /// See [EpgByteReporting]. Reset at the start of each [_guideFeeds] call and
+  /// summed as each XMLTV guide finishes downloading.
+  int? _lastEpgCompressedBytes;
+  @override
+  int? get lastEpgCompressedBytes => _lastEpgCompressedBytes;
 
   M3uSource({
     required this.sourceId,
@@ -195,6 +202,10 @@ class M3uSource
   /// carrying no `tvg-id` at all used to skip its guide outright, and is
   /// exactly the playlist a third-party guide is added for.
   List<EpgGuideFeed> _guideFeeds(List<Channel> channels, LoadToken? token) {
+    // See [EpgByteReporting]: reset here, so a guide list that turns out empty
+    // reports null (nothing downloaded) rather than a stale figure from the
+    // previous refresh.
+    _lastEpgCompressedBytes = null;
     final primary = epgUrl ?? _headerEpgUrl;
     final hasPrimary = primary != null && primary.isNotEmpty;
     final urls = <String>[
@@ -214,6 +225,8 @@ class M3uSource
           tvgIdToChannelId: tvgIds,
           nameToChannelIds: hasPrimary && i == 0 ? const {} : names,
           token: token,
+          onDownloaded: (bytes) =>
+              _lastEpgCompressedBytes = (_lastEpgCompressedBytes ?? 0) + bytes,
         ),
     ];
   }
@@ -391,11 +404,12 @@ class M3uSource
     File destination,
   ) async {
     final operation = HttpOperation(policy);
-    final bytes = await operation.readToFile(
-      await _open(uri, operation),
-      destination,
+    final resp = await _open(uri, operation);
+    final bytes = await operation.readToFile(resp, destination);
+    DiagnosticsLog.instance.add(
+      'http:${policy.name}',
+      'body_bytes=$bytes content_encoding=${contentEncodingLabel(resp)}',
     );
-    DiagnosticsLog.instance.add('http:${policy.name}', 'body_bytes=$bytes');
   }
 
   Future<HttpClientResponse> _open(Uri uri, HttpOperation operation) async {

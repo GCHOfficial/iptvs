@@ -380,8 +380,19 @@ class LibraryRepository {
                 'in ${spool.batches} batches, ${formatBytes(spool.bytes)} '
                 'spooled',
           );
+          // Known whenever this source implements [EpgByteReporting] (every
+          // guide that went through `xmltvGuideFeed`) — unknown stays
+          // `unknown` rather than a fabricated number for the rest (a
+          // non-HTTP portal guide, or a source with no capability at all).
+          // `is` doesn't promote across this unrelated interface (same as
+          // the `RefreshableSource` check above), hence the explicit cast,
+          // safe because it's guarded by the check.
+          final compressedBytes = source is EpgByteReporting
+              ? (source as EpgByteReporting).lastEpgCompressedBytes
+              : null;
           DiagnosticsLog.instance.recordIngestion(
             scope: 'epg:${source.id}',
+            compressedBytes: compressedBytes,
             providerDuration: providerWatch.elapsed,
             databaseDuration: metrics.databaseDuration,
           );

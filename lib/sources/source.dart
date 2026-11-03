@@ -536,6 +536,27 @@ abstract interface class BatchedEpgSource {
   });
 }
 
+/// Optional capability a [BatchedEpgSource] can additionally implement to
+/// report how many bytes its XMLTV guide downloads cost on the most recent
+/// [BatchedEpgSource.epgBatched] call — surfaced in
+/// `LibraryRepository._ensureEpg`'s exportable `ingestion compressed_bytes=…`
+/// line instead of leaving it `unknown`.
+///
+/// Separate from [BatchedEpgSource] for the same reason that one is separate
+/// from [Source]: a merged stream has no return value, so the only way to
+/// hand the caller a number that's only known once the whole stream is
+/// exhausted is to let it ask the source afterwards. A source whose guides
+/// aren't fetched over plain HTTP (Stalker's own portal guide) simply reports
+/// null for those; only guides built via `xmltvGuideFeed`'s `onDownloaded`
+/// contribute a real figure.
+abstract interface class EpgByteReporting {
+  /// Total as-transmitted (still gzipped, if the server sent it that way)
+  /// bytes downloaded across every guide in the last [BatchedEpgSource.epgBatched]
+  /// call, or null when nothing is known yet (no call made) or nothing in that
+  /// call carried a knowable byte count.
+  int? get lastEpgCompressedBytes;
+}
+
 /// Optional capability a [Source] can additionally implement to drop any
 /// catalog it has memoized in memory, so the next fetch hits the provider
 /// again. A *forced* reload in [LibraryRepository] (`load`/`loadMedia` with
