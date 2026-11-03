@@ -78,6 +78,17 @@ object LiveLatency {
     const val LOG_MIN_AHEAD_MS = 30_000L
 
     /**
+     * A reset must have measured at least this much drift before [resetLine]
+     * is worth printing. Below it a reset is noise — a healthy stream resets
+     * with a few tens of milliseconds of ordinary jitter on nearly every
+     * reconnect/zap, and an export full of `drift=29ms` lines buries the
+     * resets that actually matter. Parity constant with Dart's
+     * `kLiveLatencyResetLogMinDriftMs` and Swift's
+     * `LiveLatencyLogging.resetLogMinDriftMs`.
+     */
+    const val RESET_LOG_MIN_DRIFT_MS = 1_000L
+
+    /**
      * `m:ss`, or `h:mm:ss` past an hour. Floors to the second: a delay reported
      * as `0:07` that is really 7.9 s is right either way to the user, and
      * rounding up would make a stream that has drifted nothing at all read
@@ -286,13 +297,14 @@ class LiveLatencyTracker(
     /**
      * Forget everything: a new stream is about to start on this surface.
      *
-     * Returns a line to emit when a measurable drift is being discarded — an
-     * export that shows a reload at 90 s of drift says far more than one that
-     * shows a reload. Returns null when there was nothing to lose, which is the
-     * common case (every open, every zap on a healthy stream).
+     * Returns a line to emit when at least [RESET_LOG_MIN_DRIFT_MS] of drift is
+     * being discarded — an export that shows a reload at 90 s of drift says far
+     * more than one that shows a reload. Returns null below that threshold,
+     * which includes the ordinary jitter of a few tens of milliseconds a
+     * healthy stream resets with on nearly every open or zap.
      */
     fun reset(reason: String): String? {
-        val line = if (driftMs > 0L) {
+        val line = if (driftMs >= LiveLatency.RESET_LOG_MIN_DRIFT_MS) {
             LiveLatency.resetLine(reason, driftMs, stalls)
         } else {
             null

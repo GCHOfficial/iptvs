@@ -34,6 +34,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'package:iptvs/data/app_database.dart';
+import 'package:iptvs/data/diagnostics_log.dart';
 import 'package:iptvs/data/library_repository.dart';
 import 'package:iptvs/data/source_store.dart';
 import 'package:iptvs/screens/channel_list_screen.dart';
@@ -980,6 +981,55 @@ void main() {
     expect(find.text('Channel 0'), findsOneWidget);
     expect(find.text('Big Buck Bunny (H.264)'), findsNothing);
     expect(find.text('Many'), findsOneWidget);
+
+    await unmount(tester);
+  });
+
+  testWidgets('layout geometry logs once per stable size, debounced', (
+    tester,
+  ) async {
+    await pumpNarrowScreenWith(tester, DemoSource());
+
+    // Let the initial size's debounced line land before measuring deltas.
+    await tester.pump(const Duration(milliseconds: 600));
+    int layoutLines() => DiagnosticsLog.instance.entries
+        .where(
+          (e) =>
+              e.scope == 'library' && e.message.startsWith('layout window='),
+        )
+        .length;
+    final baseline = layoutLines();
+
+    // A dragged window fires didChangeDependencies on every frame; none of
+    // these quick resizes sit still long enough to log on their own.
+    for (final width in [410.0, 420.0, 430.0, 440.0]) {
+      tester.view.physicalSize = Size(width, 800);
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(layoutLines(), baseline);
+
+    // Once the final size has sat still past the debounce, exactly one line
+    // lands, for that final size.
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(layoutLines(), baseline + 1);
+    expect(
+      DiagnosticsLog.instance.entries.last.message,
+      startsWith('layout window=440x800 '),
+    );
+
+    // A genuine one-shot change (e.g. fullscreen enter) still produces
+    // exactly one line, not zero. The zero-duration pump lets the new size
+    // reach `didChangeDependencies` (and (re)start the debounce timer) before
+    // the next pump elapses past it — `pump(duration)` advances the fake
+    // clock *before* drawing the frame that would observe the new size.
+    tester.view.physicalSize = const Size(1920, 1080);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(layoutLines(), baseline + 2);
+    expect(
+      DiagnosticsLog.instance.entries.last.message,
+      startsWith('layout window=1920x1080 '),
+    );
 
     await unmount(tester);
   });

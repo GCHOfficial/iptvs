@@ -397,6 +397,28 @@ void main() {
       expect(tracker.baselined, isTrue);
       expect(tracker.driftMs, 0);
     });
+
+    test('hasResetWorthLogging is false below the threshold', () {
+      final tracker = LiveLatencyTracker();
+      final clock = _Clock(tracker)..start();
+      // A 500ms stall: ordinary jitter, well under the 1s reset-log threshold.
+      clock.tick(mediaMs: 0, wallMs: 500);
+      expect(tracker.driftMs, 500);
+      expect(tracker.hasResetWorthLogging, isFalse);
+    });
+
+    test('hasResetWorthLogging is true at the threshold', () {
+      final tracker = LiveLatencyTracker();
+      final clock = _Clock(tracker)..start();
+      // A 1000ms stall: exactly kLiveLatencyResetLogMinDriftMs.
+      clock.tick(mediaMs: 0, wallMs: 1000);
+      expect(tracker.driftMs, kLiveLatencyResetLogMinDriftMs);
+      expect(tracker.hasResetWorthLogging, isTrue);
+      expect(
+        tracker.resetLogLine('reconnect'),
+        'live latency reset reason=reconnect drift=1000ms stalls=0',
+      );
+    });
   });
 
   group('LiveLatencyTracker.takePeriodicLog', () {

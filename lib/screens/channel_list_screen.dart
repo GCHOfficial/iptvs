@@ -789,6 +789,7 @@ class _ChannelListScreenState extends State<ChannelListScreen>
     _disposeRepositoryControllers();
     _searchTimer?.cancel();
     _previewTimer?.cancel();
+    _layoutLogTimer?.cancel();
     _focus.dispose();
     for (final node in _tabFocusNodes.values) {
       node.dispose();
@@ -2681,6 +2682,15 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// than once per build.
   String? _loggedLayout;
 
+  /// Debounces [_logLayoutGeometry]: a dragged window (or a rotation) fires
+  /// `didChangeDependencies` on every frame — observed ~50 lines in 0.8 s —
+  /// which both spams the console and chews through the exportable log's
+  /// bounded 800-entry window. Cancelled/dispose-safe like `_previewTimer`.
+  Timer? _layoutLogTimer;
+
+  /// How long the window size must sit still before its geometry is logged.
+  static const _layoutLogDebounce = Duration(milliseconds: 500);
+
   /// Deliberately **not** called from `build`. `DiagnosticsLog` is a
   /// `ChangeNotifier` and the diagnostics screen listens to it, so writing a
   /// line mid-build can `markNeedsBuild` a widget this frame has already
@@ -2688,10 +2698,17 @@ class _ChannelListScreenState extends State<ChannelListScreen>
   /// by resizing the window while the diagnostics screen is open. Dependency
   /// changes are exactly when the geometry moves, and this hook runs outside
   /// the build phase.
+  ///
+  /// The write itself is debounced ([_layoutLogTimer]): every dependency
+  /// change restarts the timer, and only the geometry still current once the
+  /// size has sat still for [_layoutLogDebounce] gets logged — one line per
+  /// genuine change (a drag's last frame, or a one-shot fullscreen
+  /// enter/exit), not one per frame.
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _logLayoutGeometry();
+    _layoutLogTimer?.cancel();
+    _layoutLogTimer = Timer(_layoutLogDebounce, _logLayoutGeometry);
   }
 
   /// Records the window geometry the layout decisions are made from.

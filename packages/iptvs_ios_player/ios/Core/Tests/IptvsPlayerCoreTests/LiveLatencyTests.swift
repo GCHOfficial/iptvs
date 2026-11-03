@@ -304,6 +304,19 @@ final class LiveLatencyTests: XCTestCase {
     }
   }
 
+  /// `IptvsPlayerViewController.resetLiveLatency` (not unit-testable directly —
+  /// it is UIKit-bound) gates on `driftMs >= resetLogMinDriftMs` before calling
+  /// `resetLine`. Pins the parity constant itself (1s, matching Dart's
+  /// `kLiveLatencyResetLogMinDriftMs` and Kotlin's
+  /// `LiveLatency.RESET_LOG_MIN_DRIFT_MS`) and the boundary the caller's `>=`
+  /// comparison relies on, so a change to one can't silently drift from the
+  /// other two platforms.
+  func testResetLogMinDriftMsIsOneSecondAndInclusiveAtTheBoundary() {
+    XCTAssertEqual(LiveLatencyLogging.resetLogMinDriftMs, 1_000)
+    XCTAssertFalse(999 >= LiveLatencyLogging.resetLogMinDriftMs)
+    XCTAssertTrue(1_000 >= LiveLatencyLogging.resetLogMinDriftMs)
+  }
+
   func testPeriodicAndBehindLinesShareTheirBody() {
     let periodic = LiveLatencyLogging.periodicLine(
       driftMs: 31_000,

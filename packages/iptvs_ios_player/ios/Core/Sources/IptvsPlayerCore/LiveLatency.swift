@@ -66,8 +66,9 @@ public struct LiveLatencySample: Equatable, Sendable {
 /// ``reset()`` must be the only way ``driftMs`` ever goes back to zero, and
 /// the caller is responsible for logging a reset line
 /// (``LiveLatencyLogging/resetLine(reason:driftMs:stalls:)``) **before**
-/// calling it if `driftMs > 0` — the contract requires the about-to-be-
-/// discarded figure to survive in the diagnostics log.
+/// calling it if `driftMs >= LiveLatencyLogging.resetLogMinDriftMs` — the
+/// contract requires the about-to-be-discarded figure to survive in the
+/// diagnostics log, but only once it's worth printing.
 public struct LiveLatencyTracker: Equatable, Sendable {
   public private(set) var driftMs: Int64 = 0
   public private(set) var hasBaseline: Bool = false
@@ -220,6 +221,13 @@ public enum LiveLatencyLogging {
   /// Drift (ms) that alone justifies a periodic line, even with a healthy
   /// buffer.
   public static let driftLogThresholdMs: Int64 = 5_000
+  /// Drift (ms) a reset must have measured before ``resetLine`` is worth
+  /// printing. Below this a reset is noise — a healthy stream resets with a
+  /// few tens of milliseconds of jitter on nearly every reconnect/zap, and an
+  /// export full of `drift=29ms` lines buries the resets that matter. Parity
+  /// constant with Dart's `kLiveLatencyResetLogMinDriftMs` and Kotlin's
+  /// `LiveLatency.RESET_LOG_MIN_DRIFT_MS`.
+  public static let resetLogMinDriftMs: Int64 = 1_000
 
   /// Whether this tick's figures are worth a periodic export. The caller still
   /// owns the 60s cadence and the "only while live and playing" gate — this is
@@ -261,8 +269,8 @@ public enum LiveLatencyLogging {
   }
 
   /// `"live latency reset reason=<reason> drift=<ms>ms stalls=<n>"`. The
-  /// caller only emits this when `driftMs > 0` — a reset with nothing
-  /// accumulated is not worth a diagnostics line.
+  /// caller only emits this when `driftMs >= resetLogMinDriftMs` — a reset
+  /// with nothing meaningfully accumulated is not worth a diagnostics line.
   public static func resetLine(reason: LiveLatencyResetReason, driftMs: Int64, stalls: Int) -> String {
     "live latency reset reason=\(reason.rawValue) drift=\(driftMs)ms stalls=\(stalls)"
   }

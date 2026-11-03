@@ -911,7 +911,7 @@ final class IptvsPlayerViewController: UIViewController {
   /// ``pendingLatencyResetReason`` to its default so a reason set for one
   /// reload can never leak into an unrelated later one.
   private func resetLiveLatency(reason: LiveLatencyResetReason, nowMs: Int64) {
-    if latencyTracker.driftMs > 0 {
+    if latencyTracker.driftMs >= LiveLatencyLogging.resetLogMinDriftMs {
       emitDiagnostic(
         LiveLatencyLogging.resetLine(reason: reason, driftMs: latencyTracker.driftMs, stalls: latencyTracker.stalls)
       )
@@ -1861,7 +1861,7 @@ final class IptvsPlayerViewController: UIViewController {
     // controller is tearing down regardless — Dart reopens the content on an
     // entirely separate embedded surface, outside this class — so only the
     // diagnostics line matters here, not an actual `latencyTracker.reset()`.
-    if request.isLive, latencyTracker.driftMs > 0 {
+    if request.isLive, latencyTracker.driftMs >= LiveLatencyLogging.resetLogMinDriftMs {
       emitDiagnostic(
         LiveLatencyLogging.resetLine(
           reason: .engine,
