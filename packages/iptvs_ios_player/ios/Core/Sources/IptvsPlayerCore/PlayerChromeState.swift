@@ -304,23 +304,43 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// Greys the LIVE badge and reveals the go-to-live button, exactly as on
   /// Android and Windows.
   ///
-  /// Two independent rules can clear it, per the wave-1 live-latency contract
-  /// (`live-latency-contract.md`): the **pause rule** (unchanged, immediate —
-  /// the controller sets this `false` directly the instant playback pauses)
-  /// and the **latched drift rule** in ``applyLiveLatency(driftMs:aheadMs:)``
-  /// (accumulated delay reaching ``kLiveDriftWarnMs``). Both are **latched**:
-  /// once false, only ``resetLiveLatency()`` — called at a load, a reconnect,
-  /// "Go to live", a zap settle, or an engine swap — sets it back to true.
-  /// This hysteresis is mandatory, not a nicety: the go-to-live chip removes
-  /// itself while focused and hands focus to play/pause, so it must never
-  /// flicker around a threshold a sample could cross and re-cross.
+  /// Two independent rules can clear it: the **pause rule** (unchanged,
+  /// immediate — the controller sets this `false` directly the instant
+  /// playback pauses) and the **latched drift rule** in
+  /// ``applyLiveLatency(driftMs:delayMs:aheadMs:)`` (accumulated drift
+  /// reaching ``kLiveDriftWarnMs``). Both are **latched**: once false, only
+  /// ``resetLiveLatency()`` — called at a load, a reconnect, "Go to live", a
+  /// zap settle, or an engine swap — sets it back to true. This hysteresis is
+  /// mandatory, not a nicety: the go-to-live chip removes itself while
+  /// focused and hands focus to play/pause, so it must never flicker around a
+  /// threshold a sample could cross and re-cross.
+  ///
+  /// **Wave 2 deliberately keys this on `driftMs`, never `delayMs`**
+  /// (`live-latency-wave2-contract.md` "The Go to live latch"): `delayMs`
+  /// includes a connect-time backlog the provider handed over before the
+  /// first frame, and on iOS there is no way to trim it — a reconnect just
+  /// re-receives the same backlog from the provider, and ExoPlayer's
+  /// catch-up speed-up has no AVPlayer equivalent either. Offering "Go to
+  /// live" for a number this controller cannot reduce would be a button that
+  /// lies; the backlog is still **shown**, just not **latched on**.
   public var liveSynced: Bool = true
 
-  /// Accumulated live delay in ms, from ``LiveLatencyTracker/driftMs``. `0`
-  /// until the controller's first post-baseline sample. Drives
-  /// ``liveDelayBadgeLabel`` and ``liveDelayInfoValue`` — never read directly
-  /// by a view.
+  /// Accumulated live drift in ms, from ``LiveLatencyTracker/driftMs`` —
+  /// delay added *after* this stream's first frame, excluding any
+  /// connect-time backlog. Feeds only the latch rule in
+  /// ``applyLiveLatency(driftMs:delayMs:aheadMs:)``; no label reads it
+  /// directly any more (wave 2 moved the badge/info-row display to
+  /// ``liveDelayMs``), but it stays a stored field because it's a true
+  /// accumulator the latch needs on every sample, not something derivable
+  /// from what's displayed.
   public var liveDriftMs: Int64 = 0
+
+  /// Accumulated live **delay** in ms, from ``LiveLatencyTracker/delayMs`` —
+  /// drift plus the lower-bound connect-time backlog, minus anything
+  /// credited back (`live-latency-wave2-contract.md` (a)). `0` until the
+  /// controller's first post-baseline sample. Drives ``liveDelayBadgeLabel``
+  /// and ``liveDelayInfoValue`` — never read directly by a view.
+  public var liveDelayMs: Int64 = 0
 
   /// Buffered-ahead cushion in ms at the last latency sample, or `-1` when
   /// unknown (matches ``LiveLatencyTracker``'s sibling convention — `aheadMs`
@@ -455,16 +475,21 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// The LIVE badge's text — `"LIVE"` at the edge, `"LIVE -m:ss"` once behind
   /// by ``kLiveDriftWarnMs`` or more. Replaces the plain `"LIVE"` constant the
   /// view used to draw; ``showLiveBadge`` still decides whether to draw it at
-  /// all. See `live-latency-contract.md` "What the user sees".
+  /// all. **Wave 2: reads ``liveDelayMs``, not ``liveDriftMs``**
+  /// (`live-latency-wave2-contract.md` (a) — "the badge ... use[s] delayMs"),
+  /// so a connect-time backlog the viewer never saw added to the stream is
+  /// still shown here, even though it never latches ``liveSynced`` false (see
+  /// that property's doc).
   public var liveDelayBadgeLabel: String {
-    LiveLatencyFormatting.liveDelayBadgeLabel(driftMs: liveDriftMs)
+    LiveLatencyFormatting.liveDelayBadgeLabel(driftMs: liveDelayMs)
   }
 
   /// The stream-info panel's "Live delay" row value, or `nil` for VOD (the row
-  /// doesn't exist off live content at all — see ``infoRows()``).
+  /// doesn't exist off live content at all — see ``infoRows()``). Wave 2:
+  /// reads ``liveDelayMs``, same reasoning as ``liveDelayBadgeLabel``.
   public var liveDelayInfoValue: String? {
     guard isLive else { return nil }
-    return LiveLatencyFormatting.liveDelayInfoValue(driftMs: liveDriftMs, aheadMs: liveAheadMs)
+    return LiveLatencyFormatting.liveDelayInfoValue(driftMs: liveDelayMs, aheadMs: liveAheadMs)
   }
 
   public var speedLabel: String { playerSpeedOptionLabel(speed) }
@@ -607,27 +632,36 @@ public struct PlayerChromeState: Equatable, Sendable {
     aspect = aspect.next()
   }
 
-  /// Folds in one latency sample (`live-latency-contract.md`). Stores the raw
-  /// figures for the badge/info-row formatters and, once drift reaches
-  /// ``kLiveDriftWarnMs``, latches ``liveSynced`` false — **only** false: a
-  /// lower later reading (which should not occur, since drift only grows
-  /// between resets, but the rule holds regardless) must never resync a
-  /// viewer the pause rule or an earlier sample already desynced. Call on
-  /// every surface tick while live; harmless, if pointless, to call for VOD.
-  public mutating func applyLiveLatency(driftMs: Int64, aheadMs: Int64) {
+  /// Folds in one latency sample. Stores the raw figures for the
+  /// badge/info-row formatters and, once **drift** (not delay — see
+  /// ``liveSynced``'s doc) reaches ``kLiveDriftWarnMs``, latches
+  /// ``liveSynced`` false — **only** false: a lower later reading (which
+  /// should not occur, since drift only grows between resets, but the rule
+  /// holds regardless) must never resync a viewer the pause rule or an
+  /// earlier sample already desynced. Call on every surface tick while live;
+  /// harmless, if pointless, to call for VOD.
+  ///
+  /// `driftMs` is ``LiveLatencyTracker/driftMs`` (feeds the latch only);
+  /// `delayMs` is ``LiveLatencyTracker/delayMs`` (feeds the two labels only;
+  /// `live-latency-wave2-contract.md` (a)). The caller always has both, since
+  /// both are plain reads off the same tracker instance after one
+  /// `sample(_:aheadMs:)` call.
+  public mutating func applyLiveLatency(driftMs: Int64, delayMs: Int64, aheadMs: Int64) {
     liveDriftMs = driftMs
+    liveDelayMs = delayMs
     liveAheadMs = aheadMs
     if driftMs >= kLiveDriftWarnMs { liveSynced = false }
   }
 
-  /// Clears accumulated drift and the desync latch — called at every wave-1
-  /// reset point (load, reconnect, "Go to live", zap settle, engine swap; see
-  /// ``LiveLatencyResetReason``). The **only** place ``liveSynced`` is set back
-  /// to `true` once the drift rule has cleared it; the pause rule's direct
-  /// `false` is set by the controller elsewhere and is unaffected by this
-  /// being absent from that path, by design.
+  /// Clears accumulated drift/delay and the desync latch — called at every
+  /// wave-1 reset point (load, reconnect, "Go to live", zap settle, engine
+  /// swap; see ``LiveLatencyResetReason``). The **only** place ``liveSynced``
+  /// is set back to `true` once the drift rule has cleared it; the pause
+  /// rule's direct `false` is set by the controller elsewhere and is
+  /// unaffected by this being absent from that path, by design.
   public mutating func resetLiveLatency() {
     liveDriftMs = 0
+    liveDelayMs = 0
     liveAheadMs = -1
     liveSynced = true
   }

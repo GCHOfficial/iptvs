@@ -332,11 +332,11 @@ final class PlayerChromeStateTests: XCTestCase {
   func testApplyLiveLatencyLatchesDesyncAtTheWarnThreshold() {
     var state = PlayerChromeState()
     state.isLive = true
-    state.applyLiveLatency(driftMs: kLiveDriftWarnMs - 1, aheadMs: 10_000)
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs - 1, delayMs: kLiveDriftWarnMs - 1, aheadMs: 10_000)
     XCTAssertTrue(state.liveSynced)
     XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE")
 
-    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, aheadMs: 10_000)
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, delayMs: kLiveDriftWarnMs, aheadMs: 10_000)
     XCTAssertFalse(state.liveSynced)
     XCTAssertTrue(state.showGoLiveButton)
     XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE -0:30")
@@ -349,17 +349,40 @@ final class PlayerChromeStateTests: XCTestCase {
   func testDriftDesyncIsLatchedUntilAnExplicitReset() {
     var state = PlayerChromeState()
     state.isLive = true
-    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, aheadMs: 0)
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, delayMs: kLiveDriftWarnMs, aheadMs: 0)
     XCTAssertFalse(state.liveSynced)
 
     // A later sample reporting a *smaller* drift (should not happen in
     // practice — drift only grows between resets — but the latch must hold
     // even if it did) does not resync.
-    state.applyLiveLatency(driftMs: 1_000, aheadMs: 0)
+    state.applyLiveLatency(driftMs: 1_000, delayMs: 1_000, aheadMs: 0)
     XCTAssertFalse(state.liveSynced, "the latch must survive a lower later reading")
 
     state.resetLiveLatency()
     XCTAssertTrue(state.liveSynced)
+  }
+
+  /// Wave 2 (`live-latency-wave2-contract.md` "The Go to live latch"): iOS
+  /// can't trim a connect-time backlog, so the latch must key on `driftMs`
+  /// alone, never `delayMs` — a 30s *backlog* (drift still healthy) must
+  /// leave the viewer synced, while 30s of *drift* must desync exactly as
+  /// before, even with a trivial delay figure. Both halves of S2/S1's split
+  /// are asserted here because `LiveLatencyTests`' S1/S2 only pin the
+  /// tracker; this is the one place the latch rule itself is exercised.
+  func testBacklogDelayAloneNeverLatchesDesyncOnlyDriftDoes() {
+    var state = PlayerChromeState()
+    state.isLive = true
+
+    // S2-shaped: 30s of pure backlog delay, zero drift. Must stay synced.
+    state.applyLiveLatency(driftMs: 0, delayMs: 30_000, aheadMs: 30_000)
+    XCTAssertTrue(state.liveSynced, "backlog delay alone must not latch desync on iOS")
+    XCTAssertFalse(state.showGoLiveButton)
+    XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE -0:30", "still shown, just not offered")
+
+    // 30s of real drift, independent of whatever delay reads. Must desync.
+    state.applyLiveLatency(driftMs: 30_000, delayMs: 30_000, aheadMs: 0)
+    XCTAssertFalse(state.liveSynced, "30s of drift still latches desync")
+    XCTAssertTrue(state.showGoLiveButton)
   }
 
   /// The pre-existing pause rule is untouched by the new drift rule: pausing
@@ -369,19 +392,20 @@ final class PlayerChromeStateTests: XCTestCase {
     var state = PlayerChromeState()
     state.isLive = true
     state.liveSynced = false // the controller's existing immediate pause rule
-    state.applyLiveLatency(driftMs: 0, aheadMs: 0)
+    state.applyLiveLatency(driftMs: 0, delayMs: 0, aheadMs: 0)
     XCTAssertFalse(state.liveSynced, "a healthy drift sample must not resync a paused viewer")
   }
 
   func testResetLiveLatencyClearsDriftAheadAndTheLatch() {
     var state = PlayerChromeState()
     state.isLive = true
-    state.applyLiveLatency(driftMs: 83_000, aheadMs: 24_000)
+    state.applyLiveLatency(driftMs: 83_000, delayMs: 83_000, aheadMs: 24_000)
     XCTAssertFalse(state.liveSynced)
 
     state.resetLiveLatency()
     XCTAssertTrue(state.liveSynced)
     XCTAssertEqual(state.liveDriftMs, 0)
+    XCTAssertEqual(state.liveDelayMs, 0)
     XCTAssertEqual(state.liveAheadMs, -1)
     XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE")
     XCTAssertEqual(state.liveDelayInfoValue, "0:00")
@@ -403,7 +427,7 @@ final class PlayerChromeStateTests: XCTestCase {
     for vector in vectors {
       var state = PlayerChromeState()
       state.isLive = true
-      state.applyLiveLatency(driftMs: vector.driftMs, aheadMs: vector.aheadMs)
+      state.applyLiveLatency(driftMs: vector.driftMs, delayMs: vector.driftMs, aheadMs: vector.aheadMs)
       XCTAssertEqual(state.liveDelayBadgeLabel, vector.badge)
       XCTAssertEqual(state.liveDelayInfoValue, vector.infoValue)
     }
