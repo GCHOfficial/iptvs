@@ -68,7 +68,9 @@ select public.submit_diagnostics(
 
 -- 1
 select matches(
-  :'sub_code',
+  -- psql substitutes :'sub_code' as an untyped literal, and matches() is
+  -- polymorphic, so without the cast Postgres can't resolve the call.
+  :'sub_code'::text,
   '^D-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$',
   'a session-less anon caller can submit, and gets a D- prefixed code from the unambiguous alphabet'
 );
