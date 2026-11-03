@@ -360,35 +360,84 @@ class AppDatabase {
       await _invalidateRegenerableCache();
       return;
     }
+    // Seal every row's locators in bulk, off the calling isolate, BEFORE the
+    // write transaction opens — same reasoning as `replaceLibrary`/
+    // `replaceMediaLibrary` (CLAUDE.md "Sealed playback locators"). This
+    // migration runs once, only when the vault generated a fresh key (an
+    // upgrade from a pre-sealing build, or a backup-restored install whose
+    // key didn't survive), but on a 250k-channel cache the old per-row
+    // `await protectSecretLocators(...)` loop was a guaranteed ANR:
+    // `cryptography`'s pure-Dart AES-GCM completes synchronously behind its
+    // Future, so the loop never yielded while it ran inside this transaction.
+    //
+    // Rows with no `extra` at all are skipped entirely (never decoded, never
+    // written), matching the old per-row `continue`.
+    final channelExtras = <int, Map<String, dynamic>>{};
+    for (var i = 0; i < channelRows.length; i++) {
+      final raw = channelRows[i]['extra'] as String?;
+      if (raw != null) {
+        channelExtras[i] = (jsonDecode(raw) as Map).cast<String, dynamic>();
+      }
+    }
+    final mediaExtras = <int, Map<String, dynamic>>{};
+    for (var i = 0; i < mediaRows.length; i++) {
+      final raw = mediaRows[i]['extra'] as String?;
+      if (raw != null) {
+        mediaExtras[i] = (jsonDecode(raw) as Map).cast<String, dynamic>();
+      }
+    }
+    final channelKeys = channelExtras.keys.toList();
+    final mediaKeys = mediaExtras.keys.toList();
+    final channelProtected = await protectSecretLocatorsBulk(
+      [for (final k in channelKeys) channelExtras[k]!],
+      _vault,
+    );
+    final mediaProtected = await protectSecretLocatorsBulk(
+      [for (final k in mediaKeys) mediaExtras[k]!],
+      _vault,
+    );
+
     await _db.transaction((txn) async {
-      for (final row in channelRows) {
-        final raw = row['extra'] as String?;
-        if (raw == null) continue;
-        final protectedExtra = await protectSecretLocators(
-          (jsonDecode(raw) as Map).cast<String, dynamic>(),
-          _vault,
-        );
-        await txn.update(
+      // Chunked the same way as `_libraryInsertChunk`-gated writes: on
+      // Android every sqflite call crosses a MethodChannel, so one batch
+      // holding every row's UPDATE would be a single giant
+      // `StandardMessageCodec` message on the UI isolate. These are UPDATEs
+      // against rows that already exist, so (unlike `replaceLibrary`'s
+      // INSERTs) chunk order carries no rowid/ordering meaning — only the
+      // bound keeps each flush small.
+      var batch = txn.batch();
+      var n = 0;
+      Future<void> flush() async {
+        if (n == 0) return;
+        await batch.commit(noResult: true);
+        batch = txn.batch();
+        n = 0;
+      }
+
+      for (var k = 0; k < channelKeys.length; k++) {
+        final row = channelRows[channelKeys[k]];
+        final protectedExtra = channelProtected[k];
+        batch.update(
           'channels',
           {'extra': protectedExtra.isEmpty ? null : jsonEncode(protectedExtra)},
           where: 'source_id = ? AND id = ?',
           whereArgs: [row['source_id'], row['id']],
         );
+        if (++n >= _libraryInsertChunk) await flush();
       }
-      for (final row in mediaRows) {
-        final raw = row['extra'] as String?;
-        if (raw == null) continue;
-        final protectedExtra = await protectSecretLocators(
-          (jsonDecode(raw) as Map).cast<String, dynamic>(),
-          _vault,
-        );
-        await txn.update(
+      await flush();
+      for (var k = 0; k < mediaKeys.length; k++) {
+        final row = mediaRows[mediaKeys[k]];
+        final protectedExtra = mediaProtected[k];
+        batch.update(
           'media_items',
           {'extra': protectedExtra.isEmpty ? null : jsonEncode(protectedExtra)},
           where: 'source_id = ? AND kind = ? AND id = ?',
           whereArgs: [row['source_id'], row['kind'], row['id']],
         );
+        if (++n >= _libraryInsertChunk) await flush();
       }
+      await flush();
     });
   }
 

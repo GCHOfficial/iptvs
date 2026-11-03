@@ -174,12 +174,27 @@ The portal's guide comes from `get_epg_info`, not XMLTV, so it joins the merge a
 wrapping that call; only the top-ups go through `xmltvGuideFeed`. `epgBatched` returns null when
 there are no top-ups, keeping a portal-only source on the code path it has always taken.
 
-Two Stalker-specific points. Its channels carry **no `tvg-id`**, so an extra guide reaches them
-purely through name matching — on this provider that path is not a fallback, it is the only one.
-And third-party downloads use a separate `_downloadGuide`, never `_requestBytes`: the latter is
-the portal transport and sends the MAC cookie and the portal Bearer token, which must never reach
-an arbitrary user-supplied host. Only the emulated profile's `User-Agent` carries over, since
-some guide hosts reject a default one.
+`get_epg_info` is decode+map in one pass, off the main isolate once the body crosses the same
+256 KiB threshold `get_all_channels` uses: `_portalEpg` fetches raw bytes via `_requestBytes`
+(never `_call`, which decodes on the calling isolate) and hands them to the top-level
+`_ingestStalkerEpg` worker, run inline below the threshold and under `Isolate.run` above it —
+the same split `_fetchAllChannelsFromBytes`/`_ingestStalkerChannels` already used (CLAUDE.md
+"Large provider payloads"). A portal-wide EPG answer decoded and mapped inline was a shipped ANR
+(`LinkedHashMap.from` under `StalkerSource._portalEpg` in a GC on the UI isolate). The `debugApi`
+test seam still returns decoded `js` directly — there's no raw body to offload there — so
+`_mapPortalEpg` keeps that path's original inline mapping, byte-for-byte the same logic
+`_ingestStalkerEpg` applies from bytes (`StalkerSource._epochToDate` is `static` so both share
+it). `_fetchPortalEpgFromBytes` mirrors `_fetchAllChannelsFromBytes`'s auth/retry shape exactly:
+a token-invalid result re-handshakes once and retries, a portal-error result throws
+`StalkerException` (redacted via `redactStalkerDiagnostic`), and neither ever lets the raw
+response skip that check.
+
+Two more Stalker-specific points. Its channels carry **no `tvg-id`**, so an extra guide reaches
+them purely through name matching — on this provider that path is not a fallback, it is the only
+one. And third-party downloads use a separate `_downloadGuide`, never `_requestBytes`: the latter
+is the portal transport and sends the MAC cookie and the portal Bearer token, which must never
+reach an arbitrary user-supplied host. Only the emulated profile's `User-Agent` carries over,
+since some guide hosts reject a default one.
 
 ### Matching: ids first, then names
 

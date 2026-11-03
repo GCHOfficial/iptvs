@@ -424,14 +424,57 @@ class StalkerSource
     );
   }
 
+  /// Stalker keys EPG by channel id directly, so `channels` isn't needed.
+  /// Bulk EPG for all channels for the next few hours, keyed by channel id.
+  ///
+  /// [debugApi] (the test seam) already returns decoded `js`, so there's no
+  /// raw body to offload there — same split as [_fetchAllChannels]. The real
+  /// network path fetches raw bytes and decodes+maps off the calling isolate
+  /// once the body crosses [_isolateJsonThreshold], the same threshold
+  /// [_fetchAllChannelsFromBytes] uses, because a portal-wide `get_epg_info`
+  /// can be large enough on its own to stall the UI isolate's GC on
+  /// `LinkedHashMap.from` while mapping it (observed ANR).
   Future<List<Programme>> _portalEpg() async {
-    // Stalker keys EPG by channel id directly, so `channels` isn't needed.
-    // Bulk EPG for all channels for the next few hours, keyed by channel id.
-    final r = await _call({
-      'type': 'itv',
-      'action': 'get_epg_info',
-      'period': '6',
-    });
+    final params = {'type': 'itv', 'action': 'get_epg_info', 'period': '6'};
+    if (debugApi != null) {
+      return _mapPortalEpg(await _call(params));
+    }
+    return _fetchPortalEpgFromBytes(params);
+  }
+
+  /// Network path for [_portalEpg]: fetch the raw response body and do
+  /// decode→extract→map in a single pass, mirroring
+  /// [_fetchAllChannelsFromBytes]'s auth/retry semantics (including honoring
+  /// [retry] only on the first attempt).
+  Future<List<Programme>> _fetchPortalEpgFromBytes(
+    Map<String, String> params, {
+    bool retry = true,
+  }) async {
+    final endpoint = await _resolveEndpoint();
+    final bytes = await _requestBytes(endpoint, params);
+    final result = bytes.length < _isolateJsonThreshold
+        ? _ingestStalkerEpg(bytes)
+        : await Isolate.run(() => _ingestStalkerEpg(bytes));
+    if (retry && result.tokenInvalid) {
+      _debug('token invalid; re-handshaking for ${_actionName(params)}');
+      _token = null;
+      _endpoint = null;
+      await _resolveEndpoint();
+      await _getProfile();
+      return _fetchPortalEpgFromBytes(params, retry: false);
+    }
+    final portalError = result.portalErrorMessage;
+    if (portalError != null) {
+      throw StalkerException(
+        '${_actionName(params)} failed: ${redactStalkerDiagnostic(portalError)}',
+      );
+    }
+    return result.programmes;
+  }
+
+  /// Maps an already-decoded `get_epg_info` response (the [debugApi] path) to
+  /// [Programme]s — the same mapping [_ingestStalkerEpg] does from raw bytes.
+  List<Programme> _mapPortalEpg(Map<String, dynamic> r) {
     final js = r['js'];
     final data = (js is Map && js['data'] is Map)
         ? js['data'] as Map
@@ -859,7 +902,7 @@ class StalkerSource
     );
   }
 
-  DateTime? _epochToDate(dynamic v) {
+  static DateTime? _epochToDate(dynamic v) {
     final secs = v is int ? v : int.tryParse('$v');
     if (secs == null || secs == 0) return null;
     return DateTime.fromMillisecondsSinceEpoch(secs * 1000);
@@ -1250,6 +1293,17 @@ class StalkerSource
     int rejectedRows,
   })
   debugIngestChannels(Uint8List bytes) => _ingestStalkerChannels(bytes);
+
+  /// Test seam for the EPG ingestion worker below: lets
+  /// `test/stalker_ingest_test.dart` exercise decode→map→result without a
+  /// network round trip.
+  @visibleForTesting
+  static ({
+    List<Programme> programmes,
+    bool tokenInvalid,
+    String? portalErrorMessage,
+  })
+  debugIngestEpg(Uint8List bytes) => _ingestStalkerEpg(bytes);
 
   static Channel _mapChannel(Map<String, dynamic> ch) {
     final id =
@@ -2646,6 +2700,73 @@ _ingestStalkerChannels(Uint8List bytes) {
     portalErrorMessage: null,
     rejectedRows: list.length - channels.length,
   );
+}
+
+/// Isolate entrypoint for `get_epg_info`: decode the raw response bytes and
+/// map every channel's programme list into [Programme]s in one pass —
+/// top-level + only static/pure helpers so it can run under [Isolate.run]
+/// without capturing any [StalkerSource] instance state. Same shape as
+/// [_ingestStalkerChannels]: the same token-invalid/portal-error detection,
+/// and the exact mapping `_portalEpg` used to do on the calling isolate
+/// (`StalkerSource._mapPortalEpg` keeps that mapping for the [debugApi] path,
+/// which has no raw body to decode).
+({List<Programme> programmes, bool tokenInvalid, String? portalErrorMessage})
+_ingestStalkerEpg(Uint8List bytes) {
+  final Map<String, dynamic> response;
+  try {
+    final body = utf8.decode(bytes, allowMalformed: true);
+    final decoded = jsonDecode(body);
+    if (decoded is! Map) {
+      throw StalkerException('Unexpected response shape');
+    }
+    response = Map<String, dynamic>.from(decoded);
+  } on FormatException {
+    throw StalkerException('Non-JSON response (wrong endpoint?)');
+  }
+
+  if (StalkerSource._looksTokenInvalid(response)) {
+    return (
+      programmes: const <Programme>[],
+      tokenInvalid: true,
+      portalErrorMessage: null,
+    );
+  }
+  final portalError = StalkerSource._portalErrorMessage(response);
+  if (portalError != null) {
+    return (
+      programmes: const <Programme>[],
+      tokenInvalid: false,
+      portalErrorMessage: portalError,
+    );
+  }
+
+  final js = response['js'];
+  final data = (js is Map && js['data'] is Map)
+      ? js['data'] as Map
+      : (js is Map ? js : null);
+  final programmes = <Programme>[];
+  if (data != null) {
+    data.forEach((chId, list) {
+      if (list is! List) return;
+      for (final e in list) {
+        if (e is! Map) continue;
+        final m = Map<String, dynamic>.from(e);
+        final start = StalkerSource._epochToDate(m['start_timestamp']);
+        final stop = StalkerSource._epochToDate(m['stop_timestamp']);
+        if (start == null || stop == null) continue;
+        programmes.add(
+          Programme(
+            channelId: '$chId',
+            start: start,
+            stop: stop,
+            title: '${m['name'] ?? ''}',
+            description: m['descr']?.toString(),
+          ),
+        );
+      }
+    });
+  }
+  return (programmes: programmes, tokenInvalid: false, portalErrorMessage: null);
 }
 
 final _adultGenreTitle = RegExp(

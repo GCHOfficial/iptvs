@@ -89,6 +89,43 @@ abstract final class WorkloadFixtures {
     );
   }
 
+  /// A Stalker `get_epg_info` response: `{js: {data: {channelId: [...]}}}`,
+  /// keyed by channel id with a flat list of programmes per channel — the
+  /// shape `StalkerSource._ingestStalkerEpg` decodes.
+  static Uint8List stalkerEpgJson(
+    int channelCount, {
+    int programmesPerChannel = 3,
+  }) {
+    final data = <String, Object?>{};
+    for (var c = 0; c < channelCount; c++) {
+      data['$c'] = List<Map<String, Object?>>.generate(
+        programmesPerChannel,
+        (p) {
+          final start = DateTime.utc(
+            2026,
+            1,
+            1,
+          ).add(Duration(hours: p)).millisecondsSinceEpoch ~/ 1000;
+          final stop = start + 3600;
+          return {
+            'start_timestamp': start,
+            'stop_timestamp': stop,
+            'name': 'Programme $c-$p',
+            'descr': 'Fixture description $c-$p',
+          };
+        },
+        growable: false,
+      );
+    }
+    return Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'js': {'data': data},
+        }),
+      ),
+    );
+  }
+
   static Uint8List xmltv({
     required int channelCount,
     required int programmesPerChannel,

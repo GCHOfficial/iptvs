@@ -3,6 +3,7 @@
 // the FFI factory (desktop), without depending on path_provider.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -446,6 +447,134 @@ void main() {
       );
       await db.close();
     });
+  });
+
+  group('AppDatabase legacy cache secret migration', () {
+    // `_migrateLegacyCacheSecrets` only runs when `vault.generatedNewKey` is
+    // true — a pre-sealing-build upgrade, or a backup-restored install whose
+    // key didn't survive. Resetting the mock secure-storage store makes the
+    // *next* vault treat its key as freshly generated, which is the signal
+    // this migration keys off.
+    const url = 'http://provider.invalid/live/acct/tok/1.ts';
+
+    /// Seeds plaintext (unsealed) rows directly via raw SQL, bypassing
+    /// `protectSecretLocators` entirely — simulating a cache written before
+    /// locator sealing existed.
+    Future<void> seedLegacyRows(
+      String path, {
+      required int channelCount,
+      required int mediaCount,
+    }) async {
+      final seed = await AppDatabase.openAt(path);
+      await seed.close();
+      final raw = await databaseFactoryFfi.openDatabase(path);
+      final batch = raw.batch();
+      for (var i = 0; i < channelCount; i++) {
+        batch.insert('channels', {
+          'source_id': 'src1',
+          'id': 'ch$i',
+          'name': 'Channel $i',
+          'extra': jsonEncode({'url': '$url?i=$i', 'tvgId': 'c$i'}),
+        });
+      }
+      for (var i = 0; i < mediaCount; i++) {
+        batch.insert('media_items', {
+          'source_id': 'src1',
+          'kind': 'movie',
+          'id': 'm$i',
+          'title': 'Item $i',
+          'extra': jsonEncode({'cmd': '$url?m=$i'}),
+        });
+      }
+      await batch.commit(noResult: true);
+      await raw.close();
+    }
+
+    test(
+      'a legacy plaintext cache migrates to sealed rows that reveal correctly',
+      () async {
+        final path = dbPath();
+        await seedLegacyRows(path, channelCount: 2, mediaCount: 2);
+
+        // Simulate the key not surviving (or a pre-sealing-build upgrade): the
+        // next vault finds no key in secure storage and generates one, which
+        // is exactly `generatedNewKey`'s trigger for this migration.
+        FlutterSecureStorage.setMockInitialValues({});
+
+        final db = await AppDatabase.openAt(path);
+        final channel = (await db.readChannels('src1')).firstWhere(
+          (c) => c.id == 'ch0',
+        );
+        expect(channel.extra, isNot(contains('url')));
+        expect(hasSealedLocator(channel.extra), isTrue);
+        expect(channel.extra['tvgId'], 'c0');
+        expect((await db.revealChannel(channel)).extra['url'], '$url?i=0');
+
+        final media = (await db.readMediaItems(
+          'src1',
+          ContentKind.movie,
+        )).firstWhere((i) => i.id == 'm1');
+        expect(media.extra, isNot(contains('cmd')));
+        expect(hasSealedLocator(media.extra), isTrue);
+        expect((await db.revealMediaItem(media)).extra['cmd'], '$url?m=1');
+        await db.close();
+      },
+    );
+
+    test(
+      'a cache already carrying a sealed row is left alone (regenerate instead)',
+      () async {
+        // If any row already looks sealed, the migration can't tell which key
+        // sealed it, so it invalidates the regenerable cache instead of
+        // guessing. Covers the `hasEncrypted` early-return branch.
+        final path = dbPath();
+        final seed = await AppDatabase.openAt(path);
+        await seed.replaceLibrary('src1', 'Src', const [], [
+          Channel(id: 'ch0', name: 'Zero', extra: {'url': url}),
+        ]);
+        await seed.close();
+
+        FlutterSecureStorage.setMockInitialValues({});
+
+        final db = await AppDatabase.openAt(path);
+        expect(await db.readChannels('src1'), isEmpty);
+        await db.close();
+      },
+    );
+
+    test(
+      'a legacy cache larger than the inline seal threshold still migrates '
+      'correctly (exercises the worker-isolate path)',
+      () async {
+        // kInlineLocatorSealRows is 256; comfortably exceeding it per table
+        // forces `protectSecretLocatorsBulk` through its `compute` worker
+        // path instead of the inline loop — the same technique
+        // `secret_locator_vault_test.dart` uses, now proven end-to-end
+        // through the migration that used to do this per row inside the
+        // write transaction (the ANR this PR fixes).
+        const count = kInlineLocatorSealRows + 50;
+        final path = dbPath();
+        await seedLegacyRows(path, channelCount: count, mediaCount: count);
+
+        FlutterSecureStorage.setMockInitialValues({});
+
+        final db = await AppDatabase.openAt(path);
+        final channels = await db.readChannels('src1');
+        expect(channels, hasLength(count));
+        expect(channels.every((c) => hasSealedLocator(c.extra)), isTrue);
+        for (final i in const [0, 1, 255, 256, 305]) {
+          final row = channels.firstWhere((c) => c.id == 'ch$i');
+          expect((await db.revealChannel(row)).extra['url'], '$url?i=$i');
+        }
+
+        final media = await db.readMediaItems('src1', ContentKind.movie);
+        expect(media, hasLength(count));
+        expect(media.every((i) => hasSealedLocator(i.extra)), isTrue);
+        final sample = media.firstWhere((i) => i.id == 'm42');
+        expect((await db.revealMediaItem(sample)).extra['cmd'], '$url?m=42');
+        await db.close();
+      },
+    );
   });
 
   group('AppDatabase favorites', () {

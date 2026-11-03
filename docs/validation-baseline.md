@@ -306,6 +306,23 @@ and both were fixed together:
   rowid — CLAUDE.md "Category order") are all preserved. Categories are flushed
   before the first row chunk so their rowids still lead.
 
+The same `DartAesGcm._ghash` shape existed in a second, rarer write path:
+`AppDatabase._migrateLegacyCacheSecrets`, the one-time repair that runs only
+when `SecretLocatorVault.generatedNewKey` is true (a pre-sealing-build
+upgrade, or a backup-restored install whose key didn't survive). It queried
+the whole `channels`/`media_items` tables and then sealed one row at a time
+with an `await`ed `protectSecretLocators`, inside a transaction, exactly like
+the old `replaceLibrary` — on a 250k-channel cache restored from a backup
+with no key, a guaranteed ANR on first launch. It now seals via
+`protectSecretLocatorsBulk` before the transaction opens and flushes its
+UPDATEs in the same `_libraryInsertChunk` (1,000) batches (order doesn't
+matter here — these are UPDATEs against rows that already exist, not inserts
+whose rowids something reads back by position). Not covered by the
+re-measurement below (it runs once per install and the host harness doesn't
+drive it), but exercised at a scale past `kInlineLocatorSealRows` (the
+worker-isolate path) by `test/persistence_test.dart` ("AppDatabase legacy
+cache secret migration").
+
 Re-measured on `DEV-Linux-1` (Flutter 3.47.7 / Dart 3.13.5, sqflite_common_ffi),
 same 50,000-channel / 100,000-programme fixture, three runs each:
 
