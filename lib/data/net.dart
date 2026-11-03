@@ -540,15 +540,19 @@ class _BoundedByteSink implements Sink<List<int>> {
 /// in the *path* (`/live/user/pass/123.ts`), which [redactUrl]'s query-focused
 /// redaction wouldn't touch.
 String redactText(String text) {
-  final urlMatch = RegExp(
-    r'https?://\S+',
-    caseSensitive: false,
-  ).firstMatch(text);
-  if (urlMatch != null) {
-    final redactedUrl = _redactUrlPath(redactUrl(urlMatch.group(0)!));
-    return text.replaceRange(urlMatch.start, urlMatch.end, redactedUrl);
-  }
-  return _redactUrlPath(text);
+  // **Every** URL in the text, not just the first. This used `firstMatch` and
+  // returned after replacing one URL, so a second URL in the same line, such
+  // as an error that quotes both the requested and the redirected address,
+  // kept its whole query string (`username=…&password=…`) and its
+  // `/live/<user>/<pass>/` path. Diagnostics exports are shared for support,
+  // so that was a credential disclosure. The panel's `scrubUrls` already
+  // replaced globally; the two now agree.
+  final urls = RegExp(r'https?://\S+', caseSensitive: false);
+  if (!urls.hasMatch(text)) return _redactUrlPath(text);
+  return text.replaceAllMapped(
+    urls,
+    (match) => _redactUrlPath(redactUrl(match.group(0)!)),
+  );
 }
 
 /// Path segments that introduce IPTV credential/route material. Xtream-style

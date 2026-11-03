@@ -59,6 +59,32 @@ void main() {
       expect(redactText(message), contains('/movie/list.m3u8'));
     });
 
+    test('redacts every URL in a message, not only the first', () {
+      // A line quoting both the requested and the redirected address. Only
+      // the first URL used to be redacted, so the second leaked its query
+      // string and its credential path segments.
+      const message =
+          'redirect from http://a.example.com/get.php?username=firstuser&password=firstpass '
+          'to http://b.example.com:8080/live/seconduser/secondpass/9001.ts?token=abcdef123456 '
+          'and http://c.example.com/xmltv.php?username=thirduser&password=thirdpass';
+      final redacted = redactText(message);
+      for (final secret in [
+        'firstuser',
+        'firstpass',
+        'seconduser',
+        'secondpass',
+        'abcdef123456',
+        'thirduser',
+        'thirdpass',
+      ]) {
+        expect(redacted, isNot(contains(secret)), reason: secret);
+      }
+      expect(redacted, contains('a.example.com'));
+      expect(redacted, contains('b.example.com:8080'));
+      expect(redacted, contains('c.example.com'));
+      expect(redacted, startsWith('redirect from '));
+    });
+
     test('passes through plain text without URLs or slashes', () {
       expect(redactText('connection refused'), 'connection refused');
     });
