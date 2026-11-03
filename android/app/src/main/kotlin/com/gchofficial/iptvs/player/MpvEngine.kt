@@ -63,6 +63,11 @@ class MpvEngine(
     override fun applyAspect(mode: AspectMode) = controller.applyAspect(mode)
     override fun pause() = controller.pause()
 
+    // Both are latched mpv property events, never a blocking read — see
+    // [MpvController]'s threading rules.
+    override fun bufferedAheadMs(): Long = controller.bufferedAheadMs()
+    override fun mediaPositionMs(): Long = controller.mediaPositionMs()
+
     override fun release() {
         if (released) return
         released = true

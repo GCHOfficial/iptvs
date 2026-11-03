@@ -1082,6 +1082,28 @@ class ExoPlayerEngine(
         }
     }
 
+    /**
+     * `Player.getTotalBufferedDuration()` — "an estimate of the total buffered
+     * duration from the current position, in milliseconds". Exactly the
+     * cushion the latency readout reports, and distinct from
+     * `bufferedPosition`, which [syncProgress] already publishes as a point on
+     * the timeline rather than a depth.
+     *
+     * Guarded by [released] for the same reason [videoCounters] is: the
+     * Activity's ticker holds `engine`, and an mpv fallback releases this one
+     * mid-session.
+     */
+    override fun bufferedAheadMs(): Long {
+        if (released) return -1L
+        val ahead = runCatching { player.totalBufferedDuration }.getOrDefault(-1L)
+        return if (ahead < 0L) -1L else ahead
+    }
+
+    override fun mediaPositionMs(): Long {
+        if (released) return -1L
+        return runCatching { player.currentPosition.coerceAtLeast(0L) }.getOrDefault(-1L)
+    }
+
     override fun syncProgress() {
         state.positionMs = player.currentPosition.coerceAtLeast(0)
         state.durationMs = if (player.duration == C.TIME_UNSET) 0 else player.duration

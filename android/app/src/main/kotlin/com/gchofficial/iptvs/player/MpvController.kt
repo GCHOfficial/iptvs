@@ -73,6 +73,32 @@ class MpvController(
     private var pendingSubtitles: List<SubtitleSpec> = emptyList()
 
     /**
+     * Latest `time-pos` / `demuxer-cache-duration`, latched off the property
+     * events rather than read on demand.
+     *
+     * [LiveLatencyTracker] needs both once per host tick, and a tick is on the
+     * **main thread** — where a synchronous `mpv_get_property` blocks until the
+     * core answers, which is the ANR this class's threading rules exist to
+     * avoid (see the class doc). Both properties are already pushed to us as
+     * events, so the poll is a plain volatile read of a value mpv handed over
+     * for free.
+     *
+     * -1 is "nothing yet": before the first event, and whenever mpv reports
+     *  the property unavailable.
+     */
+    @Volatile
+    private var lastPositionMs: Long = -1L
+
+    @Volatile
+    private var lastAheadMs: Long = -1L
+
+    /** Buffered cushion ahead of the playhead, or -1. See [lastAheadMs]. */
+    fun bufferedAheadMs(): Long = lastAheadMs
+
+    /** Media position, or -1 before mpv has reported one. See [lastPositionMs]. */
+    fun mediaPositionMs(): Long = lastPositionMs
+
+    /**
      * The one thread every blocking mpv *read* runs on, and the thread the
      * handle is finally destroyed on. Single-threaded on purpose: it serialises
      * reads against teardown for free, and a second reader would only let two
@@ -165,6 +191,10 @@ class MpvController(
         mpv.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         mpv.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         mpv.observeProperty("demuxer-cache-time", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        // The cushion *ahead of the playhead*, which `demuxer-cache-time` (an
+        // absolute timestamp of the cache end) is not. Observed rather than
+        // read so the latency poll never blocks the main thread.
+        mpv.observeProperty("demuxer-cache-duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         mpv.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         mpv.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         mpv.observeProperty("eof-reached", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
@@ -176,6 +206,11 @@ class MpvController(
 
     fun load(url: String, subtitles: List<SubtitleSpec>) {
         pendingSubtitles = subtitles
+        // A new stream is a new timeline. Clearing these means the latency
+        // tracker skips its ticks until mpv reports a real position again,
+        // rather than measuring the old stream's playhead against the clock.
+        lastPositionMs = -1L
+        lastAheadMs = -1L
         mpv?.command(arrayOf("loadfile", url))
         // A reload while paused (go-to-live) must resume; loadfile keeps the
         // current pause state otherwise.
@@ -341,7 +376,15 @@ class MpvController(
 
     // ---- Property/event observation (mpv thread → main thread) ---------------
 
-    override fun eventProperty(property: String) {}
+    /**
+     * A property change with **no value**: mpv's way of saying the property is
+     * currently unavailable. Only the latency cushion cares — reporting the
+     * last known depth of a cache that no longer exists would be worse than
+     * reporting nothing.
+     */
+    override fun eventProperty(property: String) {
+        if (property == "demuxer-cache-duration") lastAheadMs = -1L
+    }
 
     override fun eventProperty(property: String, value: Long) {
         when (property) {
@@ -352,14 +395,27 @@ class MpvController(
         }
     }
 
-    override fun eventProperty(property: String, value: Double) = post {
+    override fun eventProperty(property: String, value: Double) {
         when (property) {
-            "time-pos" -> state.positionMs = (value * 1000).toLong().coerceAtLeast(0)
-            "duration" -> state.durationMs = (value * 1000).toLong().coerceAtLeast(0)
-            "demuxer-cache-time" -> if (value >= 0) {
-                state.bufferedMs = (value * 1000).toLong()
+            "time-pos" -> {
+                val ms = (value * 1000).toLong().coerceAtLeast(0)
+                // Latched on this thread as well as posted: the latency tick
+                // reads it from the host's ticker, where a blocking mpv read
+                // would be the very ANR this class's threading rules exist to
+                // avoid (see the class doc).
+                lastPositionMs = ms
+                post { state.positionMs = ms }
             }
-            "speed" -> state.speed = value.toFloat()
+            "duration" -> post { state.durationMs = (value * 1000).toLong().coerceAtLeast(0) }
+            "demuxer-cache-time" -> if (value >= 0) {
+                post { state.bufferedMs = (value * 1000).toLong() }
+            }
+            // Latched only — nothing in the overlay reads it directly, and mpv
+            // updates it often enough that a main-thread post per change would
+            // be real work for a value the ticker polls anyway.
+            "demuxer-cache-duration" ->
+                lastAheadMs = if (value >= 0) (value * 1000).toLong() else -1L
+            "speed" -> post { state.speed = value.toFloat() }
         }
     }
 

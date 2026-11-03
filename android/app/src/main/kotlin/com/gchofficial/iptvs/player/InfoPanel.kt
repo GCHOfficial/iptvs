@@ -41,6 +41,12 @@ fun InfoPanel(
             val value = if (channels.isNotBlank()) "${state.audioCodec} · $channels" else state.audioCodec
             add("Audio" to value)
         }
+        // Live only, and last: this panel carries no other buffer/network row,
+        // so the contract's "right after the buffer row, else at the end of the
+        // live rows" puts it here. It is deliberately shown from the first
+        // frame rather than only once behind — a viewer checking whether the
+        // stream is delayed needs an answer, and `0:00` is one.
+        if (state.isLive) add("Live delay" to state.liveDelayInfo())
     }
     if (rows.isEmpty()) return
 

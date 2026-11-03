@@ -433,7 +433,7 @@ private fun TopBar(
 @Composable
 private fun TopBadges(state: PlayerUiState, nowMillis: Long) {
     state.sourceBadge()?.let { Badge(it) }
-    if (state.isLive) LiveBadge(synced = state.liveSynced)
+    if (state.isLive) LiveBadge(synced = state.liveSynced, label = state.liveDelayBadge())
     state.resolutionBadge()?.let { Badge(it) }
     state.hdrBadge()?.let { Badge(it, accent = true) }
     state.fpsBadge()?.let { Badge(it) }
@@ -842,9 +842,14 @@ private fun ReconnectingNotice(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun LiveBadge(synced: Boolean = true) {
-    // Red at the live edge; grey once behind (paused/seeked). Pairs with the
-    // go-to-live button, which appears only while behind.
+fun LiveBadge(synced: Boolean = true, label: String = "LIVE") {
+    // Red at the live edge; grey once behind (paused/seeked/drifted). Pairs
+    // with the go-to-live button, which appears only while behind.
+    //
+    // [label] is printed, never derived: it is `LiveLatency.badgeLabel`'s
+    // answer, the same string the Windows GDI overlay and the Linux ASS
+    // renderer are handed. The styling is this surface's own and unchanged —
+    // the greying is what says "behind", the figure says by how much.
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -853,7 +858,7 @@ fun LiveBadge(synced: Boolean = true) {
             .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
         Text(
-            "LIVE",
+            label,
             color = if (synced) {
                 androidx.compose.ui.graphics.Color.White
             } else {
