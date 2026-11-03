@@ -398,6 +398,98 @@ class ExoPlayerEngine(
         )
     }
 
+    // ---- Surface-detach probe ----------------------------------------------
+
+    /**
+     * The pair of [SurfaceHolder.Callback]s bracketing media3's own, and the
+     * timestamp the leading one records.
+     *
+     * **Measurement only — it changes nothing about the detach.** When a
+     * `SurfaceView` that is a player's video output is destroyed (the window
+     * stopping behind a fullscreen Activity, a Home press, a platform view
+     * disposing), media3's `ExoPlayerImpl$ComponentListener.surfaceDestroyed`
+     * calls `setVideoOutputInternal(null)`, which **blocks the main thread**
+     * until the playback thread acknowledges — up to
+     * `ExoPlayer.Builder.DEFAULT_DETACH_SURFACE_TIMEOUT_MS` (2000 ms). That
+     * block is deliberate on media3's side: it is what guarantees the renderer
+     * has stopped writing into the `Surface` before the framework tears its
+     * `BLASTBufferQueue` down, and a Play-vitals SIGSEGV
+     * (501b3071d31635aabfb98d73e65fbe3f, `BLASTBufferQueue::acquireNextBuffer`
+     * under `MediaCodec::onReleaseOutputBuffer`) is what the other side of that
+     * trade looks like. It is also not something the app can shorten safely:
+     * the only lever is `setDetachSurfaceTimeoutMs`, and on timeout media3
+     * *stops the player* with an `ExoTimeoutException`.
+     *
+     * So the question an ANR report cannot currently answer is the only one
+     * worth asking: did this detach actually take two seconds, or did the
+     * thread dump merely catch the main thread passing through it? Registering
+     * one callback **before** media3's and one **after** brackets exactly that
+     * call — `SurfaceView` invokes `surfaceDestroyed` in registration order —
+     * and the elapsed time goes into the exportable log when it is long enough
+     * to matter.
+     */
+    private var detachProbeHolder: SurfaceHolder? = null
+    private var detachProbeBefore: SurfaceHolder.Callback? = null
+    private var detachProbeAfter: SurfaceHolder.Callback? = null
+    private var detachProbeStartedAtMs = 0L
+
+    /**
+     * Runs [attach] — a call that makes [view] this player's video output —
+     * with the bracketing probe registered around media3's own holder callback.
+     *
+     * Adding a callback to a live holder does **not** replay `surfaceCreated`
+     * (unlike some holder APIs), so this is inert until the surface is actually
+     * destroyed.
+     */
+    private fun attachWithDetachProbe(view: SurfaceView?, attach: () -> Unit) {
+        cancelDetachProbe()
+        val holder = view?.holder
+        if (holder == null) {
+            attach()
+            return
+        }
+        val before = object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) = Unit
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = Unit
+            override fun surfaceDestroyed(h: SurfaceHolder) {
+                detachProbeStartedAtMs = SystemClock.elapsedRealtime()
+            }
+        }
+        val after = object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) = Unit
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) = Unit
+            override fun surfaceDestroyed(h: SurfaceHolder) {
+                val startedAt = detachProbeStartedAtMs
+                detachProbeStartedAtMs = 0L
+                if (startedAt <= 0L) return
+                val blockedMs = SystemClock.elapsedRealtime() - startedAt
+                // A healthy detach is sub-millisecond and must stay out of the
+                // 800-entry export ring; only a block worth explaining is
+                // worth a line.
+                if (blockedMs >= DETACH_REPORT_MS) {
+                    onDiagnostic?.invoke("surface detach blocked main ${blockedMs}ms")
+                }
+            }
+        }
+        holder.addCallback(before)
+        attach()
+        holder.addCallback(after)
+        detachProbeHolder = holder
+        detachProbeBefore = before
+        detachProbeAfter = after
+    }
+
+    /** Unregisters the probe (the output moved elsewhere, or the engine is going away). */
+    private fun cancelDetachProbe() {
+        val holder = detachProbeHolder ?: return
+        detachProbeBefore?.let { holder.removeCallback(it) }
+        detachProbeAfter?.let { holder.removeCallback(it) }
+        detachProbeHolder = null
+        detachProbeBefore = null
+        detachProbeAfter = null
+        detachProbeStartedAtMs = 0L
+    }
+
     /// Stops the return-leg watch (a frame arrived, fullscreen re-claimed, or
     /// the engine is going away).
     private fun cancelPreviewFrameWatch() {
@@ -540,10 +632,45 @@ class ExoPlayerEngine(
         // stop() first so a reload (go-to-live) starts from a clean idle state
         // instead of inheriting a paused / mid-flush decoder, which left the
         // first go-to-live stuck paused. No-op on the initial (idle) load.
-        player.stop()
-        player.setMediaItem(item)
-        player.prepare()
-        player.playWhenReady = true
+        //
+        // **Building the media source is a crash site, not just a failure
+        // site.** `DefaultMediaSourceFactory` resolves the `MediaSource.Factory`
+        // for the URI's content type by `Class.forName`, inside `setMediaItem`
+        // — so a container whose module isn't on the classpath (DASH before the
+        // `media3-exoplayer-dash` dependency beside it in build.gradle.kts;
+        // SmoothStreaming and RTSP still, deliberately) throws
+        // `IllegalStateException(ClassNotFoundException)` straight out of this
+        // method. With `load` called from `HdrPlayerActivity.onCreate`, that is
+        // an `ActivityThread.performLaunchActivity` crash on the very first
+        // frame, which is how it reached Play vitals.
+        //
+        // Routing it to the mpv fallback is both the non-crashing answer and
+        // the *correct* one: libmpv plays every one of those containers, and
+        // the fallback is the path this engine already takes for video it
+        // cannot decode. [triggerFallback] is posted rather than invoked
+        // directly because the host's handler releases **this** engine
+        // ([HdrPlayerActivity.fallbackToMpv]) — running it inline would return
+        // into a released player.
+        //
+        // `Throwable`, not `Exception`: the same shape arrives as
+        // `NoClassDefFoundError` when a class is stripped rather than absent,
+        // and there is nothing here worth crashing for when a working engine is
+        // one callback away.
+        try {
+            player.stop()
+            player.setMediaItem(item)
+            player.prepare()
+            player.playWhenReady = true
+        } catch (t: Throwable) {
+            Log.e(TAG, "could not open media source", t)
+            // Names the exception type only — never the locator, which is the
+            // one thing a media-source failure is tempted to echo back.
+            onDiagnostic?.invoke(
+                "exo media source failed ${t.javaClass.simpleName}; falling back to mpv",
+            )
+            mainHandler.post { if (!released) triggerFallback() }
+            return
+        }
         lastFpsSampleNs = 0L
         lastRenderedFrames = 0
         frameIntervalsUs.clear()
@@ -1043,7 +1170,7 @@ class ExoPlayerEngine(
             "reattach preview surface" + (videoFrameCounters?.let { " $it" } ?: ""),
         )
         playerView.player = null
-        player.setVideoSurfaceView(view)
+        attachWithDetachProbe(view) { player.setVideoSurfaceView(view) }
         // Arm the return-leg watch *after* the transition is requested, so its
         // window measures the surface swap rather than the work above it.
         previewRebuildAttempted = false
@@ -1060,6 +1187,7 @@ class ExoPlayerEngine(
      */
     fun clearPreviewSurface(view: SurfaceView) {
         if (released) return
+        if (detachProbeHolder === view.holder) cancelDetachProbe()
         player.clearVideoSurfaceView(view)
     }
 
@@ -1168,10 +1296,16 @@ class ExoPlayerEngine(
      * counter would advance, and the screen would stay black forever. The
      * PlayerView also owns the `AspectRatioFrameLayout` resize and the
      * `SubtitleView` cues, both of which go with it.
+     *
+     * Wrapped in [attachWithDetachProbe] purely so a later *destroy* of this
+     * surface — Home from fullscreen, the Activity's window stopping — can be
+     * measured; it does not change what the two lines do.
      */
     private fun attachOwnSurface() {
-        playerView.player = null
-        playerView.player = player
+        attachWithDetachProbe(playerView.videoSurfaceView as? SurfaceView) {
+            playerView.player = null
+            playerView.player = player
+        }
     }
 
     /** Drops a deferred [claimViewSurface] without claiming (and its timer). */
@@ -1187,6 +1321,7 @@ class ExoPlayerEngine(
         released = true
         cancelPreviewFrameWatch()
         cancelPendingClaim()
+        cancelDetachProbe()
         playerView.player = null
         player.removeListener(playerListener)
         player.release()
@@ -1244,5 +1379,12 @@ class ExoPlayerEngine(
         // the point is that a preview which stays black leaves evidence
         // instead of silence.
         private const val PREVIEW_REBUILD_VERIFY_MS = 3_000L
+
+        // Floor for reporting a blocking surface detach. A healthy one is
+        // sub-millisecond; 250 ms is already a dropped frame budget's worth of
+        // main-thread stall and well clear of the noise, while media3's own
+        // ceiling (DEFAULT_DETACH_SURFACE_TIMEOUT_MS, 2000 ms) is the number
+        // the report exists to confirm or rule out.
+        private const val DETACH_REPORT_MS = 250L
     }
 }

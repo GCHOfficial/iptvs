@@ -113,6 +113,31 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        // Store the bundled Inter faces rather than deflating them.
+        //
+        // Flutter resolves a font family by asking the platform's
+        // `AssetManager` for the typeface, and a *compressed* asset has to be
+        // inflated into a heap buffer before Skia can parse it
+        // (`_CompressedAsset::getBuffer` -> `zip_archive::Inflate`). That runs
+        // on whichever thread first lays out text in that face — on Flutter
+        // that is the UI thread, inside `TextPainter.layout`, which is exactly
+        // where a Play-vitals ANR caught a set-top box (issue
+        // bdf538f0eba8828130056d4994b1b559). Stored entries are `mmap`ped
+        // instead, so the first text layout pays nothing.
+        //
+        // The three faces are ~1.2 MB raw and deflate to ~0.6 MB, and they are
+        // packaged twice — once as `res/font/` for the native player's Compose
+        // overlay and once inside `flutter_assets` for the Dart side — so this
+        // costs roughly 1.3 MB of *installed* size. Play recompresses for
+        // delivery, so the download cost is much smaller than that.
+        //
+        // This applies to both halves: AAPT2 stores matching entries under
+        // `res/`, and the packaging task applies the same predicate to
+        // `assets/` (and bundletool to the AAB via `BundleConfig`).
+        noCompress += listOf("ttf", "otf")
+    }
+
     packaging {
         jniLibs {
             // Both media_kit and dev.jdtech.mpv ship libmpv.so. We need the
@@ -155,6 +180,26 @@ dependencies {
     // do on Android.
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
+    // DASH, for the same reason HLS is here: `DefaultMediaSourceFactory` picks
+    // a `MediaSource.Factory` from the URI's inferred content type and loads it
+    // **reflectively** (`Class.forName("…dash.DashMediaSource$Factory")`), so a
+    // missing module is not a graceful "unsupported" — it is a
+    // `ClassNotFoundException` wrapped in an `IllegalStateException` thrown out
+    // of `setMediaItem`, i.e. a crash in `ExoPlayerEngine.load`. That shipped:
+    // Play issue ef0b3cb0ad7e333376287b5673cfaeeb, 8 reports / 5 users on
+    // vc10, all sharing the `DashMediaSource$Factory` signature — i.e. a
+    // provider serving `.mpd`.
+    //
+    // **SmoothStreaming and RTSP are deliberately *not* added.** The same
+    // reflective lookup covers `SsMediaSource$Factory` and
+    // `RtspMediaSource$Factory`, but there is no evidence of either in the
+    // vitals data, `.ism` is effectively extinct in IPTV, and ExoPlayer's RTSP
+    // support is narrower than libmpv/FFmpeg's — so for those two the right
+    // destination is the mpv fallback, not a second ExoPlayer module. What
+    // makes that safe is the `try`/`catch` in `ExoPlayerEngine.load`, which
+    // turns an unloadable media source into [ExoPlayerEngine.triggerFallback]
+    // instead of a crash. Pinned by `MediaSourceModulesTest`.
+    implementation("androidx.media3:media3-exoplayer-dash:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
 
     // libmpv (gpu-next / libplacebo) is the FALLBACK engine, used only when ExoPlayer
