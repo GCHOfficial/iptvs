@@ -203,6 +203,13 @@ scan_health() {
   if grep -q "ANR in ${PKG}" "$w"; then
     fail "$ctx: ANR in $PKG"
     grep -E -A20 "ANR in ${PKG}" "$w" | head -40 >>"$OUT/crashes.txt" || true
+    # logcat carries the ANR's reason and load, not its thread stacks. A
+    # bugreport includes /data/anr without root, so the main-thread stack
+    # comes back with the failure. Once per run: it takes a minute.
+    if [[ -z "${ANR_BUGREPORT_TAKEN:-}" ]]; then
+      ANR_BUGREPORT_TAKEN=1
+      timeout 180 "${ADB[@]}" bugreport "$OUT/anr-bugreport.zip" >/dev/null 2>&1 || true
+    fi
     found=1
   fi
   # A tombstone names its process in the `>>> pkg <<<` header line; `Fatal

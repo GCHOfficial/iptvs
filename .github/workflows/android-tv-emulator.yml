@@ -144,10 +144,11 @@ jobs:
             api-level: 36
             target: android-tv
             arch: x86_64
-            # Deliberately blank: the TV system image's own default AVD is
-            # already a television, and forcing `--device` on it only adds a
-            # way for AVD creation to fail.
-            profile: ''
+            # tv_1080p, like API 28. Left blank on the first run, the AVD came
+            # up as a 320x640 portrait panel at 99 dpi; the app ANR'd ("no
+            # focused window") without drawing a single frame, while the
+            # emulator's GPU layer logged "Failed to find ColorBuffer".
+            profile: tv_1080p
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
