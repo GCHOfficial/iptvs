@@ -8,6 +8,33 @@ import 'package:iptvs/sources/source.dart';
 import 'package:iptvs/sources/source_config.dart';
 
 void main() {
+  group('LinuxNativeSession live latency keys', () {
+    test('carries the preformatted badge and info value', () {
+      final command = LinuxNativeSession.buildOverlayStateCommand(
+        title: 'BBC One HD',
+        sourceName: 'My Provider',
+        epgNow: null,
+        epgNext: null,
+        canFavorite: true,
+        favorite: false,
+        isLive: true,
+        liveSynced: false,
+        liveDelayBadge: 'LIVE -1:23',
+        liveDelayInfo: '1:23 · buffer 24s',
+        aspectLabel: 'Fill',
+      );
+      final payload = jsonDecode(command[3] as String) as Map<String, dynamic>;
+      // Strings, not numbers: the Lua OSD prints them and never formats or
+      // derives, the same rule the quick list follows.
+      expect(payload['liveDelayBadge'], 'LIVE -1:23');
+      expect(payload['liveDelayInfo'], '1:23 · buffer 24s');
+      // The latched drift rule reaches the overlay through the key it always
+      // had, so an older Lua script still greys the pill and draws the
+      // go-to-live control.
+      expect(payload['liveSynced'], false);
+    });
+  });
+
   group('LinuxNativeSession.buildOverlayStateCommand', () {
     test('encodes the iptvs-state JSON contract the Lua overlay parses', () {
       final command = LinuxNativeSession.buildOverlayStateCommand(
@@ -44,6 +71,11 @@ void main() {
       // HDR10+ badge upgrade defaults to false until the Dart-side ST2094-40
       // probe pushes it — the Lua overlay never derives it itself.
       expect(payload['hdr10Plus'], false);
+      // Live latency: the badge falls back to the bare pill and the info row
+      // to "omit" when the call site pushes neither, which is exactly what an
+      // overlay that predates the keys already drew.
+      expect(payload['liveDelayBadge'], 'LIVE');
+      expect(payload['liveDelayInfo'], '');
       expect(payload.containsKey('epgNowTitle'), isFalse);
       expect(payload.containsKey('epgNextTitle'), isFalse);
     });

@@ -16,6 +16,7 @@ import '../data/net.dart';
 import '../sources/source.dart';
 import 'channel_owner.dart';
 import 'ios_engine.dart';
+import 'live_latency.dart';
 import 'live_zap_controller.dart';
 import 'mpv_options.dart';
 import 'player_overlay.dart';
@@ -744,6 +745,23 @@ class _PlayerScreenState extends State<PlayerScreen>
   // falls behind), true again after go-to-live. Greys the LIVE badge + shows the
   // go-to-live button.
   bool _liveSynced = true;
+
+  /// How far behind the live edge this session has drifted, and the counters
+  /// that explain it. One tracker per *live session* — see [_resetLiveLatency]
+  /// for every point that starts a new one, and docs/player.md "Live latency".
+  ///
+  /// **Measurement only.** Nothing here feeds the reconnect watchdog, the
+  /// buffer presets, playback speed or the handoff windows. Its two outputs
+  /// are the LIVE badge's label and the latched half of [_liveSynced] — i.e.
+  /// whether "Go to live" is on screen, which is the control this measurement
+  /// exists to make appear.
+  final LiveLatencyTracker _latency = LiveLatencyTracker();
+
+  /// The last delay badge/info pair actually published, so a sample that
+  /// changes nothing visible costs no rebuild and no MethodChannel/IPC push.
+  String _lastDelayBadge = 'LIVE';
+  String _lastDelayInfo = '';
+
   // Live reconnect watchdog (Windows / embedded media_kit; Android reconnects in
   // its native Activity). Reload the source when a live stream stalls or errors.
   bool _buffering = false;
@@ -968,10 +986,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       }),
     );
     if (_isLive) {
-      _reconnectTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => _pollLiveReconnect(),
-      );
+      _reconnectTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        // Measurement first, then the (entirely unchanged) watchdog decision.
+        // Deliberately the same tick rather than a second timer: a latency
+        // sample must never be able to reorder, delay or skip a reconnect.
+        _sampleLiveLatency();
+        _pollLiveReconnect();
+      });
       ResourceCounters.incReconnectTimers();
     }
     // VOD resume: persist the position periodically (plus on dispose and via
@@ -1304,6 +1325,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _buffering = false;
     _endedPending = false;
     _liveSynced = true;
+    _resetLiveLatency('zap');
     if (_reconnecting) {
       _reconnecting = false;
       _onReconnectingChanged();
@@ -1457,6 +1479,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _open() async {
     if (mounted) setState(() => _error = null);
+    // A fresh open, or a preview->fullscreen claim of an already-running
+    // engine — the same thing as far as the measurement is concerned: this
+    // stream starts at the live edge and its drift starts at zero.
+    _resetLiveLatency(widget.existingPlayer != null ? 'claim' : 'load');
     _showNativeControls(scheduleHide: false);
     _logPlayback(
       'open live=$_isLive url=${_redactPlayback(_stream.url)} '
@@ -2171,6 +2197,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       'ios engine fallback opening embedded mpv live=$_isLive '
       'resume=${position?.inSeconds ?? 0}s',
     );
+    // Cross-engine handoff: AVPlayer measured (natively) up to here, libmpv
+    // starts its own session from the live edge.
+    _resetLiveLatency('engine');
     await _player.open(
       Media(
         stream.url,
@@ -2379,6 +2408,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       'linux native escalation: PQ/HLG source on Wayland — switching '
       'embedded → native mpv',
     );
+    // A different engine, a fresh resolve and a fresh open: the drift measured
+    // against the embedded engine describes a stream that is about to stop.
+    _resetLiveLatency('engine');
     // Fresh resolve: the embedded engine holds the (possibly single-use)
     // connection/token, so native must open a freshly resolved URL.
     final fresh = await _freshLiveStream();
@@ -2442,6 +2474,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       'windows native escalation: PQ/HLG source — switching embedded → '
       'native HWND',
     );
+    // Same `_player`, new surface: a `vo`/`wid` hot-swap is a surface claim,
+    // and mpv re-creates its render pipeline across it.
+    _resetLiveLatency('engine');
     // Creates the HWND surface *and* the GDI overlay, sets _windowsNativeSurface
     // / _nativePlaybackLaunched, and syncs control state (see
     // _createWindowsNativeHdrSurface / CreateNativeVideoSurface).
@@ -2731,6 +2766,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     // The reload really is firing now; a later EOF sets the level again.
     _endedPending = false;
     _liveSynced = true; // a reconnect reopens at the live edge
+    _resetLiveLatency('reconnect');
     if (!_reconnecting) {
       _reconnecting = true;
       _onReconnectingChanged();
@@ -2781,6 +2817,124 @@ class _PlayerScreenState extends State<PlayerScreen>
     final state = _player.state;
     final ahead = state.buffer - state.position;
     return ahead.isNegative ? 0 : ahead.inMilliseconds;
+  }
+
+  /// Whether **Dart** is the engine that can measure this stream's latency.
+  ///
+  /// True for every media_kit surface this route drives — the embedded one,
+  /// the Windows native HWND (that is this same `_player` presenting through a
+  /// `vo` swap), and the Android/iOS media_kit fallbacks — plus the Linux
+  /// native mpv process, whose position and cache depth Dart polls over IPC.
+  ///
+  /// False where a *separate* engine owns playback and computes its own
+  /// numbers: Android's `HdrPlayerActivity` and iOS's presented
+  /// `IptvsPlayerViewController`. Pushing a Dart-computed delay to those would
+  /// be pushing an idle player's zeros over a real measurement.
+  bool get _measuresLiveLatency {
+    if (!_isLive) return false;
+    if (_linuxNativeSession != null) return true;
+    return !_separateEngineOwnsPlayback;
+  }
+
+  /// The LIVE badge's text for every surface this route feeds: `LIVE`, or
+  /// `LIVE -1:23` once drifted past [kLiveDriftWarnMs]. Each surface keeps its
+  /// own greyed-when-unsynced styling; this is only the label.
+  String get _liveDelayBadge =>
+      _measuresLiveLatency ? liveDelayBadgeLabel(_latency.driftMs) : 'LIVE';
+
+  /// The Stream information panel's "Live delay" value. Empty means **omit the
+  /// row** — VOD, and any surface whose engine Dart doesn't measure.
+  String get _liveDelayInfo => _measuresLiveLatency
+      ? liveDelayInfoValue(_latency.driftMs, _latency.aheadMs)
+      : '';
+
+  /// Starts a new live-latency session. [reason] is one of the contract's
+  /// `load|reconnect|zap|golive|engine|claim`, and a session that had measured
+  /// drift says so in the exportable log on its way out.
+  ///
+  /// It deliberately does **not** touch [_liveSynced]. The things that put a
+  /// stream back *in sync* are go-live, a reload, a zap and a reconnect, and
+  /// each of those already sets it true at its own site; an engine swap or a
+  /// surface claim restarts the measurement without claiming the user's pause
+  /// never happened.
+  void _resetLiveLatency(String reason) {
+    if (!_isLive) return;
+    if (_latency.driftMs > 0) _logPlayback(_latency.resetLogLine(reason));
+    _latency.reset();
+    _lastDelayBadge = 'LIVE';
+    _lastDelayInfo = '';
+  }
+
+  /// One latency sample, taken on the 1 Hz live poll the reconnect watchdog
+  /// already runs (see [initState]) — no timer of its own, and nothing it
+  /// reads or writes is an input to [_pollLiveReconnect].
+  void _sampleLiveLatency() {
+    if (!mounted || !_measuresLiveLatency) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = _linuxNativeSession;
+    final int positionMs;
+    final int aheadMs;
+    final bool playing;
+    if (session != null) {
+      // The native mpv window is a separate OS process, so its position and
+      // cache depth arrive through that session's own 1 Hz IPC poll rather
+      // than off `_player` (which is idle here). Nothing to sample until it
+      // has read one.
+      final position = session.lastPositionMs;
+      if (position == null) return;
+      positionMs = position;
+      aheadMs = session.lastBufferedAheadMs;
+      // mpv's `pause` isn't mirrored here and doesn't need to be: `playing`
+      // only gates the *baseline*, and a pause shows up as media time not
+      // advancing — which is drift either way, by design.
+      playing = _linuxNativeStarted;
+    } else {
+      positionMs = _player.state.position.inMilliseconds;
+      aheadMs = _bufferedAheadMs();
+      playing = _player.state.playing;
+    }
+    final crossed = _latency.sample(
+      nowMs: now,
+      positionMs: positionMs,
+      aheadMs: aheadMs,
+      playing: playing,
+      buffering: _buffering,
+    );
+    if (crossed) {
+      _logPlayback(_latency.behindLogLine);
+    } else if (_latency.takePeriodicLog(nowMs: now, playing: playing)) {
+      _logPlayback(_latency.logLine);
+    }
+    _publishLiveLatency(dropSync: crossed);
+  }
+
+  /// Applies the latched drift half of [_liveSynced] and pushes a *changed*
+  /// badge/info pair to whichever surface is drawing.
+  void _publishLiveLatency({required bool dropSync}) {
+    final badge = _liveDelayBadge;
+    final info = _liveDelayInfo;
+    final dropsSync = dropSync && _liveSynced;
+    if (!dropsSync && badge == _lastDelayBadge && info == _lastDelayInfo) {
+      return;
+    }
+    _lastDelayBadge = badge;
+    _lastDelayInfo = info;
+    // **Latched:** drift can only ever take sync away. It is given back by a
+    // reset (go-live / reload / zap / reconnect), never by the number dipping
+    // back under the threshold — "Go to live" is the one control that removes
+    // itself while focused, so a gate that oscillated around a threshold would
+    // strand a D-pad (docs/tv-navigation.md).
+    if (dropsSync) _liveSynced = false;
+    if (_linuxNativeSession != null) {
+      unawaited(_pushLinuxOverlayState());
+    } else if (_usesWindowsNativeSurface) {
+      // Through the existing 2 Hz coalescer rather than around it: a delay
+      // badge is a once-a-second string, not an input acknowledgement. Losing
+      // sync is a visible state change, so that one pushes directly.
+      _requestControlSync();
+      if (dropsSync) unawaited(_syncNativeControlState());
+    }
+    if (mounted) setState(() {});
   }
 
   /// The stream to use for a live reload: freshly re-resolved when the caller
@@ -2842,6 +2996,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       favorite: _favorite,
       isLive: _isLive,
       liveSynced: _liveSynced,
+      liveDelayBadge: _liveDelayBadge,
+      liveDelayInfo: _liveDelayInfo,
       aspectLabel: kAspectModes[_aspectModeIndex].label,
       reconnecting: _reconnecting,
       hdr10Plus: _hdr10Plus,
@@ -2929,6 +3085,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           // declines the command and the key becomes dead instead of
           // revealing the chrome.
           'zapEnabled': widget.zap != null,
+          // Live latency, **preformatted**: the GDI overlay prints these and
+          // never derives them, exactly as it does the quick list. Windows
+          // only — not in [_presentationControlState] — because iOS's
+          // presented controller owns its own engine and computes its own
+          // delay natively; pushing an idle `_player`'s "LIVE" there would
+          // overwrite a real measurement with a placeholder. An empty
+          // `liveDelayInfo` means "omit the Live delay row".
+          'liveDelayBadge': _liveDelayBadge,
+          'liveDelayInfo': _liveDelayInfo,
           ..._streamInfoPayload(),
         },
       });
@@ -3353,6 +3518,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       canFavorite: _canFavorite,
       favorite: _favorite,
       liveSynced: _liveSynced,
+      liveDelayBadge: _liveDelayBadge,
+      liveDelayInfo: _liveDelayInfo,
       zap: _zapBannerState(),
       quickList: _quickListState(),
       zapEnabled: _zapEnabled,
@@ -3371,6 +3538,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     // An explicit jump to the live edge is the reload a pending EOF was
     // waiting for; letting it stand would reconnect again a tick later.
     _endedPending = false;
+    // Reset before the (possibly slow) re-resolve rather than after the
+    // reopen: the tracker is unbaselined until media moves again, so the
+    // round trip itself can't be charged to the new session as drift.
+    _resetLiveLatency('golive');
     final stream = await _freshLiveStream();
     if (!mounted) return;
     if (_linuxNativeSession != null) {

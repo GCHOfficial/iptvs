@@ -192,6 +192,31 @@ class LinuxNativeSession {
   /// to the VOD position-persist interval of progress.
   double? _lastPositionSeconds;
   double? _lastDurationSeconds;
+
+  /// Last-known `demuxer-cache-duration` (seconds of media held ahead of the
+  /// playhead), polled beside `time-pos` by [_startPositionPoll].
+  ///
+  /// This is the native-mpv half of `_bufferedAheadMs()`: the embedded player
+  /// answers it off `PlayerState.buffer`, but here the engine is a separate OS
+  /// process, so the only way to it is the same IPC read.
+  double? _lastCacheSeconds;
+
+  /// Last polled playhead position in milliseconds, or null before the first
+  /// successful read. Fed to the live-latency tracker in `player_screen.dart`
+  /// (see `_sampleLiveLatency`).
+  int? get lastPositionMs {
+    final seconds = _lastPositionSeconds;
+    return seconds == null ? null : (seconds * 1000).round();
+  }
+
+  /// Last polled cache depth in milliseconds, or `-1` when mpv hasn't answered
+  /// yet — the same "unknown" convention `_bufferedAheadMs()` uses.
+  int get lastBufferedAheadMs {
+    final seconds = _lastCacheSeconds;
+    if (seconds == null || seconds.isNaN || seconds < 0) return -1;
+    return (seconds * 1000).round();
+  }
+
   final Map<int, Completer<Object?>> _requests = {};
   final StreamController<String> _controlEvents =
       StreamController<String>.broadcast();
@@ -517,14 +542,20 @@ class LinuxNativeSession {
       liveSynced: liveSynced,
       aspectLabel: aspectLabel,
     );
-    if (!stream.isLive) _startPositionPoll();
+    // Live polls it too, now: VOD reads `time-pos` for the resume point,
+    // live reads it (and `demuxer-cache-duration`) for the latency tracker.
+    _startPositionPoll();
   }
 
-  /// Low-frequency refresh of [_lastPositionSeconds], replacing the per-frame
-  /// `time-pos` property observation. 1 Hz is as fresh as the cache ever needs
-  /// to be: it only matters when the mpv *process* has already exited and
-  /// `playbackState()`'s live read comes back empty, and it feeds a resume
-  /// point, not a scrubber.
+  /// Low-frequency refresh of [_lastPositionSeconds] and [_lastCacheSeconds],
+  /// replacing the per-frame `time-pos` property observation.
+  ///
+  /// 1 Hz is as fresh as either value needs to be. The position feeds a resume
+  /// point, not a scrubber — and only matters when the mpv *process* has
+  /// already exited and `playbackState()`'s live read comes back empty — while
+  /// the cache depth feeds a once-a-second latency sample. Observing them
+  /// instead would hand the main isolate a 25–60 Hz JSON firehose, which is
+  /// the reason this poll exists in the first place.
   static const Duration _positionPollInterval = Duration(seconds: 1);
   Timer? _positionPollTimer;
   bool _pollingPosition = false;
@@ -549,6 +580,11 @@ class LinuxNativeSession {
         );
         _lastPositionSeconds = position;
         _lastDurationSeconds = duration;
+        // mpv answers null for an unloaded/audio-less file; keep the last
+        // known value rather than flapping the badge to "unknown" on one miss.
+        _lastCacheSeconds =
+            await _getPropertyNumber('demuxer-cache-duration') ??
+            _lastCacheSeconds;
       } finally {
         _pollingPosition = false;
       }
@@ -564,6 +600,8 @@ class LinuxNativeSession {
     required bool favorite,
     required bool isLive,
     required bool liveSynced,
+    String liveDelayBadge = 'LIVE',
+    String liveDelayInfo = '',
     required String aspectLabel,
     bool reconnecting = false,
     bool hdr10Plus = false,
@@ -579,6 +617,8 @@ class LinuxNativeSession {
       favorite: favorite,
       isLive: isLive,
       liveSynced: liveSynced,
+      liveDelayBadge: liveDelayBadge,
+      liveDelayInfo: liveDelayInfo,
       aspectLabel: aspectLabel,
       reconnecting: reconnecting,
       hdr10Plus: hdr10Plus,
@@ -601,6 +641,8 @@ class LinuxNativeSession {
     required bool favorite,
     required bool isLive,
     required bool liveSynced,
+    String liveDelayBadge = 'LIVE',
+    String liveDelayInfo = '',
     required String aspectLabel,
     bool reconnecting = false,
     bool hdr10Plus = false,
@@ -617,6 +659,14 @@ class LinuxNativeSession {
       'favorite': favorite,
       'isLive': isLive,
       'liveSynced': liveSynced,
+      // Live latency, **preformatted**: the Lua OSD prints these and never
+      // derives them (the same rule the quick list follows). `liveDelayBadge`
+      // replaces the bare `LIVE` pill text — an older overlay that doesn't
+      // read it simply keeps drawing `LIVE`, which is the documented
+      // fallback — and an empty `liveDelayInfo` means "omit the Live delay
+      // row" from the stream-information panel.
+      'liveDelayBadge': liveDelayBadge,
+      'liveDelayInfo': liveDelayInfo,
       'aspectLabel': aspectLabel,
       'reconnecting': reconnecting,
       // The Lua badge derives PQ/HLG from mpv properties itself but cannot
