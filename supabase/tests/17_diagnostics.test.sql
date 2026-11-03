@@ -169,7 +169,7 @@ select matches(
   'an oversized body is refused, and the message names the limit'
 );
 -- 12
-select unlike(
+select unalike(
   pg_temp.submit_error(repeat('SECRETMARKER', 25000), '', '', '', false, ''),
   '%SECRETMARKER%',
   'the oversize rejection echoes none of the body back'
