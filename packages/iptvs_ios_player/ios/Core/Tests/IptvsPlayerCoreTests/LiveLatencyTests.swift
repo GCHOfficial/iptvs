@@ -256,9 +256,12 @@ final class LiveLatencyTests: XCTestCase {
   func testResetClearsEveryAccumulatedFigure() {
     var tracker = LiveLatencyTracker()
     tracker.sample(LiveLatencySample(nowMs: 0, positionMs: 0, isPlaying: true, isBuffering: false))
-    tracker.sample(LiveLatencySample(nowMs: 60_500, positionMs: 500, isPlaying: false, isBuffering: true))
-    XCTAssertGreaterThan(tracker.driftMs, 0)
-    XCTAssertGreaterThan(tracker.stalls, 0)
+    // The second sample is the one that baselines (playing, media advanced);
+    // only after it can a stall accrue drift.
+    tracker.sample(LiveLatencySample(nowMs: 1_000, positionMs: 1_000, isPlaying: true, isBuffering: false))
+    tracker.sample(LiveLatencySample(nowMs: 61_000, positionMs: 1_500, isPlaying: false, isBuffering: true))
+    XCTAssertEqual(tracker.driftMs, 59_500)
+    XCTAssertEqual(tracker.stalls, 1)
 
     tracker.reset()
     XCTAssertEqual(tracker, LiveLatencyTracker())
