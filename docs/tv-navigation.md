@@ -285,7 +285,8 @@ that a single `select` press with no navigation first runs the retry.
 primary action — the update dialog, `SourceErrorView`'s retry, the LAN share screen's Restart.
 This one does not, and the divergence is deliberate rather than an oversight to be tidied up:
 
-- the action is **irreversible** — there is no unsend, and deliberately no developer delete RPC
+- the action is **irreversible to the user** — there is no unsend, and the developer-side
+  `support_delete_diagnostics` is a panel control, not something the device can ask for
   (docs/cloud-sync.md "Diagnostics submission");
 - its subject is the user's **own viewing history**, not an app-internal retry;
 - it is reached by someone pressing buttons on a remote, where a stray OK on a screen that just

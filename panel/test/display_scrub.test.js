@@ -2,7 +2,7 @@
 // (wired to `node --test test/` in package.json).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scrubForDisplay } from '../src/validate.js';
+import { diagnosticsDeleteOutcome, scrubForDisplay } from '../src/validate.js';
 
 const FFFD = '�';
 
@@ -63,4 +63,35 @@ test('scrubForDisplay coerces null/undefined to an empty string', () => {
 test('scrubForDisplay coerces a non-string', () => {
   assert.equal(scrubForDisplay(42), '42');
   assert.equal(scrubForDisplay(0), '0');
+});
+
+// ------------------------------------------- the developer delete's answer
+//
+// `support_delete_diagnostics` returns a boolean, and FALSE IS NOT AN ERROR:
+// it means the code matched nothing, which is what a second tab, or a report
+// that expired between the list being drawn and Delete being pressed, looks
+// like. A caller that only checked `error` would claim to have deleted
+// something that was never there.
+
+test('diagnosticsDeleteOutcome reports a real delete', () => {
+  const out = diagnosticsDeleteOutcome(true);
+  assert.equal(out.deleted, true);
+  assert.equal(out.message, 'Report deleted.');
+});
+
+test('diagnosticsDeleteOutcome reports "nothing deleted" without calling it an error', () => {
+  const out = diagnosticsDeleteOutcome(false);
+  assert.equal(out.deleted, false);
+  assert.equal(out.message, 'That report was already gone.');
+});
+
+test('diagnosticsDeleteOutcome accepts the stringified boolean a strict proxy may return', () => {
+  assert.equal(diagnosticsDeleteOutcome('true').deleted, true);
+});
+
+test('diagnosticsDeleteOutcome reads anything unrecognised as "nothing deleted"', () => {
+  // The safe direction: it understates, and the re-rendered list is the real
+  // answer either way. A truthy-but-not-true value must not read as a delete.
+  for (const v of [null, undefined, '', 'TRUE', 1, {}, []])
+    assert.equal(diagnosticsDeleteOutcome(v).deleted, false, `unexpected true for ${JSON.stringify(v)}`);
 });

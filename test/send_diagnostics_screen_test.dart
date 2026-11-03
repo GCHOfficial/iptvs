@@ -1,9 +1,10 @@
 // The send screen's two load-bearing properties are both about a remote:
 // where focus lands on entry, and that nothing on the screen can trap it.
 //
-// Default focus is **Cancel**, not Send. Sending is irreversible — there is no
-// unsend and, deliberately, no developer delete path — and its subject is the
-// user's own viewing history. Every other confirm in this app autofocuses its
+// Default focus is **Cancel**, not Send. Sending is irreversible *to the user*
+// — there is no unsend, and the developer-side delete that exists on the panel
+// is not something the device can ask for — and its subject is the user's own
+// viewing history. Every other confirm in this app autofocuses its
 // primary action; this is the one place where a single stray OK on a remote
 // must not publish anything. If this test starts failing because someone moved
 // `autofocus: true` onto the Send button, the test is right.
