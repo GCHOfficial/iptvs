@@ -366,7 +366,13 @@ an unlimited offline attack. This is the whole reason the generator exists.
 
 It **does not protect** against: a compromised or XSS'd panel *while it is unlocked* (it holds the
 CK in memory and can read/rewrite secrets), or a malicious already-paired device that legitimately
-holds the CK.
+holds the CK. **Submitted diagnostics are inside that same XSS'd-panel boundary and are not
+protected by E2EE at all** — they are plaintext in `public.diagnostics`, readable by the developer's
+signed-in panel session, so a compromised panel reads every submitted log just as it reads every
+unlocked secret. That is the deliberate shape of the feature (a log the developer cannot read is not
+a support channel), and it is why the user is told in plain words what the log contains before it
+leaves, why the retention is 30 days rather than indefinite, and why nothing in the log is a
+credential — `redactText` runs on the way *in*, at `DiagnosticsLog.add`, not on the way out.
 
 **An *active* (writing) backend is a third category.** The earlier wording covered only an operator
 who *reads*; one that also **writes** attacks E2EE by two other routes, and both clients used to
@@ -483,6 +489,198 @@ then raising **Auth → Rate Limits → email sent**.
 > `service_role` bypasses RLS via `BYPASSRLS` regardless). The correct defence-in-depth is the
 > table-level `REVOKE` in `..._tenant_isolation.sql`, which also strips **TRUNCATE** — RLS does not
 > filter TRUNCATE at all, so holding it on an RLS-protected table is a latent full-wipe primitive.
+
+## Diagnostics submission ("Send diagnostics")
+
+`20261103000000_diagnostics.sql` + `lib/data/diagnostics_upload.dart` +
+`lib/screens/send_diagnostics_screen.dart`. A user presses one button on the Diagnostics screen,
+the exportable log goes to the developer, and a six-character code comes back for them to read
+out. The LAN fallback beside it (`diagnostics_share_server.dart`) involves no backend at all and is
+described at the end.
+
+This is the **one place where the shape of the backend changes**, so read this before touching it.
+
+### The anon-role departure
+
+`submit_diagnostics` is the **first write RPC in this schema granted `execute` to `anon`** — i.e.
+callable by an install with no session at all, holding nothing but the public publishable key.
+Everything else that writes requires a paired anonymous session and resolves an owner through
+`current_device_owner()`.
+
+The alternative was to call `ensureAnonSession()` from the diagnostics screen, and that is worse on
+both counts. It mints a permanent `auth.users` row per install that counts toward the project's
+monthly active users forever — the bill this repo has already paid once (~1,900 anonymous users
+against 62 devices that ever paired; see "An anonymous user is created only when the user opts in"
+above), and a support button is pressed by exactly the people having a bad time. And it buys
+nothing: **a per-session meter is not a bound when sessions are free to mint.** An attacker would
+simply mint one per submission.
+
+Client-side, nothing special is needed to get the anon role — and nothing special may be *added*.
+`supabase_flutter` sends `apikey: <publishable key>` and `Authorization: Bearer <access token ??
+publishable key>` on every request; with no session there is no access token, so PostgREST resolves
+to `anon`. `submitDiagnostics` therefore just calls `Supabase.instance.client.rpc(...)` and must
+never acquire a session on the way. A device that *is* already paired has one and calls as
+`authenticated` instead; the RPC is granted to both and the metering does not care which arrives.
+
+### Therefore every bound is absolute, never per subject
+
+With no trustworthy subject, all metering is **global**:
+
+| Bound | Value | Where |
+| --- | --- | --- |
+| Body size | 256 KiB | `assert_diagnostics_valid`, called by both the RPC and the BEFORE INSERT trigger |
+| Metadata field | 64 chars, no control characters | same |
+| Submissions | **120 per hour, globally** | `check_diagnostics_rate` + the single-row `diag_rate` table |
+| Rows | 2000 | `submit_diagnostics` ceiling |
+| Total bytes | 64 MiB | same, summed over `body_bytes` |
+| Eviction floor | 72 h | nothing younger is ever evicted |
+| Retention | 30 days | `expires_at`, swept lazily and filtered on every read |
+
+A global meter **is** a denial-of-service lever: one actor can exhaust the hour for everyone. That
+is accepted deliberately. The failure mode is "the support button says try later", which is exactly
+where users were before the feature existed; what a global budget actually bounds is the only thing
+that matters here, which is unbounded storage growth on a free-tier project.
+
+The client trims oldest-first to the byte cap before sending (`DiagnosticsLog.asTextBounded`), so a
+submit should never fail on size — the server cap is a backstop against a client that doesn't, not
+the user-facing limit. Oldest-first because the newest entries are the ones describing the problem
+being reported.
+
+`body_bytes` is **recomputed by the trigger**, never taken from the caller: it is the input to the
+storage ceiling, so a client that under-reported it would be handing itself an unbounded quota.
+
+### Insert-only, enforced structurally
+
+`public.diagnostics` carries a `BEFORE UPDATE OR DELETE` trigger. UPDATE is refused
+unconditionally. DELETE is refused unless the row is **itself** eligible under a transaction-local
+mode flag the submit RPC sets (`iptvs.diagnostics_sweep`, the same `set_config(..., true)` idiom as
+`iptvs.force_profile_revision`):
+
+- `'expire'` — the row is past `expires_at`. This is the 30-day expiry being *implemented*, not an
+  exception to it.
+- `'evict'` — the row is older than the 72 h floor and the table is at its ceiling.
+
+The guard re-checks the row's own eligibility rather than trusting the flag, which is the point: a
+bug in the sweep's `WHERE` clause cannot take a fresh submission. It fires for every role
+**including the table owner**, so it binds the dashboard too. A developer-initiated delete is
+deliberately **not** in scope (the owner has not approved one); adding it later means adding a third
+mode here — a visible, reviewable change — rather than relaxing anything.
+
+There are **no column `CHECK` constraints** on this table, on purpose: a CHECK violation's `DETAIL`
+is "Failing row contains (...)", which here would echo the entire log body back over the wire.
+Everything is validated in the BEFORE trigger instead, for the same reason `sources_validate`
+exists rather than constraints on `sources`. The trigger also coalesces every nullable-looking
+column before its `NOT NULL` can fire, whose DETAIL would do the same.
+
+### Expiry is lazy, and that is safe
+
+There is no cron on this project, so expiry is work the next writer does: each submit sweeps up to
+**200** expired rows before inserting. Being behind only costs disk, because both developer read
+RPCs filter `expires_at > now()` — so the 30-day promise holds the instant it falls due, whether or
+not anything has swept yet.
+
+### The code is an identifier, not a bearer token
+
+`D-` + 6 characters of the same unambiguous alphabet `gen_pairing_code` uses (no I/L/O/0/1 — it is
+read off a television across a room and spoken down a phone line). The `D-` prefix keeps it
+structurally distinct from an 8-character pairing code. Server-generated, retried on
+`unique_violation`.
+
+Six characters is ~29.7 bits, which is a fine identifier and a poor secret — and that is fine,
+because **there is no read path for a non-developer caller**, so guessing one gains nothing. If a
+read-by-code path is ever added (e.g. so the submitting device can show its own log back), the code
+becomes a secret and needs a secret's entropy.
+
+The app shows it large, plus a QR of the **bare code string** — not a URL. There is no page to land
+on; encoding a link would invite someone to follow it and find nothing.
+
+### Who can read: `support_readers`, fail-closed
+
+`public.support_readers(uid)` is RLS-on with zero policies and zero grants. **Empty means nobody
+can read anything.** It is seeded once, by hand, from the Supabase dashboard after the developer
+account has signed in (`supabase/README.md` carries the exact insert). There is deliberately no RPC
+that adds a reader: a self-service "make me a reader" path would *be* the security boundary of this
+feature, and the boundary is better off being a row only someone with dashboard access can write.
+
+`is_support_reader()` is `stable SECURITY DEFINER` (it has to be — the table it reads has no grants)
+and is not granted to any client role; `support_list_diagnostics(p_limit)` and
+`support_get_diagnostics(p_code)` are granted to `authenticated` only and raise
+`iptvs: not authorised` for everyone else, **including a legitimately paired device** — the caller
+most easily mistaken for an authorised one. Removing the row revokes access immediately; nothing is
+cached.
+
+### No `DEFAULT` parameters
+
+`submit_diagnostics` takes all six parameters explicitly. PostgREST resolves an overload by the set
+of parameter *names* in the request body, and a `DEFAULT` beside a narrower overload makes two
+candidates match one call — answered as `PGRST203`, the failure that broke 100% of pairings once
+already. There is no narrower overload today; this shape makes one impossible to add carelessly. A
+future field is a **new arity** with every parameter explicit, and this one stays forever as a
+delegate (installs are arbitrarily old).
+
+### The panel's Support tab
+
+Shown only when `support_list_diagnostics` succeeds — the availability probe runs **inside
+`render()`**, never from an auth listener (see "The panel re-renders on a change of identity" below;
+adding a `render()` there is the bug that throws away a user's open form on every browser-tab
+switch). The flag is reset alongside the other per-identity state in the `sessionIdentityChanged`
+branch.
+
+A body is rendered with `createElement('pre')` + `textContent` — never `innerHTML` — after a pure
+`scrubForDisplay()` (`panel/src/validate.js`) that maps C0/C1 controls (except `\n` and `\t`) and
+the bidi overrides U+202A–202E / U+2066–2069 to U+FFFD, one replacement per character so offsets
+survive. **The body is attacker-influenced text**: anyone may submit a log, and it is being rendered
+inside the developer's own signed-in session, where an ANSI escape or a bidi override could make a
+line read as something it is not. The scrub is a *display* measure; `textContent` is the real
+boundary. There is no linkification, and long bodies are appended in chunks across animation frames
+so a 256 KiB log does not jank the tab. Every metadata field is `esc()`-escaped for the same reason
+the server bounds them — an unauthenticated caller chose them.
+
+There is **no delete control**, because there is no delete RPC.
+
+### The LAN fallback
+
+`lib/data/diagnostics_share_server.dart` + `lib/screens/diagnostics_share_screen.dart`. No backend
+involvement at all, and the path that works when the cloud one cannot — which matters, because the
+reports most worth collecting come from a box whose network is the problem, and because a build with
+no Supabase config has no other option (there, it is the primary action rather than the fallback).
+
+`HttpServer.bind(anyIPv4, 0)` and exactly one route, `/<32 hex from Random.secure()>`, compared in
+constant time; everything else gets a bodiless 404. The `Host:` header must be an IP literal or
+`localhost` (checked *before* the path, so the 403/404 split is not a path oracle) — a DNS-rebinding
+defence, since a browser lured to an attacker's hostname resolving to the device's LAN IP would
+otherwise read the log. No CORS header of any kind. The response is `text/plain; charset=utf-8` with
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+
+Multiple GETs are allowed inside the window, deliberately: a chat app's link preview would otherwise
+consume a single-use URL before the human opened it. The window is at most **5 minutes**, and the
+server also stops on route dispose and on the app leaving the foreground — a share left running
+behind a backgrounded app is the one state the user cannot see and therefore cannot end. A restart
+mints a new token *and* a new port, so an address written down during the last window is dead.
+
+It is **plain HTTP and the UI says so**: there is no certificate a device can present for its own
+LAN IP, so the screen states that anyone on the same network could read the log while it is open,
+rather than implying a protection that is not there. It also says the phone must be on the same
+Wi-Fi, because that is the one failure everyone hits.
+
+The server is counted in `ResourceCounters` (`diagnosticsShareServers`, incremented on a successful
+bind, decremented once in `stop()`) — see docs/player.md.
+
+### What the user agrees to
+
+The consent paragraph on the send screen is verbatim in `kDiagnosticsConsentText` and is
+deliberately specific: it names the provider address, the source and profile names, the channel
+names and the viewing times, *then* says credentials are removed. A generic "send anonymous
+diagnostics?" would be a lie, and a dialog people tap through. Changing that string changes what the
+user agreed to.
+
+**The default focus is Cancel**, not Send — the one screen in the app where the destructive-by-
+default reading is right, because the action is irreversible, its subject is the user's own viewing
+history, and it is reached by someone pressing buttons on a remote. There is no text field anywhere
+on the route (nothing to trap D-pad focus, no IME), including no `SelectableText`, which builds a
+read-only `EditableText` and is the same trap wearing a convenience label. The text that is uploaded
+and the text that is LAN-served are **one snapshot**, taken when the user asks to send, so the log
+shown beside the consent is byte-for-byte the log that goes.
 
 ## Pairing flow (code-based, works on every platform)
 

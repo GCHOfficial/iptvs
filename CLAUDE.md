@@ -746,6 +746,30 @@ docs/cloud-sync.md before touching sync, pairing, profiles, or `supabase/`.** No
   While it is set, `_check` marks no entry active at all. Delete-of-active also **adopts the sole
   survivor** when it is local and unlocked (`_adoptSoleSurvivor`); a locked or cloud survivor is
   left for the picker.
+- **"Send diagnostics" is the one anon-role write path, so every bound on it is global.**
+  `submit_diagnostics` (`..._diagnostics.sql`) is the only write RPC granted to `anon` — a
+  session-less install holding just the publishable key — because requiring a session would mint a
+  permanent `auth.users` row per submission (the ~1,900-anonymous-users bill, paid once already) and
+  still bound nothing, since sessions are free to mint. **There is therefore no subject to meter**:
+  256 KiB per body, **120 submissions/hour globally**, 2000 rows / 64 MiB, a 72 h eviction floor,
+  30-day expiry swept lazily by the next writer and filtered on every read. The client trims
+  oldest-first to fit (`DiagnosticsLog.asTextBounded`); the server recomputes `body_bytes` itself,
+  never trusting the caller. The table is **insert-only**, enforced by a `BEFORE UPDATE OR DELETE`
+  trigger that binds the **table owner** too and re-checks each row's own eligibility rather than
+  trusting the transaction-local sweep flag — and it carries **no column `CHECK`s**, because a CHECK
+  violation's "Failing row contains (...)" DETAIL would echo the whole log body. Reads are
+  `support_list_diagnostics`/`support_get_diagnostics`, gated on a `support_readers` row seeded by
+  hand from the dashboard: **empty = nobody reads anything**, and there is deliberately **no
+  developer delete RPC**. The `D-XXXXXX` code is an **identifier, not a bearer token** (no
+  non-developer read path exists); the QR encodes the bare code, never a URL. Client-side the anon
+  role comes for free — `supabase_flutter` falls back to the publishable key as the bearer when
+  there is no session — so `submitDiagnostics` must never call `ensureAnonSession()`. The LAN
+  fallback (`diagnostics_share_server.dart`) touches no backend: ephemeral port, one constant-time
+  `/<32 hex>` route, `Host:` must be an IP literal (checked before the path, so the 403/404 split is
+  not a path oracle), no CORS, `no-store`, ≤5 min, stopped on dispose and on background. The consent
+  text is verbatim in `kDiagnosticsConsentText`, **Cancel holds default focus** (irreversible action,
+  remote control), and there is no `TextField` *or* `SelectableText` on the route — the latter builds
+  a read-only `EditableText`, the same D-pad trap. Read docs/cloud-sync.md "Diagnostics submission".
 - Cloud writes are bounded by BEFORE-triggers on the tables (binding panel *direct* writes too)
   plus pre-mutation count/size guards in the push RPCs, and pushes are rate-limited DB-side —
   limits are sized ≥10x over a 250k-channel portal, and rejections are `iptvs: `-prefixed
@@ -1193,7 +1217,7 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `flutter_assets`.
 - **Debug-only resource counters must balance.** Every player-lifecycle resource is counted in
   the layer that owns it — Dart `ResourceCounters` (media_kit players and their video controllers, the live watchdog timer,
-  channel-owner claims, Linux native mpv IPC sessions), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
+  channel-owner claims, Linux native mpv IPC sessions, the LAN diagnostics share server), Kotlin `DebugCounters` (Exo/mpv engines, preview views, progress ticker,
   `SharedEngine` slot), C++ `windowsSurfaces`/`windowsOverlays`/`windowsOverlayDibs` (the last is
   the cached overlay back-buffer DIB), Swift (`iosAvPlayers`/`iosPlayerControllers`/
   `iosPipControllers`/`iosTimeObservers`/`iosAudioClients` — `iosTimeObservers` matters because an
