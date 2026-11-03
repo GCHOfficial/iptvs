@@ -44,6 +44,18 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
   (`enforce_profile_cap`) limits each account to **20** profiles. Enforced in the
   database so neither the panel nor a crafted client can exceed it; the panel also
   mirrors the limit (`MAX_PROFILES`) to disable its add button.
+- **Diagnostics submission** (`..._diagnostics.sql`) — "Send diagnostics": an install uploads its
+  exportable log and gets a `D-XXXXXX` code back for the user to read out. `submit_diagnostics` is
+  the **only write RPC in this schema granted to `anon`** — a session-less install holding nothing
+  but the publishable key — because requiring a session would mint a permanent `auth.users` row per
+  submission and still not bound anything (sessions are free to mint). Consequently every limit is
+  **global**, not per subject: 256 KiB per body, 120 submissions/hour, 2000 rows / 64 MiB, a 72 h
+  eviction floor, 30-day expiry swept lazily. The table is **insert-only**, enforced by a
+  `BEFORE UPDATE OR DELETE` trigger that binds the table owner too and re-checks each row's own
+  eligibility rather than trusting the sweep's flag. Reads go through `support_list_diagnostics` /
+  `support_get_diagnostics`, gated on a row in `support_readers` — **empty by default, so nobody can
+  read anything**. There is deliberately **no developer delete RPC**. Read
+  [docs/cloud-sync.md](../docs/cloud-sync.md) "Diagnostics submission" before changing any of it.
 - **Account deletion** (`..._account_deletion.sql`) — the panel's
   `delete_account` RPC removes only the signed-in real account. Owner foreign
   keys cascade its cloud data, and the RPC also removes the anonymous auth
@@ -59,12 +71,32 @@ no on-device login. See the repo `CLAUDE.md` and the design notes for the full p
 3. **Auth → Providers / Sign In**: enable **Email** (magic link) and turn on
    **Anonymous sign-ins** (devices rely on them). The panel uses magic-link only.
 4. **Auth → URL configuration**: add the GitHub Pages panel URL to the redirect allow-list.
-5. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
+5. **Seed yourself as the diagnostics reader.** Submitted diagnostics are readable **only** by a
+   `public.support_readers` row, and that table starts empty — so until this is done, nobody can
+   read anything, including you. There is no RPC for it on purpose: a self-service "make me a
+   reader" path would *be* the security boundary of the feature. Sign in to the panel once with the
+   developer account, then run this in the dashboard SQL editor:
+   ```sql
+   insert into public.support_readers (uid)
+   select id from auth.users where email = '<your panel sign-in email>'
+   on conflict (uid) do nothing;
+   ```
+   Confirm with `select count(*) from public.support_readers;` — it must be exactly the accounts you
+   intend. The panel's **Support** tab appears on its own once this row exists (it probes
+   `support_list_diagnostics` and hides itself when that fails). To revoke, delete the row; access
+   stops immediately and nothing is cached.
+6. **Run the security advisor** after applying (`get_advisors` / dashboard Advisors):
    the only expected warnings are the intentional `SECURITY DEFINER` RPCs (the three
    pairing RPCs, `push_sources`/`push_metadata`/`push_favorites`, and `set_device_profile`,
    all callable by `authenticated`), the anonymous-access policies on the tables (devices
    read by design), and Supabase's own `rls_auto_enable`. The push RPCs are revoked from
    `anon` (they need a real session).
+   - **One further expected warning, new and deliberate:** `submit_diagnostics` is
+     `SECURITY DEFINER` **and granted `execute` to `anon`**. It is the only write RPC in this schema
+     that is, and the advisor is right to point at it — see `..._diagnostics.sql`'s header for why a
+     session would have been worse, and `01_baseline_invariants.test.sql`, which pins that grant in
+     both directions (it exists here, and nowhere else). The three diagnostics tables also report
+     `rls_enabled_no_policy`, like the original five RPC-only tables; that is the design.
 
 > **Applying a migration out-of-band? Repair the version afterward.** When you apply a
 > migration file through the **MCP `apply_migration` tool** or the **dashboard SQL editor**
@@ -135,3 +167,13 @@ pgTAP suite in `supabase/tests/` — prefer extending that over re-checking by h
       into the new owner's device list, and a same-owner re-pair with a blank panel
       name does not overwrite the name already stored.
 - [ ] Every `SECURITY DEFINER` function pins `search_path = ''`.
+- [ ] A session-less `anon` caller **can** `submit_diagnostics` and **cannot** select, insert,
+      update or delete `diagnostics` — and the submit mints no `auth.users` row.
+- [ ] `support_list_diagnostics`/`support_get_diagnostics` raise `iptvs: not authorised` for a real
+      account with no `support_readers` row **and for a legitimately paired device**; a seeded
+      reader reads the body verbatim and loses access the moment the row is deleted.
+- [ ] A `diagnostics` row cannot be UPDATEd or DELETEd **by anyone, including the table owner**,
+      except by the submit RPC's own expiry sweep (past `expires_at`) or ceiling eviction (past the
+      72 h floor) — and setting the sweep flag by hand still cannot take an ineligible row.
+- [ ] An oversized body is refused with the **limit** in the message and **none of the body**.
+- [ ] The 121st submission in the hour is refused globally, and allowed again once the window rolls.

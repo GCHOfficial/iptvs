@@ -6,7 +6,7 @@
 
 begin;
 
-select plan(16);
+select plan(24);
 
 -- ---------------------------------------------------------------------------
 -- RLS is enabled on every table in `public` (deny-by-default is the whole
@@ -175,6 +175,79 @@ select function_privs_are(
 select function_privs_are(
   'public', 'gen_pairing_code', array[]::text[], 'authenticated', array[]::text[],
   'authenticated holds no execute on gen_pairing_code'
+);
+
+-- ---------------------------------------------------------------------------
+-- Diagnostics submission (20261103000000_diagnostics.sql). Three more RPC-only
+-- tables, on the same deny-by-default footing as the original five: RLS on,
+-- zero policies, zero table grants. They hold a user's exported log — provider
+-- address, source and profile names, what they watched — so they get the
+-- stricter of the two patterns in this schema, not the client-facing one.
+-- ---------------------------------------------------------------------------
+
+select table_privs_are(
+  'public', 'diagnostics', 'anon', array[]::text[],
+  'anon holds no privileges on diagnostics'
+);
+select table_privs_are(
+  'public', 'diagnostics', 'authenticated', array[]::text[],
+  'authenticated holds no privileges on diagnostics'
+);
+
+select ok(
+  not exists (
+    select 1
+      from unnest(array['diagnostics', 'support_readers', 'diag_rate']) as t(name)
+      cross join unnest(array['anon', 'authenticated']) as r(name)
+      cross join unnest(array[
+        'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
+      ]) as priv(name)
+     where has_table_privilege(r.name, format('public.%I', t.name), priv.name)
+  ),
+  'anon/authenticated hold zero privileges on all three diagnostics tables'
+);
+
+select ok(
+  not exists (
+    select 1
+      from pg_policies p
+     where p.schemaname = 'public'
+       and p.tablename in ('diagnostics', 'support_readers', 'diag_rate')
+  ),
+  'the three diagnostics tables carry no RLS policy at all'
+);
+
+-- THE deliberate departure, pinned in both directions. `submit_diagnostics` is
+-- the only write RPC in this schema the `anon` role may call — an install with
+-- no session, holding nothing but the publishable key (the alternative was
+-- minting a permanent auth.users row per submission; see the migration header).
+-- Asserting the grant *exists* keeps a future sweep from silently breaking
+-- every unpaired install's support button; asserting it on nothing else is
+-- what stops the exception spreading.
+select function_privs_are(
+  'public', 'submit_diagnostics',
+  array['text', 'text', 'text', 'text', 'boolean', 'text'],
+  'anon', array['EXECUTE'],
+  'anon holds EXECUTE on submit_diagnostics (the one deliberate anon write path)'
+);
+select function_privs_are(
+  'public', 'submit_diagnostics',
+  array['text', 'text', 'text', 'text', 'boolean', 'text'],
+  'authenticated', array['EXECUTE'],
+  'authenticated holds EXECUTE on submit_diagnostics (a paired device has a session)'
+);
+
+-- The read side stays developer-only: `authenticated` may call it (the identity
+-- check is inside), `anon` may not reach it at all.
+select function_privs_are(
+  'public', 'support_get_diagnostics', array['text'], 'anon', array[]::text[],
+  'anon holds no execute on support_get_diagnostics'
+);
+
+-- The code generator is internal, exactly like gen_pairing_code.
+select function_privs_are(
+  'public', 'gen_diagnostics_code', array[]::text[], 'anon', array[]::text[],
+  'anon holds no execute on gen_diagnostics_code'
 );
 
 select * from finish();
