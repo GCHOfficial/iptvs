@@ -20,8 +20,25 @@ object MpvLiveOptions {
     const val NETWORK_TIMEOUT = "10"
 
     /**
-     * Let ffmpeg transparently reconnect transient HTTP drops. Deliberately omits
-     * `reconnect_at_eof` — see the object comment.
+     * Let ffmpeg reconnect a transient HTTP drop — but **not** a streamed body,
+     * and never at EOF.
+     *
+     * `reconnect_streamed=0` is the wave-2 correction, and it is specifically
+     * about live TS. Providers answer with a close-delimited body (no
+     * `Content-Length`), so ffmpeg judges *every* end as premature and
+     * reconnects on its own — to the post-redirect URL, whose per-connection
+     * `play_token` is single-use, so the retry is dead on arrival. Worse, on
+     * the providers that send a connect backlog it sometimes *succeeds*, and
+     * splices older content in behind the playhead: the audio timestamps reset
+     * and the stream desyncs, reproduced locally. Live recovery belongs to the
+     * host watchdog's reload, which **re-resolves** first and therefore has a
+     * locator that can actually open.
+     *
+     * A non-streamed body (a finite file, i.e. VOD) keeps the benefit, and VOD
+     * does not take these options at all — so what is being given up here is
+     * only the broken half.
+     *
+     * Deliberately omits `reconnect_at_eof` — see the object comment.
      */
-    const val STREAM_LAVF_O = "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5"
+    const val STREAM_LAVF_O = "reconnect=1,reconnect_streamed=0,reconnect_delay_max=5"
 }

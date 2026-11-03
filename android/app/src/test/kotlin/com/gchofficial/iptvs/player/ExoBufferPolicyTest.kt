@@ -103,38 +103,109 @@ class ExoBufferPolicyTest {
     }
 
     /**
-     * The invariant behind [BufferPreset.MAX] existing at all, written so it
-     * binds any *future* preset too.
+     * The forward invariant, written so it binds any *future* preset too.
      *
-     * With `prioritizeTimeOverSizeThresholds` on, media3 judges "full" purely
-     * by duration, so the allocation is bounded only by `maxBufferMs x
-     * bitrate`. That is survivable at HIGH's 90 s; past it, a 20 Mbps channel
-     * on a 2 GiB Android TV box is an OOM rather than a deeper buffer. So a
-     * preset holding more than HIGH must name a byte ceiling *and* let the
-     * bytes decide.
+     * Without a byte ceiling, media3 bounds the allocation at `maxBufferMs x
+     * bitrate` and nothing else — and IPTV bitrates are not ours to predict: a
+     * preset that is 19 MB on an SD channel is 156 MB on a UHD one, on hardware
+     * that is routinely a 2 GiB Android TV box. Only [BufferPreset.LOW]'s 25 s
+     * is small enough for the duration to be its own bound, so every preset
+     * above it must name a ceiling.
+     *
+     * This was the shipped failure mode in miniature: a byte cap was added for
+     * MAX alone, as though the hazard were the two-minute ceiling rather than
+     * the bitrate multiplying it.
      */
     @Test
-    fun `a preset deeper than high must cap its bytes`() {
+    fun `every preset above low must cap its bytes`() {
+        val low = ExoBufferPolicy.forPreset(BufferPreset.LOW)
+        for (preset in presets) {
+            val b = ExoBufferPolicy.forPreset(preset)
+            if (b.maxBufferMs <= low.maxBufferMs) continue
+            assertTrue("$preset must set a finite targetBufferBytes", b.targetBufferBytes > 0)
+        }
+    }
+
+    /**
+     * The *second* byte rule, and a much narrower one: past HIGH's depth, even
+     * a player below `minBufferMs` must be held to the cap.
+     *
+     * In media3 1.11.1 `DefaultLoadControl.shouldContinueLoading`,
+     * `prioritizeTimeOverSizeThresholds` is consulted only on the
+     * `bufferedDurationUs < minBufferUs` branch; above `minBufferUs` the loader
+     * stops on `bufferedDurationUs >= maxBufferUs || targetBufferSizeReached`
+     * regardless of it. So the flag does not weaken the cap in steady state —
+     * it decides whether a *starving* player may exceed it to reach a playable
+     * cushion, which it should, right up until the depth being asked for is
+     * itself the hazard.
+     */
+    @Test
+    fun `a preset deeper than high must let the bytes decide`() {
         val high = ExoBufferPolicy.forPreset(BufferPreset.HIGH)
         for (preset in presets) {
             val b = ExoBufferPolicy.forPreset(preset)
             if (b.maxBufferMs <= high.maxBufferMs) continue
-            assertTrue("$preset must set a finite targetBufferBytes", b.targetBufferBytes > 0)
             assertTrue("$preset must not prioritize time over size", !b.prioritizeTimeOverSize)
         }
     }
 
     /**
-     * …and equally, the presets that were shipped before the byte cap existed
-     * must be byte-for-byte what they were: `C.LENGTH_UNSET` lets media3 size
-     * the allocation from the durations, which is what every build so far has
-     * done.
+     * The shallowest preset keeps media3 sizing the allocation from the
+     * durations: 25 s is bounded by its own ceiling on any bitrate this app
+     * meets, and `LOW` exists for zapping, where the extra bookkeeping buys
+     * nothing.
      */
     @Test
-    fun `the original presets are unchanged by the byte cap`() {
+    fun `low still lets the durations size the allocation`() {
+        val b = ExoBufferPolicy.forPreset(BufferPreset.LOW)
+        assertEquals(C.LENGTH_UNSET, b.targetBufferBytes)
+        assertEquals(ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE, b.prioritizeTimeOverSize)
+    }
+
+    /**
+     * A byte cap must not be allowed to undercut the preset it is capping: a
+     * ceiling that binds before the *start* gate would be a player that can
+     * never begin. The check is deliberately crude — 1 MB per second of start
+     * gate is ~8 Mbps, far above what any of these presets realistically has to
+     * clear — but it would catch a ceiling entered in MB instead of MiB, or a
+     * digit lost.
+     */
+    @Test
+    fun `a byte cap always clears the preset's own start gate`() {
+        for (preset in presets) {
+            val b = ExoBufferPolicy.forPreset(preset)
+            if (b.targetBufferBytes == C.LENGTH_UNSET) continue
+            val floorBytes = b.afterRebufferMs / 1_000 * 1024 * 1024
+            assertTrue("$preset", b.targetBufferBytes > floorBytes)
+        }
+    }
+
+    /**
+     * The caps are ordered with the presets they belong to: picking a deeper
+     * preset must never lower the ceiling that preset is allowed to reach.
+     */
+    @Test
+    fun `the byte caps never shrink as the presets deepen`() {
+        val normal = ExoBufferPolicy.forPreset(BufferPreset.NORMAL)
+        val high = ExoBufferPolicy.forPreset(BufferPreset.HIGH)
+        val max = ExoBufferPolicy.forPreset(BufferPreset.MAX)
+        assertEquals(48 * 1024 * 1024, normal.targetBufferBytes)
+        assertEquals(64 * 1024 * 1024, high.targetBufferBytes)
+        assertEquals(64 * 1024 * 1024, max.targetBufferBytes)
+        assertTrue(normal.targetBufferBytes <= high.targetBufferBytes)
+        assertTrue(high.targetBufferBytes <= max.targetBufferBytes)
+    }
+
+    /**
+     * …and the presets that existed before the caps keep **prioritising time**,
+     * so a starving player still fills to a playable cushion exactly as every
+     * shipped build has. The cap bounds the steady state; it must not move the
+     * start behaviour.
+     */
+    @Test
+    fun `the shipped presets still prioritise time over size`() {
         for (preset in listOf(BufferPreset.LOW, BufferPreset.NORMAL, BufferPreset.HIGH)) {
             val b = ExoBufferPolicy.forPreset(preset)
-            assertEquals("$preset", C.LENGTH_UNSET, b.targetBufferBytes)
             assertEquals("$preset", ExoBufferPolicy.PRIORITIZE_TIME_OVER_SIZE, b.prioritizeTimeOverSize)
         }
     }
@@ -151,6 +222,30 @@ class ExoBufferPolicyTest {
         assertEquals(50_000, b.maxBufferMs)
         assertEquals(1_000, b.forPlaybackMs)
         assertEquals(2_000, b.afterRebufferMs)
+    }
+
+    /**
+     * **The durations did not move when the byte caps arrived.** Pinned
+     * explicitly because the cap and the durations are edited in the same
+     * `Durations(...)` call, and the whole claim of the cap is that it changes
+     * nothing on the bitrates this app actually meets.
+     */
+    @Test
+    fun `the byte caps left every duration alone`() {
+        val expected = mapOf(
+            BufferPreset.LOW to listOf(8_000, 25_000, 750, 1_500),
+            BufferPreset.NORMAL to listOf(15_000, 50_000, 1_000, 2_000),
+            BufferPreset.HIGH to listOf(40_000, 90_000, 1_000, 2_000),
+            BufferPreset.MAX to listOf(60_000, 120_000, 1_000, 2_000),
+        )
+        for ((preset, want) in expected) {
+            val b = ExoBufferPolicy.forPreset(preset)
+            assertEquals(
+                "$preset",
+                want,
+                listOf(b.minBufferMs, b.maxBufferMs, b.forPlaybackMs, b.afterRebufferMs),
+            )
+        }
     }
 
     /** Anything Dart sends that this build doesn't know falls back to normal. */
