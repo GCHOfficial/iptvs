@@ -191,6 +191,12 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   keychain via `flutter_secure_storage`, plus the active source and metadata config. The whole
   source list lives under one storage key (fine: the Windows v4 backend is a DPAPI file with no
   per-entry size cap; Android likewise).
+  **Android backup and device-to-device transfer are off** (`allowBackup="false"` plus
+  `res/xml/data_extraction_rules.xml` excluding every domain; on targetSdk ≥ 31 `allowBackup`
+  alone does not stop device transfer). A restore could never work: the Keystore key doesn't
+  travel, so `flutter_secure_storage` wipes the restored store (`resetOnError`), and the cache
+  comes back keyed to source ids `newSourceId()` won't reproduce. Cloud pairing is the way to move
+  a setup. Decided 2026-11-03; re-enabling backup needs a design that survives a lost key.
 - **`lib/data/local_profile_store.dart`** — device profiles: keychain-persisted `LocalProfile`s,
   per-cloud-profile `ProfileSnapshot`s, the picker's startup mode. See docs/cloud-sync.md.
 - **A form that rebuilds `fields`/`settings` from its own controllers must carry forward the
