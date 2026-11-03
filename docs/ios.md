@@ -919,6 +919,10 @@ Measured natively, with the same spec and parity vectors as every other surface 
 - Gaps: no `zap` or `claim` reset (no iOS zap input; the engine switch is a teardown), and the mpv
   fallback is measured by Dart, not here.
 - Only CI's iOS build probe compiles this; nothing has run on a device.
+- **Wave 2** (docs/player.md "Wave 2: the delay counts the connect backlog"): the tracker carries
+  `backlogMs`/`creditedMs`/`delayMs` with the same S1–S5 parity as Dart and Kotlin, and the badge,
+  row, crossing and periodic log gate read `delayMs`. iOS can't trim, so a backlog delay is shown
+  but doesn't latch `liveSynced` false. iOS never credits.
 
 ### Known parity gaps
 

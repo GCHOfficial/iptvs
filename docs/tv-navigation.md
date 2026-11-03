@@ -78,7 +78,7 @@ navigation code.
   same treatment.
 - **"Go to live" now also appears when the stream has drifted, not only after a pause.** It is
   still gated on `!liveSynced`, but `liveSynced` now goes false at `kLiveDriftWarnMs` (30 s) of
-  accumulated drift too (docs/player.md "Live latency"). The gate is **latched**: only a reset
+  accumulated drift too, and since wave 2 at 30 s of **delay** (backlog included) on surfaces that can trim it, i.e. mpv (docs/player.md "Live latency"). The gate is **latched**: only a reset
   restores it (go-live, a reload, a zap, a reconnect), never the drift number dipping back under
   the threshold. That is what keeps this self-removing control from flickering away while focused.
 - **Content-kind selector** (`channel_list_chrome.dart` `ChannelContentTabs`) is a focusable chip

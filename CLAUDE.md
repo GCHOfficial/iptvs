@@ -967,14 +967,16 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `min`/`maxBufferMs`, while the gates decide how long a zap stares at black — and they cannot
   rise far anyway, because a stream below the resume threshold sits in `STATE_BUFFERING` and
   `ReconnectPolicy.STALL_RECONNECT_MS` (8 s) of that reloads the source, so the 4x margin caps the
-  resume threshold at 2 s. `normal` is byte-for-byte the previously hardcoded tuning on both
-  engines (the mpv map is *empty*), so an untouched install plays exactly as before.
-  **`max` is the one preset that also caps the buffer in *bytes*** (`ExoBufferPolicy.Durations.
-  targetBufferBytes` 64 MiB + `prioritizeTimeOverSize: false`): with media3 judging "full" by
-  duration alone, a 120 s ceiling is bounded only by duration x bitrate, which on a 20 Mbps
-  channel is an OOM on a 2 GiB TV box rather than a deeper buffer. `low`/`normal`/`high` stay
-  `C.LENGTH_UNSET` + `true`, and `ExoBufferPolicyTest` pins the rule forward — *any* preset
-  deeper than `high` must cap its bytes. An older build parses `max` as `normal`.
+  resume threshold at 2 s. `normal` keeps the previously hardcoded *durations* on both engines (the
+  mpv map is *empty*).
+  **Every preset above `low` caps the buffer in *bytes*** (`ExoBufferPolicy.Durations.
+  targetBufferBytes`): `normal` 48 MiB and `high` 64 MiB with `prioritizeTimeOverSize: true`
+  (wave 2), and `max` 64 MiB with `false`. With media3 judging "full" by duration alone, a ceiling
+  is bounded only by duration x bitrate. A provider that sends a connect backlog fills it at once,
+  which on a high-bitrate channel is an OOM on a 2 GiB TV box rather than a deeper buffer.
+  `low` stays `C.LENGTH_UNSET` + `true`. `ExoBufferPolicyTest` pins the rule forward: every preset
+  above `low` caps its bytes, and only one deeper than `high` may stop prioritising time. An older
+  build parses `max` as `normal`.
   iOS takes the same name on the same payload and applies it as
   `AVPlayerItem.preferredForwardBufferDuration`, held on the engine (not passed to `load`) so a
   reconnect or "Go to live" keeps it — a preset that survived only the first open would revert to
@@ -1042,7 +1044,25 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
     media_kit surface and Linux native mpv**, and pushes preformatted `liveDelayBadge` /
     `liveDelayInfo` to Windows and Linux, whose renderers print only. iOS ignores Dart's
     `liveSynced`. Previews measure nothing.
-  - **Measurement only:** no buffer, speed, reconnect, watchdog or handoff change.
+  - **Wave 2: the delay counts the provider's connect backlog** (`delay = backlog + drift −
+    credited`, a lower bound; `backlog = max(ahead + credited − drift)`). Providers send a backlog
+    faster than real time at connect and playback starts at its oldest frame, so a smaller
+    readahead does **not** reduce delay; never "fix" delay by shrinking a buffer. Credit grows only
+    through a verified skip or a sample marked `catchingUp`. S1–S5 parity is asserted identically in
+    Dart, Kotlin and Swift.
+  - **Removing it:** on mpv, "Go to live" is an **in-cache skip** (`live_trim.dart`). It verifies
+    after 300 ms and otherwise falls back to the unchanged reload; it's suppressed while
+    reconnecting, zap settling, escalating, un-baselined or paused, and never automatic. ExoPlayer
+    can't seek inside a live buffer (any seek restarts the load), so Android uses **1.05x
+    catch-up** (`CatchUpPolicy`, owner-approved). It runs only above the preset's `minBufferMs +
+    10 s`, with every veto forcing 1.0 (including passthrough audio, the handoff window and HLS), a
+    read-back, and a reset to 1.0 at handback so the preview never runs fast. A backlog delay
+    latches the chip only where the surface can trim (mpv); on ExoPlayer and iOS it's shown, not
+    offered.
+  - **`reconnect_streamed=0`** for live, in Dart and Kotlin alike. A close-delimited live body makes
+    FFmpeg retry a spent per-connection token, or splice older backlog in. The watchdog's
+    re-resolving reload owns live recovery.
+  - ExoPlayer `normal`/`high` carry byte caps (48/64 MiB); durations unchanged.
 - **Live auto-reconnect reloads the source** (capped backoff, "Reconnecting…" indicator); VOD
   keeps the manual error/Retry overlay. **A stall is three shapes on Android, not two:** buffering,
   ended, and **playing-but-not-rendering** — `isBuffering`/`ended` are the engine's own *claims*,
