@@ -152,5 +152,19 @@ void main() {
       expect(bufferPresetHint(BufferPreset.max), contains('never gets ahead'));
       expect(bufferPresetHint(BufferPreset.max), contains('drops the stream'));
     });
+
+    test('the deep presets name the delay they buy', () {
+      // On a provider that front-loads a connect backlog, a deeper cushion is
+      // a deeper backlog held in it — playback still starts at that backlog's
+      // oldest frame. A viewer who turned this up to stop stutters then filed
+      // the delay as an unrelated fault, so the setting says it itself.
+      const sentence =
+          'With some providers this also means watching further behind live.';
+      expect(bufferPresetHint(BufferPreset.high), contains(sentence));
+      expect(bufferPresetHint(BufferPreset.max), contains(sentence));
+      // Only the deep ones: it isn't true of the two that hold less.
+      expect(bufferPresetHint(BufferPreset.low), isNot(contains(sentence)));
+      expect(bufferPresetHint(BufferPreset.normal), isNot(contains(sentence)));
+    });
   });
 }

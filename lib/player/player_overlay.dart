@@ -1026,6 +1026,40 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   /// (`index * itemExtent`), it never relies on a row being focusable.
   final ScrollController _quickListScroll = ScrollController();
 
+  /// "Go to live" is the one control in this row that **removes itself while
+  /// you are standing on it**: pressing it puts the stream back at the live
+  /// edge, `liveSynced` flips true and the chip leaves the tree. On a D-pad
+  /// that left no focused node inside the overlay and no arrow key did
+  /// anything until Back tore the player down — the failure Android's
+  /// `RightCluster` and the Windows GDI key ring each already handle, and
+  /// that this surface was relying on Flutter's default recovery for (see
+  /// docs/tv-navigation.md, "A control that removes itself must hand focus on
+  /// first", and docs/player.md "Go to live hands focus to play/pause before
+  /// it disappears").
+  ///
+  /// Two paths, because the chip can vanish for two reasons: the press itself
+  /// ([_handOffGoLiveFocus]), and `liveSynced` going true underneath it — the
+  /// reconnect watchdog reaching the live edge on its own, or the in-cache
+  /// skip verifying 300 ms after the press ([didUpdateWidget]).
+  final FocusNode _playPauseFocus = FocusNode(debugLabel: 'overlay playPause');
+  final FocusNode _goLiveFocus = FocusNode(debugLabel: 'overlay goLive');
+
+  /// Parks focus on play/pause, but **only if "Go to live" holds it** — a
+  /// mouse click or a touch must not plant a focus ring on a control the user
+  /// never walked to.
+  void _handOffGoLiveFocus() {
+    if (_goLiveFocus.hasFocus) _playPauseFocus.requestFocus();
+  }
+
+  /// Hands focus on **before** the press, not after: the chip may be gone by
+  /// the time `onGoLive`'s future completes (and on the in-cache skip path it
+  /// is gone while that future is still running), so a handoff that waited for
+  /// it would be asking a detached node whether it had focus.
+  void _pressGoLive() {
+    _handOffGoLiveFocus();
+    unawaited(widget.onGoLive());
+  }
+
   /// Resolved at the top of every [build] and read by the layout helpers below,
   /// rather than threaded through eight signatures. Size-invariant (and equal
   /// to the shipped pointer values) whenever `widget.touch` is false.
@@ -1052,6 +1086,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
   @override
   void didUpdateWidget(EmbeddedPlayerControls oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // "Go to live" is about to leave the tree for a reason other than its own
+    // press — the watchdog reached the live edge, or the in-cache skip
+    // verified a few hundred milliseconds after the press. This runs *before*
+    // the rebuild that removes it, which is the only moment at which the node
+    // can still be asked whether it holds focus.
+    if (!oldWidget.liveSynced && widget.liveSynced) _handOffGoLiveFocus();
     final zap = widget.zap;
     // Keyed on `revision`, not identity: `LiveZapController.bannerRevision` is
     // bumped on every cursor move/digit/message (`_notify`), so a held key
@@ -1237,6 +1277,8 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     _clockTimer?.cancel();
     _zapTimer?.cancel();
     _quickListScroll.dispose();
+    _playPauseFocus.dispose();
+    _goLiveFocus.dispose();
     _playingSub?.cancel();
     _tracksSub?.cancel();
     _trackSub?.cancel();
@@ -1588,6 +1630,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                       : Icons.play_arrow,
                   widget.controls.state.playing ? 'Pause' : 'Play',
                   () => unawaited(widget.onPlayPause()),
+                  // The landing place for a disappearing "Go to live" — the
+                  // same control Android's `RightCluster` and the Windows GDI
+                  // ring park on. First in the row, and always present.
+                  focusNode: _playPauseFocus,
                 ),
                 if (!widget.isLive) ...[
                   _button(Icons.replay_10, 'Back 10 seconds', () {
@@ -1663,12 +1709,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                       ? _button(
                           Icons.skip_next,
                           'Go to live',
-                          () => unawaited(widget.onGoLive()),
+                          _pressGoLive,
+                          focusNode: _goLiveFocus,
                         )
                       : _textButton(
                           'Go to live',
                           'Go to live',
-                          () => unawaited(widget.onGoLive()),
+                          _pressGoLive,
+                          focusNode: _goLiveFocus,
                         ),
                 // The favorite star, immediately after "Go to live" — the
                 // slot the Android overlay puts it in
@@ -2622,12 +2670,14 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     bool active = false,
     bool compact = false,
     String? semanticsLabel,
+    FocusNode? focusNode,
   }) => _chrome(
     tooltip: tooltip,
     semanticsLabel: semanticsLabel,
     onPressed: onPressed,
     compact: compact,
     active: active,
+    focusNode: focusNode,
     // A finger needs Apple's 44pt minimum in *both* axes, which is the floor
     // every touch value in [EmbeddedOverlayMetrics] respects — the dense
     // short-surface mode sits exactly on it. The pointer sizes are deliberately
@@ -2653,10 +2703,12 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     String tooltip,
     VoidCallback onPressed, {
     String? semanticsLabel,
+    FocusNode? focusNode,
   }) => _chrome(
     tooltip: tooltip,
     semanticsLabel: semanticsLabel,
     onPressed: onPressed,
+    focusNode: focusNode,
     child: ConstrainedBox(
       constraints: BoxConstraints(
         minWidth: _m.buttonWidth,
@@ -2704,6 +2756,10 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
     required Widget child,
     bool compact = false,
     bool active = false,
+    // Supplied only where this state needs to *move* focus onto or off a
+    // control (see [_playPauseFocus]); everything else keeps the implicit node
+    // `InkWell` makes for itself.
+    FocusNode? focusNode,
   }) {
     void handle() {
       _show();
@@ -2728,7 +2784,7 @@ class EmbeddedPlayerControlsState extends State<EmbeddedPlayerControls> {
                 : AppColors.panel.withValues(alpha: 0.85),
             borderRadius: BorderRadius.circular(compact ? 10 : 12),
             clipBehavior: Clip.antiAlias,
-            child: InkWell(onTap: handle, child: child),
+            child: InkWell(focusNode: focusNode, onTap: handle, child: child),
           ),
         ),
       ),

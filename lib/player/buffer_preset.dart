@@ -104,6 +104,12 @@ String bufferPresetLabel(BufferPreset preset) => switch (preset) {
 /// Each says what it costs as well as what it buys — a preset that only
 /// advertises its upside is one users ratchet to maximum and then report the
 /// downside of as a separate bug.
+///
+/// The two deep presets name **watching further behind live** as one of those
+/// costs. On a provider that front-loads a backlog, a deeper cushion is a
+/// deeper backlog held in it, and a viewer who turned this up to stop stutters
+/// then reported the delay as an unrelated fault. Saying it here is cheaper
+/// than answering it twice.
 String bufferPresetHint(BufferPreset preset) => switch (preset) {
   BufferPreset.low =>
     'Playback starts slightly faster, but a brief network hiccup is more likely '
@@ -111,9 +117,11 @@ String bufferPresetHint(BufferPreset preset) => switch (preset) {
   BufferPreset.normal => 'Balanced. Use this unless playback stutters.',
   BufferPreset.high =>
     'Rides out an unsteady connection. Uses more memory; it cannot help if the '
-        'connection is simply too slow.',
+        'connection is simply too slow. With some providers this also means '
+        'watching further behind live.',
   BufferPreset.max =>
     'The deepest buffer available. Uses noticeably more memory, and it still '
         'cannot help a connection that never gets ahead, or a provider that '
-        'drops the stream on a timer.',
+        'drops the stream on a timer. With some providers this also means '
+        'watching further behind live.',
 };
