@@ -632,7 +632,10 @@ final class PlayerControlsView: UIView {
 
     liveBadge.isHidden = !state.showLiveBadge
     if state.showLiveBadge {
-      liveBadge.text = "LIVE"
+      // `"LIVE"` at the edge, `"LIVE -m:ss"` once behind by
+      // `kLiveDriftWarnMs` or more — the wave-1 live-latency contract
+      // (`live-latency-contract.md`), identical wording on every surface.
+      liveBadge.text = state.liveDelayBadgeLabel
       // Red at the live edge, grey once behind — the pairing with the go-to-live
       // button that every other overlay uses.
       liveBadge.backgroundColor = state.liveSynced ? PlayerColors.live : PlayerColors.trackInactive

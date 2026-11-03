@@ -292,10 +292,121 @@ final class PlayerChromeStateTests: XCTestCase {
 
     state.epgNow = PlayerEpgEntry(title: "News", startMs: 0, stopMs: 1, description: "   ")
     XCTAssertNil(state.infoSynopsis)
-    // A synopsis alone is enough to render the panel, with no info rows at all.
     state.epgNow = PlayerEpgEntry(title: "News", startMs: 0, stopMs: 1, description: "Something")
-    XCTAssertTrue(state.infoRows().isEmpty)
+    // A synopsis used to be enough to render the panel with no info rows at
+    // all — but a live stream now always carries the "Live delay" row too
+    // (`live-latency-contract.md`; see `LiveLatencyTests`), so this is the one
+    // state in this suite where that row is the *only* info row.
+    XCTAssertEqual(state.infoRows().map(\.label), ["Live delay"])
     XCTAssertFalse(state.infoPanelIsEmpty)
+  }
+
+  // MARK: - Live latency (wave 1)
+
+  /// Fresh state: no drift measured yet reads as "at the edge", and the info
+  /// row prints the still-honest zero rather than omitting itself.
+  func testFreshLiveStateReadsAtTheEdgeWithNoAheadFigure() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    XCTAssertTrue(state.liveSynced)
+    XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE")
+    XCTAssertEqual(state.liveDelayInfoValue, "0:00")
+    XCTAssertEqual(state.infoRows().last, PlayerInfoRow(label: "Live delay", value: "0:00"))
+  }
+
+  /// VOD never gets the row or the badge label change — `showLiveBadge`
+  /// already keeps the badge off screen, and `infoRows()` must not grow a
+  /// "Live delay" entry on content that was never live.
+  func testVodHasNoLiveDelayRowRegardlessOfStaleFields() {
+    var state = PlayerChromeState()
+    state.isLive = false
+    state.liveDriftMs = 45_000
+    XCTAssertNil(state.liveDelayInfoValue)
+    XCTAssertTrue(state.infoRows().isEmpty)
+    XCTAssertFalse(state.showLiveBadge)
+  }
+
+  /// Crossing the warn threshold both updates the badge/info values and
+  /// latches `liveSynced` false — exactly the fix this contract exists to
+  /// ship (a drifted viewer used to still see a green LIVE pill).
+  func testApplyLiveLatencyLatchesDesyncAtTheWarnThreshold() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs - 1, aheadMs: 10_000)
+    XCTAssertTrue(state.liveSynced)
+    XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE")
+
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, aheadMs: 10_000)
+    XCTAssertFalse(state.liveSynced)
+    XCTAssertTrue(state.showGoLiveButton)
+    XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE -0:30")
+  }
+
+  /// The latch holds even if a later sample reports healthy drift again — only
+  /// an explicit reset may clear it. Without this the go-to-live chip would
+  /// flicker in and out around the threshold, which it cannot do safely: it
+  /// removes itself while focused and hands focus to play/pause.
+  func testDriftDesyncIsLatchedUntilAnExplicitReset() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    state.applyLiveLatency(driftMs: kLiveDriftWarnMs, aheadMs: 0)
+    XCTAssertFalse(state.liveSynced)
+
+    // A later sample reporting a *smaller* drift (should not happen in
+    // practice — drift only grows between resets — but the latch must hold
+    // even if it did) does not resync.
+    state.applyLiveLatency(driftMs: 1_000, aheadMs: 0)
+    XCTAssertFalse(state.liveSynced, "the latch must survive a lower later reading")
+
+    state.resetLiveLatency()
+    XCTAssertTrue(state.liveSynced)
+  }
+
+  /// The pre-existing pause rule is untouched by the new drift rule: pausing
+  /// still desyncs immediately regardless of drift, and the drift rule must
+  /// not accidentally resync a paused viewer back to true.
+  func testPauseRuleAndDriftRuleBothOnlyEverClear() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    state.liveSynced = false // the controller's existing immediate pause rule
+    state.applyLiveLatency(driftMs: 0, aheadMs: 0)
+    XCTAssertFalse(state.liveSynced, "a healthy drift sample must not resync a paused viewer")
+  }
+
+  func testResetLiveLatencyClearsDriftAheadAndTheLatch() {
+    var state = PlayerChromeState()
+    state.isLive = true
+    state.applyLiveLatency(driftMs: 83_000, aheadMs: 24_000)
+    XCTAssertFalse(state.liveSynced)
+
+    state.resetLiveLatency()
+    XCTAssertTrue(state.liveSynced)
+    XCTAssertEqual(state.liveDriftMs, 0)
+    XCTAssertEqual(state.liveAheadMs, -1)
+    XCTAssertEqual(state.liveDelayBadgeLabel, "LIVE")
+    XCTAssertEqual(state.liveDelayInfoValue, "0:00")
+  }
+
+  /// The full parity table from `live-latency-contract.md`, exercised through
+  /// `PlayerChromeState` rather than the formatter directly — this is what the
+  /// view actually reads.
+  func testChromeStateParityVectorsMatchTheContractTable() {
+    let vectors:
+      [(driftMs: Int64, aheadMs: Int64, badge: String, infoValue: String)] = [
+        (0, 12_400, "LIVE", "0:00 · buffer 12s"),
+        (7_999, -1, "LIVE", "0:07"),
+        (29_999, 500, "LIVE", "0:29 · buffer 1s"),
+        (30_000, 24_600, "LIVE -0:30", "0:30 · buffer 25s"),
+        (83_000, 24_000, "LIVE -1:23", "1:23 · buffer 24s"),
+        (3_723_000, 0, "LIVE -1:02:03", "1:02:03 · buffer 0s"),
+      ]
+    for vector in vectors {
+      var state = PlayerChromeState()
+      state.isLive = true
+      state.applyLiveLatency(driftMs: vector.driftMs, aheadMs: vector.aheadMs)
+      XCTAssertEqual(state.liveDelayBadgeLabel, vector.badge)
+      XCTAssertEqual(state.liveDelayInfoValue, vector.infoValue)
+    }
   }
 
   // MARK: - Labels
