@@ -252,6 +252,34 @@ final class AvPlayerEngine {
     player.currentItem?.presentationSize ?? .zero
   }
 
+  /// Buffered-ahead depth in ms — the end of the `loadedTimeRanges` range that
+  /// contains `currentTime`, minus `currentTime` — or `-1` when unknown (no
+  /// item, no numeric current time, or no loaded range actually covers the
+  /// playhead yet). Exactly the `aheadMs` definition in
+  /// `live-latency-contract.md`, read fresh on every watchdog tick rather than
+  /// cached: `loadedTimeRanges` changes continuously as the item downloads.
+  var bufferedAheadMs: Int64 {
+    guard !released, let item = player.currentItem else { return -1 }
+    // `.seconds`/`.isNumeric` rather than the `CMTimeRangeContainsTime`/
+    // `CMTimeGetSeconds` C functions — matching `milliseconds(from:)` just
+    // below, which already relies on exactly these two Swift-overlay members
+    // rather than on the C API's argument-label conventions.
+    let current = player.currentTime()
+    guard current.isNumeric else { return -1 }
+    let currentSeconds = current.seconds
+    guard currentSeconds.isFinite else { return -1 }
+    for value in item.loadedTimeRanges {
+      let range = value.timeRangeValue
+      guard range.start.isNumeric, range.duration.isNumeric else { continue }
+      let startSeconds = range.start.seconds
+      let endSeconds = startSeconds + range.duration.seconds
+      guard startSeconds.isFinite, endSeconds.isFinite else { continue }
+      guard currentSeconds >= startSeconds, currentSeconds <= endSeconds else { continue }
+      return Int64((max(0, endSeconds - currentSeconds) * 1_000).rounded())
+    }
+    return -1
+  }
+
   /// Whether AVPlayer is sending this item to an external device (AirPlay).
   ///
   /// Read only by ``IptvsPlayerViewController``'s video-presence backstop, as a

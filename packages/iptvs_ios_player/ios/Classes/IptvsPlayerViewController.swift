@@ -226,6 +226,44 @@ final class IptvsPlayerViewController: UIViewController {
   private var resolveTimer: Timer?
   private var pendingResolveCompletion: ((FreshLocator) -> Void)?
 
+  // MARK: Live latency (wave 1)
+  //
+  // `live-latency-contract.md`, implemented here the same way the watchdogs
+  // above are: the pure decision/accumulation lives in `Core`
+  // (`LiveLatencyTracker`/`LiveLatencyFormatting`/`LiveLatencyLogging`, covered
+  // by `swift test`), this class only supplies the clock and the engine facts
+  // and applies what comes back. Measurement only — no buffer, speed or
+  // reconnect behaviour changes with it.
+
+  /// The pure accumulator. Sampled every 500 ms from `pollWatchdogs()` — the
+  /// free-running `Timer`, never `AvPlayerEngine.onProgressTick` — because a
+  /// pause or stall is exactly the condition this contract must keep measuring
+  /// through, and the progress tick stops firing the moment the timebase does
+  /// (see `reconnectTicker`'s own doc for why the watchdogs already made this
+  /// choice).
+  private var latencyTracker = LiveLatencyTracker()
+
+  /// Why the *next* `.started` event should reset ``latencyTracker`` — set by
+  /// whichever call site is about to (re)load a stream, consumed and restored
+  /// to ``LiveLatencyResetReason/load`` the moment that reset actually runs.
+  /// `.started` fires exactly once per `AvPlayerEngine.load(url:headers:)`
+  /// call (gated on `!hasStarted`, which `load` clears), so it is the one hook
+  /// that covers "new load/open" and "reconnect reload" without this class
+  /// having to duplicate `AvPlayerEngine`'s own per-item bookkeeping.
+  private var pendingLatencyResetReason: LiveLatencyResetReason = .load
+
+  /// The drift reading at the last sample, so the controller can detect the
+  /// one tick that *crosses* ``kLiveDriftWarnMs`` (`LiveLatencyLogging
+  /// .crossedWarnThreshold`) without a separate latched bool — reset to `0`
+  /// alongside the tracker so a fresh load can cross the threshold again.
+  private var lastSampledDriftMs: Int64 = 0
+
+  /// Wall clock of the last periodic "live latency" export, so the 60s cadence
+  /// in `live-latency-contract.md` is measured from a reset rather than from
+  /// epoch zero — which would make the very first post-reset tick eligible
+  /// immediately whenever the content gate happened to already be true.
+  private var lastLatencyLogMs: Int64 = 0
+
   // MARK: Stream info (step 9)
 
   /// Latched once the item has told us something real. Colorimetry, codecs and
@@ -636,6 +674,13 @@ final class IptvsPlayerViewController: UIViewController {
       // …and the third window opens on the same edge. From here on the question
       // stops being "did this load start" and becomes "is it showing anything".
       videoBackstop.markStarted(nowMs: IptvsPlayerViewController.nowMs())
+      // `.started` fires exactly once per `load(url:headers:)` call, which is
+      // every wave-1 reset point this controller can reach except a plain
+      // "Go to live" seek (handled directly in `goToLive()`, since that path
+      // never builds a new item) — see `pendingLatencyResetReason`'s doc.
+      if request.isLive {
+        resetLiveLatency(reason: pendingLatencyResetReason, nowMs: IptvsPlayerViewController.nowMs())
+      }
     case .resumed:
       liveDropped = false
     case .dropped:
@@ -648,6 +693,7 @@ final class IptvsPlayerViewController: UIViewController {
         // Direct port of Android wiring `onRecoverableError` to
         // `reconnectLive(force = true)`.
         if watchdog.forceReconnect(nowMs: IptvsPlayerViewController.nowMs()) == .reconnect {
+          pendingLatencyResetReason = .reconnect
           startLiveReload(showsReconnecting: true)
         }
       case .surfaceError:
@@ -784,6 +830,14 @@ final class IptvsPlayerViewController: UIViewController {
       return
     }
 
+    // Same ticker, same reason this watchdog's own `isBuffering` reads the
+    // engine rather than the chrome's echo of it (`handleProgressTick`
+    // overwrites that twice a second): `live-latency-contract.md` requires
+    // drift to keep accumulating through a pause or a stall, and this is the
+    // one tick in this class that is guaranteed to keep running through both
+    // (`AVPlayer.addPeriodicTimeObserver` stalls with the timebase it watches).
+    sampleLiveLatency(nowMs: nowMs)
+
     switch watchdog.poll(
       hasEverStarted: hasEverStarted,
       isBuffering: engine.isBuffering || liveDropped,
@@ -798,8 +852,84 @@ final class IptvsPlayerViewController: UIViewController {
     case .wait:
       break
     case .reconnect:
+      pendingLatencyResetReason = .reconnect
       startLiveReload(showsReconnecting: true)
     }
+  }
+
+  /// One tick of the wave-1 live-latency contract: fold the engine's current
+  /// position/buffering into ``latencyTracker``, push the formatted figures
+  /// into the chrome, and emit the two tick-driven diagnostics lines (the
+  /// one-shot "just crossed the warn threshold" line and the 60s periodic
+  /// export). The reset-triggered "live latency reset" line is emitted
+  /// separately, by ``resetLiveLatency(reason:nowMs:)``.
+  private func sampleLiveLatency(nowMs: Int64) {
+    latencyTracker.sample(
+      LiveLatencySample(
+        nowMs: nowMs,
+        positionMs: engine.positionMs,
+        isPlaying: engine.isPlaying,
+        isBuffering: engine.isBuffering || liveDropped
+      )
+    )
+    let driftMs = latencyTracker.driftMs
+    let aheadMs = engine.bufferedAheadMs
+    uiState.batch { $0.applyLiveLatency(driftMs: driftMs, aheadMs: aheadMs) }
+
+    if LiveLatencyLogging.crossedWarnThreshold(previousDriftMs: lastSampledDriftMs, currentDriftMs: driftMs) {
+      emitDiagnostic(
+        LiveLatencyLogging.behindLine(
+          driftMs: driftMs,
+          aheadMs: aheadMs,
+          stalls: latencyTracker.stalls,
+          stalledMs: latencyTracker.stalledMs,
+          discontinuities: latencyTracker.discontinuities
+        )
+      )
+    }
+    lastSampledDriftMs = driftMs
+
+    guard engine.isPlaying, nowMs - lastLatencyLogMs >= LiveLatencyLogging.periodicIntervalMs else {
+      return
+    }
+    guard LiveLatencyLogging.shouldLogPeriodic(driftMs: driftMs, aheadMs: aheadMs) else { return }
+    lastLatencyLogMs = nowMs
+    emitDiagnostic(
+      LiveLatencyLogging.periodicLine(
+        driftMs: driftMs,
+        aheadMs: aheadMs,
+        stalls: latencyTracker.stalls,
+        stalledMs: latencyTracker.stalledMs,
+        discontinuities: latencyTracker.discontinuities
+      )
+    )
+  }
+
+  /// Resets ``latencyTracker`` (and the chrome's copy of its figures) at one of
+  /// the wave-1 contract's reset points, logging a "live latency reset" line
+  /// first when there was drift worth recording. Restores
+  /// ``pendingLatencyResetReason`` to its default so a reason set for one
+  /// reload can never leak into an unrelated later one.
+  private func resetLiveLatency(reason: LiveLatencyResetReason, nowMs: Int64) {
+    if latencyTracker.driftMs > 0 {
+      emitDiagnostic(
+        LiveLatencyLogging.resetLine(reason: reason, driftMs: latencyTracker.driftMs, stalls: latencyTracker.stalls)
+      )
+    }
+    latencyTracker.reset()
+    lastSampledDriftMs = 0
+    lastLatencyLogMs = nowMs
+    pendingLatencyResetReason = .load
+  }
+
+  /// Sends a credential-free note through the same `nativeDiagnostic` relay
+  /// Android's `MainActivity.logPlaybackDiagnostic` already uses — reusing the
+  /// existing exportable-log path rather than adding a new one, since Dart's
+  /// `_handleNativeHdrMethodCall` already forwards any `nativeDiagnostic` note
+  /// straight into `_logPlayback` (which redacts regardless). Every live-
+  /// latency line this file builds goes through here.
+  private func emitDiagnostic(_ note: String) {
+    channel?.invokeMethod("nativeDiagnostic", arguments: ["note": note])
   }
 
   /// docs/ios.md's **second** `engineFailed` detection shape: playback is
@@ -949,8 +1079,10 @@ final class IptvsPlayerViewController: UIViewController {
         // moving video.
         state.errorMessage = nil
         // A fresh start is by definition at the live edge — this is what clears
-        // the greyed LIVE pill and the go-to-live button after a reload.
-        if state.isLive { state.liveSynced = true }
+        // the greyed LIVE pill, the accumulated drift, and the go-to-live
+        // button after a reload (`handleStateEvent` resets `latencyTracker`
+        // alongside this, in the same `.started` edge).
+        if state.isLive { state.resetLiveLatency() }
       case .stalled:
         state.isBuffering = true
       case .resumed:
@@ -1141,7 +1273,17 @@ final class IptvsPlayerViewController: UIViewController {
       }
       if let canFavorite = map["canFavorite"] as? Bool { state.canFavorite = canFavorite }
       if let isFavorite = map["isFavorite"] as? Bool { state.isFavorite = isFavorite }
-      if let liveSynced = map["liveSynced"] as? Bool, state.isLive { state.liveSynced = liveSynced }
+      // `liveSynced` is deliberately **not** read from this payload (it was,
+      // before the wave-1 live-latency contract). Dart's `_liveSynced` is a
+      // transport-authority concept — correct for Windows, where the shared
+      // `_player` really does drive playback — but this controller's own
+      // `AvPlayerEngine` is the only authority on iOS (see the doc comment
+      // above), and it now computes `liveSynced` itself from the pause rule
+      // plus the latched drift threshold (`PlayerChromeState.applyLiveLatency`
+      // /`resetLiveLatency`). Honouring a stale Dart `true` here on every
+      // `setControlState` push (EPG refresh, favorite toggle, …) would
+      // silently unlatch a genuinely desynced viewer — exactly the flicker the
+      // contract's hysteresis exists to forbid.
       if let reconnecting = map["reconnecting"] as? Bool { state.reconnecting = reconnecting }
       if let now = PlayerOpenRequest.parseEpg(
         map,
@@ -1364,10 +1506,16 @@ final class IptvsPlayerViewController: UIViewController {
     guard request.isLive else { return }
     if let edgeMs = liveEdgeMs() {
       engine.seek(toMs: edgeMs)
+      // A plain seek keeps the same `AVPlayerItem`, so `.started` never fires
+      // again for it — unlike the reload branch below, this is the only path
+      // that must reset the latency tracker directly rather than through
+      // `pendingLatencyResetReason`.
+      resetLiveLatency(reason: .golive, nowMs: IptvsPlayerViewController.nowMs())
     } else {
+      pendingLatencyResetReason = .golive
       startLiveReload(showsReconnecting: false)
     }
-    uiState.value.liveSynced = true
+    uiState.batch { $0.resetLiveLatency() }
   }
 
   /// End of the item's last seekable range, in ms, or nil when the stream
@@ -1708,6 +1856,20 @@ final class IptvsPlayerViewController: UIViewController {
       return
     }
     finishing = true
+
+    // Wave-1 contract: an AVPlayer→mpv engine swap is a reset point. This
+    // controller is tearing down regardless — Dart reopens the content on an
+    // entirely separate embedded surface, outside this class — so only the
+    // diagnostics line matters here, not an actual `latencyTracker.reset()`.
+    if request.isLive, latencyTracker.driftMs > 0 {
+      emitDiagnostic(
+        LiveLatencyLogging.resetLine(
+          reason: .engine,
+          driftMs: latencyTracker.driftMs,
+          stalls: latencyTracker.stalls
+        )
+      )
+    }
 
     let positionMs = request.isLive ? 0 : engine.positionMs
     let pipWasActive = pictureInPictureActive

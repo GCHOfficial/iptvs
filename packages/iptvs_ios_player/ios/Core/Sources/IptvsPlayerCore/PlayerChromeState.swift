@@ -300,10 +300,33 @@ public struct PlayerChromeState: Equatable, Sendable {
   /// fit whenever the picture and the screen share a shape.
   public var aspect: PlayerAspectMode = .fill
 
-  /// True while at the live edge; false once the viewer has paused and fallen
-  /// behind. Greys the LIVE badge and reveals the go-to-live button, exactly as
-  /// on Android and Windows.
+  /// True while at the live edge; false once the viewer has fallen behind.
+  /// Greys the LIVE badge and reveals the go-to-live button, exactly as on
+  /// Android and Windows.
+  ///
+  /// Two independent rules can clear it, per the wave-1 live-latency contract
+  /// (`live-latency-contract.md`): the **pause rule** (unchanged, immediate —
+  /// the controller sets this `false` directly the instant playback pauses)
+  /// and the **latched drift rule** in ``applyLiveLatency(driftMs:aheadMs:)``
+  /// (accumulated delay reaching ``kLiveDriftWarnMs``). Both are **latched**:
+  /// once false, only ``resetLiveLatency()`` — called at a load, a reconnect,
+  /// "Go to live", a zap settle, or an engine swap — sets it back to true.
+  /// This hysteresis is mandatory, not a nicety: the go-to-live chip removes
+  /// itself while focused and hands focus to play/pause, so it must never
+  /// flicker around a threshold a sample could cross and re-cross.
   public var liveSynced: Bool = true
+
+  /// Accumulated live delay in ms, from ``LiveLatencyTracker/driftMs``. `0`
+  /// until the controller's first post-baseline sample. Drives
+  /// ``liveDelayBadgeLabel`` and ``liveDelayInfoValue`` — never read directly
+  /// by a view.
+  public var liveDriftMs: Int64 = 0
+
+  /// Buffered-ahead cushion in ms at the last latency sample, or `-1` when
+  /// unknown (matches ``LiveLatencyTracker``'s sibling convention — `aheadMs`
+  /// is engine-read, not tracker-derived, so it lives here rather than on the
+  /// tracker itself).
+  public var liveAheadMs: Int64 = -1
 
   // MARK: Favorite
   //
@@ -428,6 +451,22 @@ public struct PlayerChromeState: Equatable, Sendable {
   public var hdrBadge: String? { BadgeFormatting.hdrBadge(dynamicRange: dynamicRange) }
   public var fpsBadge: String? { BadgeFormatting.fpsBadge(fps: fps) }
   public var sourceBadge: String? { BadgeFormatting.sourceBadge(name: sourceName) }
+
+  /// The LIVE badge's text — `"LIVE"` at the edge, `"LIVE -m:ss"` once behind
+  /// by ``kLiveDriftWarnMs`` or more. Replaces the plain `"LIVE"` constant the
+  /// view used to draw; ``showLiveBadge`` still decides whether to draw it at
+  /// all. See `live-latency-contract.md` "What the user sees".
+  public var liveDelayBadgeLabel: String {
+    LiveLatencyFormatting.liveDelayBadgeLabel(driftMs: liveDriftMs)
+  }
+
+  /// The stream-info panel's "Live delay" row value, or `nil` for VOD (the row
+  /// doesn't exist off live content at all — see ``infoRows()``).
+  public var liveDelayInfoValue: String? {
+    guard isLive else { return nil }
+    return LiveLatencyFormatting.liveDelayInfoValue(driftMs: liveDriftMs, aheadMs: liveAheadMs)
+  }
+
   public var speedLabel: String { playerSpeedOptionLabel(speed) }
   public var aspectLabel: String { aspect.label }
   public var positionLabel: String { BadgeFormatting.formatTime(ms: positionMs) }
@@ -506,6 +545,14 @@ public struct PlayerChromeState: Equatable, Sendable {
       let value = channels.isEmpty ? audioCodec : "\(audioCodec) · \(channels)"
       rows.append(PlayerInfoRow(label: "Audio", value: value))
     }
+    // Live only (`live-latency-contract.md`), and — unlike every row above —
+    // not gated on "known yet": `0` drift with an unknown buffer is still a
+    // real, displayable answer ("at the live edge"), not an absent one. This
+    // codebase has no existing buffer/network-related row to sit after, so it
+    // lands at the end.
+    if isLive, let value = liveDelayInfoValue {
+      rows.append(PlayerInfoRow(label: "Live delay", value: value))
+    }
     return rows
   }
 
@@ -558,6 +605,31 @@ public struct PlayerChromeState: Equatable, Sendable {
 
   public mutating func cycleAspect() {
     aspect = aspect.next()
+  }
+
+  /// Folds in one latency sample (`live-latency-contract.md`). Stores the raw
+  /// figures for the badge/info-row formatters and, once drift reaches
+  /// ``kLiveDriftWarnMs``, latches ``liveSynced`` false — **only** false: a
+  /// lower later reading (which should not occur, since drift only grows
+  /// between resets, but the rule holds regardless) must never resync a
+  /// viewer the pause rule or an earlier sample already desynced. Call on
+  /// every surface tick while live; harmless, if pointless, to call for VOD.
+  public mutating func applyLiveLatency(driftMs: Int64, aheadMs: Int64) {
+    liveDriftMs = driftMs
+    liveAheadMs = aheadMs
+    if driftMs >= kLiveDriftWarnMs { liveSynced = false }
+  }
+
+  /// Clears accumulated drift and the desync latch — called at every wave-1
+  /// reset point (load, reconnect, "Go to live", zap settle, engine swap; see
+  /// ``LiveLatencyResetReason``). The **only** place ``liveSynced`` is set back
+  /// to `true` once the drift rule has cleared it; the pause rule's direct
+  /// `false` is set by the controller elsewhere and is unaffected by this
+  /// being absent from that path, by design.
+  public mutating func resetLiveLatency() {
+    liveDriftMs = 0
+    liveAheadMs = -1
+    liveSynced = true
   }
 
   static func isBlank(_ text: String) -> Bool {
