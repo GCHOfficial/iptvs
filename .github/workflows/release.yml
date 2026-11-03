@@ -38,16 +38,31 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       track: ${{ steps.v.outputs.track }}
     steps:
+      # Inputs arrive through env, never `${{ }}` inside the script, and the
+      # version is validated here because every later job interpolates
+      # `needs.version.outputs.version` into `run:` lines — this is the one
+      # gate that makes those safe.
       - id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TRACK: ${{ inputs.track }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "track=${{ inputs.track }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+            track="$INPUT_TRACK"
           else
-            tag="${{ github.ref_name }}"
-            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-            echo "track=stable" >> "$GITHUB_OUTPUT"
+            version="${REF_NAME#v}"
+            track=stable
           fi
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Version must be MAJOR.MINOR.PATCH (digits only)."
+            exit 1
+          fi
+          case "$track" in stable|beta) ;; *) echo "::error::Unknown track."; exit 1 ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "track=$track" >> "$GITHUB_OUTPUT"
 
   build-android:
     name: Build Android (phone + TV)
@@ -57,6 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           lfs: true # libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar)
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -124,6 +140,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -162,6 +180,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -211,6 +231,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0 # full history — the changelog step diffs against the previous tag
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
