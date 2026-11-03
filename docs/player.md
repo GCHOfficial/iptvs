@@ -3615,6 +3615,13 @@ Debug-only counters track every player-lifecycle resource, in the layer that own
   player never deallocates," not as an obviously-linked counter mismatch. A plain `NSLock`
   guards the map rather than main-thread confinement, because `AvPlayerEngine.deinit`/
   `IosPipController.deinit` are not guaranteed to run on the main queue.
+- **Dart, not a player resource** (`lib/player/resource_counters.dart`): `diagnosticsShareServers`
+  — the LAN diagnostics share's `HttpServer` (`data/diagnostics_share_server.dart`), incremented
+  on a **successful bind** and decremented once in `stop()`. It lives here because it obeys the
+  same alarm for a sharper reason: a count that fails to settle at zero is a socket still serving
+  the diagnostics log to the local network after the user believes they closed it. A flag makes
+  the pairing exact in both directions — a bind that threw never incremented, and `stop()` races
+  its own expiry timer by design, so it must not decrement twice.
 
 `ResourceCounters.snapshot()` merges the Dart counts with the natives' reply to a `debugCounters`
 method on `iptvs/native_hdr_player`, called on **Android, Windows, and iOS**

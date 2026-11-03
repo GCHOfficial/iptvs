@@ -274,6 +274,38 @@ wholesale: whatever focus the body held is already gone, so there is nothing to 
 Pinned by `test/source_error_view_test.dart`, which asserts the button holds focus on arrival and
 that a single `select` press with no navigation first runs the retry.
 
+### The exception: "Send diagnostics" autofocuses **Cancel**
+
+`lib/screens/send_diagnostics_screen.dart`. Every other confirm in this app autofocuses its
+primary action — the update dialog, `SourceErrorView`'s retry, the LAN share screen's Restart.
+This one does not, and the divergence is deliberate rather than an oversight to be tidied up:
+
+- the action is **irreversible** — there is no unsend, and deliberately no developer delete RPC
+  (docs/cloud-sync.md "Diagnostics submission");
+- its subject is the user's **own viewing history**, not an app-internal retry;
+- it is reached by someone pressing buttons on a remote, where a stray OK on a screen that just
+  appeared is an ordinary thing to do.
+
+So Cancel holds focus and **Send is one D-pad step away**. The same rule the sources screen's
+delete confirmation already follows ("delete confirmation lands focused on Cancel, so the first OK
+press is safe", `test/sources_screen_test.dart`) — the difference between that rule and the
+autofocus-the-primary one is simply whether the first press can destroy or disclose something.
+Once the user *has* pressed Send, the dangerous press is behind them, so the failure state goes
+back to the ordinary rule and autofocuses **Try again**.
+
+Two more TV constraints hold across that route and its LAN sibling
+(`diagnostics_share_screen.dart`): **no `TextField`**, and **no `SelectableText` either** — the
+latter builds a read-only `EditableText`, which is a focus target that swallows arrow keys to move
+a caret, i.e. the same D-pad trap wearing a convenience label. Values that a desktop user might
+want to select (the code, a share URL, the log preview) are plain `Text` with an explicit Copy
+button beside them, which works on every input device. Both routes are plain
+`MaterialPageRoute` pushes and add **no rung to the Back ladder below** — the ladder peels state
+off one screen, and a pushed route owns none of it, so Back is an ordinary pop.
+
+Pinned by `test/send_diagnostics_screen_test.dart` (Cancel holds focus in both the
+cloud-configured and LAN-only builds, no `TextField`/`EditableText` anywhere, the consent text
+present verbatim, Copy focused after a success, Try again after a failure).
+
 ## Per-row favorite button + intra-row action cursor
 
 Every channel row carries an **always-visible star cell** (`_ChannelTile` in `live_tab_view.dart`):
