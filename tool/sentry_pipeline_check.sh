@@ -26,6 +26,14 @@ api() { # method path -> prints HTTP status; body to $tmp
 }
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 
+echo "== 0. token identity and scopes (names only, never the token)"
+st=$(api GET "")
+if [ "$st" = 200 ]; then
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); a=d.get("auth") or {}; u=d.get("user") or {}; print("token kind:", "user" if u else "organization/unknown"); print("scopes:", " ".join(sorted(a.get("scopes") or [])) or "(not reported)")' "$tmp"
+else
+  echo "API root: HTTP ${st}"
+fi
+
 echo "== 1. release registration (the real release step)"
 ./tool/sentry_register_release.sh "$version"
 
@@ -41,6 +49,10 @@ echo "release ${release}: HTTP ${st}"
 # Debug files are assembled and processed asynchronously after upload, so a
 # listing taken at once can be empty. Look each one up by its debug id and
 # give processing a few minutes.
+# Also look up the engine symbols already uploaded for this engine revision
+# (2026-11-04), so a run that uploads nothing still tests read access.
+ids="$ids ${KNOWN_DEBUG_IDS:-}"
+ids=$(printf '%s\n' $ids | sort -u)
 if [ -z "$ids" ]; then
   echo "(no new uploads this run; relying on the re-upload check below)"
 fi
