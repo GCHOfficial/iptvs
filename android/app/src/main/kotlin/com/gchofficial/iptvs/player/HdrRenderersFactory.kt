@@ -4,15 +4,23 @@ import android.content.Context
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
+import android.os.SystemClock
+import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * A [DefaultRenderersFactory] whose video renderer reports the *decoder's* view of
@@ -35,6 +43,11 @@ class HdrRenderersFactory(
     context: Context,
     private val onDynamicRange: (String) -> Unit,
     private val onCodecName: (String) -> Unit = {},
+    /**
+     * Measures the decoded signal level for the one-shot audio health line.
+     * Null leaves the audio sink exactly as `DefaultRenderersFactory` builds it.
+     */
+    private val audioPeak: AudioPeakProbe? = null,
 ) : DefaultRenderersFactory(context) {
 
     /**
@@ -74,6 +87,40 @@ class HdrRenderersFactory(
         )
         videoRenderer = renderer
         out.add(renderer)
+    }
+
+    /**
+     * The stock `DefaultAudioSink`, plus one pass-through processor that reads
+     * the decoded signal level.
+     *
+     * Everything here reproduces `DefaultRenderersFactory.buildAudioSink`
+     * verbatim (media3 1.11.1) except the `setAudioProcessors` line.
+     * `Builder.setAudioProcessors` wraps the array in media3's own
+     * `DefaultAudioProcessorChain`, which still appends
+     * `SilenceSkippingAudioProcessor` and `SonicAudioProcessor` after it — so
+     * silence skipping and, crucially, the 1.05x `CatchUpPolicy` speed
+     * adjustment keep working exactly as before.
+     *
+     * The probe sees nothing under passthrough or offload: `DefaultAudioSink`
+     * builds an empty pipeline for non-PCM input ("Audio processing is not
+     * supported in offload or passthrough mode"), which is why
+     * [AudioTrackPolicy.peakLabel] reports `n/a(passthrough)` rather than a
+     * misleading silence.
+     */
+    override fun buildAudioSink(
+        context: Context,
+        enableFloatOutput: Boolean,
+        enableAudioOutputPlaybackParams: Boolean,
+    ): AudioSink {
+        val builder = DefaultAudioSink.Builder(context)
+            .setEnableFloatOutput(enableFloatOutput)
+            .setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
+        // Explicitly typed: Kotlin arrays are invariant, so an
+        // `Array<AudioPeakProcessor>` would not satisfy `AudioProcessor[]`.
+        audioPeak?.let {
+            builder.setAudioProcessors(arrayOf<AudioProcessor>(AudioPeakProcessor(it)))
+        }
+        return builder.build()
     }
 
     private companion object {
@@ -210,5 +257,128 @@ class HdrMediaCodecVideoRenderer(
          * media3 adds.
          */
         const val MSG_REBUILD_CODEC = Renderer.MSG_CUSTOM_BASE + 1
+    }
+}
+
+/**
+ * Largest absolute PCM sample the audio sink has been handed, over a short
+ * window after each load.
+ *
+ * It exists to answer the one question no media3 counter can: a renderer can
+ * report a healthy decoder, a climbing `renderedOutputBufferCount` and an
+ * `AudioTrack` that is advancing, and still be feeding the speaker digital
+ * silence. `peak=-inf` and `peak=-18.3dBFS` are the two sides of a "no sound"
+ * report that otherwise produce byte-identical logs.
+ *
+ * **Measurement only.** The processor it drives never alters a sample — see
+ * [AudioPeakProcessor]. Written on the playback/audio thread and read from the
+ * main thread, hence the volatiles; nothing here is a correctness dependency,
+ * so a torn read would at worst print a slightly stale number.
+ */
+class AudioPeakProbe {
+
+    @Volatile
+    private var windowMs = 0L
+
+    @Volatile
+    private var startedAtMs = 0L
+
+    @Volatile
+    private var encoding = C.ENCODING_INVALID
+
+    /** The largest absolute 16-bit sample seen since [arm]. */
+    @Volatile
+    var peak = 0
+        private set
+
+    /** Whether any PCM reached the probe at all (false under passthrough). */
+    @Volatile
+    var sawPcm = false
+        private set
+
+    /** Starts a fresh measurement — called from `load`, before the sink reconfigures. */
+    fun arm(windowMs: Long) {
+        peak = 0
+        sawPcm = false
+        startedAtMs = 0L
+        this.windowMs = windowMs
+    }
+
+    /** Stops measuring (engine released, or the window is no longer wanted). */
+    fun disarm() {
+        windowMs = 0L
+    }
+
+    /** The input format the sink configured this processor with. */
+    fun noteEncoding(pcmEncoding: Int) {
+        encoding = pcmEncoding
+    }
+
+    /**
+     * Scans [buffer] without consuming it.
+     *
+     * Only 16-bit PCM is measured: the sink's user processors run *after*
+     * `ToInt16PcmAudioProcessor`, so that is what arrives in every
+     * configuration this app builds (float output is off). Anything else is
+     * left unmeasured rather than guessed at.
+     */
+    fun scan(buffer: ByteBuffer) {
+        if (windowMs <= 0L) return
+        if (encoding != C.ENCODING_PCM_16BIT) return
+        val now = SystemClock.elapsedRealtime()
+        if (startedAtMs == 0L) {
+            startedAtMs = now
+        } else if (now - startedAtMs > windowMs) {
+            // One window per load; after it the processor is a plain copy.
+            windowMs = 0L
+            return
+        }
+        sawPcm = true
+        var max = peak
+        val shorts = buffer.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+        while (shorts.hasRemaining()) {
+            val sample = shorts.get().toInt()
+            val magnitude = if (sample < 0) -sample else sample
+            if (magnitude > max) max = magnitude
+        }
+        peak = max
+    }
+}
+
+/**
+ * A pass-through [androidx.media3.common.audio.AudioProcessor] that reports the
+ * signal level to an [AudioPeakProbe] and otherwise outputs its input unchanged.
+ *
+ * Modelled on media3's own `TeeAudioProcessor` (same base class, same
+ * "output the input" `onConfigure`, same `replaceOutputBuffer(...).put(...)`
+ * copy), minus its per-buffer read-only `ByteBuffer` view — the probe reads
+ * through a `duplicate()` and never advances the caller's position.
+ *
+ * Cost is one `memcpy` of an audio buffer (a few KB, roughly fifty times a
+ * second) for the life of the session, plus a scan of those same bytes for the
+ * first [AudioTrackPolicy.PEAK_WINDOW_MS]. The processor stays *active* rather
+ * than going inactive after the window because `isActive()` is latched at
+ * `configure` time; keeping it constant means the pipeline is the same shape
+ * whether or not a measurement is running.
+ */
+@UnstableApi
+private class AudioPeakProcessor(
+    private val probe: AudioPeakProbe,
+) : BaseAudioProcessor() {
+
+    override fun onConfigure(
+        inputAudioFormat: AudioProcessor.AudioFormat,
+    ): AudioProcessor.AudioFormat {
+        probe.noteEncoding(inputAudioFormat.encoding)
+        // Always active, and output == input: the sink's format negotiation is
+        // untouched, exactly as with a TeeAudioProcessor.
+        return inputAudioFormat
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        val remaining = inputBuffer.remaining()
+        if (remaining == 0) return
+        probe.scan(inputBuffer)
+        replaceOutputBuffer(remaining).put(inputBuffer).flip()
     }
 }

@@ -57,7 +57,19 @@ class MpvController(
     /** `cache-secs` for this session, or null for mpv's own default. */
     private val cacheSecs: Int? = null,
     private val onHdrChanged: (Boolean) -> Unit = {},
+    /** Exportable, credential-free diagnostics — see [MpvEngine]'s parameter. */
+    private val onDiagnostic: ((String) -> Unit)? = null,
 ) : MPVLib.EventObserver, SurfaceHolder.Callback {
+
+    /**
+     * Whether this load's one audio line has been emitted. Main-thread only
+     * (every write is inside a [post] block), reset per [load].
+     *
+     * One line, not a stream of them: `MPV_EVENT_AUDIO_RECONFIG` fires on every
+     * format change a live MPEG-TS stream makes, and the exportable log is an
+     * 800-entry ring.
+     */
+    private var reportedAudio = false
 
     /**
      * Written on the main thread ([create] / [destroy]), read from [reader].
@@ -211,6 +223,7 @@ class MpvController(
         // rather than measuring the old stream's playhead against the clock.
         lastPositionMs = -1L
         lastAheadMs = -1L
+        reportedAudio = false
         mpv?.command(arrayOf("loadfile", url))
         // A reload while paused (go-to-live) must resume; loadfile keeps the
         // current pause state otherwise.
@@ -490,6 +503,17 @@ class MpvController(
             snapshot.audioChannels?.let { state.audioChannels = it }
             state.dynamicRange = snapshot.dynamicRange
             onHdrChanged(isHdrRangeLabel(snapshot.dynamicRange))
+            // The mpv counterpart of the Exo path's `audio tracks=`/
+            // `audio decoder=` lines: what FFmpeg actually opened. Emitted from
+            // here rather than from `readTracks` because this is where the
+            // decoded format is known, and only once per load.
+            val codec = snapshot.audioCodec
+            if (!reportedAudio && !codec.isNullOrBlank()) {
+                reportedAudio = true
+                onDiagnostic?.invoke(
+                    "audio format=$codec channels=${snapshot.audioChannels ?: -1}",
+                )
+            }
         }
     }
 
@@ -515,6 +539,14 @@ class MpvController(
             state.selectedAudioId = snapshot.selectedAudioId
             state.subtitleTracks = snapshot.subtitleTracks
             state.selectedSubtitleId = snapshot.selectedSubtitleId
+            // A stream with no audio at all never reaches the `audio format=`
+            // line above, and silence in a log reads the same as a missing
+            // feature. Say so explicitly, as the Exo path's `audio tracks=0`
+            // does.
+            if (!reportedAudio && snapshot.audioTracks.isEmpty()) {
+                reportedAudio = true
+                onDiagnostic?.invoke("audio tracks=0")
+            }
         }
     }
 

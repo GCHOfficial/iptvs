@@ -18,11 +18,13 @@ back to the embedded `media_kit` surface if unavailable. The native player is a 
   capable devices/displays, because the hardware decoder's HDR metadata reaches the compositor
   directly.
 - **`MpvEngine` (fallback)** — wraps libmpv (`dev.jdtech.mpv:libmpv`, gpu-next/libplacebo,
-  `MpvController.kt`) in a `SurfaceView`. Used **only** when ExoPlayer can't decode the video
-  track (`ExoPlayerEngine.detectUnsupportedVideo`/decoder error → `onUnsupportedVideo` →
-  `HdrPlayerActivity.fallbackToMpv()`) — chiefly **Dolby Vision Profile 5** (single-layer, no
+  `MpvController.kt`) in a `SurfaceView`. Used **only** when ExoPlayer can't decode the stream
+  (`ExoPlayerEngine.detectUnsupportedVideo` / `detectUnsupportedAudio` / decoder error →
+  `onUnsupportedStream(reason)` → `HdrPlayerActivity.fallbackToMpv(reason)`) — chiefly
+  **Dolby Vision Profile 5** (single-layer, no
   HDR10 base) on non-DV hardware (e.g. Samsung Galaxy), which mpv software-reshapes (`hwdec=no`)
-  and **tone-maps to SDR** (mpv's GL render path can't signal HDR to an Android surface). The
+  and **tone-maps to SDR** (mpv's GL render path can't signal HDR to an Android surface), and
+  now also **undecodable audio** (see "Audio is a fallback reason too" below). The
   fallback is device-aware: on DV-capable hardware ExoPlayer handles DV in hardware and it never
   fires. **DV P5 reshaping needs a libplacebo built with `libdovi`** (the stock
   `dev.jdtech.mpv:libmpv` lacks it → green/magenta), so the app vendors a **libdovi-enabled AAR**
@@ -113,7 +115,8 @@ rather than a user's TV box.
 
 **SmoothStreaming and RTSP are deliberately left out**, and `ExoPlayerEngine.load` is what makes
 that safe: `player.stop()` / `setMediaItem` / `prepare` run inside a `try`, and **any** `Throwable`
-from them posts `triggerFallback()` — the existing `onUnsupportedVideo` → `fallbackToMpv()` path —
+from them posts `triggerFallback(EngineFallbackReason.SOURCE)` — the existing
+`onUnsupportedStream` → `fallbackToMpv(reason)` path —
 instead of propagating. libmpv plays both containers (RTSP noticeably better than ExoPlayer does),
 there is no evidence of either shape in the vitals data, and `.ism` is effectively extinct in IPTV,
 so a second ExoPlayer module would be dex weight on a universal APK for a format panels stopped
@@ -122,6 +125,99 @@ serving. The catch is `Throwable` rather than `Exception` because the same shape
 rather than invoked inline because the host's handler releases this very engine — running it
 synchronously would return into a released player. The diagnostic line names the exception type
 only, never the locator.
+
+### Audio is a fallback reason too, and it used to be a *silent* failure
+
+`MediaCodecAudioRenderer.supportsFormat` answers `FORMAT_UNSUPPORTED_SUBTYPE` when the device has
+no `MediaCodec` for the MIME type, and `DefaultTrackSelector` only ever selects a track whose
+support is `FORMAT_HANDLED` (or `FORMAT_EXCEEDS_CAPABILITIES`, which it stretches to when nothing
+better exists). An undecodable audio track is therefore **deselected with no error at all**: no
+`PlaybackException`, no state change, no `onPlayerError`. The picture plays, there is no sound,
+and **nothing reaches the log** — `ExoPlayerEngine.rebuildTracks` just `continue`d past the
+unsupported track, and `detectUnsupportedVideo` only ever looked at video groups.
+
+The report: a Xiaomi 11T Pro on an SD MPEG-TS LAN channel (MPEG-2 video 720x576) whose audio is
+DVB **MP2** (`audio/mpeg-L2`). Phones routinely ship MP3 and AAC decoders and no MP2 one. VLC,
+iboplayer and smartiptv all played it, and the exported log named audio *nowhere*: it showed
+`native video decoder=c2.qti.mpeg2.decoder kind=hardware` and `native stream 720x576 … codec=MPEG-2`
+and stopped there.
+
+So `onTracksChanged` now also runs `detectUnsupportedAudio`, and the decision lives in the
+Android-free `AudioTrackPolicy` (`player/AudioTrackPolicy.kt`, pinned by `AudioTrackPolicyTest`):
+
+- **Falls back when there is ≥1 audio track and *none* of them is playable.** Capability-based —
+  there is no codec allow/deny list anywhere in it.
+- **Does not fall back on a mixed stream.** MP2 + AC-3 where AC-3 decodes stays on ExoPlayer; a
+  swap would cost a reload and a tone-mapped SDR surface for nothing.
+- **Does not fall back on a stream with no audio at all.** A video-only channel is a real thing
+  and mpv would not improve it; that case is *reported* (`audio tracks=0`) instead.
+- **Audio-only (radio) channels are covered**, because the video check returns early when there
+  are no video groups rather than claiming the stream.
+- "Playable" is `Tracks.Group.isTrackSupported(i, allowExceedsCapabilities = true)` — it mirrors
+  what the *selector* will do (`exceedRendererCapabilitiesIfNecessary` defaults to true), not what
+  the device advertises comfortably. The stricter rule would throw a working stream at mpv. The
+  video check keeps its own (stricter) predicate; nothing about ExoPlayer's selection behaviour
+  changed.
+
+`ExoPlayerEngine.onUnsupportedVideo` is now **`onUnsupportedStream(reason)`**, carrying an
+`EngineFallbackReason` (`video` | `audio` | `decode` | `source`), and the one-shot `fellBack`
+guard is unchanged — the first reason to fire wins and the engine never reports twice. Each path:
+
+| path | behaviour |
+| --- | --- |
+| **fullscreen** (`HdrPlayerActivity.fallbackToMpv`) | identical to the video case — reset the watchdog + latency, release (or un-adopt) the engine, start `MpvEngine`. Logs `native engine fallback from=exo to=mpv reason=audio adopted=…` |
+| **preview** (`SharedEngine.handlePreviewUnsupported`) | identical to the video case — `invalidate()` the shared engine and tell Dart, which reopens the preview on media_kit and adds the channel to `_nativeUnsupportedIds` so later previews of it skip the native path. Logs `preview stream unsupported reason=audio; media_kit fallback` |
+| **adopted handoff** | nothing new happens: `onTracksChanged` already fired during the preview, so a channel with undecodable audio never reaches adoption — the preview engine is released and Dart's preview is a media_kit one, which `_openLivePlayer` does not hand off |
+| **zap** | the engine is reloaded, `fellBack` is per-engine and a fallen-back engine has already been replaced, so a zap onto an MP2 channel from a working one falls back on its own `onTracksChanged`. Engine *kind* then stays mpv for the session, exactly as the video case does |
+
+### Audio diagnostics: telling "no audio", "undecodable audio" and "silence" apart
+
+All of it goes through the existing `onDiagnostic` → `native …` / `preview …` relay, carries no
+locator or header, and is emitted at most once per load.
+
+- `audio tracks=N supported=M selected=<mime ch>|none unsupported=<mime ch,…>` — at the first
+  `onTracksChanged` that carries any groups. A `Tracks` with **no** groups is skipped, because
+  that is what `player.stop()` emits on its way into a reload (`ListenerSet.flushEvents` drains on
+  the calling thread, so it lands *inside* `load`) and logging `tracks=0` for it would both
+  mislead and spend the load's one line. The audio fields are reset *before* `stop()` for the same
+  reason.
+- `audio decoder=<name> kind=hardware|software` — from `AnalyticsListener.onAudioDecoderInitialized`,
+  mirroring the video decoder line. `enableDecoderFallback` applies to audio too.
+- `audio codec error <Type>` / `audio sink error <Type>` — `onAudioCodecError` / `onAudioSinkError`,
+  **type only** (a sink message can echo the format), capped at `AudioTrackPolicy.MAX_ERROR_LINES`
+  (3) per load because the export is an 800-entry ring and a wedged sink emits continuously.
+- `audio health decoder=… output=pcm|passthrough|offload|none rendered=… skipped=… underruns=…
+  volume=… muted=… peak=…` — one sample, `HEALTH_SAMPLE_DELAY_MS` (6 s) after the first evidence
+  of output. Armed by `onRenderedFirstFrame` **or** `onAudioTrackInitialized`/
+  `onAudioPositionAdvancing`, whichever comes first — the video one matters because a silent
+  stream never advances the audio position, which is precisely the bug. Counters are read through
+  `DecoderCounters.ensureUpdated()`, the same cross-thread barrier `videoCounters()` depends on.
+- `peak=` is the one measurement nothing else provides: `-inf` means a decoder ran and produced
+  digital **silence**, `-18.3dBFS` means it produced sound and something downstream ate it. It
+  comes from a pass-through `AudioProcessor` (`AudioPeakProcessor`, modelled on media3's own
+  `TeeAudioProcessor`) installed via `HdrRenderersFactory.buildAudioSink`'s
+  `DefaultAudioSink.Builder.setAudioProcessors`. Two things make that safe: `setAudioProcessors`
+  wraps the array in media3's `DefaultAudioProcessorChain`, which still appends
+  `SilenceSkippingAudioProcessor` **and `SonicAudioProcessor`** after it (so the 1.05x
+  `CatchUpPolicy` speed adjustment is untouched), and the processor outputs its input unchanged.
+  It measures for `PEAK_WINDOW_MS` (5 s) from the first buffer it sees — from the *buffer*, not
+  from arming, so a slow-starting stream is not measured as silence — and is inert afterwards.
+  Under **passthrough or offload** `DefaultAudioSink` builds an empty pipeline ("Audio processing
+  is not supported in offload or passthrough mode"), so there is nothing to measure and the field
+  reads `n/a(passthrough)` rather than accusing a working HDMI link of being silent. Every peak
+  label is space-free so `key=value` greps survive.
+
+**The mpv side prints the equivalent**, or an export from a session that *took* the fallback would
+go quiet on exactly the subject the fallback was decided on: `MpvController` emits
+`audio format=<codec> channels=<n>` once per load from `readMediaInfo`, or `audio tracks=0` from
+`readTracks` when the stream carries none. It reaches the same relay via a new
+`MpvEngine(onDiagnostic =)` parameter, wired to `HdrPlayerActivity.diagnosticSink`. libmpv decodes
+MP2 through FFmpeg, which is why the fallback is the right answer and not just a different
+failure.
+
+**An adopted engine does not re-emit these.** The audio lines were written during the preview and
+are already in the export under the `preview ` prefix; the engine playing fullscreen is literally
+the same one.
 
 **The blocking surface detach is media3's, it is bounded at 2 s, and it is deliberately not
 shortened.** When a `SurfaceView` that is a player's video output is destroyed — the channel-list
@@ -1877,7 +1973,7 @@ ended channel) used to run inside that gap: the stop was parked as `stopAfterDet
 **ignored while still answering `true`**, and the late detach then released the engine — a black,
 captioned preview that only reproduced on slow hardware. `openPreview` now also *defers* rather
 than drops an open that lands while adopted (`pendingOpen`, replayed at detach after any parked
-stop has released the old engine), as a backstop for any exit path that skips `finish()`. Engine callbacks (`onUnsupportedVideo` /
+stop has released the old engine), as a backstop for any exit path that skips `finish()`. Engine callbacks (`onUnsupportedStream` /
 `onRecoverableError`) are mutable vars for the same reason — each host rebinds them.
 
 **The surface type is load-bearing, and the original reasoning for it was wrong.** This was a
@@ -2150,7 +2246,12 @@ ever appeared. The Activity now stamps every note with ms since its own `onCreat
 | `native video decoder=<name> kind=hardware\|software` | which `MediaCodec` was actually built, on every codec init. The engine sets `enableDecoderFallback`, so a hardware decoder that fails to configure lands silently on the platform's software one (`c2.android.*`/`OMX.google.*`) — and software HEVC cannot sustain 4K50, so the stream plays but crawls while every health flag still reads healthy. The name is the only place that shows. Repeated lines also make a decoder being rebuilt over and over visible |
 | `native playback fps=49.9 rendered=+250 dropped=+0 over 5008ms` | steady-state playback health, once every `PlaybackStatsSampler.DEFAULT_INTERVAL_MS` while playing. **This exists because the log had no frame data at all unless something failed** — the tallies below are written only on a reconnect or a handoff rebuild, so a stream that played *badly* produced a log indistinguishable from a healthy one. It separates three cases that look identical on screen: `fps` far under the stream's rate with `dropped` climbing (the decoder can't keep up — a software fallback, or thermal throttling); `fps` at the stream's rate while the picture still judders (the decoder is fine, the *display cadence* is not — e.g. 50fps content on a 60Hz output); and `fps` low with **no** drops (frames arriving late rather than being discarded) |
 | `native live re-resolve refreshed=… timedOut=…` | whether the portal handed back a new locator, or the round trip timed out and the spent one was retried |
-| `native engine fallback from=exo to=mpv adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching |
+| `native engine fallback from=exo to=mpv reason=video\|audio\|decode\|source adopted=…` | a mid-session engine swap, which is a full reload on a channel the user was already watching. `reason` is which half of the stream lost it — `video` is the Dolby Vision case the fallback was built for, `audio` the DVB-MP2 case it now also covers, and the follow-up question is different for each |
+| `native audio tracks=2 supported=1 selected=ac3 6ch unsupported=mpeg-L2 2ch` | what audio the provider actually sent and whether anything is feeding the renderer, once per load. `tracks=0` is a video-only channel; `supported=0` with a non-empty `unsupported=` is the silent deselection that plays a picture with no sound |
+| `native audio decoder=<name> kind=hardware\|software` | which audio `MediaCodec` was built — absent under passthrough, where media3 bypasses the codec entirely |
+| `native audio codec error <Type>` / `native audio sink error <Type>` | the renderer or the `AudioTrack` failed; type only, capped at three lines per load |
+| `native audio health decoder=… output=pcm\|passthrough\|offload\|none rendered=… skipped=… underruns=… volume=… muted=… peak=-18.3dBFS` | one sample a few seconds in. `peak=-inf` is a decoder producing **digital silence**; `peak=n/a(passthrough)` is an encoded bitstream going to a receiver, where there is nothing to measure |
+| `native audio format=MP2 channels=2` (mpv) | the libmpv engine's equivalent, so an export reads the same whichever engine played |
 
 Every one of those is a bare boolean/number/label by construction — never a URL, header or
 provider reply. `ExoPlayerEngine.onDiagnostic` is the sink; `SharedEngine.adoptForFullscreen`
@@ -2371,7 +2472,8 @@ makes "which channel did this session end on" answerable after the fact —
   the engine (a cross-source zap's headers, another source's buffer preset) un-adopts it through
   `previewEvent: lost`, which clears the preview's `stream`; reading that as "nothing to bring
   back" left the panel empty after exactly the sessions that zapped furthest. `lost` also carries
-  `unsupported`, and only an engine lost to undecodable video (the mpv fallback) marks the channel
+  `unsupported`, and only an engine lost to an undecodable stream — video *or* audio, i.e. the
+  mpv fallback — marks the channel
   native-unsupported — a zap rebuild used to mark the *launch* channel, pushing its later previews
   onto media_kit for the rest of the session.
 

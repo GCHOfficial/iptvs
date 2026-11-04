@@ -25,6 +25,16 @@ class MpvEngine(
      * the same source.
      */
     bufferPreset: BufferPreset = BufferPreset.NORMAL,
+    /**
+     * Short, credential-free notes for the host's exportable diagnostics log,
+     * mirroring [ExoPlayerEngine.onDiagnostic].
+     *
+     * It exists for **parity**: the Exo path reports what audio the stream
+     * carried and which decoder it built, so an export from a session that fell
+     * back to mpv used to go quiet on exactly the subject the fallback was
+     * decided on. Now both engines name the audio they opened.
+     */
+    onDiagnostic: ((String) -> Unit)? = null,
 ) : PlaybackEngine {
 
     private val controller = MpvController(
@@ -32,6 +42,7 @@ class MpvEngine(
         state,
         post,
         cacheSecs = bufferPreset.mpvCacheSecs,
+        onDiagnostic = onDiagnostic,
     )
     // MpvController.destroy() is itself idempotent, but this also guards
     // DebugCounters against a double-decrement if release() is called twice.
