@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
@@ -6,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/app_database.dart';
 import 'data/cloud_config.dart';
+import 'data/crash_reporter.dart';
 import 'data/device_class.dart';
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
@@ -34,6 +37,17 @@ Future<void> main() async {
         kAndroidImageCacheBytes;
   }
   MediaKit.ensureInitialized();
+  // Crash reporting, started **beside** the boot reads rather than in front of
+  // them. `SentryFlutter.init` awaits its integration list — including the
+  // native SDK's own init — before it returns, so awaiting it here would put a
+  // JNI `SentryAndroid.init` (and `sentry_init` on desktop) on the path to the
+  // first frame. Everything it does is keychain / platform-channel I/O, so
+  // left un-awaited it interleaves with the tuple below and costs the first
+  // frame nothing. It is also a complete no-op unless a DSN was compiled in
+  // *and* the user's "Send crash reports" switch is on, so development builds,
+  // forks and the test suite never start an SDK at all. See
+  // `data/crash_reporter.dart`.
+  unawaited(CrashReporter.instance.start());
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
   // independent — only the identity migration below needs the database and the

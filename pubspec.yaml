@@ -63,6 +63,7 @@ dependencies:
   # registration and the iOS pod to exist at all.
   iptvs_ios_player:
     path: packages/iptvs_ios_player
+  sentry_flutter: ^10.3.0
 
 # media_kit_video and media_kit_libs_video (pub.dev) both declare
 # `media_kit: ^1.2.6`. Pinning media_kit itself to a git ref for
