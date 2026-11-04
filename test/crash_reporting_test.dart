@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/crash_budget.dart';
 import 'package:iptvs/data/crash_reporter.dart';
 import 'package:iptvs/data/crash_test.dart';
+import 'package:iptvs/screens/crash_test_section.dart';
+import 'package:iptvs/widgets/focusable_card.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 /// Credentials written as `user=`/`pw=` rather than the literal
@@ -357,6 +360,37 @@ void main() {
       // a mangled one.
       expect(cleaned, contains('panel.example.com:8080'));
       expect(cleaned, contains('iptvs crash test'));
+    });
+
+    // The section is mounted behind `if (kCrashTest)`, which is a `const
+    // false` in every test — so without this nothing in CI ever builds it and
+    // a layout or focus regression would be discovered on the device the
+    // crash-test APK was dispatched to. Instantiated directly rather than
+    // through the gate, and never *activated*: pressing one of these really
+    // does crash the process.
+    testWidgets('the section renders and every action is focusable', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(child: CrashTestSection()),
+          ),
+        ),
+      );
+      for (final action in CrashTestAction.values) {
+        expect(find.text(action.label), findsOneWidget);
+      }
+      // D-pad reachable: every action is a FocusableCard, never a bare
+      // button or a tap-only row (CLAUDE.md "TV / remote navigation").
+      expect(
+        find.byType(FocusableCard),
+        findsNWidgets(CrashTestAction.values.length),
+      );
+      // No text field of any kind on this surface — one would trap D-pad
+      // focus on a television.
+      expect(find.byType(EditableText), findsNothing);
+      expect(tester.takeException(), isNull);
     });
 
     test('a scrubbed crash-test event keeps one stable fingerprint', () {
