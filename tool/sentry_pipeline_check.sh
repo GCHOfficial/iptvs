@@ -28,6 +28,13 @@ tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 
 echo "== 0. token identity and scopes (names only, never the token)"
 st=$(api GET "")
+if [ "$st" != 200 ]; then
+  # /api/0/ is served by Sentry's control silo, so a regional host (de.sentry.io)
+  # answers 404; ask the control silo instead (same vendor, same token).
+  echo "API root on ${base}: HTTP ${st}; asking https://sentry.io"
+  st=$(curl -sS -o "$tmp" -w '%{http_code}' "https://sentry.io/api/0/" \
+    -H "Authorization: Bearer ${SENTRY_AUTH_TOKEN}" --max-time 60 2>/dev/null || echo 000)
+fi
 if [ "$st" = 200 ]; then
   python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); a=d.get("auth") or {}; u=d.get("user") or {}; print("token kind:", "user" if u else "organization/unknown"); print("scopes:", " ".join(sorted(a.get("scopes") or [])) or "(not reported)")' "$tmp"
 else
