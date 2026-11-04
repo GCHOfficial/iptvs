@@ -79,7 +79,7 @@ jobs:
           IPTVS_ANDROID_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
           IPTVS_ANDROID_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
           BUILD_NAME: ${{ inputs.version }}
-        run: flutter build appbundle --release --flavor googlePlay --build-name "$BUILD_NAME" --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+        run: flutter build appbundle --release --flavor googlePlay --build-name "$BUILD_NAME" --build-number ${{ github.run_number }} --dart-define=DISTRIBUTION_CHANNEL=googlePlay --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }} --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }} --dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}
       - name: Verify bundle identity and upload signature
         env:
           EXPECTED_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
@@ -88,6 +88,26 @@ jobs:
         env:
           BUILD_NAME: ${{ inputs.version }}
         run: cp build/app/outputs/bundle/googlePlayRelease/app-googlePlay-release.aab "iptvs-player-$BUILD_NAME-google-play.aab"
+      # Crash reporting: tell Sentry this version exists. Always exits 0 and
+      # is `continue-on-error` besides — a Sentry outage must never stop a
+      # store submission. See docs/updates.md "Crash reporting (Sentry)".
+      - name: Register the Sentry release
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+          VERSION: ${{ inputs.version }}
+        run: ./tool/sentry_register_release.sh "$VERSION"
+      - name: Upload Flutter engine symbols to Sentry
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+        run: ./tool/sentry_upload_engine_symbols.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: google-play-${{ inputs.version }}
