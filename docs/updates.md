@@ -58,7 +58,8 @@ DSN on any of its six builds: CI builds crash on purpose (that is what a lint ga
 every one of those would be charged against an organisation-wide 50 000 errors/month quota that
 is shared with another product. An absent DSN means the SDK is never started at all, so leaving
 it out is the whole of that protection — see CLAUDE.md's Sentry bullet and
-`lib/data/crash_reporter.dart`.
+`lib/data/crash_reporter.dart`. The **one** other workflow that passes a DSN is the dispatch-only
+`crash-test-apk.yml`, below.
 
 `release` is `iptvs@<build name>` — the tag minus its `v`, the same string the workflow passes
 to `--build-name` — and `dist` is the build number (`github.run_number`, or `0` for the Store).
@@ -108,6 +109,71 @@ information is uploaded. That is a decision, not an omission:
     doesn't re-symbolicate processed events. Dart frames are unaffected.
   - There are **no** published engine symbols for `windows-x64` or `linux-x64` at the current
     revision, so desktop engine frames stay unsymbolicated.
+
+### The crash-test APK
+
+Nothing in CI can prove that crash capture works end to end. CI may not carry a DSN (the rule
+above), a unit test cannot start the SDK at all, and the two handlers that matter most — the NDK
+signal handler and the Android 12+ tombstone integration — are only installed on a real device by
+a real `--release` build. So the proof is a **hand-dispatched APK with four deliberate faults in
+it**: `.github/workflows/crash-test-apk.yml`, `workflow_dispatch` only, never on push, PR or
+schedule.
+
+**The deliberate exception to "only the three release workflows pass a DSN".** That build passes
+`--dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}` *and*
+`--dart-define=IPTVS_CRASH_TEST=true`. The second define is what makes the first one safe to
+grant: it forces `options.environment` to **`crashtest`** (`sentryEnvironment` in
+`lib/data/crash_test.dart`, applied in `crash_reporter.dart`), so the whole run can be selected
+or discarded in the dashboard with `environment:crashtest` and no manufactured event is ever
+mistaken for a field report. Nothing else about the pipeline changes: the consent switch, the
+crash-loop guard and every `CrashBudget` cap still apply — the budget is *part of what is being
+proven*, which is why fault (d) exists.
+
+**What is in the build.** `kCrashTest` is a compile-time `bool.fromEnvironment`, a `const false`
+everywhere else, so the Diagnostics screen's "Crash test" section
+(`lib/screens/crash_test_section.dart`) and everything it reaches are tree-shaken out of a
+shipped app. The section is `FocusableCard`-based and carries no text field, so it is D-pad
+navigable like the rest of the screen; each action states in one line what should appear in
+Sentry, and a status line says whether the SDK is actually running — without it a working scrub
+and a build that never started Sentry look identical from the dashboard (nothing arrives).
+
+| # | Fault | What it proves |
+|---|-------|----------------|
+| a | Uncaught Dart `CrashTestException` thrown from a `Timer` | The Dart `beforeSend` runs, `cleanCrashText` scrubs the fake provider URL, and the event is charged to `CrashBudget`. Thrown from a timer because `main` installs no `runZonedGuarded`, so an error escaping a timer callback reaches `PlatformDispatcher.onError` — the hook `sentry_flutter`'s `OnErrorIntegration` installs. Thrown inline it would be caught by the framework's gesture guard and arrive as a different event entirely. |
+| b | Uncaught Kotlin `RuntimeException` on the Android main thread | sentry-java's `UncaughtExceptionHandlerIntegration` captures a Java-side event at all, and `NativeCrashScrubber` — **not** the Dart `beforeSend`, which never sees one — is what redacts the URL. The handler replies to the method call *first* and then `post`s the throw: thrown inline it would not be uncaught, because `MethodChannel`'s incoming handler wraps `onMethodCall` in a try/catch and turns the exception into an error reply. |
+| c | `raise(SIGSEGV)` through `dart:ffi` on the UI thread | The NDK handler writes an outbox envelope that the **next** launch sends, and `libflutter.so` frames symbolicate against the engine debug files already uploaded for this engine revision. This is why the APK must be `--release`: the debug files are for the release-mode engine. |
+| d | A repeat of (a), from the same throw site | `CrashBudget`'s one-event-per-fingerprint-per-24 h de-duplication drops it. It only works because `runCrashTest` funnels both actions through one `_throwUncaughtDartException`; two throw sites would mean two fingerprints and two admitted events. |
+
+**The fake credentials are pinned against the scrubber.** `crashTestLocator` builds
+`http://panel.example.com:8080/live/<user>/<pass>/4821.ts?token=<token>` at runtime from parts —
+the two shapes the redaction has to handle, assembled rather than written as one literal so the
+source carries no credential-shaped pair for GitGuardian to flag. A crash test quoting a URL the
+scrub already ignores would "pass" while proving nothing, so
+`test/crash_reporting_test.dart` asserts the Dart message against `cleanCrashText` and
+`CrashTestTest` asserts the Kotlin twin against `CrashScrub.redactText`. The strings to grep a
+Sentry event for are `crashtest-example`, `not-a-real-secret` and `not-a-real-token`; if any of
+them reaches the dashboard, the scrubbing is broken.
+
+**The Kotlin gate reads the same define, not a second switch.** `android/app/build.gradle.kts`
+decodes Flutter's `dart-defines` project property (the comma-joined, base64-encoded `KEY=VALUE`
+list `flutter_tools`' `encodeDartDefines` produces and `FlutterPlugin.kt` forwards) into
+`BuildConfig.CRASH_TEST`. An environment variable beside the define would have mirrored the
+release-signing block in the same file, and was rejected for exactly that reason: two switches
+that can be set independently will eventually disagree, and the disagreement is silent. The
+decode fails **closed** — absent property, unparseable entry or any value but the literal `true`
+leaves it false — and no release workflow passes the define, so no distributable build can reach
+the `true` branch. In a normal build `MainActivity`'s `crashTestThrow` branch answers
+`notImplemented()` and R8 folds it away.
+
+**Build shape.** `--release`, `development` flavor (applicationId
+`com.gchofficial.iptvs.player.dev`, so it installs *beside* a store or GitHub-direct build rather
+than replacing it — verified by `tool/verify_android_distribution_manifest.sh`), signed with the
+committed **public** debug keystore exactly as `build.yml`'s release-lint build, uploaded as a
+7-day artifact named `iptvs-crash-test-apk-NOT-FOR-DISTRIBUTION`. It could not be published even
+by accident: the release workflow verifies the certificate against the protected fingerprint.
+Supabase config is deliberately not passed — the cloud panel has nothing to do with crash
+capture. `FLUTTER_VERSION` must stay in step with `build.yml`'s, or the engine frames in fault
+(c) have no matching debug files and arrive as bare addresses.
 
 ## Discord announcement
 

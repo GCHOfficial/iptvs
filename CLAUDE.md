@@ -71,6 +71,15 @@ fallback build/link) — native Linux playback runtime-discovers and version-gat
 (>= 0.40 required); see `docs/player.md`.
 Only the three **release** workflows pass `--dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}`;
 `build.yml` passes none, on any build, so CI's deliberate crashes never reach the shared quota.
+**One exception, and it is dispatch-only:** [`crash-test-apk.yml`](.github/workflows/crash-test-apk.yml)
+builds a debug-signed `--release` **development**-flavor APK with the DSN *and*
+`--dart-define=IPTVS_CRASH_TEST=true`, which forces the Sentry `environment` to `crashtest` so
+those manufactured events are filterable and never mix with real ones. It runs on
+`workflow_dispatch` alone, uploads a 7-day artifact that is never published, and changes **no**
+other gate — consent switch, crash-loop guard and `CrashBudget` all still apply, because the
+budget is part of what the test proves. It exists because nothing else can prove the pipeline:
+CI may not carry a DSN, a unit test cannot start the SDK, and the NDK/tombstone handlers only
+exist on a real device. See `docs/updates.md` "The crash-test APK".
 `sentry_flutter` builds sentry-native (Breakpad) from source at CMake configure time on
 Windows/Linux, which is why the Linux jobs install `libcurl4-openssl-dev`; its Darwin half is
 **SwiftPM-only**, which works because `ios/Runner.xcodeproj` already carries the
@@ -555,7 +564,16 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   that last one is what bounds the monthly exposure to ~830 installs — plus one event per
   fingerprint per 24 h. Desktop Breakpad crashes are the one source outside the per-event cap
   (sentry-native exposes no hook `sentry_flutter` wires up); they are still covered by the
-  crash-loop guard, since a withheld init never flushes them. Detail: docs/updates.md
+  crash-loop guard, since a withheld init never flushes them.
+  **`kCrashTest` is the fourth gate, and it only ever *adds* a surface.**
+  `bool.fromEnvironment('IPTVS_CRASH_TEST')` (`lib/data/crash_test.dart`) is a compile-time
+  `const false` in every shipped build, so the Diagnostics "Crash test" section, the four
+  deliberate faults and the `iptvs/device` `crashTestThrow` call are all unreachable and
+  tree-shaken. The Kotlin half reads the **same** define — `build.gradle.kts` decodes Flutter's
+  `dart-defines` project property into `BuildConfig.CRASH_TEST` rather than taking a second
+  switch of its own, because two switches that can be set independently eventually disagree
+  silently. When it is on, the only behavioural change is `environment = 'crashtest'`; every gate
+  above still runs. Detail: docs/updates.md
   "Crash reporting (Sentry)", docs/player.md "Crash reporting and the native crash handlers".
 
 ## TV / remote navigation (essentials)
@@ -1393,7 +1411,7 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   open); `persistence_test.dart` keeps the v1→current chain and the v7→8 `external_metadata`
   repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
   are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
-- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `CrashScrubTest`, `PlayerBackPolicyTest`,
+- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `CrashScrubTest`, `CrashTestTest`, `PlayerBackPolicyTest`,
   `ReconnectPolicyTest`, `LiveResolveTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`)
   for pure logic
   extracted from the native player. CI's Android job runs it (after the first `flutter build apk`,

@@ -29,6 +29,50 @@ if (releaseTaskRequested && missingReleaseSigningValues.isNotEmpty()) {
 }
 val releaseSigningConfigured = missingReleaseSigningValues.isEmpty()
 
+/**
+ * Whether this is the **crash-test** build, read from the very same
+ * `--dart-define=IPTVS_CRASH_TEST=true` that sets Dart's `kCrashTest`
+ * (`lib/data/crash_test.dart`).
+ *
+ * The Flutter Gradle plugin hands the dart-defines straight through as the
+ * `dart-defines` project property — a comma-joined list of base64-encoded
+ * `KEY=VALUE` strings (`flutter_tools`' `encodeDartDefines`, consumed at
+ * `FlutterPlugin.kt`'s `project.findProperty("dart-defines")`). Decoding it
+ * here is what keeps Dart and Kotlin from disagreeing about whether this is a
+ * crash-test build: **one flag, one source**. An environment variable beside
+ * the define would have been the more conventional mirror of the signing
+ * block above, and was rejected for exactly that reason — two switches that
+ * can be set independently are two switches that will eventually disagree, and
+ * the disagreement is silent.
+ *
+ * It fails **closed** in every uncertain case: an absent property, an
+ * unparseable entry, or any value other than the literal `true` leaves this
+ * false, which is the shipped behaviour. No release workflow passes the
+ * define, so no distributable build can reach the `true` branch.
+ */
+val crashTestBuild: Boolean = run {
+    val encoded = project.findProperty("dart-defines")?.toString().orEmpty()
+    if (encoded.isEmpty()) {
+        false
+    } else {
+        encoded.split(",").any { entry ->
+            // `runCatching` rather than a `catch (_: …)`: the build script is
+            // compiled by Gradle's *embedded* Kotlin, whose version moves with
+            // the wrapper, and unnamed catch parameters are a recent addition.
+            val decoded = runCatching {
+                String(java.util.Base64.getDecoder().decode(entry.trim()), Charsets.UTF_8)
+            }.getOrDefault("")
+            decoded == "IPTVS_CRASH_TEST=true"
+        }
+    }
+}
+if (crashTestBuild) {
+    // Loud on purpose: this flag adds a deliberate-crash surface to the app,
+    // so an accidentally-on build should be obvious in the Gradle log rather
+    // than discovered on a device. The value is a boolean; nothing is leaked.
+    logger.lifecycle("iptvs: CRASH-TEST build — deliberate-crash actions are compiled in.")
+}
+
 android {
     namespace = "com.gchofficial.iptvs"
     // Deliberately ahead of `flutter.compileSdkVersion` (36 on Flutter 3.44.5).
@@ -60,6 +104,12 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // The Kotlin half of the crash-test gate. False in every shipped
+        // build, so `MainActivity`'s `crashTestThrow` branch answers
+        // `notImplemented()` and R8 folds the dead branch away. See
+        // `crashTestBuild` above and `crash/CrashTest.kt`.
+        buildConfigField("boolean", "CRASH_TEST", crashTestBuild.toString())
     }
 
     flavorDimensions += "distribution"
@@ -109,7 +159,8 @@ android {
         compose = true
         // Generates BuildConfig.DEBUG, used to no-op the native player's debug-only
         // lifecycle counters (player/DebugCounters.kt) and integration-test soak
-        // auto-close in release builds.
+        // auto-close in release builds — plus BuildConfig.CRASH_TEST, the Kotlin
+        // half of the crash-test gate (see `crashTestBuild` above).
         buildConfig = true
     }
 

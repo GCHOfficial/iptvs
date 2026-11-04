@@ -4,11 +4,13 @@ import 'package:flutter/services.dart';
 
 import '../data/diagnostics_log.dart';
 import '../data/app_database.dart';
+import '../data/crash_test.dart';
 import '../data/diagnostics_upload.dart';
 import '../data/net.dart';
 import '../player/resource_counters.dart';
 import '../theme.dart';
 import '../widgets/app_bar_action.dart';
+import 'crash_test_section.dart';
 import 'send_diagnostics_screen.dart';
 
 class DiagnosticsScreen extends StatelessWidget {
@@ -80,6 +82,10 @@ class DiagnosticsScreen extends StatelessWidget {
         child: Column(
           children: [
             if (kDebugMode) const _ResourceCountersSection(),
+            // Only in the hand-dispatched crash-test build. `kCrashTest` is a
+            // compile-time `const false` everywhere else, so this branch and
+            // everything it reaches are tree-shaken out of a shipped app.
+            if (kCrashTest) const CrashTestSection(),
             if (database != null && sourceId != null)
               _CacheStatsSection(
                 database: database!,
