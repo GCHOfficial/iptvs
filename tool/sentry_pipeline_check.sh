@@ -89,6 +89,13 @@ fi
 # 0), so prove it here with a synthetic two-line mapping under a throwaway
 # UUID. That does leave ~70 bytes of junk mapping in the project per run, which
 # is the price of knowing the real upload works before a release depends on it.
+# **"No warning" is not proof here.** Sentry dedupes debug files by checksum,
+# so an upload of bytes it already holds answers "Nothing to upload" and
+# attaches the asserted UUID to nothing -- silently, and with a zero exit. Two
+# consecutive runs of this script caught exactly that before the release script
+# learned to stamp each copy with its own UUID. So this step demands both
+# halves: the CLI must say it UPLOADED *this* uuid, and the server must then
+# hand it back by debug id.
 echo "== 5. R8 mapping upload (the real release step, synthetic mapping)"
 probe_dir=$(mktemp -d); trap 'rm -f "$tmp"; rm -rf "$probe_dir"' EXIT
 probe_uuid=$(python3 -I -c 'import uuid; print(uuid.uuid4())')
@@ -98,8 +105,20 @@ out3=$(./tool/sentry_upload_proguard_mapping.sh "$probe_dir/mapping.txt" "$probe
 echo "$out3"
 if printf '%s\n' "$out3" | grep -q '::warning::'; then
   echo "::error::the R8 mapping upload would not work at release time"; fail=1
+elif ! printf '%s\n' "$out3" | grep -q "UPLOADED ${probe_uuid}"; then
+  echo "::error::sentry-cli did not report uploading ${probe_uuid}; the mapping is not attached to it"
+  fail=1
 else
-  echo "mapping upload accepted (probe uuid ${probe_uuid})"
+  seen=0
+  for _ in $(seq 1 18); do
+    st=$(api GET "projects/${SENTRY_ORG}/${SENTRY_PROJECT}/files/dsyms/?debug_id=${probe_uuid}")
+    if [ "$st" = 200 ] && python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "$tmp"; then seen=1; break; fi
+    sleep 10
+  done
+  echo "mapping ${probe_uuid}: listed=${seen} (last HTTP ${st})"
+  if [ "$seen" != 1 ]; then
+    echo "::error::the uploaded mapping is not readable back under ${probe_uuid}"; fail=1
+  fi
 fi
 
 exit $fail

@@ -138,6 +138,19 @@ information is uploaded. That is a decision, not an omission:
     and says so, because a wrong variant path would otherwise degrade silently for months.
     Like the engine-symbol upload it is `continue-on-error`, exits 0 on every path, and takes the
     token only through `env:`.
+  - **It uploads a *copy* stamped with `# iptvs-proguard-uuid: <uuid>`, and that line is
+    load-bearing.** Sentry decides what it is missing by the file's **checksum**, not by the UUID
+    the caller asserts, so a mapping byte-identical to one already on the server is answered
+    `Nothing to upload, all files are on the server` and the new UUID is attached to **nothing** —
+    silently, with a zero exit. `release.yml` and `google-play.yml` build the same commit and R8
+    can emit identical mappings for both, so the second channel's frames would stay obfuscated
+    while every step stayed green; two consecutive `sentry_pipeline_check.sh` runs reproduced it.
+    R8's own header is a block of `#` comments, so this is the file's native comment syntax, and
+    the line is what makes the bytes unique per UUID. The script warns loudly if it ever sees
+    `Nothing to upload` for a freshly generated UUID, since with the stamp that can only mean the
+    stamp stopped working.
+  - The pipeline check's step 5 therefore demands **both halves**: `UPLOADED <probe uuid>` in the
+    CLI output *and* a read-back of that debug id from the API. A silent exit 0 is not proof.
   - **This is not the Sentry Gradle plugin**, which stays banned: it instruments bytecode, turning
     `android.util.Log` into breadcrumbs and auto-instrumenting HTTP, and our provider URLs carry
     credentials.
