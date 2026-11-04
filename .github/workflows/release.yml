@@ -112,6 +112,21 @@ jobs:
             exit 1
           fi
           printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/iptvs-release.jks"
+      # The identity this build's R8 mapping will be uploaded under. Generated
+      # here, before the build, because the manifest needs it and the mapping
+      # file does not exist yet; `android/app/build.gradle.kts` writes it into
+      # the manifest as `io.sentry.proguard-uuid`. Exported through
+      # `$GITHUB_ENV` so the build step and the upload step below can't
+      # disagree about it. Not a secret: it ships inside the APK.
+      - name: Generate the R8 mapping UUID
+        run: |
+          uuid=$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')
+          uuid=$(printf '%s' "$uuid" | tr 'A-F' 'a-f')
+          if [ -z "$uuid" ]; then
+            echo "::warning::Could not generate an R8 mapping UUID; this build's Kotlin/Java frames stay obfuscated."
+            exit 0
+          fi
+          echo "IPTVS_SENTRY_PROGUARD_UUID=$uuid" >> "$GITHUB_ENV"
       - name: Build release APK
         # Cloud-sync config (repo Variables; empty in forks → feature stays off).
         env:
@@ -136,6 +151,18 @@ jobs:
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
           SENTRY_URL: ${{ vars.SENTRY_URL }}
         run: ./tool/sentry_upload_engine_symbols.sh
+      # Without this, every Kotlin/Java frame in this release arrives renamed
+      # (`f5.run(r8-map-id-…)`): Flutter's Gradle plugin obfuscates all
+      # `--release` builds. `githubDirectRelease` is the variant of the APK
+      # built above.
+      - name: Upload the R8 mapping to Sentry
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+        run: ./tool/sentry_upload_proguard_mapping.sh build/app/outputs/mapping/githubDirectRelease/mapping.txt "$IPTVS_SENTRY_PROGUARD_UUID"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: android
