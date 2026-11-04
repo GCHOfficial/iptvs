@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 import 'crash_budget.dart';
+import 'crash_test.dart';
 import 'diagnostics_log.dart';
 import 'distribution_channel.dart';
 import 'net.dart';
@@ -321,7 +322,15 @@ class CrashReporter {
         // string `tool/sentry_register_release.sh` registers from CI.
         options.release = 'iptvs@${info.version}';
         options.dist = info.buildNumber;
-        options.environment = DistributionConfig.rawChannel;
+        // The distribution channel, *unless* this is the hand-dispatched
+        // crash-test build (`kCrashTest`), whose manufactured events are
+        // filed under `crashtest` so the dashboard's environment filter can
+        // select or discard the whole run. Every other gate above and below
+        // is untouched — the test exercises the real path, budget included.
+        options.environment = sentryEnvironment(
+          rawChannel: DistributionConfig.rawChannel,
+          crashTest: kCrashTest,
+        );
 
         // ── Privacy, non-negotiable (CLAUDE.md) ──────────────────────────
         options.sendDefaultPii = false;
@@ -374,7 +383,11 @@ class CrashReporter {
       await _installNativeScrubber(budget);
       DiagnosticsLog.instance.addAndPrint(
         'library',
-        'crash reporting on (${DistributionConfig.rawChannel})',
+        // The resolved *environment*, not the raw channel: on a crash-test
+        // build those differ, and the exportable log is where a tester
+        // confirms which one the events will be filed under.
+        'crash reporting on '
+        '(${sentryEnvironment(rawChannel: DistributionConfig.rawChannel, crashTest: kCrashTest)})',
       );
     } catch (error) {
       // Crash reporting must never be the reason the app does not start.

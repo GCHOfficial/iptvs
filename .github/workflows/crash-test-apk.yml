@@ -1,0 +1,120 @@
+name: Crash-test APK
+
+# **Dispatch only.** Never on push, never on pull_request, never on a schedule.
+#
+# This is the one workflow outside `release.yml` / `google-play.yml` /
+# `microsoft-store.yml` that compiles a Sentry DSN in, and it exists because
+# the crash pipeline has no other way to be proven: CI may not carry a DSN (its
+# builds crash on purpose, against an organisation-wide 50 000 errors/month
+# quota shared with another product), a unit test cannot start the SDK, and the
+# native handlers — the NDK signal handler and the Android 12+ tombstone
+# integration — only exist on a real device. So the proof is a hand-dispatched
+# APK with four deliberate faults in it.
+#
+# What keeps that safe:
+#   * `--dart-define=IPTVS_CRASH_TEST=true` forces the Sentry `environment` to
+#     `crashtest` (`lib/data/crash_test.dart`, `lib/data/crash_reporter.dart`),
+#     so these manufactured events are filterable and never mix with real ones.
+#   * Every other gate is untouched — the user's "Send crash reports" switch,
+#     the crash-loop guard, and `CrashBudget`'s 5/session, 20/24 h, 60/30 days
+#     and one-event-per-fingerprint-per-24 h caps all still apply. The budget
+#     is part of what is being tested, not something the test bypasses.
+#   * The APK is debug-signed (the committed *public* debug keystore, exactly
+#     as `build.yml`'s release-lint build), is the `development` flavor, and is
+#     uploaded as a 7-day workflow artifact. It is never published, never
+#     attached to a release, and could not be: the release workflow verifies
+#     the certificate against the protected fingerprint.
+#
+# See CLAUDE.md's Sentry bullet and docs/updates.md "The crash-test APK".
+
+on:
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repo. No secrets are involved —
+# `SENTRY_DSN` is a repo *variable* (a DSN is a public, write-only ingest key),
+# and the signing values below are the committed public debug key.
+permissions:
+  contents: read
+
+env:
+  # Must match the version the uploaded engine debug files were built from, or
+  # the `libflutter.so` frames in the SIGSEGV event arrive as bare addresses.
+  # 3.47.9 is engine revision 89c39edfdfae2949f6806e4a315c0c08522238b7, whose
+  # symbols are already on Sentry (`tool/sentry_upload_engine_symbols.sh`), so
+  # this workflow needs no upload step of its own. Keep it in step with
+  # `build.yml`'s `FLUTTER_VERSION`.
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  build:
+    name: Build crash-test APK (development flavor, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Pull the libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar).
+          lfs: true
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - run: flutter pub get
+      # `--release`, not `--debug`, for three independent reasons: the Dart
+      # tree-shaker only runs in release (so a release build is also the proof
+      # that `kCrashTest` is what gates the feature), the native crash handlers
+      # are what a shipped build installs, and the engine whose debug files are
+      # uploaded to Sentry is the **release-mode** `libflutter.so` — a debug
+      # engine would not symbolicate against them.
+      #
+      # `development` flavor so the APK installs *beside* a store or
+      # GitHub-direct build rather than replacing it: its applicationId is
+      # `com.gchofficial.iptvs.player.dev` (the `.dev` suffix in
+      # `android/app/build.gradle.kts`), verified below.
+      #
+      # A release task refuses to configure without signing variables, so they
+      # point at the committed *public* debug keystore — the same arrangement
+      # as `build.yml`'s release-lint build. No secret is involved.
+      #
+      # Supabase config is deliberately **not** passed: the cloud panel has
+      # nothing to do with crash capture, and leaving it out keeps this build's
+      # moving parts to the ones under test.
+      - name: Build crash-test APK
+        env:
+          IPTVS_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
+          IPTVS_ANDROID_KEYSTORE_PASSWORD: android
+          IPTVS_ANDROID_KEY_ALIAS: androiddebugkey
+          IPTVS_ANDROID_KEY_PASSWORD: android
+        run: |
+          flutter build apk --release --flavor development \
+            --build-number ${{ github.run_number }} \
+            --dart-define=DISTRIBUTION_CHANNEL=development \
+            --dart-define=IPTVS_CRASH_TEST=true \
+            --dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}
+      # The identity guard the other Android jobs run: proves this really is
+      # the `.dev` package (so it installs alongside), and that it carries no
+      # self-updater manifest entries.
+      - name: Verify development identity
+        run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-development-release.apk development
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iptvs-crash-test-apk-NOT-FOR-DISTRIBUTION
+          path: build/app/outputs/flutter-apk/app-development-release.apk
+          # Short on purpose: this APK crashes itself four different ways and
+          # must not outlive the test session it was dispatched for.
+          retention-days: 7
+          if-no-files-found: error

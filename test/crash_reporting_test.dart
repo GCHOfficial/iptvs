@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/data/crash_budget.dart';
 import 'package:iptvs/data/crash_reporter.dart';
+import 'package:iptvs/data/crash_test.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 /// Credentials written as `user=`/`pw=` rather than the literal
@@ -298,6 +299,91 @@ void main() {
         ..writeAsStringSync('not a budget at all');
       final budget = CrashBudget(file, clock: () => now);
       expect(budget.admit('fp-a'), isTrue);
+    });
+  });
+
+  group('crash-test build', () {
+    // The flag is a `const bool.fromEnvironment`, so it is false for every
+    // `flutter test` run, every development build and every release workflow
+    // — only the dispatch-only `crash-test-apk.yml` passes the define. This
+    // is the invariant that keeps the deliberate-crash surface out of a
+    // shipped app: the Diagnostics section and `data/crash_test.dart` are
+    // reachable only through `if (kCrashTest)`.
+    test('the flag is off unless the define is passed', () {
+      expect(kCrashTest, isFalse);
+    });
+
+    test('the environment is overridden only by the flag', () {
+      // The shipped behaviour: the distribution channel, untouched.
+      expect(
+        sentryEnvironment(rawChannel: 'githubDirect', crashTest: false),
+        'githubDirect',
+      );
+      expect(
+        sentryEnvironment(rawChannel: 'googlePlay', crashTest: false),
+        'googlePlay',
+      );
+      // The crash-test build: one filterable environment, whatever channel
+      // the APK was built for (it is the `development` flavor, so without
+      // this these events would land among real development ones).
+      expect(
+        sentryEnvironment(rawChannel: 'development', crashTest: true),
+        kCrashTestEnvironment,
+      );
+      expect(
+        sentryEnvironment(rawChannel: 'githubDirect', crashTest: true),
+        kCrashTestEnvironment,
+      );
+    });
+
+    // A crash test whose fake URL the redaction already ignores would "pass"
+    // while proving nothing: no credentials would appear in the dashboard and
+    // the conclusion would be wrong. Pin the payload against the same scrub
+    // `beforeSend` runs. `CrashTestTest` does the same for the Kotlin twin.
+    test('the fake locator is one the scrubber actually defeats', () {
+      final locator = crashTestLocator();
+      // Both credential shapes are present before scrubbing — the Xtream-style
+      // path pair and a query parameter, which different rules catch.
+      expect(locator, contains('/live/crashtest-example/not-a-real-secret/'));
+      expect(locator, contains('token=not-a-real-token'));
+
+      final cleaned = cleanCrashText(
+        crashTestMessage('uncaught Dart exception'),
+      );
+      expect(cleaned, isNot(contains('crashtest-example')));
+      expect(cleaned, isNot(contains('not-a-real-secret')));
+      expect(cleaned, isNot(contains('not-a-real-token')));
+      // The host must survive, or the test cannot tell a scrubbed event from
+      // a mangled one.
+      expect(cleaned, contains('panel.example.com:8080'));
+      expect(cleaned, contains('iptvs crash test'));
+    });
+
+    test('a scrubbed crash-test event keeps one stable fingerprint', () {
+      // (d) re-fires (a) from the same throw site so `CrashBudget` drops it on
+      // the fingerprint. That only works if the type and in-app frames match,
+      // which is why `runCrashTest` funnels both actions through one function.
+      SentryEvent event() => SentryEvent(
+        exceptions: [
+          SentryException(
+            type: 'CrashTestException',
+            value: crashTestMessage('uncaught Dart exception'),
+            stackTrace: SentryStackTrace(
+              frames: [
+                SentryStackFrame(
+                  package: 'iptvs',
+                  function: '_throwUncaughtDartException',
+                  inApp: true,
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+      expect(
+        crashFingerprint(scrubSentryEvent(event())),
+        crashFingerprint(scrubSentryEvent(event())),
+      );
     });
   });
 }

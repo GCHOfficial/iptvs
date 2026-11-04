@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
+import com.gchofficial.iptvs.crash.CrashTest
 import com.gchofficial.iptvs.crash.NativeCrashScrubber
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.isTelevisionDevice
@@ -356,6 +357,39 @@ class MainActivity : FlutterActivity() {
                         result.error("bad_args", "Missing budget path", null)
                     } else {
                         result.success(NativeCrashScrubber.install(path))
+                    }
+                }
+
+                // Crash-test build only: throw an uncaught RuntimeException on
+                // the Android main thread, with a fake provider URL in its
+                // message. Proves two things a Dart exception cannot —
+                // sentry-java's UncaughtExceptionHandlerIntegration captures
+                // it at all, and `NativeCrashScrubber` (not Dart's
+                // `beforeSend`, which never sees a Java event) is what redacts
+                // the URL.
+                //
+                // `BuildConfig.CRASH_TEST` comes from the same
+                // `--dart-define=IPTVS_CRASH_TEST=true` that sets Dart's
+                // `kCrashTest`, decoded in `build.gradle.kts`. It is false in
+                // every shipped build, so this answers `notImplemented()` and
+                // R8 removes the branch — and no Dart code calls it there
+                // either, since the Diagnostics section is gated on the same
+                // const.
+                "crashTestThrow" -> {
+                    if (!BuildConfig.CRASH_TEST) {
+                        result.notImplemented()
+                    } else {
+                        // Reply *first*, then post. Throwing inline would not
+                        // be uncaught at all: `MethodChannel`'s incoming
+                        // handler wraps `onMethodCall` in a try/catch and
+                        // turns the exception into an error reply, which is
+                        // the opposite of what this is testing. Posting to the
+                        // main looper lets it escape to the default uncaught
+                        // handler, which is where Sentry is hooked.
+                        result.success(true)
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            throw RuntimeException(CrashTest.message())
+                        }
                     }
                 }
 

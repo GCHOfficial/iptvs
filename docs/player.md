@@ -3534,7 +3534,11 @@ is no `crashpad_handler` executable to package — the only artifact is `sentry.
 `libsentry.so`, which Flutter's ordinary plugin bundling already copies next to the runner and
 into `bundle/lib/`); iOS gets sentry-cocoa's. Nothing is installed unless a DSN was compiled in
 *and* the user left "Send crash reports" on, so a development build's player behaves exactly as
-before.
+before. The one development-channel build that *does* carry a DSN is the hand-dispatched
+crash-test APK (docs/updates.md "The crash-test APK"), which exists precisely because these
+native handlers cannot be exercised anywhere else — its `raise(SIGSEGV)` is the only test that
+the NDK path writes an envelope and that `libflutter.so` frames symbolicate. Its events are filed
+under `environment:crashtest`, never among real ones.
 
 **Coexistence with mpv and ExoPlayer.** Neither libmpv nor media3 installs a process-wide signal
 handler, so there is nothing to chain to or be displaced by; sentry-native chains to whatever
