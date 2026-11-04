@@ -16,7 +16,7 @@
         <img src="icon.png" alt="IPTVS Player" />
         <div>
           <h1>Privacy policy</h1>
-          <p class="meta">IPTVS Player · Effective 2 September 2026</p>
+          <p class="meta">IPTVS Player · Effective 4 November 2026</p>
         </div>
       </header>
 
@@ -42,7 +42,11 @@
         <li>local profiles, favourites, hidden categories, and metadata settings;</li>
         <li>programme-guide and media caches;</li>
         <li>playback positions and Continue Watching history; and</li>
-        <li>diagnostic messages, unless you manually copy and send them.</li>
+        <li>
+          diagnostic messages, unless you manually copy and send them (crash
+          reports are separate — see <a href="#crash-reports">Crash reports</a>
+          below).
+        </li>
       </ul>
       <p>
         Local credentials and profile data use operating-system secure storage where
@@ -90,6 +94,54 @@
         providers because HTTP traffic can be read or modified in transit.
       </p>
 
+      <h2 id="crash-reports">Crash reports</h2>
+      <p>
+        The app can send a report when it crashes, so that faults can be found and
+        fixed. This is the only data the app sends about itself; there is no
+        analytics, no usage tracking, and nothing is sent while the app is working
+        normally. It is <strong>on by default</strong> and you can turn it off at any
+        time in the app under <strong>Sources → Send crash reports</strong>. Turning
+        it off stops reports immediately and keeps them off on every later launch.
+      </p>
+      <p>A crash report contains:</p>
+      <ul>
+        <li>
+          the stack trace and error message for the fault, and a short trail of the
+          app's own recent internal events;
+        </li>
+        <li>
+          the device model, operating-system version, locale, and screen
+          characteristics;
+        </li>
+        <li>the app version, build number, and which distribution it came from; and</li>
+        <li>an anonymous, randomly generated identifier for the report itself.</li>
+      </ul>
+      <p>
+        <strong>Credentials are removed before a report leaves the device.</strong>
+        Every piece of text in a report — messages, error values, the internal event
+        trail, and any attached values — is passed through the same redaction the app
+        uses for its on-screen diagnostics: provider web addresses lose their query
+        strings and any username, password, token, or MAC-address-shaped part of
+        their path. Reports carry <strong>no</strong> cloud account identifier, email
+        address, profile name, source name, channel name, or favourites.
+      </p>
+      <p>
+        Crash reports are processed by <strong>Sentry</strong>
+        (Functional Software, Inc.), on its <strong>European Union</strong>
+        infrastructure. The project is configured so that
+        <strong>IP addresses are not stored</strong>, and session replay, screenshots
+        and screen-content capture are all disabled. Reports are retained for the
+        period of the developer's Sentry plan — <strong>30&nbsp;days</strong> on the
+        plan in use at the time of writing — after which they are deleted
+        automatically; if the plan changes, the retention period changes with it.
+      </p>
+      <p>
+        The app also limits how much it will ever send: identical faults are reported
+        at most once a day per device, and a device will not send more than a small
+        fixed number of reports per day and per month regardless of how often it
+        fails.
+      </p>
+
       <h2>Service providers and disclosure</h2>
       <p>
         <strong>Supabase</strong> provides authentication, database hosting, and the
@@ -97,7 +149,9 @@
         developer's behalf. <strong>Resend</strong> delivers the cloud panel's
         sign-in emails and processes your email address for that purpose only.
         <strong>Cloudflare Pages</strong> hosts the public panel, the website and
-        knowledge base, and the privacy, support, and deletion pages. App stores
+        knowledge base, and the privacy, support, and deletion pages.
+        <strong>Sentry</strong> receives crash reports, in its European Union
+        region, if you leave crash reporting on. App stores
         process installation, purchase-account, and store diagnostics under their
         own policies.
       </p>

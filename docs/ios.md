@@ -1027,6 +1027,23 @@ separately, and no `v1`/`v2` split left in this design.
 
 ## Other work required
 
+- **Crash reporting is on for iOS too, and one option carries the whole URL defence.**
+  `sentry_flutter` 10.3.0's Darwin half is **SwiftPM-only** (`darwin/sentry_flutter/Package.swift`,
+  no podspec), pinning `sentry-cocoa` 9.32.0 at iOS 15.0 — which works only because
+  `ios/Runner.xcodeproj` already carries the `FlutterGeneratedPluginSwiftPackage` local package
+  reference and Flutter 3.47 enables SPM by default on stable. If that reference is ever removed,
+  the iOS build loses the plugin rather than failing loudly, so check it alongside any Xcode
+  project surgery. The option that matters is **`options.recordHttpBreadcrumbs = false`**
+  (`lib/data/crash_reporter.dart`): it defaults to `true` and is what the Dart side maps onto
+  sentry-cocoa's `enableNetworkBreadcrumbs`, i.e. NSURLSession swizzling that records **every**
+  request URL — provider credentials included — as a breadcrumb. Android has no equivalent
+  exposure (`io.sentry:sentry-android` ships no OkHttp interceptor), so this is an iOS/macOS-only
+  hazard and an iOS-only line of defence. Unlike Android, iOS native crash reports do **not** pass
+  through any scrubber of ours (there is no Cocoa `beforeSend` hook in the plugin) and are outside
+  the per-event send budget; they are bounded by being one record per real process crash, over a
+  scope whose breadcrumbs Dart already scrubbed. See CLAUDE.md's Sentry bullet and docs/player.md
+  "Crash reporting and the native crash handlers".
+
 - **Layout branches: no change required.** An earlier draft of this document claimed
   the `TargetPlatform.android` tests at
   [live_tab_view.dart:381](../lib/screens/live_tab_view.dart#L381),
