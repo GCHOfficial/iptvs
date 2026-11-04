@@ -1,0 +1,48 @@
+name: Sentry pipeline check
+
+# Runs the real Sentry release steps (release registration, Flutter engine
+# symbols) with the real token and reads back what landed, so "the symbol
+# upload works" is a fact rather than an assumption. On PRs that touch the
+# Sentry scripts, and on demand. Same-repo PRs get secrets; forks skip.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'App version to register (e.g. 0.1.76)'
+        required: true
+  pull_request:
+    paths:
+      - 'tool/sentry_*.sh'
+      - '.github/workflows/sentry-check.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  check:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+      - name: Check the Sentry pipeline
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+          VERSION: ${{ inputs.version || '0.1.76' }}
+        run: |
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Version must be MAJOR.MINOR.PATCH."; exit 1
+          fi
+          ./tool/sentry_pipeline_check.sh "$VERSION"
