@@ -128,6 +128,24 @@ information is uploaded. That is a decision, not an omission:
     value is the point:** `readString` would hand back `""` and that image check is `!= null`, so an
     empty value would ship an unresolvable empty-UUID image on every event. A set-but-malformed UUID
     fails the build (only a broken workflow edit can cause it); unset is the ordinary local case.
+  - **The manifest alone does nothing, because the Dart init overwrites it.** `sentry_flutter`
+    10.3.0 starts the Android SDK from Dart, and its `configureAndroidOptions`
+    (`sentry_native_java_init.dart:237`) runs inside `SentryAndroid.init`'s options callback —
+    *after* the manifest has been read — and assigns `androidOptions.proguardUuid =
+    options.proguardUuid`. Left null on the Dart side, that nulls the manifest value, and every
+    Java/Kotlin event goes out naming no mapping. The 2026-11-04 crash test showed exactly this:
+    mapping uploaded, manifest correct, frame still `f5.run(r8-map-id-…:73)`. So
+    `CrashReporter.start` reads the value back out of the **merged manifest** over `iptvs/device`
+    (`sentryProguardUuid`, `MainActivity`) and sets `SentryFlutterOptions.proguardUuid` to it. Read
+    back rather than passed as a `--dart-define`, so the manifest stays the one source and nothing
+    has to be kept in step with it. The rejected alternative — initialising the Android SDK
+    ourselves in Kotlin so nothing overwrites the manifest — would move every privacy option,
+    the consent gate and the crash-loop guard out of the one place they are set, and change when the
+    native crash handlers are installed.
+  - **What proves it is the event, never the build.** The crash-test workflow keeps its
+    `mapping.txt` as an artifact so the deobfuscated Kotlin frame can be predicted before the button
+    is pressed, and `sentry-check.yml`'s optional `event_id` input reads that event back: its
+    `proguard` image, processing errors, and in-app frames.
   - After the build, `tool/sentry_upload_proguard_mapping.sh <mapping.txt> <uuid>` uploads
     `build/app/outputs/mapping/<variant>/mapping.txt` with the pinned
     `npx @sentry/cli@3.8.0 upload-proguard --uuid … --require-one`. `--uuid` is hidden from that

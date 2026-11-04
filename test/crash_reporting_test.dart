@@ -420,4 +420,19 @@ void main() {
       );
     });
   });
+
+  group('proguardUuidOrNull', () {
+    test('accepts the canonical UUID build.gradle.kts stamps', () {
+      expect(
+        proguardUuidOrNull(' db12bb1d-acfc-495d-aed0-67f6eb6bc608 '),
+        'db12bb1d-acfc-495d-aed0-67f6eb6bc608',
+      );
+    });
+    test('null, empty and malformed values become no mapping', () {
+      expect(proguardUuidOrNull(null), isNull);
+      expect(proguardUuidOrNull(''), isNull);
+      expect(proguardUuidOrNull('unset'), isNull);
+      expect(proguardUuidOrNull('db12bb1d-acfc-495d-aed0-67f6eb6bc60'), isNull);
+    });
+  });
 }

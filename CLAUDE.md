@@ -553,6 +553,9 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   `IPTVS_SENTRY_PROGUARD_UUID`, `build.gradle.kts` writes it to the manifest as
   `io.sentry.proguard-uuid` (and rewrites the *key*, never blanking the value, when there is none),
   and `tool/sentry_upload_proguard_mapping.sh` uploads `mapping.txt` under that same UUID.
+  **And Dart must set `SentryFlutterOptions.proguardUuid` from that manifest value**
+  (`sentryProguardUuid` over `iptvs/device`): `sentry_flutter`'s `configureAndroidOptions` assigns
+  the Dart field over the manifest's, so leaving it null silently un-links every Java/Kotlin event.
   **Dart `beforeSend` is not the whole chokepoint.** `sentry_flutter` pushes Dart events *down*
   into the native SDK and nothing comes back up, so Android Java/NDK/tombstone events and
   Windows/Linux Breakpad crashes never reach it. Android therefore has a second scrubber in

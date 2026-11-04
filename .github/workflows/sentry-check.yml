@@ -13,6 +13,10 @@ on:
       version:
         description: 'App version to register (e.g. 0.1.76)'
         required: true
+      event_id:
+        description: 'Optional: a Sentry event id to read back (its proguard image, processing errors and in-app frames)'
+        required: false
+        default: ''
   pull_request:
     paths:
       - 'tool/sentry_*.sh'
@@ -48,6 +52,7 @@ jobs:
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
           SENTRY_URL: ${{ vars.SENTRY_URL }}
           VERSION: ${{ inputs.version || '0.1.76' }}
+          EVENT_ID: ${{ inputs.event_id || '' }}
           # The three libflutter.so debug ids for engine 89c39ed (arm, arm64, x86_64).
           KNOWN_DEBUG_IDS: 2ebcaefc-4ae7-2efb-5f4d-45e128a56c27 1b940a5c-2bda-bf55-b68e-94a27d703b0b e9ab9ffe-badf-e3bf-0526-03d3b85472e5
         run: |
