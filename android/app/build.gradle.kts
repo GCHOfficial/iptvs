@@ -1,3 +1,9 @@
+// Explicit, and it has to be: inside this script `java` resolves to the Kotlin
+// DSL's `JavaPluginExtension` accessor, not to the `java.*` package, so a
+// fully-qualified `java.util.Base64` fails to compile with "Unresolved
+// reference 'util'". Used by `crashTestBuild` below.
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     // Kotlin support is now supplied by Flutter's built-in Kotlin (AGP 9+); the
@@ -60,7 +66,7 @@ val crashTestBuild: Boolean = run {
             // compiled by Gradle's *embedded* Kotlin, whose version moves with
             // the wrapper, and unnamed catch parameters are a recent addition.
             val decoded = runCatching {
-                String(java.util.Base64.getDecoder().decode(entry.trim()), Charsets.UTF_8)
+                String(Base64.getDecoder().decode(entry.trim()), Charsets.UTF_8)
             }.getOrDefault("")
             decoded == "IPTVS_CRASH_TEST=true"
         }
