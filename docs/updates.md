@@ -109,6 +109,15 @@ information is uploaded. That is a decision, not an omission:
     doesn't re-symbolicate processed events. Dart frames are unaffected.
   - There are **no** published engine symbols for `windows-x64` or `linux-x64` at the current
     revision, so desktop engine frames stay unsymbolicated.
+- **Kotlin/Java frames are R8-obfuscated, and the mapping is not uploaded — an open gap.** Flutter's
+  Gradle plugin turns on R8 shrinking *and* obfuscation for every `--release` APK/AAB unless
+  `--no-shrink` is passed, and none of our builds pass it: in the shipped 0.1.76 APK the only
+  readable `com.gchofficial.iptvs` classes are the two manifest-declared activities. So a Java/Kotlin
+  event in Sentry (our classes, media3) arrives with renamed frames, and nothing uploads
+  `build/app/outputs/mapping/<variant>/mapping.txt` to Sentry. Play's own vitals are unaffected — an
+  AAB carries its mapping to Play. Fixing it without the banned Sentry Gradle plugin means
+  generating a UUID per build, writing it to the manifest as `io.sentry.proguard-uuid`, and uploading
+  the mapping under that UUID.
 
 ### The crash-test APK
 
