@@ -182,11 +182,102 @@ void main() {
       expect(a.length, 32);
     });
 
-    test('ignores frames beyond the top three', () {
+    test('ignores frames beyond the innermost three', () {
+      // Sentry stores frames outermost first, so the frames that identify a
+      // fault are at the *end* of the list — `b`, `c`, `d` here.
       expect(
         crashFingerprint(eventWith('StateError', ['a', 'b', 'c', 'd'])),
-        crashFingerprint(eventWith('StateError', ['a', 'b', 'c', 'z'])),
+        crashFingerprint(eventWith('StateError', ['z', 'b', 'c', 'd'])),
       );
+      expect(
+        crashFingerprint(eventWith('StateError', ['a', 'b', 'c', 'd'])),
+        isNot(crashFingerprint(eventWith('StateError', ['a', 'b', 'c', 'z']))),
+      );
+    });
+  });
+
+  group('fingerprint frame choice', () {
+    // Sentry's protocol stores stack frames **outermost first** (sentry-dart
+    // reverses the parsed trace; sentry-java calls `Collections.reverse`), so
+    // every list here reads entry point -> throw site.
+
+    ({String id, bool? inApp}) frame(String id, {bool? inApp}) =>
+        (id: id, inApp: inApp);
+
+    test('takes the innermost in-app frames, innermost first', () {
+      // The real Dart crash-test stack (Sentry IPTVS-1, 2026-11-04): four
+      // `dart:` frames then the app's throw site.
+      final frames = [
+        frame('dart:isolate:_RawReceivePort._handleMessage', inApp: false),
+        frame('dart:async:_Timer._handleMessage', inApp: false),
+        frame('dart:async:_Timer._runTimers', inApp: false),
+        frame('dart:async:Timer._createTimer.<fn>', inApp: false),
+        frame('iptvs:_throwUncaughtDartException.<fn>', inApp: true),
+      ];
+      expect(fingerprintFrames(frames), [
+        'iptvs:_throwUncaughtDartException.<fn>',
+      ]);
+    });
+
+    test('two faults under one entry point are told apart', () {
+      // Both reached from the same screen; the outermost three in-app frames
+      // are identical and only the inner ones differ. Reading from the top of
+      // the list would merge them into one 24 h de-duplication window.
+      List<({String id, bool? inApp})> stack(List<String> inner) => [
+        frame('flutter:_invoke1', inApp: false),
+        frame('iptvs:_ChannelListScreenState._loadLive', inApp: true),
+        frame('iptvs:LiveController.load', inApp: true),
+        frame('iptvs:LibraryRepository.load', inApp: true),
+        for (final id in inner) frame(id, inApp: true),
+      ];
+      final a = stack([
+        'iptvs:LibraryRepository._refreshEpg',
+        'iptvs:StalkerSource.epg',
+      ]);
+      final b = stack([
+        'iptvs:LibraryRepository.resolve',
+        'iptvs:XtreamSource.resolve',
+      ]);
+      expect(
+        a.take(4).map((f) => f.id),
+        b.take(4).map((f) => f.id),
+        reason: 'the shared prefix really is shared',
+      );
+      // The rule this replaced read the list from the front, so both faults
+      // resolved to the same three frames and the same 24 h window.
+      expect(
+        a.where((f) => f.inApp == true).take(3).map((f) => f.id),
+        b.where((f) => f.inApp == true).take(3).map((f) => f.id),
+      );
+      expect(fingerprintFrames(a), isNot(fingerprintFrames(b)));
+    });
+
+    test('falls back to the innermost frames when nothing is in-app', () {
+      // What Android always sends: sentry-java's only `inAppInclude` is the
+      // applicationId (`com.gchofficial.iptvs.player.dev`) while the app's
+      // classes are under the namespace `com.gchofficial.iptvs`, so `isInApp`
+      // is null on every frame — and R8 renames app classes anyway.
+      final frames = [
+        for (final id in const [
+          'com.android.internal.os.ZygoteInit:main',
+          r'com.android.internal.os.RuntimeInit$MethodAndArgsCaller:run',
+          'java.lang.reflect.Method:invoke',
+          'android.app.ActivityThread:main',
+          'android.os.Handler:handleCallback',
+          'f5:run',
+        ])
+          frame(id),
+      ];
+      expect(fingerprintFrames(frames), [
+        'f5:run',
+        'android.os.Handler:handleCallback',
+        'android.app.ActivityThread:main',
+      ]);
+    });
+
+    test('an empty or short stack is used whole', () {
+      expect(fingerprintFrames(const []), isEmpty);
+      expect(fingerprintFrames([frame('a'), frame('b')]), ['b', 'a']);
     });
   });
 
@@ -242,6 +333,32 @@ void main() {
       expect(budget.admit('fp-b'), isTrue);
       now = now.add(const Duration(hours: 25));
       expect(budget.admit('fp-a'), isTrue);
+    });
+
+    test('a refusal names its reason', () {
+      // The only thing a refused event leaves behind, so each reason has to
+      // be reachable and distinct. `CrashScrubTest` asserts the same four
+      // words on the Kotlin side.
+      final budget = make();
+      expect(budget.check('fp-a'), CrashBudgetOutcome.admitted);
+      expect(budget.check('fp-a'), CrashBudgetOutcome.duplicate);
+      for (var i = 0; i < CrashBudget.maxPerSession - 1; i++) {
+        expect(budget.check('fp-fill-$i'), CrashBudgetOutcome.admitted);
+      }
+      expect(budget.check('fp-overflow'), CrashBudgetOutcome.session);
+      budget.beginSession();
+      // The session cap re-armed; the day cap has not been reached, so the
+      // next refusal of the first fingerprint is still the duplicate rung.
+      expect(budget.check('fp-a'), CrashBudgetOutcome.duplicate);
+      expect(
+        CrashBudgetOutcome.values.map((o) => o.name),
+        ['admitted', 'duplicate', 'session', 'day', 'month'],
+      );
+    });
+
+    test('the fingerprint a refusal logs is a short hash prefix', () {
+      expect(shortFingerprint('0123456789abcdef'), '01234567');
+      expect(shortFingerprint('abc'), 'abc');
     });
 
     test('the session cap stops a loop inside one launch', () {

@@ -81,6 +81,123 @@ class CrashScrubTest {
         assertEquals(32, a.length)
     }
 
+    /**
+     * The real frame list of a crash-test event (Sentry `IPTVS-2`/`IPTVS-4`,
+     * 2026-11-04), in Sentry's own order: **outermost first**, throw site
+     * last. Every `isInApp` is `null`, which is what the device actually
+     * sends: sentry-java's only `inAppInclude` is the applicationId
+     * (`com.gchofficial.iptvs.player.dev`) and this app's classes are under
+     * the namespace `com.gchofficial.iptvs`, so nothing matches and there are
+     * no default excludes.
+     */
+    private fun androidMainThreadStack(crashSite: String): List<Pair<String, Boolean?>> =
+        listOf(
+            "com.android.internal.os.ZygoteInit:main",
+            "com.android.internal.os.RuntimeInit\$MethodAndArgsCaller:run",
+            "java.lang.reflect.Method:invoke",
+            "android.app.ActivityThread:main",
+            "android.os.Looper:loop",
+            "android.os.Looper:loopOnce",
+            "android.os.Handler:dispatchMessage",
+            "android.os.Handler:dispatchMessageImpl",
+            "android.os.Handler:handleCallback",
+            crashSite,
+        ).map { it to null }
+
+    @Test
+    fun `two crash sites behind the same framework prefix are told apart`() {
+        // Two different obfuscated Runnables posted to the main looper: the
+        // nine outermost frames are byte-identical and only the throw site
+        // differs. Taking the *first* three frames would give both the same
+        // identity and the budget would drop the second for 24 h.
+        val a = androidMainThreadStack("f5:run")
+        val b = androidMainThreadStack("a3:run")
+        assertEquals(
+            "the framework prefix really is shared",
+            a.take(3),
+            b.take(3),
+        )
+        // The rule this replaced: the first three frames, since no frame is
+        // ever marked in-app on Android. It gives both crashes one identity.
+        assertEquals(
+            CrashScrub.fingerprint("RuntimeException", a.take(3).map { it.first }),
+            CrashScrub.fingerprint("RuntimeException", b.take(3).map { it.first }),
+        )
+        assertNotEquals(
+            CrashScrub.fingerprint("RuntimeException", CrashScrub.fingerprintFrames(a)),
+            CrashScrub.fingerprint("RuntimeException", CrashScrub.fingerprintFrames(b)),
+        )
+    }
+
+    @Test
+    fun `the chosen frames are the innermost ones, innermost first`() {
+        assertEquals(
+            listOf(
+                "f5:run",
+                "android.os.Handler:handleCallback",
+                "android.os.Handler:dispatchMessageImpl",
+            ),
+            CrashScrub.fingerprintFrames(androidMainThreadStack("f5:run")),
+        )
+    }
+
+    @Test
+    fun `the same crash site keeps one identity`() {
+        // Fault (d) of the crash test re-fires fault (b) from the same site.
+        assertEquals(
+            CrashScrub.fingerprint(
+                "RuntimeException",
+                CrashScrub.fingerprintFrames(androidMainThreadStack("f5:run")),
+            ),
+            CrashScrub.fingerprint(
+                "RuntimeException",
+                CrashScrub.fingerprintFrames(androidMainThreadStack("f5:run")),
+            ),
+        )
+    }
+
+    @Test
+    fun `in-app frames win, and are taken innermost first`() {
+        // Were sentry-java ever configured so app frames are marked, they are
+        // the better identity — but still read from the throw site outwards.
+        val frames = listOf(
+            "android.app.ActivityThread:main" to null,
+            "com.gchofficial.iptvs.MainActivity:onCreate" to true,
+            "com.gchofficial.iptvs.player.SharedEngine:adopt" to true,
+            "androidx.media3.exoplayer.ExoPlayerImpl:setMediaItem" to false,
+        )
+        assertEquals(
+            listOf(
+                "com.gchofficial.iptvs.player.SharedEngine:adopt",
+                "com.gchofficial.iptvs.MainActivity:onCreate",
+            ),
+            CrashScrub.fingerprintFrames(frames),
+        )
+    }
+
+    @Test
+    fun `a stack shorter than the frame budget is used whole`() {
+        assertEquals(
+            listOf("b:y", "a:x"),
+            CrashScrub.fingerprintFrames(listOf("a:x" to null, "b:y" to null)),
+        )
+        assertEquals(emptyList<String>(), CrashScrub.fingerprintFrames(emptyList()))
+    }
+
+    @Test
+    fun `a refusal names its reason`() {
+        var now = 0L
+        val budget = CrashBudgetFile(tempFile()) { now }
+        assertEquals(CrashBudgetOutcome.ADMITTED, budget.check("fp-a"))
+        assertEquals(CrashBudgetOutcome.DUPLICATE, budget.check("fp-a"))
+        repeat(CrashBudgetFile.MAX_PER_SESSION - 1) { i ->
+            assertEquals(CrashBudgetOutcome.ADMITTED, budget.check("fp-fill-$i"))
+        }
+        assertEquals(CrashBudgetOutcome.SESSION, budget.check("fp-overflow"))
+        now += 60_000
+        assertEquals(CrashBudgetOutcome.SESSION, budget.check("fp-later"))
+    }
+
     @Test
     fun `the budget file round-trips through the shared grammar`() {
         val state = CrashBudgetState().apply {
