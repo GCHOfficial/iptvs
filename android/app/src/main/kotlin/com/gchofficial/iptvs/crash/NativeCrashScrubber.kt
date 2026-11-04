@@ -1,5 +1,6 @@
 package com.gchofficial.iptvs.crash
 
+import android.util.Log
 import io.sentry.Breadcrumb
 import io.sentry.ScopesAdapter
 import io.sentry.SentryEvent
@@ -41,6 +42,11 @@ import java.io.File
  * scrubbed before they were synced to the native scope.
  */
 object NativeCrashScrubber {
+    private const val TAG = "IptvsCrash"
+
+    /** Hex characters of a fingerprint a log line prints. Mirrors Dart's `shortFingerprint`. */
+    private const val SHORT_FINGERPRINT = 8
+
     @Volatile
     private var installed = false
 
@@ -62,7 +68,28 @@ object NativeCrashScrubber {
         options.beforeSend =
             SentryOptions.BeforeSendCallback { event, _ ->
                 val scrubbed = scrub(event)
-                if (budget.admit(fingerprintOf(scrubbed))) scrubbed else null
+                val fingerprint = fingerprintOf(scrubbed)
+                val outcome = budget.check(fingerprint)
+                if (outcome.isAdmitted) {
+                    scrubbed
+                } else {
+                    // The only trace a refused event leaves on this side.
+                    // `Log.w` rather than the exportable diagnostics log
+                    // because the only native->Dart relay this app has is
+                    // `MainActivity.logPlaybackDiagnostic`, which pushes on
+                    // `iptvs/native_hdr_player` — a channel whose Dart handler
+                    // exists only while a player route is mounted, and which
+                    // must be called on the main thread. `beforeSend` runs on
+                    // whichever thread crashed, usually one that is about to
+                    // die. Credential-free by construction: one of four fixed
+                    // words plus a hash prefix.
+                    Log.w(
+                        TAG,
+                        "crash report dropped (${outcome.label}) " +
+                            "fp=${fingerprint.take(SHORT_FINGERPRINT)}",
+                    )
+                    null
+                }
             }
 
         installed = true
@@ -161,14 +188,22 @@ object NativeCrashScrubber {
             else -> value
         }
 
+    /**
+     * The fault's identity, from the **innermost** frames.
+     *
+     * `frames` arrives outermost-first (sentry-java reverses the JVM trace),
+     * and on Android `isInApp` is `null` on every frame — see
+     * [CrashScrub.fingerprintFrames], which owns both of those rules and is
+     * pinned against the real Android stack in `CrashScrubTest`.
+     */
     private fun fingerprintOf(event: SentryEvent): String {
         val exception = event.exceptions?.firstOrNull()
         val frames = exception?.stacktrace?.frames.orEmpty()
-        val inApp = frames.filter { it.isInApp == true }
-        val chosen = (if (inApp.isNotEmpty()) inApp else frames).take(3)
         return CrashScrub.fingerprint(
             exception?.type ?: event.message?.formatted ?: "error",
-            chosen.map { "${it.module ?: ""}:${it.function ?: ""}" },
+            CrashScrub.fingerprintFrames(
+                frames.map { "${it.module ?: ""}:${it.function ?: ""}" to it.isInApp },
+            ),
         )
     }
 }

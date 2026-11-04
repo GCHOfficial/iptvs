@@ -179,6 +179,71 @@ information is uploaded. That is a decision, not an omission:
     mapping upload needs a different token scope from the debug-file upload and a release-time
     failure is only a warning.
 
+### The send budget
+
+`CrashBudget` (`lib/data/crash_budget.dart`) and its Kotlin twin `CrashBudgetFile`
+(`crash/CrashScrub.kt`) share one line-oriented file in the app's support directory and apply the
+same four limits to every event either language sends: 5 per session, 20 per rolling 24 h, 60 per
+rolling 30 days, and **one event per fingerprint per 24 h**. The caps are explained in CLAUDE.md;
+the fingerprint is the part with a trap in it.
+
+**The fingerprint is built from the *innermost* frames, and the order is load-bearing.** Sentry's
+protocol stores a stack trace **outermost first** — sentry-dart reverses the parsed Dart trace in
+`SentryStackTraceFactory.parse`, and sentry-java calls `Collections.reverse` at the end of
+`SentryStackTraceFactory.getStackFrames` — so `frames.first` is the process entry point and
+`frames.last` is the throw site. Both halves used to take the *first* three frames whenever no
+frame was marked in-app, which on Android means the same three for every uncaught main-thread
+exception that will ever be thrown:
+
+```
+com.android.internal.os.ZygoteInit.main
+com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run
+java.lang.reflect.Method.invoke
+```
+
+Every Kotlin crash of one exception type therefore shared one fingerprint, and a device sent the
+first and silently dropped the rest for 24 h. `fingerprintFrames` (Dart) /
+`CrashScrub.fingerprintFrames` (Kotlin) now read the list from the throw site outwards: the
+innermost in-app frames when the event has any, otherwise the innermost three. Pinned against the
+real `IPTVS-2`/`IPTVS-4` frame list in `test/crash_reporting_test.dart` and `CrashScrubTest`, with
+two crash sites behind the identical framework prefix.
+
+**On Android no frame is ever in-app, so the fallback is the only path there.** sentry-java decides
+`SentryStackFrame.isInApp` from `SentryOptions.inAppIncludes`, there are no default excludes, and
+the single include is the one `AndroidOptionsInitializer.readDefaultOptionValues` adds: the
+**applicationId**, `com.gchofficial.iptvs.player[.dev|.direct]`. This app's classes live under the
+**namespace** `com.gchofficial.iptvs`, which is not a prefix of it, so `isInApp` comes back `null`
+for app and framework frames alike. `sentry_flutter` 10.3.0 configures neither list
+(`configureAndroidOptions` never touches them). Widening the include would not fix it either: R8
+renames app classes, and the shipped frame really is `f5.run`. Dart events are unaffected —
+sentry-dart marks `package:iptvs` frames in-app — but they get the same innermost-first rule, since
+the two languages share one budget file and a rule that differed would de-duplicate one fault twice.
+
+The change makes every stored fingerprint stale, which costs nothing: an unmatched `seen` key
+simply never de-duplicates and the entries expire after 24 h. The file format is **not** bumped,
+because bumping it would also discard the three rolling counters, which are real quota accounting.
+
+**A refusal now leaves exactly one line.** Dart writes
+`crash report dropped (duplicate|session|day|month) fp=<first 8 hex>` to `DiagnosticsLog`
+(`library` scope, so it rides an exported log); Kotlin writes the same text through
+`Log.w("IptvsCrash", …)`. Kotlin deliberately does **not** use the exportable log: the only
+native→Dart relay this app has is `MainActivity.logPlaybackDiagnostic`, which pushes on
+`iptvs/native_hdr_player` — a channel whose Dart handler exists only while a player route is
+mounted, and which must be called on the main thread, while `beforeSend` runs on whichever thread
+just crashed. Both lines are credential-free by construction: one of four fixed words plus a hash
+prefix. Before this, a refused event left no trace at all on either side, so "the crash was never
+reported" and "the crash reported once and was de-duplicated for a day" were indistinguishable from
+a user's export — which is the one question a budget is asked.
+
+**Field note (2026-11-04), so it is not re-litigated.** Three crash-test Kotlin events were admitted
+within five hours of one another on one phone (15:16Z, 19:07Z, 19:51Z) with the same exception type
+and stack shape, which looks like evidence that the de-duplication was working. It is not: the three
+events carry three different `device.id` context values (`a966cfed…`, `55a6828e…`, `f0e03868…`).
+That id is sentry-java's `Installation.id`, a UUID file in `context.getFilesDir()` — the same
+directory `getApplicationSupportDirectory()` returns and the budget file lives in. Three different
+ids mean the directory was emptied before each dispatch's install, so each event met an empty
+budget. The admissions say nothing about the fingerprint either way.
+
 ### The crash-test APK
 
 Nothing in CI can prove that crash capture works end to end. CI may not carry a DSN (the rule

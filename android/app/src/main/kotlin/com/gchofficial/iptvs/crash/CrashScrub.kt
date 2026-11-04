@@ -127,16 +127,60 @@ object CrashScrub {
         return prefix + cleaned.joinToString("/")
     }
 
+    /** How many frames identify a fault. Mirrors Dart's `kFingerprintFrames`. */
+    const val FINGERPRINT_FRAMES = 3
+
+    /**
+     * Picks the frames that identify a fault, **innermost first**.
+     *
+     * ## The order is the whole point
+     *
+     * Sentry stores stack frames **outermost first**: sentry-java builds them
+     * from `Throwable.getStackTrace()` and then calls `Collections.reverse`
+     * (`SentryStackTraceFactory.getStackFrames`), so `frames.first()` is the
+     * process entry point and `frames.last()` is the throw site. Taking "the
+     * first three" therefore takes `com.android.internal.os.ZygoteInit.main`,
+     * `RuntimeInit$MethodAndArgsCaller.run` and `Method.invoke` — the same
+     * three for **every** uncaught main-thread exception this app can throw.
+     * One fingerprint for all of them means the budget's de-duplication drops
+     * every main-thread crash but the first in any 24 h window.
+     *
+     * ## Why the in-app preference is not enough on its own
+     *
+     * On Android no frame is ever marked in-app. sentry-java decides `isInApp`
+     * from `inAppIncludes`, whose only entry is the one
+     * `AndroidOptionsInitializer.readDefaultOptionValues` adds: the
+     * **applicationId** (`com.gchofficial.iptvs.player[.dev|.direct]`). This
+     * app's classes are under the **namespace** `com.gchofficial.iptvs`, which
+     * is not a prefix of it; there are no default excludes; so `isInApp`
+     * returns `null` for app and framework frames alike. R8 would break a
+     * prefix match anyway — shipped app classes are renamed (`f5.run`). The
+     * fallback has to be the *innermost* frames.
+     *
+     * [frames] is the event's frames in Sentry order (outermost first), each
+     * paired with its `isInApp`. Returns at most [FINGERPRINT_FRAMES] ids: the
+     * innermost in-app ones if there are any, otherwise the innermost of all.
+     */
+    fun fingerprintFrames(frames: List<Pair<String, Boolean?>>): List<String> {
+        val innermostFirst = frames.asReversed()
+        val inApp = innermostFirst.filter { it.second == true }
+        val chosen = if (inApp.isNotEmpty()) inApp else innermostFirst
+        return chosen.take(FINGERPRINT_FRAMES).map { it.first }
+    }
+
     /**
      * An opaque, stable identity for one fault.
      *
-     * Same shape as Dart's `crashFingerprint` — exception type plus the top
-     * frames — so a crash that produces both a Dart and a Java event is not
-     * de-duplicated across the two (they are genuinely different reports), but
-     * the *same* Java crash repeating is.
+     * Same shape as Dart's `crashFingerprint` — exception type plus the
+     * innermost frames [fingerprintFrames] picked — so a crash that produces
+     * both a Dart and a Java event is not de-duplicated across the two (they
+     * are genuinely different reports), but the *same* Java crash repeating
+     * is. The two languages share one budget file, so the rules must not
+     * drift apart.
      */
     fun fingerprint(type: String?, frames: List<String>): String {
-        val joined = (listOf(type ?: "error") + frames.take(3)).joinToString("|")
+        val joined =
+            (listOf(type ?: "error") + frames.take(FINGERPRINT_FRAMES)).joinToString("|")
         val digest = MessageDigest.getInstance("SHA-256").digest(joined.toByteArray())
         return digest.joinToString("") { byte ->
             (byte.toInt() and 0xff).toString(16).padStart(2, '0')
@@ -231,6 +275,25 @@ class CrashBudgetState {
     }
 }
 
+/**
+ * Why one more event was *not* sent.
+ *
+ * Mirrors Dart's `CrashBudgetOutcome`; [label] is what gets logged, and the
+ * four refusal words must stay spelled the same on both sides because one
+ * install's log carries lines from both.
+ */
+enum class CrashBudgetOutcome(val label: String) {
+    ADMITTED("admitted"),
+    DUPLICATE("duplicate"),
+    SESSION("session"),
+    DAY("day"),
+    MONTH("month"),
+    ;
+
+    val isAdmitted: Boolean
+        get() = this == ADMITTED
+}
+
 /** File-backed [CrashBudgetState]; see the Dart `CrashBudget` for the rules. */
 class CrashBudgetFile(
     private val file: File,
@@ -270,18 +333,21 @@ class CrashBudgetFile(
     }
 
     /** Whether one more event may be sent, charging it to every cap when so. */
-    fun admit(fingerprint: String): Boolean {
+    fun admit(fingerprint: String): Boolean = check(fingerprint).isAdmitted
+
+    /** [admit] with the reason, for the one log line a refusal leaves behind. */
+    fun check(fingerprint: String): CrashBudgetOutcome {
         val nowMs = clock()
         val state = read()
         rotate(state, nowMs)
 
         if (fingerprint.isNotEmpty() && state.seen.containsKey(fingerprint)) {
             write(state)
-            return false
+            return CrashBudgetOutcome.DUPLICATE
         }
-        if (state.sessionCount >= MAX_PER_SESSION) return false
-        if (state.dayCount >= MAX_PER_DAY) return false
-        if (state.monthCount >= MAX_PER_MONTH) return false
+        if (state.sessionCount >= MAX_PER_SESSION) return CrashBudgetOutcome.SESSION
+        if (state.dayCount >= MAX_PER_DAY) return CrashBudgetOutcome.DAY
+        if (state.monthCount >= MAX_PER_MONTH) return CrashBudgetOutcome.MONTH
 
         state.sessionCount += 1
         state.dayCount += 1
@@ -294,7 +360,7 @@ class CrashBudgetFile(
             }
         }
         write(state)
-        return true
+        return CrashBudgetOutcome.ADMITTED
     }
 
     companion object {

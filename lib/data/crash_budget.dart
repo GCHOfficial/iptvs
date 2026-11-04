@@ -146,6 +146,29 @@ class CrashBudgetState {
   }
 }
 
+/// Why one more event was *not* sent.
+///
+/// The name of each refusal is written to the exportable diagnostics log
+/// beside the fingerprint's first 8 hex characters. Until it existed a refused
+/// event left no trace at all on either side, so "the crash never reported"
+/// and "the crash reported once and was de-duplicated for a day" were
+/// indistinguishable from a user's export — which is exactly the question
+/// asked of a budget. Nothing here is a secret: the reason is one of four
+/// fixed words and the fingerprint is a SHA-256 prefix over type and symbol
+/// names.
+///
+/// Mirrored by Kotlin's `CrashBudgetOutcome`; the four refusal names must stay
+/// spelled the same on both sides, since one install's log carries both.
+enum CrashBudgetOutcome {
+  admitted,
+  duplicate,
+  session,
+  day,
+  month;
+
+  bool get isAdmitted => this == CrashBudgetOutcome.admitted;
+}
+
 /// File-backed [CrashBudgetState] with the three caps, the de-duplication
 /// window and the crash-loop guard applied.
 class CrashBudget {
@@ -249,7 +272,10 @@ class CrashBudget {
   /// [fingerprint] is an opaque, already-hashed identity for the fault (see
   /// `crashFingerprint`). An empty string skips de-duplication only — the
   /// three caps still apply.
-  bool admit(String fingerprint) {
+  bool admit(String fingerprint) => check(fingerprint).isAdmitted;
+
+  /// [admit] with the reason, for the one log line a refusal leaves behind.
+  CrashBudgetOutcome check(String fingerprint) {
     final nowMs = _clock().millisecondsSinceEpoch;
     final state = _read();
     _rotate(state, nowMs);
@@ -258,11 +284,11 @@ class CrashBudget {
       // Still write: the rotate above may have pruned expired entries, and
       // dropping that work would re-walk them on every suppressed event.
       _write(state);
-      return false;
+      return CrashBudgetOutcome.duplicate;
     }
-    if (state.sessionCount >= maxPerSession) return false;
-    if (state.dayCount >= maxPerDay) return false;
-    if (state.monthCount >= maxPerMonth) return false;
+    if (state.sessionCount >= maxPerSession) return CrashBudgetOutcome.session;
+    if (state.dayCount >= maxPerDay) return CrashBudgetOutcome.day;
+    if (state.monthCount >= maxPerMonth) return CrashBudgetOutcome.month;
 
     state.sessionCount += 1;
     state.dayCount += 1;
@@ -280,6 +306,6 @@ class CrashBudget {
       }
     }
     _write(state);
-    return true;
+    return CrashBudgetOutcome.admitted;
   }
 }

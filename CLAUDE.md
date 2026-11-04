@@ -569,7 +569,18 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   50 000 errors/month is shared with another product: `CrashBudget` (shared line-oriented file,
   read and written by both languages) caps 5/session, 20/rolling-24 h and **60/rolling-30-days** —
   that last one is what bounds the monthly exposure to ~830 installs — plus one event per
-  fingerprint per 24 h. Desktop Breakpad crashes are the one source outside the per-event cap
+  fingerprint per 24 h. **That fingerprint is built from the *innermost* frames** (in-app ones if
+  the event has any, else the innermost three), because Sentry stores a stack trace **outermost
+  first**: reading from the front took `ZygoteInit.main`/`RuntimeInit$MethodAndArgsCaller.run`/
+  `Method.invoke` and gave every uncaught main-thread Kotlin exception one identity. On Android
+  *no* frame is ever in-app — sentry-java's only `inAppInclude` is the **applicationId**
+  (`com.gchofficial.iptvs.player…`) while the classes are under the **namespace**
+  `com.gchofficial.iptvs` — so the fallback is the whole rule there, and widening the include would
+  not help (R8 ships them renamed). Dart and Kotlin must keep the identical rule; they share one
+  budget file. A refusal logs one credential-free line naming the reason
+  (`duplicate|session|day|month`) and the fingerprint's first 8 hex chars — `DiagnosticsLog` in
+  Dart, `Log.w` in Kotlin (no native→Dart log relay survives a crashing thread).
+  Desktop Breakpad crashes are the one source outside the per-event cap
   (sentry-native exposes no hook `sentry_flutter` wires up); they are still covered by the
   crash-loop guard, since a withheld init never flushes them.
   **`kCrashTest` is the fourth gate, and it only ever *adds* a surface.**

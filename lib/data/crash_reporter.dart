@@ -55,33 +55,74 @@ class CrashReportingStore {
       _storage.write(key: _kEnabled, value: value ? 'true' : 'false');
 }
 
+/// How many frames identify a fault. Mirrored by `CrashScrub.FINGERPRINT_FRAMES`.
+const int kFingerprintFrames = 3;
+
+/// Picks the frames that identify a fault, **innermost first**.
+///
+/// ## The order is the whole point
+///
+/// Sentry's stack-trace protocol stores frames **outermost first** — the
+/// process entry point is `frames.first` and the throw site is `frames.last`
+/// (sentry-dart reverses the parsed Dart trace in
+/// `SentryStackTraceFactory.parse`; sentry-java does the same in
+/// `SentryStackTraceFactory.getStackFrames`, `Collections.reverse`). So taking
+/// "the first three frames" takes the three frames *furthest* from the fault,
+/// which on Android is `ZygoteInit.main` / `RuntimeInit$MethodAndArgsCaller.run`
+/// / `Method.invoke` for **every** main-thread crash there has ever been. Every
+/// such crash of one exception type then shares one fingerprint, and the
+/// de-duplication window silently swallows all but the first per 24 h.
+///
+/// ## Why the in-app preference cannot be relied on alone
+///
+/// In-app frames are the right identity when they exist, but on Android they
+/// never do: sentry-java decides `isInApp` from `inAppIncludes`, and the only
+/// entry `AndroidOptionsInitializer.readDefaultOptionValues` adds is the
+/// **`applicationId`** (`com.gchofficial.iptvs.player[.dev|.direct]`), while
+/// this app's classes live under the **namespace** `com.gchofficial.iptvs`.
+/// Nothing matches, there are no default excludes, and `isInApp` returns `null`
+/// for every frame. R8 would defeat a prefix match anyway, since app classes
+/// ship renamed (`f5.run`). The fallback therefore has to be the *innermost*
+/// frames, not the outermost ones.
+///
+/// Returns at most [kFingerprintFrames] entries: the innermost in-app frames if
+/// the event has any, otherwise the innermost frames of all.
+@visibleForTesting
+List<String> fingerprintFrames(List<({String id, bool? inApp})> frames) {
+  final innermostFirst = frames.reversed.toList();
+  final inApp = innermostFirst.where((frame) => frame.inApp == true);
+  final chosen = inApp.isNotEmpty ? inApp : innermostFirst;
+  return [for (final frame in chosen.take(kFingerprintFrames)) frame.id];
+}
+
 /// An opaque, stable identity for one fault, used to de-duplicate.
 ///
-/// Built from the exception type plus the first few **in-app** frames —
-/// framework frames are the same for every fault in a widget build, so
-/// including them would merge unrelated crashes. Hashed rather than stored
-/// verbatim because the budget file is written by two languages and read by
-/// neither a human nor Sentry; a hash keeps file size bounded and keeps any
-/// stray text (a file path, a symbol name) out of a file that outlives the
-/// process.
+/// Built from the exception type plus the innermost few frames, preferring
+/// in-app ones — see [fingerprintFrames] for why that order is load-bearing.
+/// Hashed rather than stored verbatim because the budget file is written by two
+/// languages and read by neither a human nor Sentry; a hash keeps file size
+/// bounded and keeps any stray text (a file path, a symbol name) out of a file
+/// that outlives the process.
+///
+/// `CrashScrub.fingerprint` + `NativeCrashScrubber.fingerprintOf` are the
+/// Kotlin twin, and must stay identical: the two languages share one budget
+/// file, so a rule that differs would de-duplicate the same fault twice.
 String crashFingerprint(SentryEvent event) {
   final parts = <String>[];
   final exceptions = event.exceptions;
   if (exceptions != null && exceptions.isNotEmpty) {
     final first = exceptions.first;
     parts.add(first.type ?? 'error');
-    final frames = first.stackTrace?.frames ?? const [];
-    var taken = 0;
-    for (final frame in frames) {
-      if (frame.inApp != true) continue;
-      parts.add('${frame.package ?? ''}:${frame.function ?? ''}');
-      if (++taken == 3) break;
-    }
-    if (taken == 0) {
-      for (final frame in frames.take(3)) {
-        parts.add('${frame.package ?? ''}:${frame.function ?? ''}');
-      }
-    }
+    parts.addAll(
+      fingerprintFrames([
+        for (final frame
+            in first.stackTrace?.frames ?? const <SentryStackFrame>[])
+          (
+            id: '${frame.package ?? ''}:${frame.function ?? ''}',
+            inApp: frame.inApp,
+          ),
+      ]),
+    );
   } else {
     parts.add(event.type ?? 'event');
     parts.add(event.message?.formatted ?? event.culprit ?? '');
@@ -91,6 +132,13 @@ String crashFingerprint(SentryEvent event) {
       .toString()
       .substring(0, 32);
 }
+
+/// The part of a fingerprint a log line prints: enough to tell two faults
+/// apart in one export, short enough that it reads as an identifier rather
+/// than a hash. Kotlin's `NativeCrashScrubber` prints the same prefix.
+@visibleForTesting
+String shortFingerprint(String fingerprint) =>
+    fingerprint.length <= 8 ? fingerprint : fingerprint.substring(0, 8);
 
 /// Runs **every** free-form string on [event] through [redactText].
 ///
@@ -427,7 +475,19 @@ class CrashReporter {
     final scrubbed = scrubSentryEvent(event);
     final budget = _budget;
     if (budget == null) return scrubbed;
-    return budget.admit(crashFingerprint(scrubbed)) ? scrubbed : null;
+    final fingerprint = crashFingerprint(scrubbed);
+    final outcome = budget.check(fingerprint);
+    if (outcome.isAdmitted) return scrubbed;
+    // The only trace a refused event leaves. Credential-free by construction:
+    // one of four fixed reason words plus a hash prefix. Without it a user's
+    // export cannot tell "never reported" from "reported once, then
+    // de-duplicated for a day" — see [CrashBudgetOutcome].
+    DiagnosticsLog.instance.addAndPrint(
+      'library',
+      'crash report dropped (${outcome.name}) '
+          'fp=${shortFingerprint(fingerprint)}',
+    );
+    return null;
   }
 
   Future<File> _budgetFile() async {
