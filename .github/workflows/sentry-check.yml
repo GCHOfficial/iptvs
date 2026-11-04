@@ -26,6 +26,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # SENTRY_AUTH_TOKEN is a personal token, so it lives only in the
+    # protected environments, not at repository level. This job borrows the
+    # release one, which means every run waits for a reviewer's approval.
+    environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

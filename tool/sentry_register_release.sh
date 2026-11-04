@@ -6,7 +6,8 @@
 # Usage: tool/sentry_register_release.sh <version>      # e.g. 0.1.74
 #
 # Environment (all optional; a missing one makes this a no-op):
-#   SENTRY_AUTH_TOKEN  repo secret, passed through `env:` and never
+#   SENTRY_AUTH_TOKEN  environment secret (release / google-play /
+#                      microsoft-store), passed through `env:` and never
 #                      interpolated into a `run:` block
 #   SENTRY_ORG         organisation slug
 #   SENTRY_PROJECT     project slug
