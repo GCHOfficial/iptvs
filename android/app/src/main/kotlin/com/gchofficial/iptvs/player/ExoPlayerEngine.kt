@@ -20,10 +20,13 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.util.Util
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DecoderCounters
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -278,9 +281,10 @@ object ExoBufferPolicy {
 /**
  * Default [PlaybackEngine]: ExoPlayer/MediaCodec hardware decode into a
  * [PlayerView] (SurfaceView-backed), which gives true HDR on capable
- * devices/displays. When the video track can't be decoded here (e.g. Dolby Vision
- * Profile 5 on non-DV hardware), [onUnsupportedVideo] fires so the host can fall
- * back to libmpv.
+ * devices/displays. When the stream can't be decoded here — video (e.g. Dolby
+ * Vision Profile 5 on non-DV hardware) **or** audio (e.g. DVB MP2 on a phone
+ * that ships no MP2 decoder) — [onUnsupportedStream] fires with the reason so
+ * the host can fall back to libmpv.
  */
 @UnstableApi
 class ExoPlayerEngine(
@@ -301,7 +305,12 @@ class ExoPlayerEngine(
     // its host: the shared preview engine is adopted by the fullscreen Activity,
     // which must route these to *its* handlers (mpv fallback / live reconnect) and
     // hand them back to the preview's on exit. See [SharedEngine].
-    var onUnsupportedVideo: (() -> Unit)? = null
+    /**
+     * "This engine cannot play this stream" — the argument is an
+     * [EngineFallbackReason], so the host's log line can say *which half* of
+     * the stream lost it. One-shot per engine (see [fellBack]).
+     */
+    var onUnsupportedStream: ((reason: String) -> Unit)? = null
     var onRecoverableError: (() -> Unit)? = null
     var onVideoSizeChanged: ((Int, Int) -> Unit)? = null
 
@@ -348,6 +357,31 @@ class ExoPlayerEngine(
     private val subtitleOverrides = mutableMapOf<String, TrackSelectionOverride>()
     private var volumeBeforeMute = 1f
     private var fellBack = false
+
+    // ---- Audio diagnostics (see [AudioTrackPolicy]) --------------------------
+    //
+    // An undecodable audio track is deselected *silently* by DefaultTrackSelector
+    // — no error, no state change — so before these the engine could play a
+    // picture with no sound and leave an exported log that mentioned audio
+    // nowhere at all. Each of these is reset per load and reported at most once.
+
+    /// The `audio tracks=…` line, emitted at the first `onTracksChanged` that
+    /// carries any groups (an empty `Tracks` is a stop/reset artefact, not news).
+    private var reportedAudioTracks = false
+
+    /// Which `MediaCodec` the audio renderer built, or null under passthrough
+    /// (no codec is instantiated for a bypassed format).
+    private var audioDecoderName: String? = null
+
+    /// `pcm` / `passthrough` / `offload`, learned from the `AudioTrackConfig`.
+    private var audioOutputMode: String? = null
+    private var audioUnderruns = 0
+    private var audioErrorLines = 0
+    private var reportedAudioHealth = false
+    private var audioHealthArmed = false
+
+    /// Drives the `peak=` field — see [AudioPeakProbe].
+    private val audioPeak = AudioPeakProbe()
     // Guards release() against a double-decrement of DebugCounters (and a
     // clearPreviewSurface call landing after release, e.g. a disposing preview
     // platform view racing the shared engine's own teardown).
@@ -599,6 +633,131 @@ class ExoPlayerEngine(
     }
 
     /**
+     * The audio renderer's counters, read with the same cross-thread barrier
+     * [videoCounters] documents — `DecoderCounters`' fields are plain `int`s
+     * written on the playback thread.
+     */
+    private fun audioCounters(): DecoderCounters? {
+        if (released) return null
+        return player.audioDecoderCounters?.also { it.ensureUpdated() }
+    }
+
+    /**
+     * The audio half of the instrumentation, which the `Player.Listener` above
+     * cannot see: decoder identity, sink/codec errors, underruns, and whether
+     * the sink is decoding PCM or passing an encoded bitstream to HDMI.
+     *
+     * Delivered on the player's application looper — the main thread, since the
+     * engine is constructed there — so these touch `onDiagnostic` directly, the
+     * way the `Player.Listener` does.
+     */
+    private val analyticsListener = object : AnalyticsListener {
+        override fun onAudioDecoderInitialized(
+            eventTime: AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long,
+        ) {
+            audioDecoderName = decoderName
+            // Mirrors the video decoder line: `enableDecoderFallback` applies to
+            // audio too, so a silent drop to a software decoder shows here.
+            val kind = if (isSoftwareDecoder(decoderName)) "software" else "hardware"
+            onDiagnostic?.invoke("audio decoder=$decoderName kind=$kind")
+        }
+
+        override fun onAudioTrackInitialized(
+            eventTime: AnalyticsListener.EventTime,
+            audioTrackConfig: AudioSink.AudioTrackConfig,
+        ) {
+            audioOutputMode = when {
+                audioTrackConfig.offload -> OUTPUT_OFFLOAD
+                !Util.isEncodingLinearPcm(audioTrackConfig.encoding) -> OUTPUT_PASSTHROUGH
+                else -> OUTPUT_PCM
+            }
+            // The audio side can be up long before (or entirely without) a video
+            // frame — an audio-only channel has no other arming signal.
+            armAudioHealthSample()
+        }
+
+        override fun onAudioPositionAdvancing(
+            eventTime: AnalyticsListener.EventTime,
+            playoutStartSystemTimeMs: Long,
+        ) {
+            armAudioHealthSample()
+        }
+
+        override fun onAudioUnderrun(
+            eventTime: AnalyticsListener.EventTime,
+            bufferSize: Int,
+            bufferSizeMs: Long,
+            elapsedSinceLastFeedMs: Long,
+        ) {
+            audioUnderruns++
+        }
+
+        override fun onAudioCodecError(
+            eventTime: AnalyticsListener.EventTime,
+            audioCodecError: Exception,
+        ) {
+            reportAudioError("codec", audioCodecError)
+        }
+
+        override fun onAudioSinkError(
+            eventTime: AnalyticsListener.EventTime,
+            audioSinkError: Exception,
+        ) {
+            reportAudioError("sink", audioSinkError)
+        }
+    }
+
+    /// Exception **type** only: a sink/codec message can echo the format and is
+    /// not worth the audit surface in an exportable log.
+    private fun reportAudioError(where: String, error: Exception) {
+        if (audioErrorLines >= AudioTrackPolicy.MAX_ERROR_LINES) return
+        audioErrorLines++
+        Log.w(TAG, "audio $where error", error)
+        onDiagnostic?.invoke("audio $where error ${error.javaClass.simpleName}")
+    }
+
+    private fun armAudioHealthSample() {
+        if (released || audioHealthArmed || reportedAudioHealth) return
+        audioHealthArmed = true
+        mainHandler.postDelayed(audioHealthSample, AudioTrackPolicy.HEALTH_SAMPLE_DELAY_MS)
+    }
+
+    /**
+     * One line, once per load, a few seconds after output starts: the state a
+     * "there is no sound" report needs and no counter alone provides.
+     *
+     * It separates the three shapes that look identical on screen — nothing
+     * selected (`decoder=none`), a decoder running into a passthrough sink the
+     * receiver may be refusing (`output=passthrough`), and a decoder producing
+     * buffers of digital silence (`peak=-inf` with `rendered=` climbing).
+     */
+    private val audioHealthSample = Runnable {
+        if (released || reportedAudioHealth) return@Runnable
+        reportedAudioHealth = true
+        val counters = audioCounters()
+        val mode = audioOutputMode ?: OUTPUT_NONE
+        val volume = runCatching { player.volume }.getOrDefault(-1f)
+        audioPeak.disarm()
+        val decoder = audioDecoderName ?: "none"
+        val rendered = counters?.renderedOutputBufferCount ?: -1
+        val skipped = counters?.skippedOutputBufferCount ?: -1
+        val volumeText = String.format(Locale.US, "%.2f", volume)
+        val peak = AudioTrackPolicy.peakLabel(
+            audioPeak.peak,
+            audioPeak.sawPcm,
+            passthrough = mode != OUTPUT_PCM,
+        )
+        onDiagnostic?.invoke(
+            "audio health decoder=$decoder output=$mode " +
+                "rendered=$rendered skipped=$skipped underruns=$audioUnderruns " +
+                "volume=$volumeText muted=${volume == 0f} peak=$peak",
+        )
+    }
+
+    /**
      * Sends [HdrMediaCodecVideoRenderer.MSG_REBUILD_CODEC] to this player's own
      * video renderer. Asynchronous by construction — the message is applied on
      * the playback thread — so `true` means "asked", and the answer arrives as
@@ -665,6 +824,19 @@ class ExoPlayerEngine(
                 },
             )
             .build()
+        // Reset the audio diagnostics *before* `stop()`, which dispatches its
+        // `onTracksChanged(Tracks.EMPTY)` synchronously (ListenerSet.flushEvents
+        // drains on the calling thread) — resetting after it would hand the new
+        // load a flag the previous one's teardown had just consumed.
+        reportedAudioTracks = false
+        audioDecoderName = null
+        audioOutputMode = null
+        audioUnderruns = 0
+        audioErrorLines = 0
+        reportedAudioHealth = false
+        audioHealthArmed = false
+        mainHandler.removeCallbacks(audioHealthSample)
+        audioPeak.arm(AudioTrackPolicy.PEAK_WINDOW_MS)
         // stop() first so a reload (go-to-live) starts from a clean idle state
         // instead of inheriting a paused / mid-flush decoder, which left the
         // first go-to-live stuck paused. No-op on the initial (idle) load.
@@ -704,7 +876,7 @@ class ExoPlayerEngine(
             onDiagnostic?.invoke(
                 "exo media source failed ${t.javaClass.simpleName}; falling back to mpv",
             )
-            mainHandler.post { if (!released) triggerFallback() }
+            mainHandler.post { if (!released) triggerFallback(EngineFallbackReason.SOURCE) }
             return
         }
         lastFpsSampleNs = 0L
@@ -747,7 +919,12 @@ class ExoPlayerEngine(
         }
 
         override fun onTracksChanged(tracks: Tracks) {
+            val audio = audioTracksOf(tracks)
+            // Reported before either fallback check, so an export says what the
+            // stream carried even on the load that gave up on it.
+            reportAudioTracks(tracks, audio)
             if (detectUnsupportedVideo(tracks)) return
+            if (detectUnsupportedAudio(audio)) return
             rebuildTracks(tracks)
             updateStreamInfo()
         }
@@ -783,6 +960,11 @@ class ExoPlayerEngine(
             reportedFirstFrame = true
             // The picture is up, whichever leg produced it.
             cancelPreviewFrameWatch()
+            // Output has started, so the audio health sample has something to
+            // describe. (A silent stream never advances the audio position, so
+            // this is the arming signal that actually fires on the bug it was
+            // written for.)
+            armAudioHealthSample()
             // Only a *claim's* first frame says anything about the handoff, and
             // media3 re-notifies this only when the output surface really
             // changed — which is exactly the proof FrameLivenessWatch needs to
@@ -812,7 +994,11 @@ class ExoPlayerEngine(
             // Anything else (network/source) is transient -> let the host reconnect;
             // ExoPlayer otherwise stops in STATE_IDLE, which the stall watchdog can't
             // see (it's neither buffering nor ended).
-            if (isVideoDecodeError(error)) triggerFallback() else onRecoverableError?.invoke()
+            if (isVideoDecodeError(error)) {
+                triggerFallback(EngineFallbackReason.DECODE)
+            } else {
+                onRecoverableError?.invoke()
+            }
         }
     }
 
@@ -842,6 +1028,7 @@ class ExoPlayerEngine(
                     onDiagnostic?.invoke("video decoder=$name kind=$kind")
                 }
             },
+            audioPeak = audioPeak,
         )
         renderersFactory.setEnableDecoderFallback(true)
 
@@ -866,6 +1053,10 @@ class ExoPlayerEngine(
             .also {
                 playerView.player = it
                 it.addListener(playerListener)
+                // Audio decoder identity, sink/codec errors and underruns are
+                // only visible through the analytics path — `Player.Listener`
+                // reports none of them.
+                it.addAnalyticsListener(analyticsListener)
             }
         state.volume = player.volume
         state.muted = player.volume == 0f
@@ -881,10 +1072,72 @@ class ExoPlayerEngine(
         }
         if (!anySupported) {
             Log.w(TAG, "no supported video decoder for track -> mpv fallback")
-            triggerFallback()
+            triggerFallback(EngineFallbackReason.VIDEO)
             return true
         }
         return false
+    }
+
+    /**
+     * Flattens the audio groups into the Android-free shape [AudioTrackPolicy]
+     * decides on.
+     *
+     * `allowExceedsCapabilities = true` on purpose: it mirrors what
+     * `DefaultTrackSelector` will actually do (`exceedRendererCapabilitiesIfNecessary`
+     * defaults to true), and the question here is "will anything feed the audio
+     * renderer?", not "does the device advertise this comfortably". The stricter
+     * rule would throw a working stream at mpv.
+     */
+    private fun audioTracksOf(tracks: Tracks): List<AudioTrackPolicy.AudioTrack> =
+        tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
+            (0 until group.length).map { i ->
+                val format = group.getTrackFormat(i)
+                AudioTrackPolicy.AudioTrack(
+                    playable = group.isTrackSupported(i, /* allowExceedsCapabilities= */ true),
+                    selected = group.isTrackSelected(i),
+                    mime = format.sampleMimeType,
+                    channelCount = if (format.channelCount == Format.NO_VALUE) {
+                        0
+                    } else {
+                        format.channelCount
+                    },
+                )
+            }
+        }
+
+    /**
+     * The `audio tracks=…` line, once per load.
+     *
+     * Skipped for a `Tracks` with no groups at all: that is what `player.stop()`
+     * emits on its way into a reload, and logging `tracks=0` for it would both
+     * mislead and consume the one line this load had to spend.
+     */
+    private fun reportAudioTracks(tracks: Tracks, audio: List<AudioTrackPolicy.AudioTrack>) {
+        if (reportedAudioTracks || tracks.groups.isEmpty()) return
+        reportedAudioTracks = true
+        onDiagnostic?.invoke(AudioTrackPolicy.summaryLine(audio))
+    }
+
+    /**
+     * True (and triggers fallback) when the stream carries audio and **none** of
+     * it can be decoded here.
+     *
+     * This is the silent failure the video check never covered:
+     * `MediaCodecAudioRenderer` answers `FORMAT_UNSUPPORTED_SUBTYPE` for a MIME
+     * with no `MediaCodec` (DVB MP2 on a phone, say), `DefaultTrackSelector`
+     * then selects nothing, and playback continues with a picture and no sound —
+     * no error, no state change, nothing in the log. libmpv decodes those
+     * formats through FFmpeg, and the fallback already exists for "this device
+     * cannot decode this stream".
+     *
+     * A stream with no audio at all is deliberately *not* a fallback: mpv would
+     * not improve it, and [reportAudioTracks] has already said `tracks=0`.
+     */
+    private fun detectUnsupportedAudio(audio: List<AudioTrackPolicy.AudioTrack>): Boolean {
+        if (!AudioTrackPolicy.shouldFallback(audio)) return false
+        Log.w(TAG, "no supported audio decoder for any track -> mpv fallback")
+        triggerFallback(EngineFallbackReason.AUDIO)
+        return true
     }
 
     private fun isVideoDecodeError(error: PlaybackException): Boolean = when (error.errorCode) {
@@ -896,10 +1149,10 @@ class ExoPlayerEngine(
         else -> false
     }
 
-    private fun triggerFallback() {
+    private fun triggerFallback(reason: String) {
         if (fellBack) return
         fellBack = true
-        onUnsupportedVideo?.invoke()
+        onUnsupportedStream?.invoke(reason)
     }
 
     // ---- Tracks -------------------------------------------------------------
@@ -1449,8 +1702,11 @@ class ExoPlayerEngine(
         cancelPreviewFrameWatch()
         cancelPendingClaim()
         cancelDetachProbe()
+        mainHandler.removeCallbacks(audioHealthSample)
+        audioPeak.disarm()
         playerView.player = null
         player.removeListener(playerListener)
+        player.removeAnalyticsListener(analyticsListener)
         player.release()
         DebugCounters.decExoEngine()
     }
@@ -1476,6 +1732,14 @@ class ExoPlayerEngine(
 
     companion object {
         private const val TAG = "iptvs.exo"
+
+        // How the sink is feeding the output, as printed by the health line.
+        // `passthrough`/`offload` both mean no PCM passes through the processor
+        // chain, so there is no level to measure (docs/player.md).
+        private const val OUTPUT_PCM = "pcm"
+        private const val OUTPUT_PASSTHROUGH = "passthrough"
+        private const val OUTPUT_OFFLOAD = "offload"
+        private const val OUTPUT_NONE = "none"
 
         // ~30 consecutive frame intervals is enough for a stable median even
         // with a stray dropped/duplicated frame or two mixed in, while still

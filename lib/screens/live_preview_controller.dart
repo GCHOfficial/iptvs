@@ -672,16 +672,21 @@ class LivePreviewController extends ChangeNotifier {
     if (!nativeActive || _stoppingNative) return null;
     switch (args?['event']) {
       case 'unsupported':
-        // The native engine can't decode this channel's video — remember that
-        // and fall back to the embedded media_kit preview mid-flight.
+        // The native engine can't decode this channel — its video (chiefly
+        // Dolby Vision P5) or, just as silently, its *audio* (a DVB MP2 track
+        // on a device with no MP2 decoder plays a picture with no sound). Both
+        // are answered the same way: remember the channel and fall back to the
+        // embedded media_kit preview mid-flight. `reason` is only ever logged.
         final id = channelId;
         final s = stream;
+        final reason = (args?['reason'] as String?) ?? 'video';
         if (id != null) _nativeUnsupportedIds.add((previewSourceId, id));
         nativeActive = false;
         if (s == null) return null;
         DiagnosticsLog.instance.add(
           'library',
-          'preview video unsupported by native engine — media_kit fallback',
+          'preview stream unsupported by native engine '
+              '(reason=$reason) — media_kit fallback',
         );
         try {
           await player.open(Media(s.url, httpHeaders: s.headers));
@@ -693,8 +698,9 @@ class LivePreviewController extends ChangeNotifier {
       case 'lost':
         // Fullscreen let go of the adopted shared engine, so the native
         // preview is gone. Clear the preview; the next start opens a fresh
-        // one. Only an engine lost to **undecodable video** (fullscreen fell
-        // back to mpv) says anything about this channel: one rebuilt because a
+        // one. Only an engine lost to an **undecodable stream** — video or
+        // audio, i.e. fullscreen fell back to mpv — says anything about this
+        // channel: one rebuilt because a
         // zap changed its headers or buffer preset does not, and marking the
         // launch channel unsupported for that pushed every later preview of
         // it onto media_kit for the rest of the session.

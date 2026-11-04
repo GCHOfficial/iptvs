@@ -113,7 +113,14 @@ object SharedEngine {
 
     // Dart-facing preview callbacks (installed by MainActivity per session).
     var onPreviewError: ((String) -> Unit)? = null
-    var onPreviewUnsupported: (() -> Unit)? = null
+
+    /**
+     * The shared engine cannot play this stream; the argument is an
+     * [EngineFallbackReason] (`video` for undecodable video, `audio` for a
+     * stream whose every audio track is undecodable, …). Dart falls the preview
+     * back to media_kit either way — the reason exists so an export says which.
+     */
+    var onPreviewUnsupported: ((reason: String) -> Unit)? = null
     /** Fullscreen let go of the adopted engine; the argument says whether it
      *  was because the video can't be decoded (as opposed to a zap rebuild). */
     var onPreviewLost: ((unsupported: Boolean) -> Unit)? = null
@@ -249,7 +256,7 @@ object SharedEngine {
     }
 
     private fun bindPreviewCallbacks(target: ExoPlayerEngine) {
-        target.onUnsupportedVideo = { handlePreviewUnsupported() }
+        target.onUnsupportedStream = { reason -> handlePreviewUnsupported(reason) }
         target.onRecoverableError = { onPreviewError?.invoke("stream error") }
         target.onVideoSizeChanged = { w, h -> applyPreviewAspect(w, h) }
         // This is the path a detaching fullscreen returns through, so it must
@@ -265,12 +272,22 @@ object SharedEngine {
         target.onClaimedSurfaceFirstFrame = null
     }
 
-    private fun handlePreviewUnsupported() {
+    /**
+     * The preview engine gave up on this stream.
+     *
+     * Audio is treated exactly like video, deliberately: both mean "ExoPlayer
+     * cannot play this here", both are answered by releasing the shared engine
+     * and letting Dart reopen the preview on media_kit (libmpv), and both must
+     * mark the channel so a later preview of it does not re-take the same
+     * native path. Only the logged reason differs.
+     */
+    private fun handlePreviewUnsupported(reason: String) {
+        previewDiagnostics("stream unsupported reason=$reason; media_kit fallback")
         // Fires from inside a player listener; releasing the player there is
         // unsafe, so hop off the callstack first.
         mainHandler.post {
             invalidate()
-            onPreviewUnsupported?.invoke()
+            onPreviewUnsupported?.invoke(reason)
         }
     }
 

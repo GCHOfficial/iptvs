@@ -27,6 +27,7 @@ import com.gchofficial.iptvs.player.BufferPreset
 import com.gchofficial.iptvs.player.CatchUpController
 import com.gchofficial.iptvs.player.CatchUpPolicy
 import com.gchofficial.iptvs.player.CatchUpSample
+import com.gchofficial.iptvs.player.EngineFallbackReason
 import com.gchofficial.iptvs.player.ExoBufferPolicy
 import com.gchofficial.iptvs.player.ExoPlayerEngine
 import com.gchofficial.iptvs.player.FrameLivenessWatch
@@ -630,7 +631,9 @@ class HdrPlayerActivity : ComponentActivity() {
 
         if (shared != null) {
             val sharedEngine = shared.first
-            sharedEngine.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
+            sharedEngine.onUnsupportedStream = { reason ->
+                runOnUiThread { fallbackToMpv(reason) }
+            }
             sharedEngine.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
             sharedEngine.onVideoSizeChanged = null
             setEngine(sharedEngine)
@@ -702,21 +705,30 @@ class HdrPlayerActivity : ComponentActivity() {
             // to be built with the *current* ones.
             bufferPreset = this.bufferPreset,
         )
-        exo.onUnsupportedVideo = { runOnUiThread { fallbackToMpv() } }
+        exo.onUnsupportedStream = { reason -> runOnUiThread { fallbackToMpv(reason) } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
         exo.onDiagnostic = diagnosticSink
         setEngine(exo)
         exo.load(url, subtitles)
     }
 
-    /** One-way fallback: ExoPlayer couldn't decode the video → switch to libmpv. */
-    private fun fallbackToMpv() {
+    /**
+     * One-way fallback: ExoPlayer couldn't play the stream → switch to libmpv.
+     *
+     * [reason] is an [EngineFallbackReason]: `video` (undecodable video, chiefly
+     * DV P5), `audio` (every audio track undecodable — DVB MP2 on a phone with
+     * no MP2 decoder), `decode` (a mid-stream decode error) or `source` (no
+     * media3 module for the container). It is printed because the follow-up
+     * question is different for each, and an export that only said "fell back"
+     * could not tell them apart.
+     */
+    private fun fallbackToMpv(reason: String = EngineFallbackReason.VIDEO) {
         if (engine is MpvEngine || isFinishing) return
-        Log.i(TAG, "falling back to libmpv (video unsupported by ExoPlayer)")
+        Log.i(TAG, "falling back to libmpv (reason=$reason)")
         // An engine swap mid-session is a full stream reload on a channel the
         // user was already watching — very much part of "it stopped working
         // when I went fullscreen", and previously logcat-only.
-        logNative("engine fallback from=exo to=mpv adopted=$adoptedShared")
+        logNative("engine fallback from=exo to=mpv reason=$reason adopted=$adoptedShared")
         frameLiveness.reset()
         // A different engine means a different playhead: mpv's `time-pos`
         // starts from the new stream, so the old reference is meaningless.
@@ -743,6 +755,10 @@ class HdrPlayerActivity : ComponentActivity() {
             headers = headers,
             post = { action -> if (!isFinishing) runOnUiThread(action) },
             bufferPreset = this.bufferPreset,
+            // So an export reads the same whichever engine is playing: the
+            // Exo path reports `audio tracks=`/`audio decoder=`, this one
+            // reports what mpv actually opened.
+            onDiagnostic = diagnosticSink,
         )
         setEngine(mpv)
         mpv.load(url, subtitles)

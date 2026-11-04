@@ -104,10 +104,14 @@ class MainActivity : FlutterActivity() {
                             mapOf("event" to "error", "message" to message),
                         )
                     }
-                    SharedEngine.onPreviewUnsupported = {
+                    SharedEngine.onPreviewUnsupported = { reason ->
+                        // `reason` is an EngineFallbackReason (video|audio|…).
+                        // Dart's handling is identical either way — it reopens
+                        // the preview on media_kit — but the exported log says
+                        // which half of the stream the native engine lost.
                         previewChannel.invokeMethod(
                             "previewEvent",
-                            mapOf("event" to "unsupported"),
+                            mapOf("event" to "unsupported", "reason" to reason),
                         )
                     }
                     SharedEngine.onPreviewLost = { unsupported ->

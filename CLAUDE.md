@@ -941,7 +941,8 @@ best-effort dev-era repair paths outside the claim.
 
 `player_screen.dart` plays a resolved `StreamInfo` via `media_kit`, with native-HDR paths on
 Android (`HdrPlayerActivity`: **ExoPlayer default**, **mpv fallback** only when ExoPlayer can't
-decode — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR), Windows (native
+decode the video — chiefly DV P5 on non-DV hardware, needing the vendored libdovi AAR — **or the
+audio**, see below), Windows (native
 HWND surface, mpv d3d11 — for HDR; a same-channel **SDR** preview→fullscreen stays on the embedded
 texture for a seamless handoff via `preferWindowsEmbedded`, escalating embedded→native once on
 PQ/HLG detection, the same SDR-embedded/HDR-native split Linux uses), and iOS (**implemented,
@@ -1276,6 +1277,22 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   encodes items with mpv `%n%` raw-length quoting (`MpvOptionEncoding`).
 - Both media_kit and the libmpv AAR ship `libmpv.so` — `jniLibs.pickFirsts` must keep the
   libdovi/libplacebo one.
+- **Undecodable *audio* is an mpv fallback reason, not just undecodable video.** An audio track
+  with no `MediaCodec` is deselected by `DefaultTrackSelector` **silently** — no error, no state
+  change, picture and no sound (DVB MP2 on a phone). `ExoPlayerEngine.onTracksChanged` therefore
+  also runs `detectUnsupportedAudio`, and `onUnsupportedVideo` is now
+  **`onUnsupportedStream(reason)`** (`EngineFallbackReason`: `video|audio|decode|source`, printed
+  on the `engine fallback` line). The rule is capability-based, never a codec list, and lives in
+  the Android-free `AudioTrackPolicy` (`AudioTrackPolicyTest`): fall back only when there is ≥1
+  audio track and **none** is playable — a mixed MP2+AC-3 stream stays on ExoPlayer, and a stream
+  with *no* audio is reported (`audio tracks=0`) rather than swapped, since mpv wouldn't help.
+  "Playable" allows `FORMAT_EXCEEDS_CAPABILITIES`, mirroring what the selector will actually do.
+  Fullscreen and preview behave exactly as they do for video. Four diagnostic shapes make
+  "no audio" / "undecodable audio" / "decoded silence" separable in an export
+  (`audio tracks=`, `audio decoder=`, `audio codec|sink error`, `audio health … peak=`), the last
+  via a pass-through `AudioProcessor` in `HdrRenderersFactory.buildAudioSink` that never alters
+  samples and is inert outside its 5 s window; mpv prints `audio format=… channels=…` for parity.
+  Detail: docs/player.md "Audio is a fallback reason too".
 - **Every container ExoPlayer serves needs its media3 module declared.** `DefaultMediaSourceFactory`
   loads factories reflectively, so a missing module is a `ClassNotFoundException` out of
   `setMediaItem`, i.e. an Activity-launch crash (how `.mpd` channels crashed on v0.1.61).
