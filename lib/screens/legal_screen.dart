@@ -10,6 +10,12 @@ import '../widgets/focusable_card.dart';
 /// empty state. Intentionally link-based (no in-app feedback form, no
 /// analytics): support and issue reporting live on the web / GitHub, in
 /// keeping with the app being open-source.
+///
+/// "No analytics" still holds — nothing here measures what a user does. The
+/// one thing the app does send is a **crash report** (Sentry, EU region, on by
+/// default with every string redacted through `redactText`); its switch is on
+/// the Sources screen with the other settings, and what it sends is described
+/// on the privacy policy linked below.
 class LegalScreen extends StatelessWidget {
   const LegalScreen({super.key});
 

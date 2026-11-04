@@ -5,6 +5,7 @@ import 'package:flutter/services.dart' show KeyRepeatEvent;
 import '../data/app_database.dart';
 import '../data/distribution_channel.dart';
 import '../data/cloud_config.dart';
+import '../data/crash_reporter.dart';
 import '../data/diagnostics_log.dart';
 import '../data/expiry_cache.dart';
 import '../data/local_profile_store.dart';
@@ -288,6 +289,11 @@ class _SourcesScreenState extends State<SourcesScreen> {
                     padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
                     child: _PickerStartupCard(),
                   ),
+                  if (kSentryDsn.isNotEmpty)
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: _CrashReportsCard(),
+                    ),
                   if (DistributionConfig.directUpdaterEnabled) ...[
                     const Padding(
                       padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -1604,6 +1610,102 @@ class _PickerStartupCardState extends State<_PickerStartupCard> {
             ),
             Text(
               _valueLabel,
+              style: const TextStyle(
+                color: AppColors.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Send crash reports" — the device-local consent switch for Sentry.
+///
+/// Lives here, with the other app-level settings, rather than on the
+/// link-only "Help & about" screen. A `FocusableCard` rather than a
+/// `SwitchListTile` so it carries the same OK-ring and "OK to activate"
+/// convention as every other TV-facing row; OK toggles it in place, which is
+/// the whole interaction a remote needs.
+///
+/// Only drawn when a DSN was compiled in: a development build or a fork has
+/// nothing to switch off, and a dead toggle is worse than no toggle.
+class _CrashReportsCard extends StatefulWidget {
+  const _CrashReportsCard();
+
+  @override
+  State<_CrashReportsCard> createState() => _CrashReportsCardState();
+}
+
+class _CrashReportsCardState extends State<_CrashReportsCard> {
+  bool? _enabled; // null while loading
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final enabled = await const CrashReportingStore().enabled();
+    if (mounted) setState(() => _enabled = enabled);
+  }
+
+  Future<void> _toggle() async {
+    final next = !(_enabled ?? true);
+    setState(() => _enabled = next);
+    await CrashReporter.instance.setEnabled(next);
+  }
+
+  /// Turning it **off** takes effect at once (the SDK is closed); turning it
+  /// **on** cannot, because the native crash handlers are installed by the
+  /// SDK's own startup. Say which, rather than making the user guess why
+  /// nothing appears to have happened.
+  String get _hint {
+    if (_enabled == null) return 'Loading…';
+    if (_enabled == false) return 'Off — nothing is sent';
+    return CrashReporter.instance.started
+        ? 'Crash reports only, with URLs and credentials removed'
+        : 'On from the next launch';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FocusableCard(
+      onTap: _enabled == null ? () {} : _toggle,
+      scrollOnFocus: false,
+      debugLabel: 'sources.crashReports',
+      semanticsLabel:
+          'Send crash reports, ${_enabled == true ? 'on' : 'off'}. $_hint',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.bug_report_outlined,
+              size: 20,
+              color: AppColors.textLo,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Send crash reports'),
+                  Text(
+                    _hint,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.textLo,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              _enabled == true ? 'On' : 'Off',
               style: const TextStyle(
                 color: AppColors.accent,
                 fontWeight: FontWeight.w600,
