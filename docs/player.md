@@ -3520,6 +3520,45 @@ token is already spent. On a backlog provider a retry that succeeds splices olde
 recovery is the app watchdog's, which re-resolves first. `reconnect=1` stays, and VOD never
 receives `kLiveMpvOptions`.
 
+## Crash reporting and the native crash handlers
+
+Crash reporting (`lib/data/crash_reporter.dart`, docs are in CLAUDE.md and
+`panel/public/privacy.html`) installs **native** crash handlers in the same process as the
+player, on every platform this app ships a native playback surface on. What follows is only the
+part that touches playback.
+
+**What is installed where.** Android gets sentry-native's signal handler via the NDK integration
+plus the Android 12+ Tombstone integration; Windows and Linux get sentry-native with the
+**Breakpad** backend (`SENTRY_BACKEND "breakpad"` is forced in the plugin's own CMake, so there
+is no `crashpad_handler` executable to package — the only artifact is `sentry.dll` /
+`libsentry.so`, which Flutter's ordinary plugin bundling already copies next to the runner and
+into `bundle/lib/`); iOS gets sentry-cocoa's. Nothing is installed unless a DSN was compiled in
+*and* the user left "Send crash reports" on, so a development build's player behaves exactly as
+before.
+
+**Coexistence with mpv and ExoPlayer.** Neither libmpv nor media3 installs a process-wide signal
+handler, so there is nothing to chain to or be displaced by; sentry-native chains to whatever
+handler it finds in any case. The one thing worth knowing is that **a crash inside the decoder
+now terminates through a signal handler that writes a file before the process dies**, which adds
+tens of milliseconds to a crash that was previously instant. That is invisible to a user whose
+app just died, and it is the whole point: a DV P5 reshape or an `HdrMediaCodecVideoRenderer`
+`setOutputSurface` fault is exactly the class of bug that leaves nothing in the exportable log,
+because the process is gone before `_logPlayback` can flush.
+
+**`HdrPlayerActivity` is covered without doing anything.** It is a separate Activity in the same
+process, so the Java handler, the NDK handler and the tombstone integration all apply to it; the
+Dart `beforeSend` does not, because nothing in that Activity throws into Dart. Everything it
+reports is scrubbed by `NativeCrashScrubber` instead (`android/app/src/main/kotlin/.../crash/`)
+— which is the reason that class exists: an ExoPlayer `HttpDataSourceException` quotes the
+`DataSpec` URI, and in this app that URI carries the provider's credentials.
+
+**Breadcrumbs.** The app adds none of its own, and the native auto-breadcrumbs that are on
+(activity/app lifecycle, system events) carry class names and system state, never URLs. Android
+has no OkHttp integration in `io.sentry:sentry-android`, so nothing there can capture a provider
+request; iOS/macOS *would*, through sentry-cocoa's NSURLSession swizzling, which is why
+`options.recordHttpBreadcrumbs = false` is set explicitly — it is the whole of that defence and
+its SDK default is `true`.
+
 ## MethodChannel handler ownership
 
 The two inbound native→Dart channels — `iptvs/native_hdr_player` (Android `nativeClosed` with

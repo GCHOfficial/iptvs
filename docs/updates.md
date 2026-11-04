@@ -49,6 +49,62 @@ anything non-404 goes back through retry. Re-runs converge: an existing release 
 body never overwrites an existing release's notes on the edit path. `--verify-tag` keeps a
 manual dispatch from minting a release for a tag that was never pushed.
 
+## Crash reporting (Sentry)
+
+The three release workflows — `release.yml`, `google-play.yml`, `microsoft-store.yml` — pass
+**`--dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}`** on their build command, and each one runs
+`tool/sentry_register_release.sh <version>` afterwards. `build.yml` deliberately passes **no**
+DSN on any of its six builds: CI builds crash on purpose (that is what a lint gate is for) and
+every one of those would be charged against an organisation-wide 50 000 errors/month quota that
+is shared with another product. An absent DSN means the SDK is never started at all, so leaving
+it out is the whole of that protection — see CLAUDE.md's Sentry bullet and
+`lib/data/crash_reporter.dart`.
+
+`release` is `iptvs@<build name>` — the tag minus its `v`, the same string the workflow passes
+to `--build-name` — and `dist` is the build number (`github.run_number`, or `0` for the Store).
+`environment` is the existing `DISTRIBUTION_CHANNEL` define, so the dashboard separates
+`githubDirect` from `googlePlay` and `microsoftStore` without a fourth knob. The Android native
+layer reports the same three, because the Dart SDK is what configures it (`autoInitializeNativeSdk`
+stays at its default `true`, and `configureAndroidOptions` maps release/dist/environment across).
+
+The registration step is **`continue-on-error` and the script exits 0 on every path**. A Sentry
+outage, a rotated token or a fork with no secrets must never be the reason a release does not
+ship; the release object is a convenience anyway, since Sentry creates one implicitly from the
+first event carrying the tag. The token is `secrets.SENTRY_AUTH_TOKEN`, passed through `env:` and
+never interpolated into a `run:` block; `SENTRY_ORG`, `SENTRY_PROJECT` and `SENTRY_URL`
+(`https://de.sentry.io/` — the organisation is in the EU region) are repo *variables*, like
+`SUPABASE_URL`. No new Action is added, so there is no new SHA to pin.
+
+### Symbols: the engine's are uploaded, ours aren't
+
+The release builds do **not** pass `--split-debug-info` or `--obfuscate`, and none of *our* debug
+information is uploaded. That is a decision, not an omission:
+
+- `--split-debug-info` is what turns Dart AOT stack traces into bare addresses: it is the only
+  thing that adds `--dwarf-stack-traces` to the `gen_snapshot` invocation
+  (`flutter_tools/lib/src/base/build.dart`, the `shouldSplitDebugInfo` block). Without it, every
+  Dart frame Sentry receives already carries its function name and `package:` URI. Adding it and
+  uploading the symbols would be net-neutral when the upload works and strictly worse when it
+  does not — and an upload that "must never fail a release" is, by construction, one that can
+  fail. Sentry does not re-symbolicate events it has already processed, so a single failed upload
+  would make that whole release's crashes permanently unreadable.
+- The other three artifacts named in the usual recipe do not exist here. Windows Release builds
+  emit **no PDBs** (`windows/CMakeLists.txt` sets no `/Zi`, and anything that appeared next to
+  the exe would be swept into the public release zip by its `Release/*` glob), Linux Release
+  compiles with **no `-g`**, and the `.so`s in the APK are third-party prebuilts shipped stripped.
+- **The Flutter engine's symbols are uploaded** (`tool/sentry_upload_engine_symbols.sh`, in the
+  Android build jobs of `release.yml` and `google-play.yml`). The engine (`libflutter.so`) is
+  where the Play-vitals native crashes lived (Impeller, Skia's text layout, the Dart VM), and
+  without its symbols those frames arrive as bare addresses. Google publishes them per engine
+  revision and ABI (`flutter_infra_release/flutter/<rev>/android-{arm,arm64,x64}-release/
+  symbols.zip`). The script reads the revision from `flutter --version --machine`, downloads all
+  three, and runs a pinned `npx @sentry/cli@3.8.0 debug-files upload`. It is `continue-on-error`,
+  exits 0 on every path, and the token only arrives via `env:`.
+  - If it fails for a release, that release's engine frames stay unsymbolicated, since Sentry
+    doesn't re-symbolicate processed events. Dart frames are unaffected.
+  - There are **no** published engine symbols for `windows-x64` or `linux-x64` at the current
+    revision, so desktop engine frames stay unsymbolicated.
+
 ## Discord announcement
 
 The last step of the publish job posts the release to Discord (`DISCORD_RELEASE_WEBHOOK` repo

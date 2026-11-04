@@ -69,6 +69,12 @@ running AppImage via a detached helper. See `docs/updates.md` before changing re
 The Linux AppImage does **not** bundle mpv (CI installs `mpv`/`libmpv-dev` only for the embedded
 fallback build/link) — native Linux playback runtime-discovers and version-gates the host's mpv
 (>= 0.40 required); see `docs/player.md`.
+Only the three **release** workflows pass `--dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}`;
+`build.yml` passes none, on any build, so CI's deliberate crashes never reach the shared quota.
+`sentry_flutter` builds sentry-native (Breakpad) from source at CMake configure time on
+Windows/Linux, which is why the Linux jobs install `libcurl4-openssl-dev`; its Darwin half is
+**SwiftPM-only**, which works because `ios/Runner.xcodeproj` already carries the
+`FlutterGeneratedPluginSwiftPackage` reference. See `docs/updates.md`.
 
 ## Orchestration workflow
 
@@ -228,7 +234,10 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   semantics label rather than a third line), `live_focus_coordinator.dart` (the live D-pad selection model),
   `epg_grid_screen.dart` (the TV-guide timeline, selection-cursor model) — both navigation models
   are documented in docs/tv-navigation.md. `sources_screen.dart` manages provider configs
-  (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`); `source_settings_screen.dart`
+  (add/edit/delete/activate, ↑/↓ reorder via `SourceStore.setAll`) and is also where the
+  app-level settings cards live — the profile-picker mode, the GitHub update track, and the
+  device-local **"Send crash reports"** switch, which is drawn only when a DSN was compiled in;
+  `source_settings_screen.dart`
   toggles a source's categories and edits advanced catch-up timezone/offset/window overrides
   (persisted on `SourceConfig.settings`); its category rows are **lazy slivers**, because
   `ListView(children: [...])` builds every child up front and a portal with thousands of
@@ -515,6 +524,39 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   response, use `response.readBytes()` and `.timeout(kHttpReadTimeout)` on `request.close()`
   (both in `lib/data/net.dart`) — `connectionTimeout` does **not** cover a server that connects
   then stalls mid-body.
+- **Crash reporting is Sentry, on by default, and gated three ways before anything starts.**
+  `lib/data/crash_reporter.dart` calls `SentryFlutter.init` only when a DSN was compiled in
+  (`--dart-define=SENTRY_DSN`, a repo *variable*; empty on dev builds, forks and every test), the
+  user's "Send crash reports" switch is on (device-local in the keychain — **never**
+  `SourceConfig.settings`, which syncs), and the crash-loop guard has not tripped. Declining to
+  init is the only kill switch that covers the *native* handlers too, since the Dart SDK is what
+  starts them. It is **started un-awaited in `main`, beside the boot reads**: `SentryFlutter.init`
+  awaits its integrations — including the JNI `SentryAndroid.init` — before returning, so awaiting
+  it would put native SDK startup in front of the first frame.
+  **Never add Sentry's HTTP or tracing integrations, and never add the Sentry Gradle plugin.**
+  `sentry_dio`/`SentryHttpClient` would send the full provider URL *with its query string*; the
+  Gradle plugin's bytecode instrumentation turns `android.util.Log` into breadcrumbs and
+  auto-instruments HTTP. `tracesSampleRate` stays unset, `enableAutoPerformanceTracing` false,
+  and `recordHttpBreadcrumbs = false` is load-bearing on iOS/macOS alone — it defaults to **true**
+  and drives sentry-cocoa's NSURLSession swizzling, which records every provider request. Replay,
+  screenshots and view hierarchy are all off and set explicitly.
+  **Dart `beforeSend` is not the whole chokepoint.** `sentry_flutter` pushes Dart events *down*
+  into the native SDK and nothing comes back up, so Android Java/NDK/tombstone events and
+  Windows/Linux Breakpad crashes never reach it. Android therefore has a second scrubber in
+  Kotlin (`android/app/src/main/kotlin/.../crash/NativeCrashScrubber`), installed over the
+  plugin's own `beforeSend` through `iptvs/device` as soon as init returns — sentry-java runs
+  `beforeSend` for cached outbox envelopes too, with no "is cached" exemption, so that one
+  callback covers all three Android sources. Both sides run **every** string through
+  `redactText` plus a credential-pair pass (`cleanCrashText` / `CrashScrub.redactText`), and drop
+  `request`/`user` outright.
+  **The quota guard is client-side because the plan has no per-project rate limit** and the
+  50 000 errors/month is shared with another product: `CrashBudget` (shared line-oriented file,
+  read and written by both languages) caps 5/session, 20/rolling-24 h and **60/rolling-30-days** —
+  that last one is what bounds the monthly exposure to ~830 installs — plus one event per
+  fingerprint per 24 h. Desktop Breakpad crashes are the one source outside the per-event cap
+  (sentry-native exposes no hook `sentry_flutter` wires up); they are still covered by the
+  crash-loop guard, since a withheld init never flushes them. Detail: docs/updates.md
+  "Crash reporting (Sentry)", docs/player.md "Crash reporting and the native crash handlers".
 
 ## TV / remote navigation (essentials)
 
@@ -1351,7 +1393,7 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   open); `persistence_test.dart` keeps the v1→current chain and the v7→8 `external_metadata`
   repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
   are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
-- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `PlayerBackPolicyTest`,
+- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `CrashScrubTest`, `PlayerBackPolicyTest`,
   `ReconnectPolicyTest`, `LiveResolveTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`)
   for pure logic
   extracted from the native player. CI's Android job runs it (after the first `flutter build apk`,
