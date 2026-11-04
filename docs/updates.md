@@ -163,7 +163,8 @@ that can be set independently will eventually disagree, and the disagreement is 
 decode fails **closed** — absent property, unparseable entry or any value but the literal `true`
 leaves it false — and no release workflow passes the define, so no distributable build can reach
 the `true` branch. In a normal build `MainActivity`'s `crashTestThrow` branch answers
-`notImplemented()` and R8 folds it away.
+`notImplemented()`. The branch stays in the shipped bytecode (release builds are not minified,
+so R8 removes nothing); it is inert, not absent.
 
 **Build shape.** `--release`, `development` flavor (applicationId
 `com.gchofficial.iptvs.player.dev`, so it installs *beside* a store or GitHub-direct build rather
