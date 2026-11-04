@@ -14,7 +14,8 @@
 # Usage: tool/sentry_upload_engine_symbols.sh
 #
 # Environment (all optional; any missing one makes this a no-op):
-#   SENTRY_AUTH_TOKEN  repo secret, via `env:` only
+#   SENTRY_AUTH_TOKEN  environment secret (release / google-play /
+#                      microsoft-store), via `env:` only
 #   SENTRY_ORG / SENTRY_PROJECT / SENTRY_URL  repo variables
 #
 # **Never fails a release:** every path exits 0, problems become warnings.

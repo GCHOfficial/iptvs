@@ -71,7 +71,11 @@ The registration step is **`continue-on-error` and the script exits 0 on every p
 outage, a rotated token or a fork with no secrets must never be the reason a release does not
 ship; the release object is a convenience anyway, since Sentry creates one implicitly from the
 first event carrying the tag. The token is `secrets.SENTRY_AUTH_TOKEN`, passed through `env:` and
-never interpolated into a `run:` block; `SENTRY_ORG`, `SENTRY_PROJECT` and `SENTRY_URL`
+never interpolated into a `run:` block. It is a **personal** user token (scopes `org:read
+project:read project:releases`, as Sentry reports them), so it acts as its owner and lives **only as an environment secret** on `release`, `google-play` and
+`microsoft-store` — each gated on a required reviewer — never at repository level, where any
+workflow could read it. `sentry-check.yml` borrows the `release` environment for the same reason,
+so each of its runs waits for that approval; `SENTRY_ORG`, `SENTRY_PROJECT` and `SENTRY_URL`
 (`https://de.sentry.io/` — the organisation is in the EU region) are repo *variables*, like
 `SUPABASE_URL`. No new Action is added, so there is no new SHA to pin.
 
