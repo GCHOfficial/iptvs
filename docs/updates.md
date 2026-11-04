@@ -109,15 +109,44 @@ information is uploaded. That is a decision, not an omission:
     doesn't re-symbolicate processed events. Dart frames are unaffected.
   - There are **no** published engine symbols for `windows-x64` or `linux-x64` at the current
     revision, so desktop engine frames stay unsymbolicated.
-- **Kotlin/Java frames are R8-obfuscated, and the mapping is not uploaded — an open gap.** Flutter's
-  Gradle plugin turns on R8 shrinking *and* obfuscation for every `--release` APK/AAB unless
-  `--no-shrink` is passed, and none of our builds pass it: in the shipped 0.1.76 APK the only
-  readable `com.gchofficial.iptvs` classes are the two manifest-declared activities. So a Java/Kotlin
-  event in Sentry (our classes, media3) arrives with renamed frames, and nothing uploads
-  `build/app/outputs/mapping/<variant>/mapping.txt` to Sentry. Play's own vitals are unaffected — an
-  AAB carries its mapping to Play. Fixing it without the banned Sentry Gradle plugin means
-  generating a UUID per build, writing it to the manifest as `io.sentry.proguard-uuid`, and uploading
-  the mapping under that UUID.
+- **Kotlin/Java frames are R8-obfuscated, and the mapping is uploaded per build.** Flutter's Gradle
+  plugin turns on R8 shrinking *and* obfuscation for every `--release` APK/AAB unless `--no-shrink`
+  is passed, and none of our builds pass it: in the shipped 0.1.76 APK the only readable
+  `com.gchofficial.iptvs` classes are the two manifest-declared activities, and a real crash-test
+  event arrived as `at f5.run(r8-map-id-f87c1a5f…:73)`. Deobfuscating that needs two halves agreeing
+  on one identifier, and **the identifier cannot be derived**, because the mapping file does not
+  exist yet when the manifest is merged. So CI generates it:
+  - Each Android job runs `uuidgen` into `IPTVS_SENTRY_PROGUARD_UUID` (through `$GITHUB_ENV`, so the
+    build step and the upload step cannot disagree) **before** the build.
+    `android/app/build.gradle.kts` validates it and feeds two manifest placeholders;
+    `AndroidManifest.xml` carries one `<meta-data>` whose **name** is a placeholder too. With a UUID
+    the key is `io.sentry.proguard-uuid` — what sentry-java 8.62.0's `ManifestMetadataReader` reads
+    (`PROGUARD_UUID`, line 108, applied at line 550) into `SentryOptions.proguardUuid`, which
+    `DebugMeta.createDebugImagesFromOptions` attaches to every event as the `proguard` debug image.
+    Without one the key becomes `io.sentry.proguard-uuid.unset`, which sentry-java never looks for,
+    so the option stays null and no image is attached. **Rewriting the key rather than blanking the
+    value is the point:** `readString` would hand back `""` and that image check is `!= null`, so an
+    empty value would ship an unresolvable empty-UUID image on every event. A set-but-malformed UUID
+    fails the build (only a broken workflow edit can cause it); unset is the ordinary local case.
+  - After the build, `tool/sentry_upload_proguard_mapping.sh <mapping.txt> <uuid>` uploads
+    `build/app/outputs/mapping/<variant>/mapping.txt` with the pinned
+    `npx @sentry/cli@3.8.0 upload-proguard --uuid … --require-one`. `--uuid` is hidden from that
+    version's `--help` but present and honoured — it is what the Sentry Gradle plugin passes, and the
+    pin is what keeps it from moving. Variants: `githubDirectRelease` (release.yml),
+    `googlePlayRelease` (google-play.yml), `developmentRelease` (crash-test-apk.yml). If the given
+    path is missing the script falls back to the one unambiguous `mapping.txt` under the output tree
+    and says so, because a wrong variant path would otherwise degrade silently for months.
+    Like the engine-symbol upload it is `continue-on-error`, exits 0 on every path, and takes the
+    token only through `env:`.
+  - **This is not the Sentry Gradle plugin**, which stays banned: it instruments bytecode, turning
+    `android.util.Log` into breadcrumbs and auto-instrumenting HTTP, and our provider URLs carry
+    credentials.
+  - **0.1.76 and every earlier build stay obfuscated, permanently.** Their APKs carry no UUID, and
+    Sentry does not reprocess events it has already handled — this works from the next release on.
+  - Play's own vitals were never affected: an AAB carries its mapping to Play.
+  - `tool/sentry_pipeline_check.sh` now also runs this upload with a synthetic mapping, because the
+    mapping upload needs a different token scope from the debug-file upload and a release-time
+    failure is only a warning.
 
 ### The crash-test APK
 
@@ -182,7 +211,14 @@ committed **public** debug keystore exactly as `build.yml`'s release-lint build,
 by accident: the release workflow verifies the certificate against the protected fingerprint.
 Supabase config is deliberately not passed — the cloud panel has nothing to do with crash
 capture. `FLUTTER_VERSION` must stay in step with `build.yml`'s, or the engine frames in fault
-(c) have no matching debug files and arrive as bare addresses.
+(c) have no matching debug files and arrive as bare addresses. The job runs in the protected
+`release` environment, for the `SENTRY_AUTH_TOKEN` the R8-mapping upload needs — so **every
+dispatch now waits for the owner to approve it**, a second cost on a build that crashes itself
+against a shared error quota. It uploads its own `developmentRelease` mapping, because fault (b)
+otherwise proves capture without proving readability. `--build-name` comes from a dispatch input
+defaulting to **`0.0.0-crashtest`**: without it these events report `iptvs@1.0.0`, the pubspec
+default this project has never shipped, and tagging four deliberate faults with a *real* version
+would corrupt that release's crash-free rate and "first seen in".
 
 ## Discord announcement
 

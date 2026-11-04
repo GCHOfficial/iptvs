@@ -72,6 +72,56 @@ val crashTestBuild: Boolean = run {
         }
     }
 }
+
+/**
+ * The UUID that ties this build to its R8 mapping file, or `""` when the build
+ * is not going to have one uploaded.
+ *
+ * Flutter's Gradle plugin shrinks **and obfuscates** every `--release`
+ * APK/AAB, so Kotlin/Java frames reach Sentry renamed (`f5.run(r8-map-id-…)`).
+ * Deobfuscating them needs two halves that agree on one identifier: this value
+ * in the manifest, which sentry-java reads as `io.sentry.proguard-uuid` and
+ * attaches to every event as a `proguard` debug image, and the matching
+ * `tool/sentry_upload_proguard_mapping.sh --uuid` upload of
+ * `build/app/outputs/mapping/<variant>/mapping.txt`. CI generates the UUID per
+ * build and passes it here; nothing derives it, because the mapping file does
+ * not exist yet when the manifest is merged.
+ *
+ * **Not the Sentry Gradle plugin**, which is banned (CLAUDE.md): it
+ * instruments bytecode, turning `android.util.Log` into breadcrumbs and
+ * auto-instrumenting HTTP — and our provider URLs carry credentials.
+ *
+ * An **environment variable** rather than the `dart-defines` property that
+ * `crashTestBuild` above decodes, and that is not a contradiction: the rule
+ * there is "one flag, one source" for a switch Dart *also* reads. This has no
+ * Dart counterpart — Dart never sees it, so there is nothing for a second
+ * switch to disagree with — and it matches the signing block's `System.getenv`
+ * directly above, which is the other build input CI supplies and a local build
+ * omits.
+ *
+ * It is **not a secret**: it ships inside the APK and rides on every event.
+ *
+ * Unset is the ordinary local/dev case and emits no usable meta-data (see
+ * `AndroidManifest.xml`). Set-but-malformed throws, because that can only be a
+ * broken workflow edit, and failing the build is how it gets noticed rather
+ * than shipping a release whose crashes are permanently unreadable.
+ */
+val sentryProguardUuid: String = run {
+    val raw = System.getenv("IPTVS_SENTRY_PROGUARD_UUID")?.trim().orEmpty()
+    when {
+        raw.isEmpty() -> ""
+        !Regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$").matches(raw) ->
+            throw GradleException(
+                "IPTVS_SENTRY_PROGUARD_UUID is set but is not a UUID. Leave it unset for a " +
+                    "local build; CI generates it with uuidgen.",
+            )
+        else -> raw.lowercase()
+    }
+}
+if (sentryProguardUuid.isNotEmpty()) {
+    logger.lifecycle("iptvs: R8 mapping UUID $sentryProguardUuid (upload it or Sentry can't deobfuscate).")
+}
+
 if (crashTestBuild) {
     // Loud on purpose: this flag adds a deliberate-crash surface to the app,
     // so an accidentally-on build should be obvious in the Gradle log rather
@@ -116,6 +166,16 @@ android {
         // `notImplemented()` and R8 folds the dead branch away. See
         // `crashTestBuild` above and `crash/CrashTest.kt`.
         buildConfigField("boolean", "CRASH_TEST", crashTestBuild.toString())
+
+        // The two halves of the `io.sentry.proguard-uuid` meta-data in
+        // `AndroidManifest.xml`. With no UUID the *key* is rewritten to a name
+        // sentry-java never reads, which is how a build with no uploaded
+        // mapping ends up attaching no proguard debug image at all — see the
+        // comment on `sentryProguardUuid` above.
+        manifestPlaceholders["iptvsSentryProguardUuidKey"] =
+            if (sentryProguardUuid.isEmpty()) "io.sentry.proguard-uuid.unset" else "io.sentry.proguard-uuid"
+        manifestPlaceholders["iptvsSentryProguardUuid"] =
+            sentryProguardUuid.ifEmpty { "unset" }
     }
 
     flavorDimensions += "distribution"

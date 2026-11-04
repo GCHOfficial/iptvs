@@ -548,7 +548,11 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   auto-instruments HTTP. `tracesSampleRate` stays unset, `enableAutoPerformanceTracing` false,
   and `recordHttpBreadcrumbs = false` is load-bearing on iOS/macOS alone — it defaults to **true**
   and drives sentry-cocoa's NSURLSession swizzling, which records every provider request. Replay,
-  screenshots and view hierarchy are all off and set explicitly.
+  screenshots and view hierarchy are all off and set explicitly. **The R8 mapping is uploaded
+  without it:** every `--release` build is obfuscated, so each Android CI job generates a UUID into
+  `IPTVS_SENTRY_PROGUARD_UUID`, `build.gradle.kts` writes it to the manifest as
+  `io.sentry.proguard-uuid` (and rewrites the *key*, never blanking the value, when there is none),
+  and `tool/sentry_upload_proguard_mapping.sh` uploads `mapping.txt` under that same UUID.
   **Dart `beforeSend` is not the whole chokepoint.** `sentry_flutter` pushes Dart events *down*
   into the native SDK and nothing comes back up, so Android Java/NDK/tombstone events and
   Windows/Linux Breakpad crashes never reach it. Android therefore has a second scrubber in

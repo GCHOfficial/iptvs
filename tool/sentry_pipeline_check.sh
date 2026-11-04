@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # Proves what the Sentry CI token can actually do, instead of assuming it.
-# Runs the two real release steps (release registration, Flutter engine
-# symbols), then reads back from the API whether the release and the debug
-# files really exist. Prints HTTP statuses and counts only, never the token or
-# a response body that could carry one.
+# Runs the three real release steps (release registration, Flutter engine
+# symbols, the R8 mapping upload), then reads back from the API whether the
+# release and the debug files really exist. Prints HTTP statuses and counts
+# only, never the token or a response body that could carry one.
 #
 # Usage: tool/sentry_pipeline_check.sh <version>   (e.g. 0.1.76)
 # Env:   SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT, SENTRY_URL
@@ -83,4 +83,23 @@ if printf '%s\n' "$out2" | grep -q 'UPLOADED '; then
 else
   echo "server already holds the engine symbols (nothing re-uploaded)"
 fi
+
+# The R8 mapping upload needs a different scope from the debug-file upload
+# above, and a release-time failure is invisible (the script warns and exits
+# 0), so prove it here with a synthetic two-line mapping under a throwaway
+# UUID. That does leave ~70 bytes of junk mapping in the project per run, which
+# is the price of knowing the real upload works before a release depends on it.
+echo "== 5. R8 mapping upload (the real release step, synthetic mapping)"
+probe_dir=$(mktemp -d); trap 'rm -f "$tmp"; rm -rf "$probe_dir"' EXIT
+probe_uuid=$(python3 -I -c 'import uuid; print(uuid.uuid4())')
+printf 'com.gchofficial.iptvs.PipelineCheck -> a:\n    1:1:void probe() -> a\n' \
+  > "$probe_dir/mapping.txt"
+out3=$(./tool/sentry_upload_proguard_mapping.sh "$probe_dir/mapping.txt" "$probe_uuid" 2>&1)
+echo "$out3"
+if printf '%s\n' "$out3" | grep -q '::warning::'; then
+  echo "::error::the R8 mapping upload would not work at release time"; fail=1
+else
+  echo "mapping upload accepted (probe uuid ${probe_uuid})"
+fi
+
 exit $fail

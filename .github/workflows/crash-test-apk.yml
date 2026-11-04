@@ -29,10 +29,17 @@ name: Crash-test APK
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Build name for this APK (its Sentry release tag). Not a real release.'
+        required: false
+        default: 0.0.0-crashtest
 
-# Least privilege: this workflow only reads the repo. No secrets are involved —
-# `SENTRY_DSN` is a repo *variable* (a DSN is a public, write-only ingest key),
-# and the signing values below are the committed public debug key.
+# Least privilege: this workflow only reads the repo. The one secret it holds
+# is the Sentry auth token for the R8-mapping upload, from the protected
+# `release` environment below; `SENTRY_DSN` is a repo *variable* (a DSN is a
+# public, write-only ingest key) and the signing values are the committed
+# public debug key.
 permissions:
   contents: read
 
@@ -49,6 +56,15 @@ jobs:
   build:
     name: Build crash-test APK (development flavor, release)
     runs-on: ubuntu-latest
+    # Holds `SENTRY_AUTH_TOKEN`, for uploading this build's R8 mapping — a
+    # crash test whose Kotlin fault arrives as `f5.run(r8-map-id-…)` proves
+    # capture but not readability, which is half the thing being tested.
+    #
+    # **Every dispatch of this workflow now waits for the owner to approve it**
+    # (that is what a protected environment does), which is a deliberate second
+    # cost on top of the DSN: this build crashes itself on purpose against a
+    # shared error quota.
+    environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -74,6 +90,18 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
       - run: flutter pub get
+      # The identity this build's R8 mapping is uploaded under, generated
+      # before the build because the manifest needs it and the mapping file
+      # does not exist yet. See `android/app/build.gradle.kts`.
+      - name: Generate the R8 mapping UUID
+        run: |
+          uuid=$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')
+          uuid=$(printf '%s' "$uuid" | tr 'A-F' 'a-f')
+          if [ -z "$uuid" ]; then
+            echo "::warning::Could not generate an R8 mapping UUID; this build's Kotlin/Java frames stay obfuscated."
+            exit 0
+          fi
+          echo "IPTVS_SENTRY_PROGUARD_UUID=$uuid" >> "$GITHUB_ENV"
       # `--release`, not `--debug`, for three independent reasons: the Dart
       # tree-shaker only runs in release (so a release build is also the proof
       # that `kCrashTest` is what gates the feature), the native crash handlers
@@ -93,18 +121,38 @@ jobs:
       # Supabase config is deliberately **not** passed: the cloud panel has
       # nothing to do with crash capture, and leaving it out keeps this build's
       # moving parts to the ones under test.
+      # `--build-name` is what stops these events reporting `iptvs@1.0.0` — the
+      # pubspec default, which is not a version this project has ever shipped.
+      # It defaults to `0.0.0-crashtest` rather than to the latest release on
+      # purpose: a crash test is not that release, and tagging four deliberate
+      # faults with a real version would corrupt its crash-free rate and its
+      # "first seen in". Pass a real version only to reproduce something
+      # version-specific.
       - name: Build crash-test APK
         env:
           IPTVS_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
           IPTVS_ANDROID_KEYSTORE_PASSWORD: android
           IPTVS_ANDROID_KEY_ALIAS: androiddebugkey
           IPTVS_ANDROID_KEY_PASSWORD: android
+          BUILD_NAME: ${{ inputs.version }}
         run: |
           flutter build apk --release --flavor development \
+            --build-name "$BUILD_NAME" \
             --build-number ${{ github.run_number }} \
             --dart-define=DISTRIBUTION_CHANNEL=development \
             --dart-define=IPTVS_CRASH_TEST=true \
             --dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}
+      # The crash test's own Kotlin fault is the thing this proves: without the
+      # mapping it arrives as renamed frames. `developmentRelease` is this
+      # build's variant.
+      - name: Upload the R8 mapping to Sentry
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+        run: ./tool/sentry_upload_proguard_mapping.sh build/app/outputs/mapping/developmentRelease/mapping.txt "$IPTVS_SENTRY_PROGUARD_UUID"
       # The identity guard the other Android jobs run: proves this really is
       # the `.dev` package (so it installs alongside), and that it carries no
       # self-updater manifest entries.

@@ -56,6 +56,26 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- The identity of this build's R8 mapping file, read by sentry-java's
+             ManifestMetadataReader (PROGUARD_UUID = "io.sentry.proguard-uuid")
+             and attached to every event as the `proguard` debug image. CI
+             generates the UUID, passes it in IPTVS_SENTRY_PROGUARD_UUID, and
+             uploads build/app/outputs/mapping/{variant}/mapping.txt under that
+             same UUID (tool/sentry_upload_proguard_mapping.sh), which is what
+             lets Sentry deobfuscate Kotlin/Java frames.
+
+             **Both attributes are placeholders, and the *name* is one on
+             purpose.** A build with no UUID (every local build, every PR CI
+             build) rewrites the key to `io.sentry.proguard-uuid.unset`, which
+             sentry-java never looks for — so the option stays null and no
+             debug image is attached. Substituting an empty *value* under the
+             real key would not: `readString` hands back "" and
+             `DebugMeta.createDebugImagesFromOptions` only skips on null, so
+             every event would carry a proguard image with an unresolvable
+             empty UUID. See `android/app/build.gradle.kts`. -->
+        <meta-data
+            android:name="${iptvsSentryProguardUuidKey}"
+            android:value="${iptvsSentryProguardUuid}" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
