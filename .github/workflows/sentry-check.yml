@@ -1,9 +1,12 @@
 name: Sentry pipeline check
 
 # Runs the real Sentry release steps (release registration, Flutter engine
-# symbols) with the real token and reads back what landed, so "the symbol
-# upload works" is a fact rather than an assumption. On PRs that touch the
-# Sentry scripts, and on demand. Same-repo PRs get secrets; forks skip.
+# symbols, the R8 mapping upload) with the real token and reads back what
+# landed, so "the symbol upload works" is a fact rather than an assumption. The
+# mapping upload is the one that most needs it: it takes a different token
+# scope from the debug-file upload, and at release time a failure is only a
+# warning. On PRs that touch the Sentry scripts, and on demand. Same-repo PRs
+# get secrets; forks skip.
 on:
   workflow_dispatch:
     inputs:
