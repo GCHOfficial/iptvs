@@ -202,6 +202,15 @@ jobs:
       # debug-signed, never uploaded, and could not be published anyway: the
       # release workflow verifies the certificate against the protected
       # fingerprint. No secret is involved, so this also runs on fork PRs.
+      #
+      # **No `--dart-define=SENTRY_DSN` in this workflow, on any build.** CI
+      # builds crash constantly by design — that is what a lint gate and a
+      # smoke build are for — and every one of those would be charged against
+      # an organisation-wide 50 000 errors/month quota shared with another
+      # product. An absent DSN means the SDK is never started at all
+      # (`lib/data/crash_reporter.dart`), so leaving it out here is the whole
+      # of the protection. Only `release.yml`, `google-play.yml` and
+      # `microsoft-store.yml` pass it.
       - name: Release build (release lint gate, not distributable)
         env:
           IPTVS_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
@@ -282,7 +291,12 @@ jobs:
           channel: stable
           cache: true
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev mpv libsecret-1-dev libepoxy-dev
+        # `libcurl4-openssl-dev` is for sentry_flutter: its CMake fetches and
+        # builds sentry-native (Breakpad backend) at configure time, and that
+        # library's Linux transport links against libcurl. The runner image
+        # normally already carries it; naming it here means a future image
+        # change fails `apt-get`, not the link step.
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev mpv libsecret-1-dev libepoxy-dev libcurl4-openssl-dev
       - run: flutter config --enable-linux-desktop
       - run: flutter pub get
       - name: Build release (Linux x86-64)

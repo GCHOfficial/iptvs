@@ -56,7 +56,8 @@ jobs:
           STORE_VERSION: ${{ inputs.version }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
-        run: flutter build windows --release --build-name $env:STORE_VERSION --build-number 0 --dart-define=DISTRIBUTION_CHANNEL=microsoftStore --dart-define=SUPABASE_URL=$env:SUPABASE_URL --dart-define=SUPABASE_ANON_KEY=$env:SUPABASE_ANON_KEY
+          SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+        run: flutter build windows --release --build-name $env:STORE_VERSION --build-number 0 --dart-define=DISTRIBUTION_CHANNEL=microsoftStore --dart-define=SUPABASE_URL=$env:SUPABASE_URL --dart-define=SUPABASE_ANON_KEY=$env:SUPABASE_ANON_KEY --dart-define=SENTRY_DSN=$env:SENTRY_DSN
       - name: Package and verify unsigned Store MSIX
         shell: powershell
         env:
@@ -73,6 +74,21 @@ jobs:
           $hash = (Get-FileHash $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $($package.Name)" | Set-Content "$($package.FullName).sha256" -Encoding Ascii
           Write-Host "MSIX SHA-256: $hash"
+      # Crash reporting: tell Sentry this version exists. `shell: bash` because
+      # the script is the same one the other two release workflows run — Git
+      # Bash is present on the Windows runner. Always exits 0 and is
+      # `continue-on-error` besides. See docs/updates.md "Crash reporting
+      # (Sentry)".
+      - name: Register the Sentry release
+        continue-on-error: true
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          SENTRY_URL: ${{ vars.SENTRY_URL }}
+          VERSION: ${{ inputs.version }}
+        run: ./tool/sentry_register_release.sh "$VERSION"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: microsoft-store-msix-${{ inputs.version }}
