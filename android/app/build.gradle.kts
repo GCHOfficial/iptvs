@@ -113,8 +113,7 @@ android {
 
         // The Kotlin half of the crash-test gate. False in every shipped
         // build, so `MainActivity`'s `crashTestThrow` branch answers
-        // `notImplemented()`. Release builds are not minified, so the branch
-        // stays in the bytecode; it is inert, not removed. See
+        // `notImplemented()` and R8 folds the dead branch away. See
         // `crashTestBuild` above and `crash/CrashTest.kt`.
         buildConfigField("boolean", "CRASH_TEST", crashTestBuild.toString())
     }
