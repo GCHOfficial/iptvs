@@ -166,3 +166,16 @@ jobs:
           # must not outlive the test session it was dispatched for.
           retention-days: 7
           if-no-files-found: error
+
+      # The mapping itself, kept beside the APK for the same 7 days, so the
+      # crash test can be judged against a *prediction*: look up what this
+      # build's obfuscated Kotlin frame should deobfuscate to *before* the
+      # button is pressed, then require the Sentry event to show exactly that.
+      # (The 2026-11-04 test proved the upload and the manifest, and the frame
+      # still came back obfuscated.) Nothing secret in it: class/member names.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iptvs-crash-test-r8-mapping
+          path: build/app/outputs/mapping/developmentRelease/mapping.txt
+          retention-days: 7
+          if-no-files-found: error

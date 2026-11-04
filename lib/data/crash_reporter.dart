@@ -316,8 +316,18 @@ class CrashReporter {
       }
 
       final info = await PackageInfo.fromPlatform();
+      final proguardUuid = await _readProguardUuid();
       await SentryFlutter.init((options) {
         options.dsn = kSentryDsn;
+        // The R8 mapping this build was stamped with. **Load-bearing:** the
+        // plugin's `configureAndroidOptions` assigns this field over the
+        // value sentry-android read from the manifest, so leaving it null
+        // nulls the manifest's UUID too and every Java/Kotlin event goes out
+        // naming no mapping — the 2026-11-04 crash test, whose frame stayed
+        // `f5.run(r8-map-id-…)` with the mapping uploaded and the manifest
+        // correct. Read back from the merged manifest rather than passed as
+        // a dart-define, so there is one source for it.
+        options.proguardUuid = proguardUuid;
         // `iptvs@<build name>` — the release tag minus its `v`, the same
         // string `tool/sentry_register_release.sh` registers from CI.
         options.release = 'iptvs@${info.version}';
@@ -435,6 +445,20 @@ class CrashReporter {
   /// instead — bounded by `maxCacheItems` above, and structurally
   /// credential-free, since a cached native event is frames plus a scope whose
   /// breadcrumbs went through [scrubBreadcrumb] before they were synced.
+  /// The `io.sentry.proguard-uuid` this APK's manifest carries, or null —
+  /// off Android, on dev/PR builds (which carry no UUID), or if the call
+  /// fails. Never throws: crash reporting must not be why the app won't start.
+  Future<String?> _readProguardUuid() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return proguardUuidOrNull(
+        await _channel.invokeMethod<String>('sentryProguardUuid'),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _installNativeScrubber(CrashBudget budget) async {
     if (!Platform.isAndroid) return;
     try {
@@ -448,4 +472,18 @@ class CrashReporter {
       );
     }
   }
+}
+
+/// Accepts only a canonical UUID, the shape `build.gradle.kts` stamps — so a
+/// malformed value from the platform side becomes "no mapping" rather than a
+/// debug image Sentry can never resolve.
+@visibleForTesting
+String? proguardUuidOrNull(String? raw) {
+  if (raw == null) return null;
+  final v = raw.trim();
+  return RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+  ).hasMatch(v)
+      ? v
+      : null;
 }

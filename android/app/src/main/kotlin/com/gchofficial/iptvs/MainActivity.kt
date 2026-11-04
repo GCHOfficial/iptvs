@@ -41,6 +41,17 @@ class MainActivity : FlutterActivity() {
      * [isTelevisionDevice], deliberately: the two must never disagree about
      * what kind of device this is.
      */
+    private fun sentryProguardUuid(): String? = try {
+        val info = packageManager.getApplicationInfo(
+            packageName,
+            android.content.pm.PackageManager.GET_META_DATA,
+        )
+        info.metaData?.getString("io.sentry.proguard-uuid")
+            ?.takeIf { PROGUARD_UUID_SHAPE.matches(it) }
+    } catch (e: Exception) {
+        null
+    }
+
     private fun isTelevision(): Boolean = isTelevisionDevice(this)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -347,6 +358,17 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
 
+                // The R8 mapping UUID this build was stamped with
+                // (`io.sentry.proguard-uuid`, from `build.gradle.kts`), read
+                // back out of the *merged* manifest so Dart can hand it to
+                // `SentryFlutterOptions.proguardUuid`. Without that, the
+                // plugin's `configureAndroidOptions` assigns the Dart value
+                // (null) over the one sentry-android read from this manifest,
+                // and every Java/Kotlin event goes out naming no mapping.
+                // Returns null when absent (dev/PR builds carry the `.unset`
+                // key instead) or not UUID-shaped.
+                "sentryProguardUuid" -> result.success(sentryProguardUuid())
+
                 // Crash reporting: put this app's redaction and send budget on
                 // the **Java** SDK's event path. Dart's `beforeSend` sees only
                 // Dart events — Java/Kotlin uncaught exceptions, NDK crashes
@@ -618,6 +640,10 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        /** A canonical UUID, as `build.gradle.kts` validates it before stamping. */
+        private val PROGUARD_UUID_SHAPE =
+            Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
         /**
          * Set while a MainActivity exists. Lets [HdrPlayerActivity] move the
          * *main* task behind its PiP window (once an Activity enters PiP it lives

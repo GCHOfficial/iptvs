@@ -121,4 +121,40 @@ else
   fi
 fi
 
+# Optional: read one event back and show what Sentry actually did with it —
+# the proguard image it carries (does the event name a mapping at all?), any
+# processing errors (e.g. a missing mapping), and its in-app frames after
+# processing. Exists because the 2026-11-04 crash test proved the mapping upload
+# and the manifest while the event itself stayed obfuscated: only the event can
+# say whether deobfuscation happened. Prints code locations and error *types*
+# only — never the message, which is user data on a real event.
+if [ -n "${EVENT_ID:-}" ]; then
+  echo "== 6. event read-back ${EVENT_ID}"
+  if ! [[ "$EVENT_ID" =~ ^[0-9a-f]{32}$ ]]; then
+    echo "::error::EVENT_ID must be 32 hex characters"; fail=1
+  else
+    st=$(api GET "projects/${SENTRY_ORG}/${SENTRY_PROJECT}/events/${EVENT_ID}/")
+    echo "event: HTTP ${st}"
+    if [ "$st" = 200 ]; then
+      python3 -I - "$tmp" <<'PY'
+import json, sys
+e = json.load(open(sys.argv[1]))
+entries = {x.get("type"): x.get("data") for x in e.get("entries", [])}
+images = (entries.get("debugmeta") or {}).get("images") or []
+pg = [i.get("uuid") for i in images if i.get("type") == "proguard"]
+print("proguard images:", " ".join(pg) if pg else "NONE")
+errs = e.get("errors") or []
+print("processing errors:", " ".join(sorted({x.get("type", "?") for x in errs})) or "none")
+for exc in (entries.get("exception") or {}).get("values") or []:
+    frames = (exc.get("stacktrace") or {}).get("frames") or []
+    app = [f for f in frames if f.get("inApp")] or frames[-3:]
+    for f in app[-5:]:
+        print("  frame: %s.%s line=%s" % (f.get("module"), f.get("function"), f.get("lineNo")))
+PY
+    else
+      echo "::warning::could not read the event (HTTP ${st}); the token may lack event:read"
+    fi
+  fi
+fi
+
 exit $fail
