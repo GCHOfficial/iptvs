@@ -73,6 +73,30 @@ if [ -z "$mapping" ] || [ ! -s "$mapping" ]; then
   fi
 fi
 
+# **The UUID is stamped into a copy of the mapping before upload, and that is
+# load-bearing.** Sentry decides what it is missing by the file's *checksum*,
+# not by the UUID we assert — so a second build whose `mapping.txt` is
+# byte-identical to one already on the server is answered "Nothing to upload,
+# all files are on the server" and its UUID is attached to nothing. That is not
+# hypothetical: `release.yml` (githubDirect) and `google-play.yml` (googlePlay)
+# build the same commit, and R8 can emit identical mappings for both — the
+# second one's Kotlin frames would stay obfuscated while every step stayed
+# green. Two consecutive `sentry_pipeline_check.sh` runs reproduced it exactly.
+#
+# Appending `# iptvs-proguard-uuid: <uuid>` makes the bytes unique per UUID.
+# R8's own header is a block of `#` comments, so this is the file's native
+# comment syntax; verified against this pin that the mapping still parses and
+# that the line changes the content-derived UUID (1fc56f8a… -> 2184d0d2…),
+# which is the checksum the server dedupes on.
+work=$(mktemp -d) || { echo "::warning::Could not create a temp dir; skipping mapping upload."; exit 0; }
+trap 'rm -rf "$work"' EXIT
+tagged="$work/mapping.txt"
+cp "$mapping" "$tagged" || { echo "::warning::Could not copy ${mapping}; skipping mapping upload."; exit 0; }
+# `$(tail -c1)` is empty exactly when the file already ends in a newline, so
+# this never splices the stamp onto a real mapping line.
+if [ -n "$(tail -c1 "$tagged")" ]; then printf '\n' >> "$tagged"; fi
+printf '# iptvs-proguard-uuid: %s\n' "$uuid" >> "$tagged"
+
 # Pinned sentry-cli (released 2026-09-16), run through npx so no new Action
 # needs pinning — the same arrangement as the engine-symbol upload beside it.
 #
@@ -86,9 +110,20 @@ fi
 # empty or unreadable mapping becomes a visible warning instead of a green step
 # that uploaded nothing.
 echo "Uploading ${mapping} as ${uuid}"
-if ! SENTRY_URL="$SENTRY_URL" npx -y @sentry/cli@3.8.0 upload-proguard \
+if ! out=$(SENTRY_URL="$SENTRY_URL" npx -y @sentry/cli@3.8.0 upload-proguard \
     --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
-    --uuid "$uuid" --require-one "$mapping"; then
+    --uuid "$uuid" --require-one "$tagged" 2>&1); then
+  printf '%s\n' "$out"
   echo "::warning::Sentry R8 mapping upload failed; the release continues (its Kotlin/Java frames stay obfuscated)."
+  exit 0
+fi
+printf '%s\n' "$out"
+
+# With the stamp above this cannot happen for a freshly generated UUID: the
+# bytes are unique, so the server has never seen them. If it does, the stamp
+# stopped working and the UUID is attached to nothing — which is silent in
+# every other way, so say it loudly.
+if printf '%s\n' "$out" | grep -q 'Nothing to upload'; then
+  echo "::warning::Sentry already had this mapping and uploaded nothing for ${uuid}; its Kotlin/Java frames will stay obfuscated. The per-UUID stamp in this script is not working."
 fi
 exit 0
