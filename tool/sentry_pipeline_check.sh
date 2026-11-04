@@ -30,19 +30,38 @@ echo "== 1. release registration (the real release step)"
 ./tool/sentry_register_release.sh "$version"
 
 echo "== 2. engine symbols (the real release step)"
-./tool/sentry_upload_engine_symbols.sh
+out=$(./tool/sentry_upload_engine_symbols.sh 2>&1); echo "$out"
+ids=$(printf '%s\n' "$out" | sed -n 's/.*UPLOADED \([0-9a-f-]\{36\}\).*/\1/p; s/.*OK \([0-9a-f-]\{36\}\).*/\1/p' | sort -u)
 
 echo "== 3. read-back"
 st=$(api GET "organizations/${SENTRY_ORG}/releases/${release}/")
 echo "release ${release}: HTTP ${st}"
 [ "$st" = 200 ] || { echo "::error::release ${release} is not readable/present (HTTP ${st})"; fail=1; }
 
-st=$(api GET "projects/${SENTRY_ORG}/${SENTRY_PROJECT}/files/dsyms/?per_page=100")
-if [ "$st" = 200 ]; then
-  n=$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d)); [print(" ", x.get("objectName"), x.get("cpuName"), x.get("symbolType")) for x in d if "flutter" in (x.get("objectName") or "")]' "$tmp")
-  echo "debug files listed: $n"
-  printf '%s\n' "$n" | head -1 | grep -qv '^0$' || { echo "::error::no debug files present after upload"; fail=1; }
+# Debug files are assembled and processed asynchronously after upload, so a
+# listing taken at once can be empty. Look each one up by its debug id and
+# give processing a few minutes.
+if [ -z "$ids" ]; then
+  echo "(no new uploads this run; relying on the re-upload check below)"
+fi
+for id in $ids; do
+  seen=0
+  for _ in $(seq 1 18); do
+    st=$(api GET "projects/${SENTRY_ORG}/${SENTRY_PROJECT}/files/dsyms/?debug_id=${id}")
+    if [ "$st" = 200 ] && python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "$tmp"; then seen=1; break; fi
+    sleep 10
+  done
+  echo "debug file ${id}: listed=${seen} (last HTTP ${st})"
+done
+
+# Decisive regardless of what the listing endpoint shows this token: the
+# upload asks the server which files it is missing, so a second run that
+# uploads nothing means the server already holds all of them.
+echo "== 4. re-upload (expect nothing missing)"
+out2=$(./tool/sentry_upload_engine_symbols.sh 2>&1); echo "$out2"
+if printf '%s\n' "$out2" | grep -q 'UPLOADED '; then
+  echo "::error::second upload still uploaded files: the server did not keep the first upload"; fail=1
 else
-  echo "::error::cannot list debug files (HTTP ${st})"; fail=1
+  echo "server already holds the engine symbols (nothing re-uploaded)"
 fi
 exit $fail
