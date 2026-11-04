@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.media3.common.util.UnstableApi
+import com.gchofficial.iptvs.crash.NativeCrashScrubber
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.BufferPreset
@@ -340,6 +341,24 @@ class MainActivity : FlutterActivity() {
         deviceChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
+
+                // Crash reporting: put this app's redaction and send budget on
+                // the **Java** SDK's event path. Dart's `beforeSend` sees only
+                // Dart events — Java/Kotlin uncaught exceptions, NDK crashes
+                // and Android 12+ tombstones are captured and sent by the Java
+                // SDK and never cross back up. Called by
+                // `CrashReporter._installNativeScrubber` as soon as
+                // `SentryFlutter.init` returns, which is the first moment the
+                // native options object exists. See `crash/NativeCrashScrubber`.
+                "installCrashScrubber" -> {
+                    val path = (call.arguments as? Map<*, *>)?.get("budgetPath") as? String
+                    if (path.isNullOrBlank()) {
+                        result.error("bad_args", "Missing budget path", null)
+                    } else {
+                        result.success(NativeCrashScrubber.install(path))
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         }
