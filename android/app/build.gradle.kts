@@ -376,3 +376,16 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
 }
+
+// With testOptions.unitTests.isIncludeAndroidResources on (needed by AGP 9.5's
+// Compose Preview), AGP's `package<Variant>UnitTestForUnitTest` task reads the
+// merged-assets directory, which the Flutter Gradle plugin's
+// `copyFlutterAssets<Variant>` task also writes into. Gradle 9.8 rejects that
+// undeclared overlap ("uses this output of task ':app:copyFlutterAssets…'
+// without declaring an explicit or implicit dependency"), so declare the real
+// order. `matching` is lazy and empty for variants with no Flutter asset copy.
+tasks.configureEach {
+    val variant = Regex("^package(.+)UnitTestForUnitTest$").matchEntire(name)?.groupValues?.get(1)
+        ?: return@configureEach
+    dependsOn(tasks.matching { it.name == "copyFlutterAssets$variant" })
+}
