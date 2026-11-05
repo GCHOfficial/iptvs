@@ -76,6 +76,14 @@
         <meta-data
             android:name="${iptvsSentryProguardUuidKey}"
             android:value="${iptvsSentryProguardUuid}" />
+        <!-- Renderer test builds only (`renderer-test-apk.yml`): Impeller off,
+             i.e. Flutter's Skia OpenGL renderer. Every other build gets a key
+             the engine never reads, the same key-rewrite pattern as the
+             proguard UUID above, so ordinary builds are untouched. See
+             `iptvsDisableImpeller` in `android/app/build.gradle.kts`. -->
+        <meta-data
+            android:name="${iptvsImpellerOptOutKey}"
+            android:value="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

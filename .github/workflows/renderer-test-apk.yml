@@ -1,0 +1,104 @@
+name: Renderer-test APK
+
+# **Dispatch only. NOT FOR DISTRIBUTION.** One diagnosis, one device class:
+# a TCL / Realtek RTD2875P TV (armeabi-v7a, Android 12) whose native crashes
+# (IPTVS-9, IPTVS-A, IPTVS-B, and the Play-vitals cluster in
+# docs/validation-baseline.md) look like heap corruption surfacing at random
+# sites — Skia text layout, BoringSSL frees, scudo aborts.
+#
+# The build switches Flutter's Impeller renderer **off**, so the engine runs its
+# Skia OpenGL renderer instead (`io.flutter.embedding.android.EnableImpeller =
+# false`, still honoured by Flutter 3.47.9's Android engine, and deprecated).
+# Not `ImpellerBackend=opengles`: that TV's tombstones carry none of Impeller's
+# Vulkan worker threads (`IplrVkFenceWait`, `IplrVkResMgr`), so it is most likely
+# already on Impeller's OpenGLES backend, and forcing that would change nothing.
+#
+# If the crashes stop on this build, they follow the Impeller renderer on that
+# device; if they continue with the same signatures, the renderer is ruled out.
+#
+# Shape: the `development` flavor (`com.gchofficial.iptvs.player.dev`, installs
+# beside a store or GitHub-direct build, carries no self-updater), `--release`,
+# debug-signed with the committed public key, DSN compiled in so its crashes
+# reach Sentry — under environment `development` and release
+# `iptvs@<build name>`, both distinct from every shipped build. No deliberate
+# crash actions (that is `crash-test-apk.yml`), no secrets, no protected
+# environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Build name for the test APK (its Sentry release tag)'
+        required: true
+        default: '0.1.78-skiagl'
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.9
+
+jobs:
+  build:
+    name: Build renderer-test APK (Impeller off, development flavor, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          lfs: true
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - run: flutter pub get
+      - name: Build renderer-test APK
+        env:
+          IPTVS_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android/app/debug.keystore
+          IPTVS_ANDROID_KEYSTORE_PASSWORD: android
+          IPTVS_ANDROID_KEY_ALIAS: androiddebugkey
+          IPTVS_ANDROID_KEY_PASSWORD: android
+          IPTVS_DISABLE_IMPELLER: 'true'
+          BUILD_NAME: ${{ inputs.version }}
+        run: |
+          flutter build apk --release --flavor development \
+            --build-name "$BUILD_NAME" \
+            --build-number ${{ github.run_number }} \
+            --dart-define=DISTRIBUTION_CHANNEL=development \
+            --dart-define=SENTRY_DSN=${{ vars.SENTRY_DSN }}
+      - name: Verify development identity
+        run: ./tool/verify_android_distribution_manifest.sh build/app/outputs/flutter-apk/app-development-release.apk development
+      # The whole point of the artifact: fail unless the built APK's merged
+      # manifest really carries the opt-out, and the armeabi-v7a engine is in it.
+      - name: Verify Impeller is off in the built APK
+        run: |
+          apk=build/app/outputs/flutter-apk/app-development-release.apk
+          aapt2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          tree=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk")
+          if ! printf '%s\n' "$tree" | grep -A2 'io.flutter.embedding.android.EnableImpeller"' | grep -q '"false"'; then
+            echo "::error::the APK does not carry io.flutter.embedding.android.EnableImpeller=false"
+            printf '%s\n' "$tree" | grep -n 'EnableImpeller' || true
+            exit 1
+          fi
+          unzip -l "$apk" | grep -q 'lib/armeabi-v7a/libflutter.so' || { echo "::error::no armeabi-v7a engine in the APK"; exit 1; }
+          echo "Impeller opt-out present; armeabi-v7a engine present."
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: iptvs-renderer-test-skiagl-apk-NOT-FOR-DISTRIBUTION
+          path: build/app/outputs/flutter-apk/app-development-release.apk
+          retention-days: 14
+          if-no-files-found: error
