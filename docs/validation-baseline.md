@@ -561,6 +561,15 @@ Google Play workflow's run number (vc10 = v0.1.61, vc12 = v0.1.70).
     `TArray` type arbitrary.
   - There is no on-device instrumentation path, since HWASan and MTE are arm64-only. **Owner
     decision 2026-11-03: leave as is.**
+  - **Reopened 2026-11-05 on Sentry evidence: one user, one TV (`fushan_euT`, same chipset), seven
+    native crashes across 0.1.76 and 0.1.78** (IPTVS-5 to -9, IPTVS-A, -B): SIGILL in Skia text
+    layout, a scudo `corrupted chunk header` inside BoringSSL's free during Dart's TLS teardown, and
+    aborts. No playback thread is running in any of them, and they're unrelated to that user's
+    Stalker EPG 503s. The tombstones carry none of Impeller's Vulkan worker threads, so the TV is
+    most likely already on Impeller's OpenGLES backend. The test is therefore **Impeller off**
+    (`renderer-test-apk.yml`, Skia OpenGL), not `ImpellerBackend=opengles`:
+    - crashes stop → they follow the Impeller renderer on this device;
+    - same signatures continue → the renderer is ruled out and "not app-fixable" stands.
 - **DNA Hubi Soundbox** (Broadcom BCM72180), `0a0f1ee6…`: `std::terminate` thrown out of
   `/vendor/lib/libbcmvulkan_icd.so` (`vkCreateImageView`) while Impeller allocates a texture.
   It's a vendor Vulkan driver; the only lever is an app-wide `ImpellerBackend=opengles`, which is

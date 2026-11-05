@@ -106,6 +106,21 @@ val crashTestBuild: Boolean = run {
  * broken workflow edit, and failing the build is how it gets noticed rather
  * than shipping a release whose crashes are permanently unreadable.
  */
+/**
+ * Renderer test builds only: switch Flutter's Impeller renderer off, so the
+ * engine uses its Skia OpenGL renderer (still present in Flutter 3.47.9's
+ * Android engine, behind the deprecated `io.flutter.embedding.android.
+ * EnableImpeller` opt-out). Exists for one diagnosis: a TCL / Realtek RTD2875P
+ * TV whose tombstones show heap corruption surfacing at random sites
+ * (IPTVS-9/A/B). Only the dispatch-only `renderer-test-apk.yml` sets it; it
+ * fails closed (anything but the literal `true` is off) and is loud when on.
+ */
+val iptvsDisableImpeller: Boolean =
+    System.getenv("IPTVS_DISABLE_IMPELLER")?.trim() == "true"
+if (iptvsDisableImpeller) {
+    logger.lifecycle("iptvs: RENDERER-TEST build — Impeller is OFF (Skia OpenGL).")
+}
+
 val sentryProguardUuid: String = run {
     val raw = System.getenv("IPTVS_SENTRY_PROGUARD_UUID")?.trim().orEmpty()
     when {
@@ -176,6 +191,11 @@ android {
             if (sentryProguardUuid.isEmpty()) "io.sentry.proguard-uuid.unset" else "io.sentry.proguard-uuid"
         manifestPlaceholders["iptvsSentryProguardUuid"] =
             sentryProguardUuid.ifEmpty { "unset" }
+        // The Impeller opt-out's key: the real one only on a renderer test
+        // build, otherwise a name the Flutter embedding never reads.
+        manifestPlaceholders["iptvsImpellerOptOutKey"] =
+            if (iptvsDisableImpeller) "io.flutter.embedding.android.EnableImpeller"
+            else "io.flutter.embedding.android.EnableImpeller.unset"
     }
 
     flavorDimensions += "distribution"

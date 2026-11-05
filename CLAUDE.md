@@ -80,6 +80,12 @@ other gate — consent switch, crash-loop guard and `CrashBudget` all still appl
 budget is part of what the test proves. It exists because nothing else can prove the pipeline:
 CI may not carry a DSN, a unit test cannot start the SDK, and the NDK/tombstone handlers only
 exist on a real device. See `docs/updates.md` "The crash-test APK".
+A **second dispatch-only one**, [`renderer-test-apk.yml`](.github/workflows/renderer-test-apk.yml),
+builds the same kind of not-for-distribution development APK with the DSN and **Impeller off**
+(`IPTVS_DISABLE_IMPELLER=true` → `io.flutter.embedding.android.EnableImpeller=false`, i.e. Skia
+OpenGL; every other build carries an inert `.unset` key). It has no crash actions and verifies the
+opt-out in the built APK. It exists for the TCL/RTD2875P heap-corruption diagnosis
+(docs/validation-baseline.md); never ship the opt-out in a release.
 `sentry_flutter` builds sentry-native (Breakpad) from source at CMake configure time on
 Windows/Linux, which is why the Linux jobs install `libcurl4-openssl-dev`; its Darwin half is
 **SwiftPM-only**, which works because `ios/Runner.xcodeproj` already carries the
