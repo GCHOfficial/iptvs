@@ -250,6 +250,19 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            // AGP 9.5's Compose Preview task fails the build unless unit tests
+            // see the compiled Android resources ("Compose Preview requires
+            // compiled Android resources to resolve layout XML and theme
+            // attributes"). Off by default, and nothing set it here, which is
+            // what held the AGP 9.5.x bump (Dependabot #261). The plain-JUnit
+            // tests under src/test touch no resources, so the only cost is
+            // processing resources for the unit-test task.
+            isIncludeAndroidResources = true
+        }
+    }
+
     androidResources {
         // Store the bundled Inter faces rather than deflating them.
         //
