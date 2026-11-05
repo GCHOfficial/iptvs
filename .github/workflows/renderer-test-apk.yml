@@ -89,9 +89,13 @@ jobs:
           apk=build/app/outputs/flutter-apk/app-development-release.apk
           aapt2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
           tree=$("$aapt2" dump xmltree --file AndroidManifest.xml "$apk")
-          if ! printf '%s\n' "$tree" | grep -A2 'io.flutter.embedding.android.EnableImpeller"' | grep -q '"false"'; then
+          # aapt2 compiles android:value="false" into a typed boolean, printed
+          # `=false` without quotes (a string would print `="false"`); Flutter
+          # reads it with getBoolean, so both forms mean "Impeller off".
+          entry=$(printf '%s\n' "$tree" | grep -A3 'android:name(0x01010003)="io.flutter.embedding.android.EnableImpeller"' || true)
+          echo "manifest entry:"; printf '%s\n' "$entry"
+          if ! printf '%s\n' "$entry" | grep -qE 'android:value\(0x01010024\)=("false"|false|\(type 0x12\)0x0)( |$)'; then
             echo "::error::the APK does not carry io.flutter.embedding.android.EnableImpeller=false"
-            printf '%s\n' "$tree" | grep -n 'EnableImpeller' || true
             exit 1
           fi
           unzip -l "$apk" | grep -q 'lib/armeabi-v7a/libflutter.so' || { echo "::error::no armeabi-v7a engine in the APK"; exit 1; }
