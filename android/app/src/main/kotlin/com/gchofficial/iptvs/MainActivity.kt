@@ -15,9 +15,11 @@ import com.gchofficial.iptvs.crash.NativeCrashScrubber
 import com.gchofficial.iptvs.player.DebugCounters
 import com.gchofficial.iptvs.player.isTelevisionDevice
 import com.gchofficial.iptvs.player.BufferPreset
+import com.gchofficial.iptvs.player.RendererPolicy
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterShellArgs
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
@@ -53,6 +55,92 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun isTelevision(): Boolean = isTelevisionDevice(this)
+
+    /**
+     * The SoC model this device reports, or null below API 31 where the
+     * property does not exist.
+     *
+     * `Build.SOC_MODEL` is `UNKNOWN` ("unknown") rather than null on a device
+     * that declines to answer; [RendererPolicy] treats anything that is not an
+     * exact denylist entry as "keep Impeller", so that needs no special case.
+     */
+    private fun socModel(): String? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else null
+
+    /**
+     * The value of an `io.flutter.embedding.android.EnableImpeller` meta-data
+     * entry in the **merged** manifest, or null when the build carries no such
+     * key.
+     *
+     * Ordinary builds carry the inert `…EnableImpeller.unset` key instead
+     * (`iptvsImpellerOptOutKey` in `android/app/build.gradle.kts`), so this is
+     * null everywhere except a hand-dispatched `renderer-test-apk.yml` build.
+     *
+     * Read the same way `FlutterLoader.ensureInitializationComplete` reads it —
+     * via `Bundle.get` and the value's own string form — because aapt2 types
+     * `android:value="false"` as a *boolean*, while a placeholder-substituted
+     * value can arrive as a String. Reading it with `getBoolean` alone would
+     * silently see the default for the String form.
+     */
+    private fun manifestEnableImpeller(): Boolean? = try {
+        val info = packageManager.getApplicationInfo(
+            packageName,
+            PackageManager.GET_META_DATA,
+        )
+        info.metaData?.get(FLUTTER_ENABLE_IMPELLER_KEY)?.let { value ->
+            when (value) {
+                is Boolean -> value
+                else -> value.toString().trim().equals("true", ignoreCase = true)
+            }
+        }
+    } catch (e: Exception) {
+        // An unreadable manifest must not decide the renderer; fall through to
+        // the ordinary rules.
+        null
+    }
+
+    /**
+     * Debug-only CI switch: `adb shell am start … --ez iptvsForceSkiaGl true`
+     * makes this launch run on Skia GL whatever the SoC says, so
+     * `tool/android_tv_emulator_check.sh` can exercise the fallback renderer
+     * on an emulator that is not on the denylist.
+     *
+     * Gated on [BuildConfig.DEBUG], so a release build ignores the extra
+     * entirely — this Activity is exported, and a renderer any caller can
+     * switch is not something to ship.
+     */
+    private fun forceSkiaGlRequested(): Boolean =
+        BuildConfig.DEBUG && intent?.getBooleanExtra(EXTRA_FORCE_SKIA_GL, false) == true
+
+    /**
+     * Adds `--enable-impeller=false` when this device is on the renderer
+     * denylist (see [RendererPolicy]).
+     *
+     * **This is the one hook that reaches the engine.** In Flutter 3.47.9
+     * `FlutterActivityAndFragmentDelegate.setUpFlutterEngine` builds the engine
+     * with `new FlutterEngineGroup(context, host.getFlutterShellArgs()
+     * .toArray())`, whose constructor calls `FlutterLoader
+     * .ensureInitializationComplete(context, dartVmArgs)` — and `EnableImpeller`
+     * is `allowedInRelease`, so the flag is honoured on a shipped build and not
+     * just under `flutter run`. That path is only taken because this app
+     * overrides neither `getCachedEngineId` nor `provideFlutterEngine` and runs
+     * no custom `Application`, so no FlutterLoader exists before this call.
+     *
+     * The args are only consulted on the *first* initialisation in a process;
+     * a later Activity recreation re-computes the same decision and it is
+     * ignored, which is harmless because the decision is deterministic.
+     */
+    override fun getFlutterShellArgs(): FlutterShellArgs {
+        val decision = RendererPolicy.decide(
+            socModel = socModel(),
+            manifestEnableImpeller = manifestEnableImpeller(),
+            forceSkiaGl = forceSkiaGlRequested(),
+        )
+        rendererDecision = decision
+        val args = super.getFlutterShellArgs()
+        decision.shellArg?.let { args.add(it) }
+        return args
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -358,6 +446,18 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "isTelevision" -> result.success(isTelevision())
 
+                // Which Flutter renderer this process started with, and why
+                // (`RendererPolicy`). Read once at boot so the exportable
+                // diagnostics log says it on every report, and so Dart can put
+                // it on the Sentry scope. Outbound only, like `isTelevision`,
+                // and never blocking: the decision was taken before the engine
+                // existed, so this is a field read.
+                "renderer" -> result.success(
+                    (rendererDecision ?: RendererPolicy.decide(null, null, false)).let {
+                        mapOf("renderer" to it.renderer, "reason" to it.reason)
+                    },
+                )
+
                 // The R8 mapping UUID this build was stamped with
                 // (`io.sentry.proguard-uuid`, from `build.gradle.kts`), read
                 // back out of the *merged* manifest so Dart can hand it to
@@ -382,7 +482,16 @@ class MainActivity : FlutterActivity() {
                     if (path.isNullOrBlank()) {
                         result.error("bad_args", "Missing budget path", null)
                     } else {
-                        result.success(NativeCrashScrubber.install(path))
+                        // The renderer rides in here rather than being read
+                        // back from Dart: this is the callback that sees every
+                        // Java/NDK/tombstone event, and it must be able to tag
+                        // one even if the Dart scope sync has not run yet.
+                        result.success(
+                            NativeCrashScrubber.install(
+                                path,
+                                rendererDecision?.renderer,
+                            ),
+                        )
                     }
                 }
 
@@ -654,5 +763,30 @@ class MainActivity : FlutterActivity() {
 
         private const val REQUEST_NATIVE_PLAYER = 4120
         private const val REQUEST_INSTALL_PERMISSION = 4121
+
+        /**
+         * The Flutter embedding's build-time Impeller opt-out key, as
+         * `FlutterEngineFlags.ENABLE_IMPELLER.metadataKey` spells it.
+         */
+        private const val FLUTTER_ENABLE_IMPELLER_KEY =
+            "io.flutter.embedding.android.EnableImpeller"
+
+        /**
+         * Debug-only intent extra forcing the Skia GL renderer
+         * (`--ez iptvsForceSkiaGl true`). See [forceSkiaGlRequested].
+         */
+        const val EXTRA_FORCE_SKIA_GL = "iptvsForceSkiaGl"
+
+        /**
+         * The renderer this process resolved, set by [getFlutterShellArgs]
+         * before the engine exists and read afterwards by the `iptvs/device`
+         * channel and by the native crash scrubber.
+         *
+         * Process-static rather than per-Activity: the engine is initialised
+         * once per process, so the decision belongs to the process.
+         */
+        @Volatile
+        var rendererDecision: RendererPolicy.Decision? = null
+            private set
     }
 }

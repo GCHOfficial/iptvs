@@ -52,8 +52,9 @@ env:
   FLUTTER_VERSION: 3.47.9
 
 jobs:
-  # Built once and handed to both emulator legs, rather than rebuilt per leg:
-  # the build is the long pole and the APK is identical for both.
+  # Built once and handed to every emulator leg, rather than rebuilt per leg:
+  # the build is the long pole and the APK is identical for all of them — the
+  # renderer leg differs only in the intent extra it is launched with.
   build-apk:
     name: Build development debug APK
     runs-on: ubuntu-latest
@@ -129,6 +130,7 @@ jobs:
           # preview/handoff path. The script asserts `wide=true` rather than
           # assuming it.
           - name: API 28 (google_apis x86_64, TV screen, D-pad only)
+            slug: api28-google_apis
             api-level: 28
             target: google_apis
             arch: x86_64
@@ -141,6 +143,7 @@ jobs:
           # proves `isTelevision` / UiModeManager / leanback detection and the
           # TV layout on a genuine TV system image.
           - name: API 36 (android-tv x86_64)
+            slug: api36-android-tv
             api-level: 36
             target: android-tv
             arch: x86_64
@@ -149,6 +152,29 @@ jobs:
             # focused window") without drawing a single frame, while the
             # emulator's GPU layer logged "Failed to find ColorBuffer".
             profile: tv_1080p
+          # A **renderer** dimension on one existing level rather than on both:
+          # the app ships Impeller everywhere except a one-entry SoC denylist
+          # (`player/RendererPolicy.kt`), and nothing but a hand-dispatched
+          # build has ever run the Skia GL fallback end to end. This leg forces
+          # it with the debug-only intent extra and asserts the app reports
+          # `renderer=skia-gl reason=forced-debug`, so both the override
+          # mechanism and the fallback renderer's ability to drive the whole TV
+          # flow stay honest.
+          #
+          # Cost: one extra emulator boot + scripted run (~25 min of a
+          # non-required job), i.e. three legs instead of two rather than the
+          # four a full renderer x API matrix would be. API 36 is the one
+          # doubled because it is the genuine `android-tv` image — if a renderer
+          # is going to break the ten-foot UI, that is where it shows. API 28's
+          # value is the SurfaceTexture-finalizer level, which is a decoder/
+          # surface path the renderer does not touch.
+          - name: API 36 (android-tv x86_64, Skia GL)
+            slug: api36-android-tv-skiagl
+            api-level: 36
+            target: android-tv
+            arch: x86_64
+            profile: tv_1080p
+            force-skia-gl: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -195,12 +221,12 @@ jobs:
           # One line on purpose: android-emulator-runner runs every line of
           # `script` as its own `sh -c`, so a backslash continuation hands the
           # driver a literal `\` (first run: "unknown argument: \", exit 2).
-          script: bash tool/android_tv_emulator_check.sh --apk apk/app-development-debug.apk --out "$RUNNER_TEMP/tv-artifacts" --label "api${{ matrix.api-level }}-${{ matrix.target }}" ${{ (github.event_name == 'workflow_dispatch' && inputs.strict) && '--strict' || '' }}
+          script: bash tool/android_tv_emulator_check.sh --apk apk/app-development-debug.apk --out "$RUNNER_TEMP/tv-artifacts" --label "${{ matrix.slug }}" ${{ matrix.force-skia-gl && '--force-skia-gl' || '' }} ${{ (github.event_name == 'workflow_dispatch' && inputs.strict) && '--strict' || '' }}
       - name: Collect artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: tv-emulator-api${{ matrix.api-level }}-${{ matrix.target }}
+          name: tv-emulator-${{ matrix.slug }}
           path: ${{ runner.temp }}/tv-artifacts
           if-no-files-found: warn
           retention-days: 14

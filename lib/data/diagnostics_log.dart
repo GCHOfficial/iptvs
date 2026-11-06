@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 
+import 'distribution_channel.dart';
 import 'net.dart';
 
 /// The byte ceiling the cloud `submit_diagnostics` RPC enforces server-side
@@ -36,6 +37,30 @@ class DiagnosticsLog extends ChangeNotifier {
   final Queue<DiagnosticsEntry> _entries = Queue<DiagnosticsEntry>();
 
   List<DiagnosticsEntry> get entries => List.unmodifiable(_entries);
+
+  String _appBuild = '';
+
+  /// `<version>+<build>` for the running build, e.g. `0.1.79+42`.
+  ///
+  /// Set once during boot (`_recordBuildIdentity` in `main.dart`) because
+  /// `PackageInfo.fromPlatform` is async while [asText] and [asTextBounded]
+  /// are not. Until then the header reads `app=unknown`, which is the honest
+  /// answer for an export taken in the first few hundred milliseconds.
+  ///
+  /// It exists because an exported log that does not say which build produced
+  /// it cannot be read against a changelog: "it still happens" and "it happens
+  /// again on a build that was supposed to fix it" are the same text.
+  set appBuild(String value) => _appBuild = value.trim();
+
+  /// The two build-identity fields every export carries, beside `entries=`.
+  ///
+  /// `channel` is the raw `DISTRIBUTION_CHANNEL` define rather than the parsed
+  /// enum: an unrecognised value parses to `development`, and a report from a
+  /// build whose channel define was wrong is exactly the report that needs to
+  /// say so.
+  String get _buildIdentityLine =>
+      'app=${_appBuild.isEmpty ? 'unknown' : _appBuild} '
+      'channel=${DistributionConfig.rawChannel}';
 
   void add(String scope, String message) {
     _entries.addLast(
@@ -106,6 +131,7 @@ class DiagnosticsLog extends ChangeNotifier {
   String asText() {
     final lines = <String>[
       'iptvs diagnostics exported ${DateTime.now().toIso8601String()}',
+      _buildIdentityLine,
       'entries=${_entries.length}',
       '',
       ..._entries.map(
@@ -139,8 +165,12 @@ class DiagnosticsLog extends ChangeNotifier {
   ///
   /// Pure with respect to the log: it reads [entries] and mutates nothing.
   String asTextBounded(int maxBytes) {
+    // Both header lines are part of the size accounting below: `overhead` is
+    // measured from this list, so adding a line here is accounted for without
+    // touching the trim loop.
     final header = <String>[
       'iptvs diagnostics exported ${DateTime.now().toIso8601String()}',
+      _buildIdentityLine,
       'entries=${_entries.length}',
     ];
     final lines = _entries

@@ -34,6 +34,8 @@
 # HOW IT KNOWS WHAT THE APP IS DOING
 #   logcat, exclusively. The app already prints these lines in a debug build:
 #     [iptvs.library] device class television=<bool>   (data/device_class.dart)
+#     [iptvs.library] renderer=<impeller|skia-gl> reason=<why>
+#                                                      (data/renderer_class.dart)
 #     [iptvs.library] layout window=WxH dpr=.. wide=<bool> tv=<bool>
 #     [iptvs.library] preview live source=.. channel=.. id=..
 #     [iptvs.library] preview native engine open
@@ -59,6 +61,11 @@ PAUSE_SECONDS="${IPTVS_TVEMU_PAUSE_SECONDS:-35}"
 CYCLES="${IPTVS_TVEMU_CYCLES:-5}"
 STRICT="${IPTVS_TVEMU_STRICT:-0}"
 KEEP_INSTALLED=0
+# Launch the app with the debug-only force-Skia-GL extra, and assert it took.
+# Debug builds only by construction: `MainActivity.forceSkiaGlRequested` is
+# gated on BuildConfig.DEBUG, so on a release APK this flag silently does
+# nothing — which is exactly what the assertion below would then catch.
+FORCE_SKIA_GL="${IPTVS_TVEMU_FORCE_SKIA_GL:-0}"
 
 usage() {
   cat <<'EOF'
@@ -77,6 +84,9 @@ Usage: tool/android_tv_emulator_check.sh [options]
   --keep-installed     do not uninstall before installing (skips the first-run
                        flow; only useful for re-running against a warm device)
   --strict             make the behavioural checks fail the run too
+  --force-skia-gl      launch with the debug-only renderer override so the
+                       whole run exercises Flutter's Skia OpenGL renderer, and
+                       assert the app reports it (debug builds only)
   -h, --help           this text
 EOF
 }
@@ -92,6 +102,7 @@ while [ $# -gt 0 ]; do
     --pause-seconds) PAUSE_SECONDS="$2"; shift 2 ;;
     --keep-installed) KEEP_INSTALLED=1; shift ;;
     --strict) STRICT=1; shift ;;
+    --force-skia-gl) FORCE_SKIA_GL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -298,7 +309,24 @@ sleep 1
 
 # ── Navigation primitives ────────────────────────────────────────────────────
 
-launch() { "${ADB[@]}" shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1 || true; }
+# Every launch in the run carries the same extras, so the relaunch cycles stay
+# on the renderer the run is about. The extra is read in
+# `MainActivity.getFlutterShellArgs`, i.e. before the Flutter engine exists —
+# but `FlutterLoader` is only initialised once per process, so it only has an
+# effect on a launch that starts a *new* process. That is what the uninstall
+# above and the Home/relaunch cycles' process checks already guarantee.
+LAUNCH_EXTRAS=()
+if [ "$FORCE_SKIA_GL" = "1" ]; then
+  LAUNCH_EXTRAS=(--ez iptvsForceSkiaGl true)
+fi
+
+launch() {
+  # `${a[@]+"${a[@]}"}`, not a bare `"${a[@]}"`: an empty array under `set -u`
+  # is an unbound variable on bash before 4.4, and this script is meant to be
+  # runnable against a local device too.
+  "${ADB[@]}" shell am start -n "$PKG/$ACTIVITY" \
+    ${LAUNCH_EXTRAS[@]+"${LAUNCH_EXTRAS[@]}"} >/dev/null 2>&1 || true
+}
 
 # The channel list is the only screen that prints `layout window=`, so that one
 # line is both "we got there" and the geometry the layout decision was made
@@ -384,6 +412,29 @@ else
 fi
 sleep 2
 shot "profile-picker"
+
+# Which Flutter renderer the engine started with, and why
+# (`player/RendererPolicy.kt` -> `data/renderer_class.dart`). The line is
+# printed by `addAndPrint`, so it only exists on a debug build — which this
+# always is.
+if wait_log "$M" '\[iptvs\.library\] renderer=' 30; then
+  RENDERER=$(first_match "$M" '\[iptvs\.library\] renderer=')
+  pass "renderer line: ${RENDERER##*] }"
+  if [ "$FORCE_SKIA_GL" = "1" ]; then
+    # A hard failure, not a soft one: this leg exists *only* to prove the
+    # override works end to end. A run that silently fell back to Impeller
+    # would otherwise report a green Skia GL leg that never ran Skia GL.
+    if printf '%s' "$RENDERER" | grep -q 'renderer=skia-gl reason=forced-debug'; then
+      pass "the debug renderer override took (Skia OpenGL)"
+    else
+      fail "--force-skia-gl was passed but the app reports: ${RENDERER##*] }"
+    fi
+  fi
+elif [ "$FORCE_SKIA_GL" = "1" ]; then
+  fail "the app never reported a renderer, so --force-skia-gl cannot be verified"
+else
+  note "no renderer line (an older build, or a non-Android target)"
+fi
 
 if ! wait_for_channel_list "$M" 10; then
   skip_profile_picker

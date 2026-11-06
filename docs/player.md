@@ -477,6 +477,77 @@ Note: both media_kit and the libmpv AAR ship `libmpv.so` — `app/build.gradle.k
 `packaging.jniLibs.pickFirsts` keeps the libplacebo one; minSdk is raised to 26 (libmpv
 requirement).
 
+### The Flutter renderer: Impeller, except a SoC denylist
+
+Impeller is Flutter's renderer on Android and stays the default here. One device class is
+switched to the **Skia OpenGL** renderer at runtime, by exact SoC model:
+
+- **`player/RendererPolicy.kt`** is the matcher — Android-free, pure, pinned by
+  `RendererPolicyTest`. `decide(socModel, manifestEnableImpeller, forceSkiaGl)` returns the
+  renderer (`impeller` / `skia-gl`), a reason, and the engine argument (if any) needed to make it
+  so. The denylist is `["RTD2875P"]` and the match is **exact**, case-insensitive after trim —
+  `RTD2873` and `RTD2875` are different parts, and a prefix match would silently take Impeller
+  away from chips nobody has evidence about. null, blank and everything else keep Impeller.
+- **`MainActivity.getFlutterShellArgs()`** is the single override that applies it: it adds
+  `--enable-impeller=false` to what `super` returns. That is the hook that reaches the engine —
+  in Flutter 3.47.9 `FlutterActivityAndFragmentDelegate.setUpFlutterEngine` builds the engine as
+  `new FlutterEngineGroup(context, host.getFlutterShellArgs().toArray())`, whose constructor calls
+  `FlutterLoader.ensureInitializationComplete(context, dartVmArgs)` **only when the loader is not
+  already initialised**. Nothing in this app initialises it earlier: `MainActivity` overrides
+  neither `getCachedEngineId` nor `provideFlutterEngine`, there is no `FlutterEngineCache` use, no
+  custom `Application` (Flutter's `applicationName` placeholder resolves to `android.app.Application`),
+  and `HdrPlayerActivity` hosts no Flutter engine. `FlutterEngineFlags.ENABLE_IMPELLER` is
+  constructed with `allowedInRelease = true` and is not in `DISABLED_FLAGS`, which is why the
+  switch works on a shipped build rather than only under `flutter run`.
+- `Build.SOC_MODEL` is API 31+; below that the caller passes null and the denylist cannot fire.
+  The TCL G10 class runs Android 12, so it is covered.
+
+**Precedence.** The *manifest* wins, and when it is present this matcher contributes nothing:
+
+1. an `io.flutter.embedding.android.EnableImpeller` meta-data entry (only the dispatch-only
+   `renderer-test-apk.yml` build has one; every other build carries the inert
+   `…EnableImpeller.unset` key) → reason `manifest`, **no** shell argument;
+2. the debug-only `--ez iptvsForceSkiaGl true` intent extra → reason `forced-debug`;
+3. the SoC denylist → reason `soc:RTD2875P`;
+4. otherwise Impeller, reason `default`.
+
+The manifest is first because it is a deliberate build-time statement, and because a build that
+pins Impeller *on* to A/B against this denylist must not be defeated by it. It also means the two
+mechanisms never both emit an `--enable-impeller=` — `FlutterShellArgs` is set-backed, so two
+contradictory values would leave the outcome to an unordered iteration.
+
+**It is visible in a report, both ways.** At boot Dart reads the decision back over the existing
+`iptvs/device` channel (`renderer`, beside `isTelevision`) — un-awaited, so nothing on the
+first-frame path waits for it — and writes one line to the exportable diagnostics log:
+`renderer=skia-gl reason=soc:RTD2875P` (`lib/data/renderer_class.dart`). The same value is set as
+the Sentry **`renderer` tag**, on both sides: the Dart scope (`CrashReporter._tagRenderer`), which
+`sentry_flutter`'s `NativeScopeObserver` mirrors onto the Java scope because `enableNdkScopeSync`
+is left at its default `true`, *and* in `NativeCrashScrubber`'s Java `beforeSend`, which is the
+only callback Java exceptions, NDK crashes and Android 12+ tombstones all pass through. The native
+one only fills the tag when nothing has set it, so a replayed outbox envelope keeps the renderer
+it actually crashed on.
+
+**Flutter-upgrade caveat — re-check this on every Flutter bump.** The opt-out is deprecated;
+Flutter 3.47.9 already warns it "is going to go away in an upcoming Flutter release". When it
+does, `--enable-impeller=false` becomes a silent no-op and the app will keep reporting
+`renderer=skia-gl` while running Impeller. Nothing detects that at runtime: confirm
+`FlutterEngineFlags.ENABLE_IMPELLER` still exists and is still `allowedInRelease` (it is readable
+straight out of `bin/cache/artifacts/engine/android-arm-release/flutter.jar`) whenever the pinned
+Flutter version moves.
+
+**Not verified on hardware.** The evidence for the denylist is the renderer-test APK
+(`renderer-test-apk.yml`, the manifest opt-out) stopping the crashes on the owner's TCL TV. The
+*runtime* path — `Build.SOC_MODEL` actually reading `RTD2875P` on that device, and the shell
+argument producing the same engine the manifest build produced — can only be confirmed on the TV:
+install, open Diagnostics, and read the `renderer=` line. The emulator leg below proves the
+mechanism, not the match.
+
+**Emulator coverage.** `android-tv-emulator.yml` has a third leg, API 36 `android-tv` with
+`--force-skia-gl`: it launches with the debug extra, asserts the app reports
+`renderer=skia-gl reason=forced-debug` (a *hard* failure — a leg that silently ran Impeller would
+be worse than no leg), and then drives the whole TV flow on Skia GL. Cost is one extra emulator
+boot on a non-required job.
+
 ## iOS
 
 **Status: implemented; on-device validation pending — see docs/ios.md for the full design,

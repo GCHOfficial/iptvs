@@ -16,6 +16,15 @@ name: Renderer-test APK
 # If the crashes stop on this build, they follow the Impeller renderer on that
 # device; if they continue with the same signatures, the renderer is ruled out.
 #
+# **Outcome: they stopped.** The fix shipped in 0.1.79 as a *targeted* runtime
+# denylist instead of an app-wide opt-out — `player/RendererPolicy.kt` switches
+# only `Build.SOC_MODEL == "RTD2875P"` to Skia GL, via
+# `MainActivity.getFlutterShellArgs()`. This workflow stays for the next
+# renderer question, and its manifest entry deliberately **outranks** the
+# denylist (`RendererPolicy.decide`'s `manifest` branch), so a build from here
+# can still pin either renderer for an A/B without the matcher fighting it.
+# See docs/player.md "The Flutter renderer".
+#
 # Shape: the `development` flavor (`com.gchofficial.iptvs.player.dev`, installs
 # beside a store or GitHub-direct build, carries no self-updater), `--release`,
 # debug-signed with the committed public key, DSN compiled in so its crashes

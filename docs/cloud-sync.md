@@ -570,7 +570,10 @@ that matters here, which is unbounded storage growth on a free-tier project.
 The client trims oldest-first to the byte cap before sending (`DiagnosticsLog.asTextBounded`), so a
 submit should never fail on size — the server cap is a backstop against a client that doesn't, not
 the user-facing limit. Oldest-first because the newest entries are the ones describing the problem
-being reported.
+being reported. The header it keeps carries `app=<version>+<build> channel=<rawChannel>` beside
+`entries=`, so a submitted log names the build that produced it without depending on the
+`app_version`/`channel` metadata columns beside it (docs/updates.md "Every diagnostics export
+names its build"); it is measured as part of the trim, not added after it.
 
 `body_bytes` is **recomputed by the trigger**, never taken from the caller: it is the input to the
 storage ceiling, so a client that under-reported it would be handing itself an unbounded quota.
