@@ -200,6 +200,7 @@ things an "Android TV emulator" was wanted for:
 |---|---|---|
 | API 28 | `system-images;android-28;google_apis;x86_64`, `tv_1080p` profile, D-pad-only input | The API-28 runtime/texture path. `isTelevision` is **false** here — it is not a TV image — so the two-pane layout comes from the window-size branch of `isWideLayout`, not the TV branch. The script asserts `wide=true` from the app's own `layout window=…` line rather than assuming it. |
 | API 36 | `system-images;android-36;android-tv;x86_64` | A genuine TV image: `UiModeManager`/leanback detection (`device class television=true`), the TV layout and the leanback launcher category. |
+| API 36, Skia GL | `system-images;android-36;android-tv;x86_64`, launched with `--force-skia-gl` | The **non-default renderer**. The app ships Impeller except on a one-entry SoC denylist (docs/player.md "The Flutter renderer"); this leg forces Skia OpenGL with the debug-only `--ez iptvsForceSkiaGl true` extra, hard-fails unless the app reports `renderer=skia-gl reason=forced-debug`, and then drives the whole TV flow on it. A renderer dimension on one level, not on both: the cost is one extra emulator boot on a non-required job, and API 36 is the leg worth doubling because it is the genuine TV image. No emulator carries the denylisted SoC, so this proves the mechanism, never the match. |
 
 ### What the run actually asserts
 
@@ -214,6 +215,7 @@ carries a URL, header or credential:
 | Preview → fullscreen → Back (×5) | `HdrPlayerActivity` becomes the resumed activity (`dumpsys`), `iptvs.shared: fullscreen adopted the shared preview engine` once per cycle, and ≤4 Back presses leave the player. |
 | Pause ≥35 s, resume, "Go to live" | `native live latency behind drift=…` (the one-shot crossing of `LiveLatency.WARN_MS`), the chip reachable by D-pad, `native live latency reset reason=golive drift=…` with `drift ≥ 30000`, and — the invariant with no other observable effect — focus landing on play/pause afterwards. OK is pressed the moment the chip takes focus, and the focus check counts only **after** the go-live reload: the live chrome auto-hides after 4.5 s, and a late OK merely re-reveals it with default focus on play/pause, which once read as a passing hand-back. |
 | Channel up/down | `[iptvs.player] zap play source=… channel=… id=…` per settled zap. |
+| The renderer in use | `[iptvs.library] renderer=<impeller\|skia-gl> reason=<why>`, reported on every leg. On the Skia GL leg the value is asserted and a mismatch is a **hard** failure — a leg that silently fell back to Impeller would be worse than no leg. |
 | Throughout | `FATAL EXCEPTION` attributed to the package, `ANR in <pkg>`, a tombstone naming the package (`>>> <pkg> <<<`), and any unexpected pid change all fail the run. |
 
 Artifacts per leg: full logcat, a crash excerpt, screenshots at every step, `meminfo`, and a
@@ -570,6 +572,22 @@ Google Play workflow's run number (vc10 = v0.1.61, vc12 = v0.1.70).
     (`renderer-test-apk.yml`, Skia OpenGL), not `ImpellerBackend=opengles`:
     - crashes stop → they follow the Impeller renderer on this device;
     - same signatures continue → the renderer is ruled out and "not app-fixable" stands.
+  - **Outcome: the renderer-test APK stopped them**, across several sources and streams. **Fixed
+    by targeted Skia GL in 0.1.79, pending on-device confirmation**: `player/RendererPolicy.kt`
+    denylists the SoC model `RTD2875P` and `MainActivity.getFlutterShellArgs()` adds
+    `--enable-impeller=false` for that model alone, so every other device keeps Impeller
+    (docs/player.md "The Flutter renderer"). Still owed on the TV itself:
+    - that `Build.SOC_MODEL` really reads `RTD2875P` there. Sentry reports the *chipset* as
+      "Realtek RTD2875P", most likely `SOC_MANUFACTURER` + `SOC_MODEL`, so the model half is
+      inferred rather than observed — the shipped build prints what it matched as
+      `renderer=… reason=…` in the exportable log, so one Diagnostics export settles it;
+    - that the runtime shell argument produces the same engine the manifest-opt-out build did;
+    - that the crashes stay gone on an ordinary (non-dispatch) build. Watch IPTVS-5…-B and this
+      Play cluster on 0.1.79+; a recurrence on an event tagged `renderer=skia-gl` means the
+      renderer is ruled out after all and this entry reverts to "not app-fixable".
+    An emulator leg (API 36 `android-tv`, `--force-skia-gl`) proves the override mechanism and
+    that the TV flow runs on Skia GL — no emulator carries this SoC, so it proves nothing about
+    the match.
 - **DNA Hubi Soundbox** (Broadcom BCM72180), `0a0f1ee6…`: `std::terminate` thrown out of
   `/vendor/lib/libbcmvulkan_icd.so` (`vkCreateImageView`) while Impeller allocates a texture.
   It's a vendor Vulkan driver; the only lever is an app-wide `ImpellerBackend=opengles`, which is

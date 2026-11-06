@@ -21,6 +21,45 @@ void main() {
     expect(log.asText(), isNot(contains('providerpass123')));
   });
 
+  group('build identity header', () {
+    // Set once at boot and never cleared, so every test below restores it.
+    tearDown(() => log.appBuild = '');
+
+    test('every export says which build produced it', () {
+      log.appBuild = '0.1.79+42';
+      log.add('player', 'something');
+      for (final text in [log.asText(), log.asTextBounded(1 << 20)]) {
+        final lines = text.split('\n');
+        // Beside `entries=`, so a reader scanning the top of a report sees
+        // the build before the first log line.
+        expect(lines[1], 'app=0.1.79+42 channel=development');
+        expect(lines[2], 'entries=1');
+      }
+    });
+
+    test('an unresolved version reads `unknown` rather than being omitted', () {
+      // `PackageInfo.fromPlatform` is async; an export taken in the first
+      // moments of a launch has to say so instead of silently dropping the
+      // field, which would read as an older build that never had one.
+      expect(log.asText(), contains('app=unknown channel=development'));
+    });
+
+    test('the bounded export still honours its cap with the extra line', () {
+      log.appBuild = '0.1.79+42';
+      for (var i = 0; i < 200; i++) {
+        log.add('s', 'line $i padded out so the trim loop has work to do');
+      }
+      for (final cap in [0, 1, 40, 120, 900, 3000]) {
+        final bounded = log.asTextBounded(cap);
+        expect(
+          utf8.encode(bounded).length,
+          lessThanOrEqualTo(cap),
+          reason: 'cap=$cap must be honoured with the app= line present',
+        );
+      }
+    });
+  });
+
   group('asTextBounded', () {
     int bytes(String value) => utf8.encode(value).length;
 

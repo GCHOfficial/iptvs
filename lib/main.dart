@@ -4,12 +4,15 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/app_database.dart';
 import 'data/cloud_config.dart';
 import 'data/crash_reporter.dart';
 import 'data/device_class.dart';
+import 'data/diagnostics_log.dart';
+import 'data/renderer_class.dart';
 import 'data/secure_local_storage.dart';
 import 'data/source_identity_migration.dart';
 import 'data/source_store.dart';
@@ -48,6 +51,14 @@ Future<void> main() async {
   // forks and the test suite never start an SDK at all. See
   // `data/crash_reporter.dart`.
   unawaited(CrashReporter.instance.start());
+  // Two facts every exported diagnostics log should carry, neither of which
+  // anything on the first-frame path waits for:
+  //  * which build produced the export (`app=<version>+<build>`), and
+  //  * which Flutter renderer the Android engine started with, and why
+  //    (`renderer=… reason=…`, resolved in Kotlin before this isolate
+  //    existed — `data/renderer_class.dart`).
+  unawaited(_recordBuildIdentity());
+  unawaited(reportRenderer());
   final store = SourceStore();
   // Cloud init, opening the database and reading the source list are mutually
   // independent — only the identity migration below needs the database and the
@@ -69,6 +80,22 @@ Future<void> main() async {
   ).wait;
   await migrateAllSourceIdentities(db, sources);
   runApp(IptvApp(db: db, store: store));
+}
+
+/// Stamps the running build's version onto the exportable diagnostics log's
+/// header (`app=<version>+<build>`).
+///
+/// Un-awaited and failure-tolerant: the header already has a word for "not
+/// resolved" (`app=unknown`), and a platform-channel hiccup here must not be
+/// the reason the app does not boot. `PackageInfo.fromPlatform` memoizes, so
+/// this shares its round trip with the crash reporter's.
+Future<void> _recordBuildIdentity() async {
+  try {
+    final info = await PackageInfo.fromPlatform();
+    DiagnosticsLog.instance.appBuild = '${info.version}+${info.buildNumber}';
+  } catch (_) {
+    // Leaves `app=unknown`, which is accurate.
+  }
 }
 
 /// Optional cloud source panel: only initialised when build-time Supabase

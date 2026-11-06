@@ -61,7 +61,9 @@ over `adb`: D-pad first run → DemoSource → preview → shared-engine fullscr
 "Go to live" → zap), on PRs touching `android/**`/`lib/player/**`/`lib/screens/**`, plus dispatch
 and a weekly cron — **there is no x86_64 Android TV image below API 36**, so API 28 (the
 SurfaceTexture-finalizer level) runs on `google_apis;x86_64` with a TV screen profile and API 36 on
-the real `android-tv` image; an emulator validates input/lifecycle, never decoders, HDR or
+the real `android-tv` image, plus a third leg re-running API 36 under the debug-only
+`--force-skia-gl` override so the non-default renderer is driven end to end; an emulator validates
+input/lifecycle, never decoders, HDR or
 passthrough (docs/validation-baseline.md "Android TV emulator CI").
 Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
 exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
@@ -979,6 +981,23 @@ otherwise `PlayerScreen` escalates embedded→native once on PQ/HLG detection. O
 embedded `media_kit_video`, HDR tone-mapped to SDR.
 **Read docs/player.md before touching playback, preview, or overlay code.** Non-negotiables:
 
+- **Renderer: Impeller everywhere except a runtime SoC denylist (RTD2875P → Skia GL).**
+  `player/RendererPolicy.kt` (pure, `RendererPolicyTest`) matches `Build.SOC_MODEL` **exactly**
+  (case-insensitive after trim; API 31+, null below) against a one-entry denylist and
+  `MainActivity.getFlutterShellArgs()` — the single override, and the only hook that reaches
+  `FlutterLoader.ensureInitializationComplete` for how this app starts its engine — adds
+  `--enable-impeller=false`. Precedence: an `EnableImpeller` **manifest** entry wins and this
+  contributes nothing (so `renderer-test-apk.yml` and a future Impeller-pinned A/B aren't
+  defeated, and two contradictory `--enable-impeller=` values can never meet in the set-backed
+  `FlutterShellArgs`), then the debug-only `--ez iptvsForceSkiaGl true`, then the denylist, then
+  Impeller. The decision is read back at boot over `iptvs/device` (`renderer`), logged once as
+  `renderer=… reason=…`, and set as the Sentry `renderer` tag on **both** the Dart scope (synced
+  to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`, which is what puts
+  it on tombstones. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
+  go away — when it does this silently stops working while still reporting `skia-gl`, so re-check
+  `FlutterEngineFlags.ENABLE_IMPELLER` (still present, still `allowedInRelease`) and the matcher
+  test on **every Flutter bump**. Detail + the on-device confirmation still owed:
+  docs/player.md "The Flutter renderer".
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
   top-level window.
 - **Windows: the runner sizes mpv's VO window itself** (`ResyncNativeVideoRenderer`) — never rely on
@@ -1453,7 +1472,8 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
   are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
 - Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `CrashScrubTest`, `CrashTestTest`, `PlayerBackPolicyTest`,
-  `ReconnectPolicyTest`, `LiveResolveTest`; run via `./gradlew :app:testDevelopmentDebugUnitTest`)
+  `ReconnectPolicyTest`, `LiveResolveTest`, `RendererPolicyTest`; run via
+  `./gradlew :app:testDevelopmentDebugUnitTest`)
   for pure logic
   extracted from the native player. CI's Android job runs it (after the first `flutter build apk`,
   which generates the uncommitted `android/gradlew`); before that step existed nothing compiled

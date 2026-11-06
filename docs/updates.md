@@ -179,6 +179,41 @@ information is uploaded. That is a decision, not an omission:
     mapping upload needs a different token scope from the debug-file upload and a release-time
     failure is only a warning.
 
+### The `renderer` tag
+
+Every event carries a `renderer` tag (`impeller` / `skia-gl`), so the Android renderer denylist
+(docs/player.md "The Flutter renderer") is answerable from the dashboard rather than from a guess:
+a recurrence of the TCL/RTD2875P native crashes on an event tagged `skia-gl` would rule the
+renderer out, which is exactly what that denylist is betting against.
+
+It is set **twice, on purpose**, because the Dart `beforeSend` is not the whole chokepoint:
+
+- `CrashReporter._tagRenderer` puts it on the **Dart** scope after `SentryFlutter.init` returns.
+  `sentry_flutter` installs a `NativeScopeObserver` and leaves `enableNdkScopeSync` at its default
+  `true`, so a Dart `setTag` is mirrored onto the Java SDK's scope (`Sentry.setTag` over JNI) and
+  from there into sentry-ndk's.
+- `NativeCrashScrubber`'s Java `beforeSend` stamps it too, which is what makes it independent of
+  scope-sync *timing* and of whether an event's scope survived the process. That one callback is
+  the only place Java/Kotlin exceptions, NDK crashes and Android 12+ tombstones all pass through —
+  the same reason the redaction lives there. It fills the tag **only when nothing has set it**, so
+  an envelope replayed from a previous launch's outbox keeps the renderer it actually crashed on.
+
+The value is not PII and is one of two fixed words plus, in the diagnostics log only, a reason
+(`default` / `manifest` / `forced-debug` / `soc:<MODEL>`).
+
+### Every diagnostics export names its build
+
+`DiagnosticsLog.asText`/`asTextBounded` put `app=<version>+<build> channel=<rawChannel>` in the
+header, beside `entries=`. Without it "it still happens" and "it happens again on the build that
+was supposed to fix it" are the same text, and the Send-diagnostics path had no other field saying
+which build a log came from. `channel` is the **raw** `DISTRIBUTION_CHANNEL` define rather than the
+parsed enum, because an unrecognised value parses to `development` and a build whose channel define
+was wrong is exactly the one that needs to say so. The version is read asynchronously
+(`PackageInfo.fromPlatform`, un-awaited in `main`), so an export taken in the first moments of a
+launch reads `app=unknown` rather than silently omitting the field. The bounded variant measures
+its header, so the extra line is accounted for in the trim rather than pushing the result over the
+256 KiB server cap.
+
 ### The send budget
 
 `CrashBudget` (`lib/data/crash_budget.dart`) and its Kotlin twin `CrashBudgetFile`

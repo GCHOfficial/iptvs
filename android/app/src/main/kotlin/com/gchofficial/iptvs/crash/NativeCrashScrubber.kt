@@ -47,15 +47,29 @@ object NativeCrashScrubber {
     /** Hex characters of a fingerprint a log line prints. Mirrors Dart's `shortFingerprint`. */
     private const val SHORT_FINGERPRINT = 8
 
+    /** Tag naming the Flutter renderer this process runs (`RendererPolicy`). */
+    private const val RENDERER_TAG = "renderer"
+
     @Volatile
     private var installed = false
+
+    @Volatile
+    private var renderer: String? = null
 
     /**
      * Installs the callbacks. Idempotent; returns false only if the Sentry
      * Android SDK is not running, in which case there is nothing to guard.
+     *
+     * [renderer] is the Flutter renderer this process resolved
+     * (`impeller`/`skia-gl`). It is tagged onto every event here, not only on
+     * the Dart scope, because the three Android event sources this callback
+     * exists for — Java/Kotlin uncaught exceptions, NDK signal crashes and
+     * Android 12+ tombstones — are captured by the *Java* SDK and are exactly
+     * the crashes the renderer denylist is about.
      */
     @Synchronized
-    fun install(budgetPath: String): Boolean {
+    fun install(budgetPath: String, renderer: String? = null): Boolean {
+        this.renderer = renderer?.takeIf { it.isNotBlank() }
         if (installed) return true
         val options: SentryOptions = ScopesAdapter.getInstance().options
         if (options.dsn.isNullOrEmpty()) return false
@@ -163,6 +177,13 @@ object NativeCrashScrubber {
             event.extras = rebuilt
         }
         event.breadcrumbs?.forEach { scrub(it) }
+        // After the tag-redaction pass above, and only when nothing has
+        // already said otherwise: a cached outbox envelope from a previous
+        // launch carries that launch's scope, and the renderer it crashed on
+        // is the one worth keeping.
+        renderer?.let {
+            if (event.tags?.containsKey(RENDERER_TAG) != true) event.setTag(RENDERER_TAG, it)
+        }
         return event
     }
 

@@ -16,6 +16,7 @@ import 'crash_test.dart';
 import 'diagnostics_log.dart';
 import 'distribution_channel.dart';
 import 'net.dart';
+import 'renderer_class.dart';
 
 /// The Sentry DSN, injected at build time by the release workflows
 /// (`--dart-define=SENTRY_DSN=...`, from the repo **variable** of that name —
@@ -439,6 +440,7 @@ class CrashReporter {
 
       _started = true;
       await _installNativeScrubber(budget);
+      await _tagRenderer();
       DiagnosticsLog.instance.addAndPrint(
         'library',
         // The resolved *environment*, not the raw channel: on a crash-test
@@ -454,6 +456,34 @@ class CrashReporter {
         'library',
         'crash reporting unavailable: ${error.runtimeType}',
       );
+    }
+  }
+
+  /// Puts the Flutter renderer this process runs (`impeller` / `skia-gl`) on
+  /// the Sentry scope as the `renderer` tag.
+  ///
+  /// Two paths, because they cover different events:
+  ///
+  ///  * **This one** tags the *Dart* scope. `sentry_flutter` installs a
+  ///    `NativeScopeObserver` and leaves `enableNdkScopeSync` at its default
+  ///    `true`, so a Dart `setTag` is mirrored onto the Java SDK's scope (and
+  ///    from there into sentry-ndk's), which is what makes it reach Java, NDK
+  ///    and tombstone events *of this session*.
+  ///  * `NativeCrashScrubber` additionally stamps it in the Java
+  ///    `beforeSend`, where it is independent of scope-sync timing and covers
+  ///    an envelope replayed from a previous launch's outbox. That one only
+  ///    fills the tag when nothing has set it, so the scope's value wins.
+  ///
+  /// A failure here is cosmetic — never let it take the SDK down with it.
+  Future<void> _tagRenderer() async {
+    try {
+      final info = await detectRenderer();
+      if (info == null) return;
+      await Sentry.configureScope(
+        (scope) => scope.setTag('renderer', info.renderer),
+      );
+    } catch (_) {
+      // An untagged event is still a useful event.
     }
   }
 
