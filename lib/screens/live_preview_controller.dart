@@ -827,9 +827,11 @@ class LivePreviewController extends ChangeNotifier {
     // pause behaviour rides here rather than in a second observer.
     await _audioSession.release();
     // Same reasoning for the provider's keep-alive, and the same observer
-    // covers backgrounding. Token-checked: on the way *into* fullscreen a
-    // different-channel preview is stopped after the route has armed its own,
-    // and that arming must survive this call.
+    // covers backgrounding. Token-checked rather than unconditional, because
+    // `stop()` also runs on paths where something *else* is already playing by
+    // the time it completes — the native stop above is an awaited round trip,
+    // and a fullscreen route or a newer `start()` can arm its own inside that
+    // window. Only the arming this preview still owns is released.
     PlaybackKeepAliveCoordinator.instance.stopped(_keepAliveToken);
   }
 
