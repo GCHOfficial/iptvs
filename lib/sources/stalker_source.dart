@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
@@ -15,6 +16,7 @@ import 'epg_guides.dart';
 import 'epg_matching.dart';
 import 'expiry.dart';
 import 'source.dart';
+import 'stalker_watchdog.dart';
 
 /// A MAG set-top-box profile emulated to the portal.
 class MagProfile {
@@ -153,7 +155,8 @@ class StalkerSource
         EpgByteReporting,
         CatchupSource,
         SourceCapabilityReporter,
-        RefreshableSource {
+        RefreshableSource,
+        PlaybackKeepAlive {
   final String sourceId;
   final String portal; // e.g. http://host:port/c/
   final String mac;
@@ -206,6 +209,32 @@ class StalkerSource
   /// on the same payload.
   Map<dynamic, dynamic>? _lastProfileJs;
   String? _providerCatchupTimezone;
+
+  // ── Portal watchdog (keep-alive) ───────────────────────────────────────────
+  //
+  // See [lib/sources/stalker_watchdog.dart] for the sourced STB behaviour and
+  // docs/sources.md for why this exists and what would falsify it. Armed and
+  // disarmed only through `PlaybackKeepAliveCoordinator`, which guarantees
+  // one armed source app-wide; these fields guarantee one timer and one
+  // in-flight request for *this* source.
+  Timer? _watchdogTimer;
+  Duration? _watchdogInterval;
+  int _watchdogPolls = 0;
+  int _watchdogFailures = 0;
+  bool _watchdogInFlight = false;
+
+  /// `init=1` is "the box just started", not "playback just started" — a MAG
+  /// sends it once per portal load (`c/watchdog.js:61`), and the portal stores
+  /// it as `users.just_started` and uses `init == 0` to gate MAC-clone
+  /// detection (`server/lib/watchdog.class.php:22-31`). One per source
+  /// instance is the faithful mapping: this object's session *is* the portal
+  /// load.
+  bool _watchdogInitSent = false;
+
+  /// `cur_play_type` for the next poll. Only ever live TV or idle here:
+  /// the keep-alive is armed from the live resolve path alone (catch-up and
+  /// VOD are deliberately out of scope for the experiment — one variable).
+  int _watchdogPlayType = kStalkerPlayTypeIdle;
 
   StalkerSource({
     required this.sourceId,
@@ -301,6 +330,99 @@ class StalkerSource
     // portal. Session/auth state (_endpoint/_token/_profileLoaded) is left
     // intact — connect() is already re-run before the fetch.
     _channelCache = null;
+  }
+
+  // ── PlaybackKeepAlive ──────────────────────────────────────────────────────
+
+  /// Arms the portal watchdog. **Repeat calls are "still playing"**, not a
+  /// reason to restart the timer: a held channel-up key settles into one
+  /// resolve per zap and the reconnect watchdog re-resolves on every drop, so
+  /// restarting here would mean a session that zaps briskly never completes an
+  /// interval and the keep-alive — the one thing this is for — never fires.
+  @override
+  void playbackStarted(Channel channel) {
+    _watchdogPlayType = kStalkerPlayTypeLiveTv;
+    final resolved = stalkerWatchdogInterval(_lastProfileJs);
+    if (_watchdogTimer != null && _watchdogInterval == resolved.interval) {
+      return;
+    }
+    // Either nothing was armed, or the portal's answer changed under us (a
+    // re-handshake refreshed the profile). Re-arm at the new cadence.
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
+    _watchdogInterval = resolved.interval;
+    _watchdogPolls = 0;
+    _watchdogFailures = 0;
+    _debug(
+      'watchdog start interval=${resolved.interval.inSeconds}s '
+      'from=${resolved.source.name} channel=${channel.id}',
+    );
+    _watchdogTimer = Timer.periodic(
+      resolved.interval,
+      (_) => unawaited(_sendWatchdog()),
+    );
+    // `watchdog.run` sends one immediately before scheduling the interval
+    // (`c/watchdog.js:61`) — the box tells the portal it is here the moment it
+    // starts, rather than one whole interval later.
+    unawaited(_sendWatchdog());
+  }
+
+  @override
+  void playbackStopped() => _stopWatchdog('playback stopped');
+
+  void _stopWatchdog(String reason) {
+    final timer = _watchdogTimer;
+    if (timer == null) return;
+    timer.cancel();
+    _watchdogTimer = null;
+    _watchdogInterval = null;
+    _watchdogPlayType = kStalkerPlayTypeIdle;
+    _debug('watchdog stop reason=$reason polls=$_watchdogPolls');
+  }
+
+  Future<void> _sendWatchdog() async {
+    // Disarmed between the tick being scheduled and it running, or a previous
+    // poll is still in flight on a portal slower than the interval. Either way
+    // this one is skipped rather than queued — the portal only ever reads the
+    // most recent one.
+    if (_watchdogTimer == null || _watchdogInFlight) return;
+    _watchdogInFlight = true;
+    final n = ++_watchdogPolls;
+    final init = !_watchdogInitSent;
+    _watchdogInitSent = true;
+    final intervalSeconds = _watchdogInterval?.inSeconds ?? 0;
+    try {
+      final r = await _call({
+        'type': 'watchdog',
+        'action': 'get_events',
+        'cur_play_type': '$_watchdogPlayType',
+        'event_active_id': '0',
+        'init': init ? '1' : '0',
+      }, quiet: true);
+      if (stalkerWatchdogShouldLog(n)) {
+        // `_call` returns only on HTTP 200 — anything else throws — so the
+        // status is a constant here and a quoted number only on the failure
+        // path below.
+        _debug(
+          'watchdog HTTP 200 interval=${intervalSeconds}s '
+          'events=${stalkerWatchdogEventsNote(r['js'])}',
+        );
+      }
+    } catch (e) {
+      // The first failure always lands: a keep-alive that is silently failing
+      // is the one thing an export most needs to say, and it would otherwise
+      // be invisible until the tenth poll.
+      final failures = ++_watchdogFailures;
+      if (failures == 1 || stalkerWatchdogShouldLog(n)) {
+        _debug(
+          'watchdog HTTP ${stalkerWatchdogStatus(e)} '
+          'interval=${intervalSeconds}s events=none '
+          'detail=${e.runtimeType}',
+        );
+      }
+    } finally {
+      _watchdogInFlight = false;
+    }
   }
 
   @override
@@ -1007,7 +1129,13 @@ class StalkerSource
   }
 
   @override
-  Future<void> dispose() async => _http.close(force: true);
+  Future<void> dispose() async {
+    // Before the client closes: a surviving periodic timer would keep firing
+    // `_sendWatchdog` against a closed `HttpClient` for the rest of the app's
+    // life, one failed poll per interval, on a source nothing is playing.
+    _stopWatchdog('source disposed');
+    _http.close(force: true);
+  }
 
   // ── data mapping ───────────────────────────────────────────────────────────
 
@@ -2301,14 +2429,23 @@ class StalkerSource
   }
 
   /// Calls the resolved endpoint, re-handshaking once if the token expired.
+  ///
+  /// [quiet] suppresses the per-request diagnostics `_request` writes (the
+  /// `HTTP 200 … body=…B`, response-shape and `http:stalker-json` byte lines).
+  /// It exists for the watchdog alone: the log holds 2000 entries, and a poll
+  /// every 30 s writing three lines each would evict the evidence an export
+  /// was taken for within the hour. The watchdog writes its own throttled line
+  /// instead. Everything that can *fail* still logs — the throw carries the
+  /// status, and `_sendWatchdog` reports it.
   Future<Map<String, dynamic>> _call(
     Map<String, String> params, {
     bool retry = true,
+    bool quiet = false,
   }) async {
     final override = debugApi;
     if (override != null) return override(params);
     final ep = await _resolveEndpoint();
-    final r = await _request(ep, params);
+    final r = await _request(ep, params, quiet: quiet);
     if (retry && _looksTokenInvalid(r)) {
       // Stale token → re-auth and try once more.
       _debug('token invalid; re-handshaking for ${_actionName(params)}');
@@ -2318,7 +2455,7 @@ class StalkerSource
       if (params['action'] != 'get_profile') {
         await _getProfile();
       }
-      return _call(params, retry: false);
+      return _call(params, retry: false, quiet: quiet);
     }
     final portalError = _portalErrorMessage(r);
     if (portalError != null) {
@@ -2331,17 +2468,21 @@ class StalkerSource
 
   Future<Map<String, dynamic>> _request(
     String endpoint,
-    Map<String, String> params,
-  ) async {
+    Map<String, String> params, {
+    bool quiet = false,
+  }) async {
     final uri = Uri.parse(endpoint)
         .replace(queryParameters: {...params, 'JsHttpRequest': '1-xml'});
     for (var attempt = 1; attempt <= 3; attempt++) {
       final operation = HttpOperation(
         kStalkerJsonWorkload,
-        onReadMetrics: (m) => DiagnosticsLog.instance.add(
-          'http:${kStalkerJsonWorkload.name}',
-          'compressed_bytes=${m.compressedBytes} decoded_bytes=${m.decodedBytes}',
-        ),
+        onReadMetrics: quiet
+            ? null
+            : (m) => DiagnosticsLog.instance.add(
+                'http:${kStalkerJsonWorkload.name}',
+                'compressed_bytes=${m.compressedBytes} '
+                    'decoded_bytes=${m.decodedBytes}',
+              ),
       );
       final req = await operation.wait(_http.getUrl(uri));
       req.followRedirects = true;
@@ -2358,10 +2499,12 @@ class StalkerSource
       final resp = await operation.wait(req.close());
       final bytes = await operation.readBytes(resp);
       final body = utf8.decode(bytes, allowMalformed: true);
-      _debug(
-        '${_actionName(params)} HTTP ${resp.statusCode} ${_redactUrl(endpoint)} '
-        'body=${body.length}B',
-      );
+      if (!quiet) {
+        _debug(
+          '${_actionName(params)} HTTP ${resp.statusCode} '
+          '${_redactUrl(endpoint)} body=${body.length}B',
+        );
+      }
       if (resp.statusCode != 200) {
         if (_isTransientStatus(resp.statusCode) && attempt < 3) {
           _debug(
@@ -2384,7 +2527,9 @@ class StalkerSource
       }
       if (decoded is! Map) throw StalkerException('Unexpected response shape');
       final result = Map<String, dynamic>.from(decoded);
-      _debug('${_actionName(params)} response ${_responseShape(result)}');
+      if (!quiet) {
+        _debug('${_actionName(params)} response ${_responseShape(result)}');
+      }
       return result;
     }
     throw StalkerException('Request failed after retries');

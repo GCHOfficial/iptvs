@@ -912,7 +912,13 @@ class HdrPlayerActivity : ComponentActivity() {
         // all three used to arrive as the same silent black screen.
         logNative(
             "live reconnect attempt=$reconnectAttempt force=$force " +
-                "kind=${if (force) "error" else stallKind}" +
+                "kind=${if (force) "error" else stallKind} " +
+                // What was still buffered when the decision was taken — the
+                // same field Dart's own reconnect line carries. It separates a
+                // cushion that never built from one that built and drained,
+                // and read next to `stream source eof sinceLoadMs=` it says how
+                // long the server's close was hidden behind the buffer.
+                "ahead=${engine?.bufferedAheadMs() ?: -1L}" +
                 // Frame tallies at the moment of the decision: they are what
                 // separate a decoder throwing frames away to catch up from one
                 // that has stopped emitting, which read identically from every

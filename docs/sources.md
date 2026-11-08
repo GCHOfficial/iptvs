@@ -1,9 +1,11 @@
-# Sources — EPG guides, subscription expiry, the M3U→Xtream upgrade, and Stalker adult genres
+# Sources — EPG guides, subscription expiry, the M3U→Xtream upgrade, Stalker adult genres, and the portal watchdog
 
-Detail for two provider-layer areas whose rules are summarised in CLAUDE.md: how a subscription
-expiry is obtained per provider, and how an M3U source that is really an Xtream panel gets
-upgraded. Read this before touching `subscriptionExpiry()` on any `Source`, `lib/sources/expiry.dart`,
-`lib/sources/m3u_upgrade.dart`, or the expiry cache.
+Detail for the provider-layer areas whose rules are summarised in CLAUDE.md: how a subscription
+expiry is obtained per provider, how an M3U source that is really an Xtream panel gets
+upgraded, and the Stalker portal **watchdog (keep-alive)** — a deliberate, falsifiable experiment
+rather than a shipped fix. Read this before touching `subscriptionExpiry()` on any `Source`,
+`lib/sources/expiry.dart`, `lib/sources/m3u_upgrade.dart`, the expiry cache, or
+`lib/sources/stalker_watchdog.dart` / `lib/data/playback_keep_alive.dart`.
 
 ## Multiple EPG guides per source
 
@@ -562,3 +564,177 @@ Hiding them again is the user's call, through the per-source category toggles
 in `source_settings_screen` — the app does not filter adult content itself.
 
 Pinned by `test/stalker_censored_genres_test.dart`.
+
+## The portal watchdog (keep-alive)
+
+**This is a hypothesis test, not a known fix.** It was shipped as a
+one-variable experiment against a user's 0.1.79 export and is written to be
+*falsified* by the next one. Read the falsification section at the bottom
+before concluding anything from it.
+
+### The evidence it was built from
+
+A Stalker portal on Android TV, ExoPlayer native. A live channel plays at a
+steady 50 fps with zero dropped frames; every connection then ends cleanly
+with `native live reconnect attempt=1 force=false kind=ended`, roughly 26–29 s
+of wall clock after it was opened, for about 24–27 s of media. Each time the
+channel is re-resolved through `itv:create_link` and the picture is back in
+about 1.5 s. Nothing in this app imposes a ~30 s stream timeout, and
+`kind=ended` is the engine's *clean* end of stream, not an error — so something
+on the provider's side closed the body.
+
+The one thing a real MAG set-top box does on that cadence and this app did not
+is poll the portal's watchdog.
+
+### What a MAG box actually sends
+
+Sourced from the open-source Stalker middleware (`azhurb/stalker_portal`; the
+upstream repository was stripped when it was archived, so the files below were
+read through a complete fork, `tzpeng/stalker_portal`, whose tree matches the
+published layout).
+
+| | |
+| --- | --- |
+| **Request** | `type=watchdog`, `action=get_events`, `cur_play_type`, `event_active_id`, `init` (`c/watchdog.js:71-105`) |
+| **Transport** | the ordinary authorized portal call — same MAC cookie, `Bearer` token and `JsHttpRequest=1-xml` as every other action (`c/xpcom.common.js:698-721,797-821`) |
+| **Interval** | `watchdog_timeout` seconds from the profile (`c/xpcom.common.js:1172`, handed to `watchdog.run` at `:1399`) |
+| **Interval fallback** | **30 s** — the client's own `this.request_timeout = 30000` (`c/watchdog.js:8`), reached through `timeout*1000 \|\| this.request_timeout` (`c/watchdog.js:23`), so an absent or zero portal value leaves a real box polling every 30 s |
+| **Portal-side default** | `watchdog_timeout = 120`, documented as "Timeout for polling the server in seconds. Set between 30 and 300." (`server/config.ini:196-197`) |
+| **First poll** | immediate, with `init=1`, *before* the interval is scheduled (`c/watchdog.js:59-68`) |
+| **`cur_play_type`** | `1` live TV, `11` TV archive, `14` timeshift, `2` VOD, `0` when nothing is playing or playback is paused (`c/xpcom.common.js:2065+`, `c/watchdog.js:76-80`) |
+
+And what the server does with it (`server/lib/watchdog.class.php:20-85`): one
+`UPDATE users SET keep_alive = NOW(), ip = …, now_playing_type = …,
+just_started = …, last_watchdog = NOW()`, then any pending event for this box.
+`init` is "the box just started", not "playback just started" — the portal
+stores it as `users.just_started` and uses `init == 0` to gate MAC-clone
+detection (`:22-31`).
+
+**What the open-source server does *not* do is kill a stream when the polls
+stop.** `keep_alive` drives "is this box online" in the admin UI
+(`server/lib/user.class.php:686`: `keep_alive >= NOW() - watchdog_timeout`) and
+the streamer-session counts used for load balancing and statistics
+(`server/lib/streamserver.class.php:195-200`, `server/lib/func.php:164,189,203`,
+all `keep_alive > now - watchdog_timeout*2`). Nothing in that code path
+terminates a running body. That is recorded here deliberately: it is the
+strongest argument *against* the hypothesis, and the only thing that keeps it
+alive is that the panels and streamers in front of real subscriptions are not
+this code — they are forks, Ministra 5.x, and third-party streamers (Flussonic,
+nginx secure-link, XtreamUI's Ministra emulation) that do their own session
+accounting off exactly these columns.
+
+### What this app sends
+
+`StalkerSource` implements the optional `PlaybackKeepAlive` capability
+(`lib/sources/source.dart`, same shape and the same
+`implements`-doesn't-inherit-defaults reasoning as `RefreshableSource` /
+`BatchedEpgSource`), with the pure half — interval resolution, log throttling,
+the `events=` note, the status extraction — in
+`lib/sources/stalker_watchdog.dart`.
+
+- The payload is the MAG one above, with `cur_play_type=1` and
+  `event_active_id=0`. We never act on a returned event (no reboot, no portal
+  reload, no message popup); the point is the `keep_alive` write, and acting on
+  a portal-pushed `reboot` from a third-party panel is not something this app
+  should do.
+- `init=1` once per `StalkerSource` instance, `0` after. That object's session
+  *is* the portal load, which is the faithful mapping — and it matters, because
+  `init=0` is what arms MAC-clone logging on panels that enable it.
+- The interval is the profile's `watchdog_timeout` when `get_profile` carried
+  one (parsed `parseInt`-style, since portals send it as a string at least as
+  often as a number), **clamped to the documented 30–300 s**, else the STB's own
+  30 s. The client does not clamp; we do, because a panel answering far outside
+  that range would either hammer the portal or arm a keep-alive too slow to keep
+  anything alive. The fallback is the client's 30 s rather than the server's
+  120 s default on purpose: 30 s is what a box *does* when the field is absent,
+  and it is the conservative choice for the thing being tested.
+- Requests go through the ordinary authorized `_call` transport. They never
+  reach a third-party host — the same rule that keeps the MAC cookie and Bearer
+  token off user-supplied EPG guide servers.
+- Catch-up and VOD deliberately **do not** arm it. One variable.
+
+### Lifecycle
+
+Armed and disarmed through `PlaybackKeepAliveCoordinator`
+(`lib/data/playback_keep_alive.dart`), which is a **single slot**, not a set: a
+provider account here is single-connection by assumption, which is why the
+Android preview and the fullscreen player share one engine and why a zap stops
+before it resolves. Arming it for one source disarms whatever held it before,
+so a cross-source zap can never leave provider A being polled for a stream
+provider B is carrying.
+
+- **Start: a successful live `LibraryRepository.resolve`.** That is the one
+  event every surface shares — the live preview, the fullscreen route, a zap
+  settle and a reconnect's re-resolve all arrive there — so no surface has to
+  remember to call anything. It is armed *after* the provider answers: a portal
+  that refused is not playing.
+- **Repeat starts mean "still playing"**, never "restart the timer". A held
+  channel-up key settles into one resolve per zap; restarting the timer there
+  would mean a briskly-zapping session never completes an interval and the
+  keep-alive never fires at all.
+- **Stop** is token-checked, the same discipline `ChannelHandlerOwner` uses for
+  the native MethodChannels and for the same class of bug: across the Android
+  handoff the preview and the fullscreen route both believe they own playback,
+  and the one that is *leaving* runs its teardown last. `LivePreviewController`
+  releases its own arming in `stop()` (which is also the app-background path —
+  the lifecycle observer in `channel_list_screen` calls it) and in `dispose()`;
+  a stale release from a superseded owner is ignored.
+- **The fullscreen route releases with `stopAll()`**, immediately after the
+  push returns and before the preview return leg runs. Not a token release: a
+  zap moves the session to another channel and possibly another source, each
+  re-arming through its own resolve, so the arming the route started with is
+  long superseded by the time it closes.
+- **`LivePreviewController.play()` re-arms.** The pause/resume pair around a
+  same-channel adopted handoff is the one return path with no resolve on it:
+  the route stops the keep-alive as it closes, and then a decoder resumes that
+  nothing would otherwise be holding the session open for. `pause()`
+  deliberately does not release — while it is paused, the route is what is
+  playing.
+- **`StalkerSource.dispose()` stops the timer before closing its `HttpClient`**,
+  or a survivor would poll a closed client once per interval for the rest of
+  the process's life.
+
+### Diagnostics
+
+One throttled line per poll, under the `stalker` scope:
+
+```
+watchdog start interval=30s from=fallback channel=12345
+watchdog HTTP 200 interval=30s events=0
+watchdog HTTP 503 interval=30s events=none detail=StalkerException
+watchdog stop reason=playback stopped polls=61
+```
+
+`events=` is the portal's `msgs` **count** when it sent one, otherwise the
+response's key **names** only — never a value, because an event's `msg` is
+account-notice text that panels substitute `%mac%`/`%sn%` into
+(`c/watchdog.js:218`). Throttling is the first three polls, then one in ten:
+the log holds 2000 entries and a 30 s poll over a two-hour session is 240
+lines, which would evict the evidence the export was taken for. The **first
+failure always lands**, because a keep-alive that is quietly failing is the one
+thing an export most needs to say.
+
+The watchdog's own transport lines are suppressed (`_call(..., quiet: true)` →
+`_request(..., quiet: true)`), or each poll would additionally write the
+`get_events HTTP 200 … body=…B`, response-shape and `http:stalker-json`
+byte-count lines — three more per poll. Nothing that can *fail* is suppressed:
+the throw carries the status, and `_sendWatchdog` reports it.
+
+### What would falsify this
+
+With the watchdog armed and logging `HTTP 200` on cadence, an export that
+**still** shows `native live reconnect … kind=ended` every ~30 s — now with the
+new `stream source eof sinceLoadMs≈26000 …` line (docs/player.md "Live
+auto-reconnect") beside it — falsifies the hypothesis outright. The portal was
+being told the box is alive and the stream was closed anyway, which points at
+the streamer rather than the portal: a per-connection token lifetime, an
+idle/ABR timeout on the streaming host, or a session cap.
+
+Two weaker outcomes are worth naming so they are not mistaken for a result.
+A session that survives longer *but still ends* says the keep-alive moved a
+timeout rather than removing one. And `watchdog HTTP 404`/`HTTP 403` on every
+poll means the panel has no watchdog endpoint at all — which neither confirms
+nor denies the hypothesis, but does mean this build never tested it on that
+portal.
+
+Pinned by `test/stalker_watchdog_test.dart`.

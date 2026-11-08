@@ -156,7 +156,17 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   dated/unlimited/unknown value (never collapse unlimited into unknown); shared parsing lives in
   `expiry.dart` — **read [docs/sources.md](docs/sources.md) before touching expiry or the
   M3U→Xtream upgrade.** Stalker also backfills adult ("censored") genres that
-  `get_all_channels` omits, via per-genre `get_ordered_list` (docs/sources.md). Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
+  `get_all_channels` omits, via per-genre `get_ordered_list` (docs/sources.md). It also polls the
+  **portal watchdog** while something plays (`type=watchdog&action=get_events`, the MAG payload,
+  on the profile's `watchdog_timeout` clamped to the documented 30–300 s, else the STB client's own
+  30 s): the optional `PlaybackKeepAlive` capability, armed by a successful **live**
+  `LibraryRepository.resolve` and released through `PlaybackKeepAliveCoordinator`
+  (`lib/data/playback_keep_alive.dart`) — one armed source app-wide, token-checked so the preview's
+  teardown can't silence the fullscreen route that superseded it. **It is a deliberate, falsifiable
+  hypothesis test** for live sessions that end cleanly every ~30 s, not a known fix: the
+  open-source portal only writes `users.keep_alive` and kills nothing. Read docs/sources.md "The
+  portal watchdog (keep-alive)" — including what would falsify it — before changing or removing it.
+  Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
   handshake **+ `get_profile`**, before `account_info` — `_call` only guarantees the handshake, and
   the sources screen builds a fresh source per card, which is why the badge read unknown on every
   portal). A far-future sentinel is **unlimited**, but only when written as a date — a bare number
@@ -1297,7 +1307,13 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   dead with no indicator. The poll now treats `_buffering || _endedPending` as stalled with
   **threshold 0** for ended (`shouldReloadStalledLive`), mirroring Android's sticky
   `PlayerUiState.ended`; the flag clears only when a reload really fires (or on `_goToLive`/a
-  zap reset). The reconnect log line carries `kind=ended|buffering|error` (Android's `stallKind`
+  zap reset). **Who closed it is logged ahead of when the picture ran dry**: mpv surfaces write
+  `live upstream ended ahead=…ms` off `demuxer-cache-state.eof` (`upstream_eof.dart`) and Android
+  writes `stream source eof sinceLoadMs=… ahead=… played=… bytes=…` off media3's
+  `AnalyticsListener.onLoadCompleted` on a **progressive** period (`StreamEofPolicy`: live only,
+  `TRACK_TYPE_UNKNOWN` only — HLS/DASH dispatch one per segment — capped per load), with `ahead=`
+  now on Android's `live reconnect` line too. Diagnostics only: nothing reads either, and neither
+  changes a threshold. The reconnect log line carries `kind=ended|buffering|error` (Android's `stallKind`
   vocabulary) and `ahead=<ms>` buffered at the decision, so an export can tell a cushion never
   built from one built and drained.
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
