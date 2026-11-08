@@ -28,6 +28,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -567,6 +569,9 @@ class ExoPlayerEngine(
         mainHandler.removeCallbacks(previewRebuildVerify)
     }
     private var reportedStreamShape = false
+
+    /** `stream source eof` lines written for the current load (see [StreamEofPolicy]). */
+    private var sourceEofLines = 0
     // Dynamic range as reported by the decoder's output MediaFormat (VUI + in-band
     // SEI). Authoritative when set; we fall back to Format.colorInfo until then.
     // Reset per load so a new stream re-derives instead of inheriting the last one.
@@ -693,6 +698,44 @@ class ExoPlayerEngine(
             elapsedSinceLastFeedMs: Long,
         ) {
             audioUnderruns++
+        }
+
+        /**
+         * The **source** reaching end of stream, as opposed to the renderer
+         * draining to `STATE_ENDED` seconds later. See [StreamEofPolicy]: on a
+         * progressive live body this is dispatched the instant the HTTP body
+         * ends, so the gap between this line and the `native live reconnect …
+         * kind=ended` that follows it is exactly how much cushion the server's
+         * close was hidden behind.
+         *
+         * `state.isLive` is provider metadata (CLAUDE.md: liveness is never
+         * inferred), and the track-type filter keeps chunked containers out.
+         */
+        override fun onLoadCompleted(
+            eventTime: AnalyticsListener.EventTime,
+            loadEventInfo: LoadEventInfo,
+            mediaLoadData: MediaLoadData,
+        ) {
+            if (released) return
+            if (!StreamEofPolicy.shouldReport(
+                    trackType = mediaLoadData.trackType,
+                    trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
+                    isLive = state.isLive,
+                    linesSoFar = sourceEofLines,
+                )
+            ) {
+                return
+            }
+            sourceEofLines++
+            val since = if (loadedAtMs == 0L) -1L else SystemClock.elapsedRealtime() - loadedAtMs
+            onDiagnostic?.invoke(
+                StreamEofPolicy.line(
+                    sinceLoadMs = since,
+                    aheadMs = bufferedAheadMs(),
+                    playedMs = mediaPositionMs(),
+                    bytes = loadEventInfo.bytesLoaded,
+                ),
+            )
         }
 
         override fun onAudioCodecError(
@@ -894,6 +937,7 @@ class ExoPlayerEngine(
         reattachedAtMs = 0L
         reportedFirstFrame = false
         reportedStreamShape = false
+        sourceEofLines = 0
         // Re-armed per load — locking unregisters it (see stopFrameMetadataMeasurement).
         stopFrameMetadataMeasurement()
         val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->

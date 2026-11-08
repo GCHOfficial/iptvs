@@ -12,6 +12,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
+import '../data/playback_keep_alive.dart';
 import '../player/channel_owner.dart';
 import '../player/buffer_preset.dart';
 import '../player/mpv_options.dart';
@@ -418,6 +419,16 @@ class LivePreviewController extends ChangeNotifier {
   /// list.
   LibraryRepository? _activeRepo;
 
+  /// The `PlaybackKeepAliveCoordinator` arming this preview owns, or 0 when it
+  /// owns none.
+  ///
+  /// A token rather than a boolean because the preview is routinely *not* the
+  /// current owner while it is still alive: going fullscreen re-arms through
+  /// the route's own resolve, and the preview's teardown runs afterwards. A
+  /// plain "stop the keep-alive" there would silence the session the user is
+  /// actually watching.
+  int _keepAliveToken = 0;
+
   /// The source id the preview currently belongs to.
   String get previewSourceId => (_activeRepo ?? repo).source.id;
 
@@ -579,6 +590,9 @@ class LivePreviewController extends ChangeNotifier {
         'preview live source=${activeRepo.source.name} channel=${channel.name} id=${channel.id}',
       );
       final resolved = await activeRepo.resolve(channel);
+      // The resolve armed the provider's keep-alive (LibraryRepository.resolve);
+      // claim that arming so this controller's own teardown can release it.
+      _keepAliveToken = PlaybackKeepAliveCoordinator.instance.token;
       if (_disposed || requestId != _requestId) return;
       if (_useNative(activeRepo.source.id, channel)) {
         final opened = await _openNative(resolved, muted: muted);
@@ -616,6 +630,11 @@ class LivePreviewController extends ChangeNotifier {
       });
     } catch (e) {
       if (_disposed || requestId != _requestId) return;
+      // The resolve may already have armed the keep-alive before the engine
+      // refused to open it. Nothing is playing, so release it — checked
+      // against this attempt's token, so a newer start that has since armed
+      // its own is untouched.
+      PlaybackKeepAliveCoordinator.instance.stopped(_keepAliveToken);
       // Exception text can embed the stream URL (credentials in the path) —
       // scrub before anything user-visible.
       final message = redactText('$e');
@@ -807,6 +826,11 @@ class LivePreviewController extends ChangeNotifier {
     // lifecycle observer in `channel_list_screen.dart` calls `stop()`, so the
     // pause behaviour rides here rather than in a second observer.
     await _audioSession.release();
+    // Same reasoning for the provider's keep-alive, and the same observer
+    // covers backgrounding. Token-checked: on the way *into* fullscreen a
+    // different-channel preview is stopped after the route has armed its own,
+    // and that arming must survive this call.
+    PlaybackKeepAliveCoordinator.instance.stopped(_keepAliveToken);
   }
 
   /// Pause/resume the preview player around fullscreen playback (no-ops if the
@@ -822,8 +846,25 @@ class LivePreviewController extends ChangeNotifier {
     if (_player != null) await _player!.pause();
   }
 
+  /// Resumes a preview that was *paused* around fullscreen playback.
+  ///
+  /// This has to re-arm the provider keep-alive, because the pause/resume pair
+  /// is the one return path with **no resolve on it**: the same-channel
+  /// adopted handoff pauses the preview, the fullscreen route stops the
+  /// keep-alive when it closes, and then this resumes a decoder that nothing
+  /// would otherwise be keeping the session open for. [pause] deliberately
+  /// does *not* release it — while it is paused, the fullscreen route is what
+  /// is playing.
   Future<void> play() async {
     _pausedByApp = false;
+    final repo = _activeRepo ?? this.repo;
+    final channel = _activeChannel;
+    if (channel != null) {
+      _keepAliveToken = PlaybackKeepAliveCoordinator.instance.started(
+        repo.source,
+        channel,
+      );
+    }
     if (nativeActive) {
       try {
         await _nativeChannel.invokeMethod('play');
@@ -903,6 +944,10 @@ class LivePreviewController extends ChangeNotifier {
     // for the rest of the app's life, so other apps could not resume audio.
     // Idempotent — a no-op when `stop()`/`discardPlayer()` already released.
     unawaited(_audioSession.release());
+    // Same last-resort balance for the provider keep-alive: a controller torn
+    // down with a preview still running would otherwise leave a portal being
+    // polled for a stream nobody is watching.
+    PlaybackKeepAliveCoordinator.instance.stopped(_keepAliveToken);
     _activeChannel = null;
     final player = _player;
     final hadController = _controller != null;

@@ -3358,6 +3358,28 @@ watchdogs** because the platforms play through different stacks:
   (`platform.getProperty`, `NativePlayer` only), logged **once per live session** (reset at every
   point `_resetLiveLatency` already resets at), and changes nothing about reconnect timing or
   thresholds — it is purely an earlier timestamp for the same drop.
+
+  **Android has the ExoPlayer half of that same signal, and it is a different API.** mpv's
+  `demuxer-cache-state.eof` has no media3 equivalent, but `AnalyticsListener.onLoadCompleted` on a
+  **progressive** media period does the same job: media3 1.11.1 dispatches it from
+  `ProgressiveMediaPeriod.onLoadCompleted` the instant the extracting loadable reaches end of
+  input, i.e. the instant the HTTP body ended, with `C.DATA_TYPE_MEDIA` /
+  `C.TRACK_TYPE_UNKNOWN`. `ExoPlayerEngine` writes one credential-free line from there —
+  `stream source eof sinceLoadMs=… ahead=… played=… bytes=…` — and `HdrPlayerActivity`'s existing
+  `live reconnect` line now carries `ahead=` beside `kind=`, the field Dart's equivalent already
+  had. Read as a pair they answer the question the export that prompted this could not: a Stalker
+  session ending every ~26–29 s with ~24–27 s of media played is consistent *either* with a server
+  closing at ~26 s *or* with one closing far earlier behind a cushion that took the rest of the
+  time to drain, and `sinceLoadMs` at the close against `ahead` at the reconnect separates them.
+  The decision is the pure `StreamEofPolicy` (`player/StreamEofPolicy.kt`, pinned by
+  `StreamEofPolicyTest`): **live only** — liveness is provider metadata, read off
+  `PlayerUiState.isLive`, never inferred — the `TRACK_TYPE_UNKNOWN` filter, which is what keeps
+  chunked containers out (HLS and DASH dispatch one completed load *per segment*, and reporting
+  those would write a line every few seconds and evict the log this was added to fill), and a cap
+  of three lines per load. It changes no timing and no policy: nothing reads it, it is written to
+  the exportable relay and to nothing else. The two stacks' lines are deliberately named
+  differently today (`live upstream ended` in Dart, `stream source eof` in Kotlin) because the
+  field sets differ; if they ever converge, converge the names with them.
 - **Linux native** in `player_screen.dart` too, but the mpv process is a *separate OS process*
   whose media_kit `_player` is idle, so the watchdog is driven off mpv's JSON-IPC signals
   (`LinuxNativeSession.playbackEvents`, a `LinuxNativePlaybackSignal` stream). `end-file` with
