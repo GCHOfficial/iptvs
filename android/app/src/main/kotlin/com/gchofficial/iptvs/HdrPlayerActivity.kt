@@ -1181,7 +1181,10 @@ class HdrPlayerActivity : ComponentActivity() {
             // it keeps today's unchanged path rather than being given a fast
             // reload of a URL that may already be dead.
             val fresh = if (refreshed && !timedOut) next else null
-            val ok = fastReconnect.store(token, fresh, settledAt)
+            val ok = fastReconnect.store(token, fresh)
+            // Measured from the request, not from here: the round trip is age
+            // the portal's token has already spent, and the store deliberately
+            // holds no clock of its own ([LiveFastReconnect.store]).
             logNative(LiveFastReconnectPolicy.readyLine(settledAt - requestedAt, ok))
         }
         if (!started) {

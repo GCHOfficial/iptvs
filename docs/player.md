@@ -3544,6 +3544,15 @@ the EOF — a second trigger to reason about, bought only once an export shows i
   providers that mint a per-connection locator, which is exactly the failure it exists for.
 - **A clean drop only.** A buffering or frozen-renderer stall means the connection is still open
   and the server closed nothing; a locator minted at an earlier EOF is not what that failure needs.
+- **The age clock is the request, and `noteRequested` is its only writer.** `store` takes no clock
+  at all. It briefly did, behind a `requestedAtMs == 0L` guard meaning "no request recorded" — but
+  zero is a legitimate clock reading *and* the value `discard`/`takeForReload` write as "cleared",
+  so a request issued at time zero had its age re-stamped to the **reply**, under-reporting the age
+  by exactly the round trip and letting a 30-second-stale locator read as fresh. The guarantee has
+  to hold whatever the clock's origin, so the field now carries no sentinel and `stored == null` is
+  the only test for "nothing held". Pinned three ways in `LiveFastReconnectTest`: stale at a
+  zero-based clock, stale an hour in, and a nine-second round trip whose cost counts against the
+  bound.
 - **The preview never pre-resolves.** `SharedEngine.adoptForFullscreen` installs the Activity's
   hook and `bindPreviewCallbacks` nulls it on handback, so an engine back on the preview texture
   never spends a token for an Activity that has finished. (The adopted session is also the one the

@@ -199,7 +199,7 @@ class LiveFastReconnectTest {
         val fast = LiveFastReconnect()
         // Source EOF at 6032 ms into the load, reply 412 ms later.
         val token = fast.noteRequested(6_032L)
-        assertTrue(fast.store(token, locator, 6_444L))
+        assertTrue(fast.store(token, locator))
         // The age includes the round trip: the token was minted inside it.
         assertEquals(412L, fast.ageMs(6_444L))
         // Buffer runs dry at ~26 s; the locator is ~20 s old.
@@ -214,7 +214,7 @@ class LiveFastReconnectTest {
     @Test
     fun `a stored locator is spent at most once`() {
         val fast = LiveFastReconnect()
-        fast.store(fast.noteRequested(0L), locator, 10L)
+        fast.store(fast.noteRequested(0L), locator)
         assertNotNull(fast.takeForReload(1_000L, endedDrop = true, forced = false))
         // Stalker `play_token`s are single-use; a second reload must re-resolve.
         assertNull(fast.takeForReload(1_100L, endedDrop = true, forced = false))
@@ -226,7 +226,7 @@ class LiveFastReconnectTest {
     fun `a stall or a forced reconnect discards rather than spends`() {
         for (args in listOf(false to false, true to true)) {
             val fast = LiveFastReconnect()
-            fast.store(fast.noteRequested(0L), locator, 10L)
+            fast.store(fast.noteRequested(0L), locator)
             assertNull(fast.takeForReload(1_000L, endedDrop = args.first, forced = args.second))
             // Cleared either way: any reload supersedes the locator, and one
             // left behind would only age toward being loaded dead later.
@@ -237,16 +237,47 @@ class LiveFastReconnectTest {
     @Test
     fun `a stale locator is dropped and the ordinary path runs`() {
         val fast = LiveFastReconnect()
-        fast.store(fast.noteRequested(0L), locator, 10L)
+        fast.store(fast.noteRequested(0L), locator)
         val tooLate = LiveFastReconnectPolicy.FRESH_MS + 1
         assertFalse(fast.readyFor(tooLate, endedDrop = true, forced = false))
         assertNull(fast.takeForReload(tooLate, endedDrop = true, forced = false))
     }
 
     @Test
+    fun `a stale locator is dropped whatever the clock's origin`() {
+        // The same guarantee one hour in, where no value involved is zero. It
+        // is a separate case because the one above starts its clock at 0, and a
+        // `requestedAtMs == 0L` sentinel read as "no request recorded" made
+        // exactly that case — and only that case — report a 30-second-stale
+        // locator as fresh.
+        val fast = LiveFastReconnect()
+        val requestedAt = 3_600_000L
+        fast.store(fast.noteRequested(requestedAt), locator)
+        val lastUsableMs = requestedAt + LiveFastReconnectPolicy.FRESH_MS
+        assertTrue(fast.readyFor(lastUsableMs, endedDrop = true, forced = false))
+        assertFalse(fast.readyFor(lastUsableMs + 1, endedDrop = true, forced = false))
+        assertNull(fast.takeForReload(lastUsableMs + 1, endedDrop = true, forced = false))
+        assertFalse(fast.holdsLocator)
+    }
+
+    @Test
+    fun `the age clock is the request, not the reply`() {
+        // A slow round trip: requested at 1 s, settled 9 s later. Those 9 s are
+        // age the portal's token has already spent, so the locator may be used
+        // for 30 s from the *request* — not from the reply. Re-stamping at the
+        // store hid the round trip and bought the fast path time it never had.
+        val fast = LiveFastReconnect()
+        fast.store(fast.noteRequested(1_000L), locator)
+        assertEquals(9_000L, fast.ageMs(10_000L))
+        val lastUsableMs = 1_000L + LiveFastReconnectPolicy.FRESH_MS
+        assertTrue(fast.readyFor(lastUsableMs, endedDrop = true, forced = false))
+        assertFalse(fast.readyFor(lastUsableMs + 1, endedDrop = true, forced = false))
+    }
+
+    @Test
     fun `a reply with no new locator stores nothing`() {
         val fast = LiveFastReconnect()
-        assertFalse(fast.store(fast.noteRequested(0L), null, 400L))
+        assertFalse(fast.store(fast.noteRequested(0L), null))
         assertFalse(fast.holdsLocator)
         assertNull(fast.takeForReload(1_000L, endedDrop = true, forced = false))
     }
@@ -258,7 +289,7 @@ class LiveFastReconnectTest {
         // A zap, an engine fallback or a finish between the request and its
         // reply: the locator describes a stream this session has left.
         fast.discard()
-        assertFalse(fast.store(token, locator, 400L))
+        assertFalse(fast.store(token, locator))
         assertFalse(fast.holdsLocator)
     }
 
@@ -267,8 +298,8 @@ class LiveFastReconnectTest {
         val fast = LiveFastReconnect()
         val stale = fast.noteRequested(0L)
         val current = fast.noteRequested(100L)
-        assertFalse(fast.store(stale, locator, 400L))
-        assertTrue(fast.store(current, other, 500L))
+        assertFalse(fast.store(stale, locator))
+        assertTrue(fast.store(current, other))
         assertEquals(other, fast.takeForReload(1_000L, endedDrop = true, forced = false))
     }
 
@@ -278,7 +309,7 @@ class LiveFastReconnectTest {
         var now = 0L
         val outcomes = mutableListOf<FastReconnectOutcome>()
         repeat(3) {
-            fast.store(fast.noteRequested(now), locator, now)
+            fast.store(fast.noteRequested(now), locator)
             assertNotNull(fast.takeForReload(now, endedDrop = true, forced = false))
             // The pre-resolved connection dies 1.2 s later.
             now += 1_200L
@@ -306,7 +337,7 @@ class LiveFastReconnectTest {
                 zapSettling = false,
             ),
         )
-        assertFalse(fast.store(fast.noteRequested(now), locator, now))
+        assertFalse(fast.store(fast.noteRequested(now), locator))
         assertNull(fast.takeForReload(now, endedDrop = true, forced = false))
     }
 
@@ -315,7 +346,7 @@ class LiveFastReconnectTest {
         val fast = LiveFastReconnect()
         var now = 0L
         repeat(9) {
-            fast.store(fast.noteRequested(now), locator, now)
+            fast.store(fast.noteRequested(now), locator)
             assertNotNull(fast.takeForReload(now, endedDrop = true, forced = false))
             // Two bad connections, then a healthy ~26 s one — forever.
             now += if (it % 3 == 2) 26_000L else 1_000L
@@ -331,7 +362,7 @@ class LiveFastReconnectTest {
         assertEquals(FastReconnectOutcome.NONE, fast.noteReconnect(1_000L))
         // And a take that refused is not a fast load either, so the reconnect
         // after it must not be blamed on the fast path.
-        fast.store(fast.noteRequested(0L), locator, 0L)
+        fast.store(fast.noteRequested(0L), locator)
         assertNull(fast.takeForReload(1_000L, endedDrop = false, forced = false))
         assertEquals(FastReconnectOutcome.NONE, fast.noteReconnect(1_100L))
         assertTrue(fast.enabled)
@@ -340,7 +371,7 @@ class LiveFastReconnectTest {
     @Test
     fun `judging happens once per fast load`() {
         val fast = LiveFastReconnect()
-        fast.store(fast.noteRequested(0L), locator, 0L)
+        fast.store(fast.noteRequested(0L), locator)
         fast.takeForReload(0L, endedDrop = true, forced = false)
         assertEquals(FastReconnectOutcome.FAILED, fast.noteReconnect(1_000L))
         // A second reconnect with no intervening fast load adds nothing to the
