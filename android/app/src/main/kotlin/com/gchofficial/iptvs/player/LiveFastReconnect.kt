@@ -229,6 +229,13 @@ class LiveFastReconnect(
     // landed. The portal mints the token somewhere inside that window, so the
     // earlier end is the conservative one — and it keeps the age on the
     // `ready` line and the age on the reconnect line on a single clock.
+    //
+    // **[noteRequested] is the only writer of a meaningful value, and
+    // `stored == null` is the only test for "nothing held".** This field has no
+    // sentinel: zero is a legitimate clock reading, so any code reading `== 0L`
+    // as "no request recorded" cannot tell that apart from a request issued at
+    // time zero — which is exactly how [store] used to move the age clock
+    // forward to the reply and let a 30-second-stale locator read as fresh.
     private var requestedAtMs = 0L
 
     private var disabled = false
@@ -289,17 +296,21 @@ class LiveFastReconnect(
      * a URL already known to be spent. A stale [token] (a discard or a newer
      * request has intervened) reports false for the same reason — nothing is
      * held — which is all the `ok=` field on the diagnostics line claims.
+     *
+     * **Takes no clock.** The age clock belongs to [noteRequested] and this must
+     * not touch it: the age the reconnect judges has to *include* the round
+     * trip, because that is time the portal's token has already spent. A
+     * settle-time reading here would under-report the age by exactly the round
+     * trip, and (through the token check below) can only ever follow a
+     * [noteRequested] that has already stamped it.
      */
-    fun store(token: Long, locator: LiveLocator?, nowMs: Long): Boolean {
+    fun store(token: Long, locator: LiveLocator?): Boolean {
         if (token != requestToken) return false
         if (disabled || locator == null) {
             stored = null
             return false
         }
         stored = locator
-        // Never re-stamped to [nowMs]: the age the reconnect reports must
-        // include the round trip, which is time the token has already spent.
-        if (requestedAtMs == 0L) requestedAtMs = nowMs
         return true
     }
 
