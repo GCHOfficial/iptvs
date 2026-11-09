@@ -3505,11 +3505,20 @@ EOF hook at all), a locator older than the freshness bound, and a provider whose
 change. `LiveFastReconnectTest` asserts the three constants are untouched, because the whole
 claim of this path rests on `path=resolve` meaning "unchanged".
 
+**The known cost of that conservatism**: a provider whose per-connection backlog outlasts
+`FRESH_MS` on a deep buffer preset will pre-resolve, go stale, and then re-resolve — one wasted
+`create_link` per cycle, with nothing else changed. Wasted rather than dangerous (a `create_link`
+mints a link; it opens no stream), and **visible**: `path=resolve ageMs=41000` on the reconnect
+line is exactly that case and nothing else. Raise the bound from an export, not from this
+paragraph. The refinement that would remove the waste entirely is to arm the pre-resolve off
+*remaining buffer* (`bufferedAheadMs` crossing ~10 s on the existing 500 ms ticker) instead of off
+the EOF — a second trigger to reason about, bought only once an export shows it is needed.
+
 #### The numbers, and why they are those numbers
 
 | | | |
 | --- | --- | --- |
-| `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. Bounded **below** by the drain it has to survive — the body closes at ~6 s and the cushion empties at ~26 s, so the locator is ~20 s old when used, and the deeper buffer presets (`high`, `max`) drain *slower*, so a bound at 20 s would fail exactly the configurations that buffer most. Bounded **above** by what a portal-minted link plausibly outlives. 30 s is ~1.5x the observed drain and still leaves 20 s of life to a round trip that only settled at `ResolveGate.TIMEOUT_MS`. |
+| `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. Bounded **below** by the drain it has to survive: the body closes at ~6 s with `ahead=21011`, so the locator is ~20 s old when used — and that drain is the size of the **backlog the connection delivered**, which is itself capped by the preset's `maxBufferMs` (25 / 50 / 90 / 120 s). 30 s clears the observed case and the whole of `low`, with margin, and still leaves 20 s of life to a round trip that only settled at `ResolveGate.TIMEOUT_MS`. Bounded **above** by what a portal-minted link plausibly outlives: stretching it to cover `max`'s 120 s ceiling would mean loading a two-minute-old single-use token — precisely where it is likeliest to be dead — to save a round trip. |
 | `FAILURE_WINDOW_MS` | 8 s | A pre-resolved reconnect whose own connection ends again inside this much playback was not a working connection. The healthy cycle is ~26 s, so 8 s cannot be confused with a short-but-working one; it is also the existing policy's own notion of a connection that isn't working (`STALL_RECONNECT_MS`), kept as a separate constant so the two agree by reasoning rather than by dependency. |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | One is noise the ordinary path would also have hit; two can still be a flaky link; three in a row with no intervening connection that survived the window is a portal that won't honour a link minted before the previous one drained. The asymmetry favours patience — a wrong fast path costs one wasted load and one wasted `create_link`, while disabling too eagerly gives up the whole fix on a blip. |
 

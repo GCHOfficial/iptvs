@@ -49,19 +49,25 @@ object LiveFastReconnectPolicy {
     /**
      * How old a stored locator may be when the reload finally needs it.
      *
-     * Bounded below by the drain it has to survive: in the evidence the body
-     * closes at ~6 s and the buffer runs dry at ~26 s, so the locator is ~20 s
-     * old when it is used — and the deeper buffer presets (`high`, `max`) drain
-     * *slower*, so a bound at 20 s would miss exactly the configurations that
-     * buffer most. Bounded above by what a portal-minted link plausibly
-     * outlives: Stalker `play_token`s are single-use and short-lived, and a
-     * locator stale enough to be refused costs a wasted load (~1.5 s) before
-     * the ordinary path runs anyway.
+     * Bounded **below** by the drain it has to survive. In the evidence the
+     * body closes at ~6 s with `ahead=21011`, so the locator is ~20 s old when
+     * it is used; that drain is the size of the **backlog the connection
+     * delivered**, which in turn is capped by the preset's `maxBufferMs`
+     * ([ExoPlayerEngine.Durations]: 25 / 50 / 90 / 120 s). 30 s therefore
+     * clears the observed case and the whole of `low`, with margin.
      *
-     * 30 s is ~1.5x the observed drain and leaves 20 s of usable life even for
-     * a round trip that only settled at [ResolveGate.TIMEOUT_MS]. Past it the
-     * stored locator is dropped and the unchanged path takes over, which is a
-     * graceful degrade rather than a failure.
+     * Bounded **above** by what a portal-minted link plausibly outlives:
+     * Stalker `play_token`s are single-use and short-lived. Stretching this to
+     * cover `max`'s 120 s ceiling would mean loading a two-minute-old token —
+     * precisely where a single-use link is most likely already dead — to save
+     * a round trip, which is the wrong trade.
+     *
+     * So the deliberate gap: a provider that sends a backlog larger than this
+     * **on a deep preset** drains for longer than 30 s, the stored locator is
+     * dropped, and the unchanged path takes over. That costs one wasted
+     * `create_link` per cycle and is visible in an export as
+     * `path=resolve ageMs=41000` — the field that would justify moving this
+     * number, rather than a guess that it should move.
      */
     const val FRESH_MS = 30_000L
 
