@@ -9,7 +9,6 @@ import 'diagnostics_log.dart';
 import 'load_token.dart';
 import 'metadata_provider.dart';
 import 'net.dart' show formatBytes, redactText;
-import 'playback_keep_alive.dart';
 import 'programme_spool.dart';
 
 class LibrarySnapshot {
@@ -452,22 +451,8 @@ class LibraryRepository {
   /// locators"): cached channels carry their locator encrypted, so it is
   /// decrypted here — one model, at play time — before crossing into the
   /// [Source].
-  ///
-  /// This is also where a provider's **playback keep-alive** is armed (see
-  /// `PlaybackKeepAliveCoordinator` and docs/sources.md "The portal watchdog").
-  /// A live resolve is the one event that means "this provider session is
-  /// about to carry a stream", and it is the only one every surface shares —
-  /// the preview, the fullscreen route, a zap settle and a reconnect's
-  /// re-resolve all arrive here. Catch-up ([resolveArchive]) and VOD
-  /// ([resolveMedia]) deliberately do **not** arm it: the keep-alive is a
-  /// one-variable experiment about live sessions dropping at ~30 s.
-  Future<StreamInfo> resolve(Channel channel) async {
-    final revealed = await db.revealChannel(channel);
-    final stream = await source.resolve(revealed);
-    // After the resolve, not before: a provider that refused is not playing.
-    PlaybackKeepAliveCoordinator.instance.started(source, revealed);
-    return stream;
-  }
+  Future<StreamInfo> resolve(Channel channel) async =>
+      source.resolve(await db.revealChannel(channel));
 
   /// Resolve a past [programme] on [channel] into a catch-up stream. Resolved at
   /// play time (archive URLs are short-lived, like live). Reveal point.

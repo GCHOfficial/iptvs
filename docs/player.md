@@ -3127,7 +3127,10 @@ watchdogs** because the platforms play through different stacks:
   **re-resolves first** through `withFreshLiveLocator`/`ResolveGate`
   (`android/.../player/LiveResolve.kt`) — a Stalker `play_token` the portal already killed can
   never work a second time — single-flight with "Go to live" (see "Android" above) and falling
-  back to the held locator if the round trip times out or fails.
+  back to the held locator if the round trip times out or fails. **On a clean drop that round trip
+  has usually already happened**: the Activity pre-resolves at the live source's EOF, while the
+  picture is still running on the buffer, so the reconnect skips both the 2 s ended threshold and
+  the resolve — see "The pre-resolved reconnect" below.
 
   **A decoder that is dropping frames is behind, not wedged, and must never be rebuilt.**
   `FrameLivenessWatch` originally judged liveness on `renderedOutputBufferCount` alone, which reads
@@ -3377,8 +3380,13 @@ watchdogs** because the platforms play through different stacks:
   `PlayerUiState.isLive`, never inferred — the `TRACK_TYPE_UNKNOWN` filter, which is what keeps
   chunked containers out (HLS and DASH dispatch one completed load *per segment*, and reporting
   those would write a line every few seconds and evict the log this was added to fill), and a cap
-  of three lines per load. It changes no timing and no policy: nothing reads it, it is written to
-  the exportable relay and to nothing else. The two stacks' lines are deliberately named
+  of three lines per load. On mpv it changes no timing and no policy: nothing reads it, it is
+  written to the exportable relay and to nothing else. **On Android it is now also an input** —
+  `ExoPlayerEngine.onSourceEof` hands the same event to `HdrPlayerActivity`, which pre-resolves
+  the next locator from it ("The pre-resolved reconnect" below). The log cap and the reaction are
+  deliberately split (`StreamEofPolicy.isSourceEof` vs `shouldReport`): a recovery gated on a
+  diagnostics quota would stop working on the fourth EOF of a load for no stated reason. The two
+  stacks' lines are deliberately named
   differently today (`live upstream ended` in Dart, `stream source eof` in Kotlin) because the
   field sets differ; if they ever converge, converge the names with them.
 - **Linux native** in `player_screen.dart` too, but the mpv process is a *separate OS process*
@@ -3452,6 +3460,135 @@ Dart leaves `resolveAgain` unwired for VOD (only live channels pass it,
 `channel_list_screen.dart`), so `_freshLiveStream` answers with the original stream, which is
 exactly what a VOD retry wants, at the cost of one extra method call and no VOD-specific branch on
 the Swift side.
+
+### The pre-resolved reconnect (Android)
+
+**The drop was never the expensive part. The recovery was.** A user's 0.1.80 export (Stalker
+portal, Android TV, ExoPlayer, adopted fullscreen) reads, per cycle:
+
+```
+native stream source eof sinceLoadMs=6032 ahead=21011 played=4580 bytes=8649536
+… ~20 s of steady 50 fps playback, drawn entirely from the buffer …
+native live reconnect attempt=1 force=false kind=ended ahead=0 …
+native live re-resolve refreshed=true timedOut=false
+… ~1.1–1.5 s to the first frame …
+```
+
+The provider sends ~25.6 s of media in ~6 s — a connect backlog, far faster than real time — and
+then closes the HTTP body. Playback runs on from the cushion until it is empty at ~26 s, the
+renderer reaches `STATE_ENDED`, and only *then* does the recovery start: `ENDED_RECONNECT_MS`
+(2 s), an `itv:create_link` round trip (~0.4 s), and 1.1–1.5 s to the first frame. About **four
+seconds of frozen picture every twenty-six**, of which roughly 2.4 s is spent on work that could
+have been done twenty seconds earlier, while the picture was still running.
+
+(The ~26 s period itself is this provider's delivery, not a client-side timeout and not a portal
+session expiry — see docs/sources.md "The portal watchdog (keep-alive) — tried in 0.1.80 and
+removed", which is the hypothesis that `stream source eof` falsified.)
+
+**So the Activity resolves the next locator at the source's EOF and stores it.** When the buffer
+finally runs dry and the watchdog calls `kind=ended`, a stored locator that is still fresh is
+loaded on that very tick: no 2 s threshold, no round trip. The decisions are the pure
+`LiveFastReconnectPolicy` / `LiveFastReconnect` (`android/.../player/LiveFastReconnect.kt`,
+Android-free, pinned by the plain-JUnit `LiveFastReconnectTest` like `ReconnectPolicy` and
+`StreamEofPolicy`).
+
+**Why a resolve here is not "resolving ahead".** CLAUDE.md's rule is that streams resolve at play
+time, never ahead, because `create_link` URLs are short-lived. This one is issued *after the
+server has already closed the body* — there is no live connection left for it to disturb, and it
+is resolved for an imminent reload rather than cached against a future tap. Re-resolving while a
+stream is on screen is also already shipped behaviour: "Go to live" does exactly that.
+
+**It is an additional path, not a retune.** Not one `ReconnectPolicy` constant moves, and
+everything without a usable stored locator behaves exactly as 0.1.80 did: a buffering or
+frozen-renderer stall, a forced (hard-error) reconnect, the mpv fallback engine (which wires no
+EOF hook at all), a locator older than the freshness bound, and a provider whose locator doesn't
+change. `LiveFastReconnectTest` asserts the three constants are untouched, because the whole
+claim of this path rests on `path=resolve` meaning "unchanged".
+
+#### The numbers, and why they are those numbers
+
+| | | |
+| --- | --- | --- |
+| `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. Bounded **below** by the drain it has to survive — the body closes at ~6 s and the cushion empties at ~26 s, so the locator is ~20 s old when used, and the deeper buffer presets (`high`, `max`) drain *slower*, so a bound at 20 s would fail exactly the configurations that buffer most. Bounded **above** by what a portal-minted link plausibly outlives. 30 s is ~1.5x the observed drain and still leaves 20 s of life to a round trip that only settled at `ResolveGate.TIMEOUT_MS`. |
+| `FAILURE_WINDOW_MS` | 8 s | A pre-resolved reconnect whose own connection ends again inside this much playback was not a working connection. The healthy cycle is ~26 s, so 8 s cannot be confused with a short-but-working one; it is also the existing policy's own notion of a connection that isn't working (`STALL_RECONNECT_MS`), kept as a separate constant so the two agree by reasoning rather than by dependency. |
+| `MAX_CONSECUTIVE_FAILURES` | 3 | One is noise the ordinary path would also have hit; two can still be a flaky link; three in a row with no intervening connection that survived the window is a portal that won't honour a link minted before the previous one drained. The asymmetry favours patience — a wrong fast path costs one wasted load and one wasted `create_link`, while disabling too eagerly gives up the whole fix on a blip. |
+
+#### Invariants
+
+- **One locator, spent at most once.** `play_token`s are single-use, so the store holds exactly one
+  and **every** reload consumes *or discards* it (`takeForReload`). A locator left behind by a
+  stall or a forced reconnect would only age toward being loaded dead later.
+- **Requested only after the body has closed**, never speculatively, and never while a resolve is
+  already in flight — the single `ResolveGate` still bounds a single-connection account to one
+  `create_link` at a time, and a pre-resolve goes through it like every other resolve.
+- **One request per connection.** `holdsLocator` refuses a second: media3 can complete a
+  progressive load more than once, and each extra request would spend another token on a reload
+  that needs one.
+- **Discarded on zap, "Go to live", engine fallback, finish and destroy.** Each either replaces the
+  stream deliberately or ends it. A discard also bumps the request token, so a reply that settles
+  *after* one can't quietly re-stock the store (the same discipline `ResolveGate` and
+  `ChannelHandlerOwner` use).
+- **A reply with no *new* URL stores nothing.** `ResolveAgainReply` collapses a timeout, an
+  unreadable reply and a genuine same-URL answer into "the locator we already hold", and storing
+  that would make the fast path skip both the wait and the round trip in order to reload a URL
+  already known to be spent. The side effect is deliberate scoping: the path only ever engages for
+  providers that mint a per-connection locator, which is exactly the failure it exists for.
+- **A clean drop only.** A buffering or frozen-renderer stall means the connection is still open
+  and the server closed nothing; a locator minted at an earlier EOF is not what that failure needs.
+- **The preview never pre-resolves.** `SharedEngine.adoptForFullscreen` installs the Activity's
+  hook and `bindPreviewCallbacks` nulls it on handback, so an engine back on the preview texture
+  never spends a token for an Activity that has finished. (The adopted session is also the one the
+  report came from, which is why the hook is installed on adoption at all rather than only on a
+  cold open.)
+
+#### Diagnostics (exportable, credential-free)
+
+Every field is a number or a boolean; the locator never appears, in any of them.
+
+```
+native live pre-resolve requested sinceLoadMs=6032 ms=…
+native live pre-resolve ready ageMs=412 ok=true ms=…
+native live reconnect attempt=1 force=false kind=ended path=preresolved ageMs=20183 ahead=0 … ms=…
+native live latency reset reason=reconnect drift=… ms=…
+native live pre-resolve disabled failures=3 playedMs=1204 ms=…
+```
+
+- `ready`'s `ageMs` is measured from the **request**, i.e. the age the locator already has when it
+  lands — the head start the round trip cost. `ok=false` means nothing is held (a timeout, a reply
+  with no new URL, or a request the session has since moved past).
+- `path=preresolved|resolve` says which path a reconnect took, and `ageMs` on a `path=resolve`
+  line says how old the locator it *declined* was (`-1` = none was held). That distinction is the
+  whole point of the field: it separates "no pre-resolve happened" from "one happened and the
+  freshness bound refused it".
+- **`live latency reset reason=reconnect drift=…` is the success metric** and is deliberately
+  unchanged. The drift it reports is the lag the session banked across the frozen gap, so on the
+  export above it should fall from ~2.4 s to well under 1 s once `path=preresolved` appears.
+- The back-off line is written **once**, at the reconnect that trips it.
+
+#### The other watchdogs are unchanged, deliberately
+
+The Dart/media_kit watchdog (Windows embedded + Windows native HDR), the Dart-over-IPC one for
+Linux native mpv, and Swift's `LiveReconnectWatchdog` on iOS are all untouched. The evidence is
+from one platform, one engine and one provider, and the repo's own history with this exact
+watchdog is that a recovery added on a plausible-sounding theory *was* the bug (the handoff
+decoder rebuild, above). One variable at a time: ship the Android path, read the next export, then
+decide.
+
+The equivalent elsewhere is well-defined when that time comes, and it is the same two halves:
+
+- **mpv surfaces already have the signal.** `demuxer-cache-state.eof` is the direct analogue of
+  `onLoadCompleted` on a progressive period, and `upstream_eof.dart` already polls it (once per
+  session, for the `live upstream ended ahead=…ms` line). The work would be to make it an input:
+  call `resolveAgain` on the first upstream EOF, store the `StreamInfo`, and have
+  `_pollLiveReconnect`'s ended branch (`shouldReloadStalledLive`, threshold 0 for ended) open the
+  stored locator instead of re-resolving. The `_endedPending` level flag is already the right
+  shape to hang it off.
+- **iOS** has neither half: `AVPlayerItem` exposes no "the HTTP body ended" event distinct from
+  `AVPlayerItemDidPlayToEndTime`, so the forward signal would have to come from the mpv fallback
+  only — which makes it the least valuable port, not the next one.
+
+On every one of those surfaces the storage, freshness and back-off rules would be a port of
+`LiveFastReconnectPolicy`'s, not a second set of numbers.
 
 ## Live latency
 

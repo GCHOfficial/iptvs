@@ -74,6 +74,33 @@ class StreamEofPolicyTest {
     }
 
     @Test
+    fun `the event itself is not capped, only its reporting`() {
+        // `HdrPlayerActivity` pre-resolves off this event
+        // ([LiveFastReconnectPolicy]), so it must survive the log budget: a
+        // recovery silently gated on a diagnostics quota is a recovery that
+        // stops working on the fourth EOF of a load for no stated reason.
+        assertTrue(
+            StreamEofPolicy.isSourceEof(
+                trackType = unknown,
+                trackTypeUnknown = unknown,
+                isLive = true,
+            ),
+        )
+        assertFalse(
+            StreamEofPolicy.shouldReport(
+                trackType = unknown,
+                trackTypeUnknown = unknown,
+                isLive = true,
+                linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD,
+            ),
+        )
+        // The filters it *does* keep are the ones that decide what the event
+        // is, not how often it is printed.
+        assertFalse(StreamEofPolicy.isSourceEof(unknown, unknown, isLive = false))
+        assertFalse(StreamEofPolicy.isSourceEof(trackType = 1, trackTypeUnknown = unknown, isLive = true))
+    }
+
+    @Test
     fun `the line carries durations and bytes and nothing else`() {
         val line = StreamEofPolicy.line(
             sinceLoadMs = 26_412,

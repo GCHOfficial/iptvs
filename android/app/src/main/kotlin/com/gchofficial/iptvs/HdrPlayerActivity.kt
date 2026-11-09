@@ -30,7 +30,10 @@ import com.gchofficial.iptvs.player.CatchUpSample
 import com.gchofficial.iptvs.player.EngineFallbackReason
 import com.gchofficial.iptvs.player.ExoBufferPolicy
 import com.gchofficial.iptvs.player.ExoPlayerEngine
+import com.gchofficial.iptvs.player.FastReconnectOutcome
 import com.gchofficial.iptvs.player.FrameLivenessWatch
+import com.gchofficial.iptvs.player.LiveFastReconnect
+import com.gchofficial.iptvs.player.LiveFastReconnectPolicy
 import com.gchofficial.iptvs.player.LiveLatencyReset
 import com.gchofficial.iptvs.player.LiveLatencyTracker
 import com.gchofficial.iptvs.player.LiveLocator
@@ -117,6 +120,12 @@ class HdrPlayerActivity : ComponentActivity() {
     // and settles the reply-vs-timeout race exactly once.
     private val resolveGate = ResolveGate()
     private var resolveTimeoutJob: Job? = null
+
+    // The pre-resolved reconnect: one locator fetched at the live source's EOF
+    // and spent when the buffer behind it runs dry, plus the consecutive-failure
+    // streak that can switch the whole path off for the session. Holds no timer
+    // of its own — the 500 ms progress ticker supplies every clock reading.
+    private val fastReconnect = LiveFastReconnect()
 
     // The buffering preset the current engine was built with. Read from the
     // launch Intent and then **kept in a field**, because an in-player zap can
@@ -458,7 +467,11 @@ class HdrPlayerActivity : ComponentActivity() {
                 isPlaying = uiState.isPlaying,
                 isBuffering = uiState.isBuffering,
                 // A re-resolve in flight is a reload that has not landed yet;
-                // the engine is about to be handed a different stream.
+                // the engine is about to be handed a different stream. (A
+                // pre-resolve shares the gate and so vetoes a sample too —
+                // deliberately left as is: forcing 1.0 for the length of one
+                // round trip costs nothing, and a cushion measured across a
+                // stream whose source has already closed is not a cushion.)
                 reconnecting = uiState.reconnecting || resolveGate.inFlight,
                 zapSettling = zapSettlingNow(nowMs),
                 inHandoffWindow = frameLiveness.inHandoffWindow(nowMs),
@@ -610,6 +623,12 @@ class HdrPlayerActivity : ComponentActivity() {
                 onClaimedSurfaceFirstFrame = {
                     frameLiveness.markHandoffFirstFrame(System.currentTimeMillis())
                 },
+                // The adopted session is the one the report came from, so it is
+                // the one that most needs the fast reconnect. Cleared again by
+                // `bindPreviewCallbacks` when the engine goes back.
+                onSourceEof = { sinceLoadMs ->
+                    runOnUiThread { preResolveAfterSourceEof(sinceLoadMs) }
+                },
             )
         } else {
             null
@@ -749,6 +768,9 @@ class HdrPlayerActivity : ComponentActivity() {
         exo.onUnsupportedStream = { reason -> runOnUiThread { fallbackToMpv(reason) } }
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
         exo.onDiagnostic = diagnosticSink
+        exo.onSourceEof = { sinceLoadMs ->
+            runOnUiThread { preResolveAfterSourceEof(sinceLoadMs) }
+        }
         setEngine(exo)
         exo.load(url, subtitles)
     }
@@ -771,6 +793,9 @@ class HdrPlayerActivity : ComponentActivity() {
         // when I went fullscreen", and previously logcat-only.
         logNative("engine fallback from=exo to=mpv reason=$reason adopted=$adoptedShared")
         frameLiveness.reset()
+        // The new engine loads `url` as it stands, and mpv wires no source-EOF
+        // hook, so nothing would ever restock or spend a held locator.
+        fastReconnect.discard()
         // A different engine means a different playhead: mpv's `time-pos`
         // starts from the new stream, so the old reference is meaningless.
         resetLiveLatency(LiveLatencyReset.ENGINE)
@@ -856,7 +881,18 @@ class HdrPlayerActivity : ComponentActivity() {
         // requiring the stall threshold on top would double it.
         val threshold = when {
             frameStalled -> 0L
-            uiState.ended -> ReconnectPolicy.ENDED_RECONNECT_MS
+            // A clean drop with a fresh pre-resolved locator in hand has
+            // nothing left to wait *for*: the two seconds this threshold buys
+            // are the re-resolve's head start, and that resolve already
+            // happened at the source's EOF. ENDED_RECONNECT_MS itself is
+            // untouched — this is an additional path, and every reconnect
+            // without a usable stored locator still takes it.
+            uiState.ended ->
+                if (fastReconnect.readyFor(now, endedDrop = true, forced = false)) {
+                    0L
+                } else {
+                    ReconnectPolicy.ENDED_RECONNECT_MS
+                }
             else -> ReconnectPolicy.STALL_RECONNECT_MS
         }
         stallKind = when {
@@ -928,6 +964,14 @@ class HdrPlayerActivity : ComponentActivity() {
      * Stalker `create_link` URLs carry single-use `play_token`s, so after a
      * portal-side kill the URL this Activity was launched with is permanently
      * dead and retrying it can never reconnect.
+     *
+     * …unless one was **already** resolved, at the instant the live source's
+     * HTTP body closed, while the picture was still running on the buffer
+     * ([preResolveAfterSourceEof]). Then this reconnect has neither a
+     * threshold nor a round trip in front of it and loads on this tick. That is
+     * the only difference; every reconnect without a usable stored locator
+     * behaves exactly as before, on exactly the same constants
+     * ([LiveFastReconnectPolicy]).
      */
     private fun reconnectLive(force: Boolean) {
         if (!uiState.isLive || isFinishing) return
@@ -947,6 +991,23 @@ class HdrPlayerActivity : ComponentActivity() {
         uiState.reconnecting = true
         uiState.ended = false
         Log.i(TAG, "live reconnect attempt=$reconnectAttempt force=$force")
+        // Judge the *previous* reconnect, if it took the fast path: this is the
+        // instant that connection's life ends, so it is the only place the
+        // "did a pre-resolved locator actually work?" question can be answered.
+        if (fastReconnect.noteReconnect(now) == FastReconnectOutcome.BACKED_OFF) {
+            logNative(
+                LiveFastReconnectPolicy.backOffLine(
+                    failures = fastReconnect.failures(),
+                    playedMs = fastReconnect.lastJudgedPlayedMs,
+                ),
+            )
+        }
+        // `stallKind` is the kind this line is about to print, so the fast path
+        // and the log can never disagree about which failure this was. The age
+        // is read before the take, which clears the store either way.
+        val endedDrop = !force && stallKind == "ended"
+        val storedAgeMs = fastReconnect.ageMs(now)
+        val preResolved = fastReconnect.takeForReload(now, endedDrop = endedDrop, forced = force)
         // Rate-limited above, so this is once per real attempt rather than once
         // per 500 ms tick. `kind` is what makes it worth exporting: an underrun,
         // a drop and a frozen renderer want completely different answers, and
@@ -954,6 +1015,12 @@ class HdrPlayerActivity : ComponentActivity() {
         logNative(
             "live reconnect attempt=$reconnectAttempt force=$force " +
                 "kind=${if (force) "error" else stallKind} " +
+                // Which path this reconnect took and, when it did not take the
+                // fast one, how old the locator it declined was (-1 = none was
+                // held). Read next to `live latency reset reason=reconnect
+                // drift=` it says whether skipping the wait actually shortened
+                // the gap — that drift is the metric this path exists to move.
+                LiveFastReconnectPolicy.reconnectPath(preResolved != null, storedAgeMs) + " " +
                 // What was still buffered when the decision was taken — the
                 // same field Dart's own reconnect line carries. It separates a
                 // cushion that never built from one that built and drained,
@@ -967,6 +1034,18 @@ class HdrPlayerActivity : ComponentActivity() {
                 (engine?.videoFrameCounters?.let { " $it" } ?: ""),
         )
         frameLiveness.reset()
+        if (preResolved != null) {
+            // Nothing to wait for: the locator was resolved while the picture
+            // was still running, so the reload begins on this very tick. Both
+            // resets are taken here for the reason the round-trip path defers
+            // them — "when the reload actually begins" — which is now.
+            url = preResolved.url
+            headers = preResolved.headers
+            stalledSinceMs = now
+            resetLiveLatency(LiveLatencyReset.RECONNECT)
+            engine?.load(url, subtitles)
+            return
+        }
         withFreshLiveLocator {
             // The round trip is asynchronous, so restart the stall clock when
             // the reload actually begins rather than when it was requested.
@@ -994,21 +1073,51 @@ class HdrPlayerActivity : ComponentActivity() {
      * waiting. Any answer we can't use falls back to the current locator
      * ([ResolveAgainReply]), so this always ends in a reload attempt.
      */
-    private fun withFreshLiveLocator(onFresh: () -> Unit): Boolean {
+    private fun withFreshLiveLocator(onFresh: () -> Unit): Boolean =
+        resolveLiveLocator { next, refreshed, timedOut ->
+            url = next.url
+            // Headers are baked into an engine's data-source factory at construction
+            // (see SharedEngine.openPreview / MpvEngine), so this only takes effect
+            // for a later engine build — an mpv fallback. Re-resolving the same
+            // channel on the same source can't change them in practice; the
+            // never-blank rule in ResolveAgainReply is what keeps a MAG User-Agent
+            // from being dropped if a reply ever omits them.
+            headers = next.headers
+            // Never log the locator itself — provider URLs embed credentials. The
+            // two booleans are safe and are what separate "the portal gave us a new
+            // link and it still didn't play" from "we retried a locator we already
+            // knew was dead because the round trip timed out".
+            Log.i(TAG, "live re-resolve settled refreshed=$refreshed timedOut=$timedOut")
+            logNative("live re-resolve refreshed=$refreshed timedOut=$timedOut")
+            onFresh()
+        }
+
+    /**
+     * The round trip itself, with no opinion about what the answer is for.
+     *
+     * [onSettled] receives the parsed locator, whether it differs from the one
+     * held now, and whether the backstop won the race. [withFreshLiveLocator]
+     * applies it in place and reloads; [preResolveAfterSourceEof] stores it for
+     * later and changes nothing. Both go through the one [ResolveGate], which is
+     * what keeps a single-connection account to one `create_link` at a time.
+     */
+    private fun resolveLiveLocator(
+        onSettled: (next: LiveLocator, refreshed: Boolean, timedOut: Boolean) -> Unit,
+    ): Boolean {
         val token = resolveGate.begin() ?: return false
         resolveTimeoutJob = lifecycleScope.launch {
             delay(ResolveGate.TIMEOUT_MS)
             resolveTimeoutJob = null
-            settleFreshLiveLocator(token, reply = null, timedOut = true, onFresh = onFresh)
+            settleFreshLiveLocator(token, reply = null, timedOut = true, onSettled = onSettled)
         }
         val host = MainActivity.instance?.get()
         if (host == null) {
             // No Flutter host to ask (it was destroyed under us) — settle now on
             // the current locator instead of waiting out the whole timeout.
-            settleFreshLiveLocator(token, reply = null, timedOut = false, onFresh = onFresh)
+            settleFreshLiveLocator(token, reply = null, timedOut = false, onSettled = onSettled)
         } else {
             host.requestFreshLiveLocator { reply ->
-                settleFreshLiveLocator(token, reply, timedOut = false, onFresh = onFresh)
+                settleFreshLiveLocator(token, reply, timedOut = false, onSettled = onSettled)
             }
         }
         return true
@@ -1018,7 +1127,7 @@ class HdrPlayerActivity : ComponentActivity() {
         token: Long,
         reply: Any?,
         timedOut: Boolean,
-        onFresh: () -> Unit,
+        onSettled: (next: LiveLocator, refreshed: Boolean, timedOut: Boolean) -> Unit,
     ) {
         // Lost the race (or belongs to an already-settled request): discard.
         if (!resolveGate.settle(token)) return
@@ -1028,22 +1137,59 @@ class HdrPlayerActivity : ComponentActivity() {
         // this Activity); nothing to reload then.
         if (isFinishing || isDestroyed) return
         val next = ResolveAgainReply.parse(reply, LiveLocator(url, headers))
-        val refreshed = next.url != url
-        url = next.url
-        // Headers are baked into an engine's data-source factory at construction
-        // (see SharedEngine.openPreview / MpvEngine), so this only takes effect
-        // for a later engine build — an mpv fallback. Re-resolving the same
-        // channel on the same source can't change them in practice; the
-        // never-blank rule in ResolveAgainReply is what keeps a MAG User-Agent
-        // from being dropped if a reply ever omits them.
-        headers = next.headers
-        // Never log the locator itself — provider URLs embed credentials. The
-        // two booleans are safe and are what separate "the portal gave us a new
-        // link and it still didn't play" from "we retried a locator we already
-        // knew was dead because the round trip timed out".
-        Log.i(TAG, "live re-resolve settled refreshed=$refreshed timedOut=$timedOut")
-        logNative("live re-resolve refreshed=$refreshed timedOut=$timedOut")
-        onFresh()
+        onSettled(next, next.url != url, timedOut)
+    }
+
+    /**
+     * The live source reached end of input: ask for the next locator **now**,
+     * while the picture is still running on the buffer, and store it.
+     *
+     * This is the whole fast path's forward half. Nothing is loaded here and no
+     * timing changes — see [LiveFastReconnectPolicy] for why a `create_link`
+     * issued at this instant disturbs nothing (the body has already closed) and
+     * for the freshness bound that decides whether the reconnect may use it.
+     */
+    private fun preResolveAfterSourceEof(sinceLoadMs: Long) {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        val requestedAt = System.currentTimeMillis()
+        if (!LiveFastReconnectPolicy.shouldPreResolve(
+                isLive = uiState.isLive,
+                enabled = fastReconnect.enabled,
+                holdsLocator = fastReconnect.holdsLocator,
+                resolveInFlight = resolveGate.inFlight,
+                zapSettling = zapSettlingNow(requestedAt),
+            )
+        ) {
+            return
+        }
+        val token = fastReconnect.noteRequested(requestedAt)
+        // Logged before the call, because a host-less settle runs the
+        // continuation synchronously and an export reading `ready` before
+        // `requested` would be unreadable.
+        logNative(LiveFastReconnectPolicy.requestedLine(sinceLoadMs))
+        val started = resolveLiveLocator { next, refreshed, timedOut ->
+            val settledAt = System.currentTimeMillis()
+            // A reply that carries no *new* URL is not a pre-resolve: storing
+            // the locator we already hold would make the fast path skip both
+            // the wait and the round trip in order to reload a spent token.
+            //
+            // It also scopes the whole path to providers that mint a
+            // per-connection locator — which is exactly the failure this
+            // exists for (a Stalker `create_link` answers with a fresh
+            // `play_token` every time). A provider whose URL is stable reports
+            // `refreshed=false` indistinguishably from an unreadable reply, so
+            // it keeps today's unchanged path rather than being given a fast
+            // reload of a URL that may already be dead.
+            val fresh = if (refreshed && !timedOut) next else null
+            val ok = fastReconnect.store(token, fresh, settledAt)
+            logNative(LiveFastReconnectPolicy.readyLine(settledAt - requestedAt, ok))
+        }
+        if (!started) {
+            // The gate refused after all (nothing should reach here, since
+            // `shouldPreResolve` checked it — but a request recorded against a
+            // round trip that never happened would age toward being used).
+            fastReconnect.discard()
+        }
     }
 
     // ── Live zapping: applying what Dart decided ─────────────────────────────
@@ -1130,6 +1276,10 @@ class HdrPlayerActivity : ComponentActivity() {
         resolveGate.abandon()
         resolveTimeoutJob?.cancel()
         resolveTimeoutJob = null
+        // Same reasoning one rung further on: a pre-resolved locator describes
+        // the channel being left, and loading it on a reconnect after the zap
+        // would put the previous channel back on screen.
+        fastReconnect.discard()
 
         // Both are build-time arguments (the HTTP data-source factory and
         // `LoadControl`), so neither can be changed on a running engine — the
@@ -1307,6 +1457,9 @@ class HdrPlayerActivity : ComponentActivity() {
         // `create_link` calls would exceed a single-connection account.
         onGoLive = {
             if (uiState.isLive) {
+                // This press reloads with a locator of its own, so a stored one
+                // is spent on nothing — and a reload supersedes it in any case.
+                fastReconnect.discard()
                 val started = withFreshLiveLocator { engine?.load(url, subtitles) }
                 // The reset moves with `liveSynced`, and both only on a press
                 // that actually started a reload. They cannot be split: leaving
@@ -1506,6 +1659,10 @@ class HdrPlayerActivity : ComponentActivity() {
         // re-resolve, open the ended channel) ran entirely inside that gap and
         // found the engine still adopted; and an un-zapped return sat on the
         // preview's frozen last frame until it closed.
+        // Nothing left to reconnect: drop the held locator (and cancel the
+        // bookkeeping of any pre-resolve still in flight) before the engine
+        // goes back to the preview, which has no use for either.
+        fastReconnect.discard()
         handBackSharedEngine()
         if (enteredPip) restoreMainTaskAfterPip()
         super.finish()
@@ -1555,6 +1712,8 @@ class HdrPlayerActivity : ComponentActivity() {
         // releases the captured reload callback immediately.
         resolveTimeoutJob?.cancel()
         resolveTimeoutJob = null
+        // Idempotent, and this covers any exit that never went through finish().
+        fastReconnect.discard()
         if (adoptedShared) {
             // Not ours to release: hand the video output back to the preview
             // surface; the engine keeps playing across the return.
