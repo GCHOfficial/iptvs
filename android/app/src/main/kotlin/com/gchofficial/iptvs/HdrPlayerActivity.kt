@@ -311,13 +311,27 @@ class HdrPlayerActivity : ComponentActivity() {
     private var catchingUpLastTick = false
 
     /**
-     * Periodic frame-rate/drop line while playing.
+     * Periodic frame-rate/drop line while playing — now joined by inbound
+     * throughput/estimate/stream-bitrate, printed on *both* shapes below, and
+     * by a `state=buffering` shape that fires while playback does not.
      *
-     * Rides the existing ticker rather than adding a timer, and only while the
-     * engine says it is playing: a paused or buffering player renders nothing,
-     * and reporting 0fps for it would bury the case this exists to catch.
+     * Rides the existing ticker rather than adding a timer. The fps half
+     * still runs only while the engine says it is playing: a paused or
+     * buffering player renders nothing, and reporting 0fps for it would bury
+     * the case that half exists to catch. The throughput half ([ThroughputMeter],
+     * via [ExoPlayerEngine.sampleThroughputKbps]) deliberately does not share
+     * that restriction — it is read every tick regardless of state, because a
+     * stall is exactly the window it needs to keep measuring *through*: an
+     * export showing `stalls=10 stalled=22941ms` with the fps line simply
+     * absent for the whole stall could not say whether the link had gone
+     * quiet (`in=0kbps`, starvation) or something else. mpv reports none of
+     * this (null throughout), the same convention [ExoPlayerEngine.videoFrameCounters]
+     * uses for an engine that doesn't count.
      */
     private fun samplePlaybackStats() {
+        val nowMs = System.currentTimeMillis()
+        val exo = engine as? ExoPlayerEngine
+        val kbpsIn = exo?.sampleThroughputKbps(nowMs)
         if (!uiState.isPlaying || uiState.isBuffering) {
             // Drop the baseline rather than just skipping. The rate is
             // frames-over-wall-clock, so carrying a baseline across a pause, a
@@ -327,14 +341,41 @@ class HdrPlayerActivity : ComponentActivity() {
             // this exists to detect. A diagnostic that manufactures its own
             // headline symptom is worse than none.
             playbackStats.reset()
+            // Buffering only, not a plain pause — a pause has nothing new to
+            // say. Gated on [kbpsIn] rather than a timer of its own: that is
+            // [ThroughputMeter]'s own 5s window closing, the single cadence
+            // this whole line shares with the playing shape below.
+            if (uiState.isBuffering && kbpsIn != null) {
+                logNative(
+                    "playback state=buffering ahead=${engine?.bufferedAheadMs() ?: -1L}ms " +
+                        throughputFields(exo, kbpsIn),
+                )
+            }
             return
         }
         val active = engine ?: return
         playbackStats.sample(
-            nowMs = System.currentTimeMillis(),
+            nowMs = nowMs,
             rendered = active.renderedFrameCount,
             dropped = active.droppedFrameCount,
-        )?.let { logNative("playback $it") }
+        )?.let { logNative("playback $it ${throughputFields(exo, kbpsIn)}") }
+    }
+
+    /**
+     * `in=`/`est=`/`bitrate=`, appended to both [samplePlaybackStats] shapes:
+     * inbound kbps over the current [ThroughputMeter] window (or `?` if it
+     * hasn't closed on this exact tick — its clock runs independently of the
+     * fps line's), [ExoPlayerEngine.bandwidthEstimateKbps]'s latest sample,
+     * and the stream's own declared bitrate ([ExoPlayerEngine.currentVideoBitrateKbps],
+     * usually `?` for a single-rendition IPTV body that declares none at all).
+     * `?` throughout when [exo] is null (the mpv fallback).
+     */
+    private fun throughputFields(exo: ExoPlayerEngine?, kbpsIn: Long?): String {
+        val est = exo?.bandwidthEstimateKbps()
+        val bitrate = exo?.currentVideoBitrateKbps()
+        return "in=${kbpsIn?.toString() ?: "?"}kbps " +
+            "est=${est?.toString() ?: "?"}kbps " +
+            "bitrate=${bitrate?.toString() ?: "?"}kbps"
     }
 
     /**
