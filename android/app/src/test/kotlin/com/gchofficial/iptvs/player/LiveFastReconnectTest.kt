@@ -52,7 +52,7 @@ class LiveFastReconnectTest {
     @Test
     fun `freshness spans the observed drain and stops at the bound`() {
         // The evidence: body closes at ~6 s, buffer runs dry at ~26 s, so the
-        // locator is ~20 s old when it is used. The deeper presets drain slower.
+        // locator is ~20 s old when it is used.
         assertTrue(LiveFastReconnectPolicy.isFresh(0L))
         assertTrue(LiveFastReconnectPolicy.isFresh(20_183L))
         assertTrue(LiveFastReconnectPolicy.isFresh(LiveFastReconnectPolicy.FRESH_MS))
@@ -62,11 +62,15 @@ class LiveFastReconnectTest {
     }
 
     @Test
-    fun `the bound clears the observed drain with margin`() {
-        // Sized against the cycle it has to survive rather than picked: a bound
-        // at the observed 20 s would fail exactly the buffer presets that drain
-        // slowest. Guards the constant against being tightened back under it.
+    fun `the bound clears the observed drain and the low preset ceiling`() {
+        // The drain is the size of the backlog the connection delivered, which
+        // is capped by the preset's maxBufferMs (25 / 50 / 90 / 120 s). This
+        // must clear the observed ~21 s and the whole of `low`; it deliberately
+        // does *not* stretch to `max`, where a 120 s-old single-use token is a
+        // likelier failure than the round trip it would have saved. Both bounds
+        // are asserted so neither can drift without this test saying so.
         assertTrue(LiveFastReconnectPolicy.FRESH_MS >= 26_000L)
+        assertTrue(LiveFastReconnectPolicy.FRESH_MS < 50_000L)
     }
 
     @Test

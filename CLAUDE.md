@@ -1320,7 +1320,9 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   so by the time `kind=ended` fires there has been ample time to mint the next link — and
   `ENDED_RECONNECT_MS` (2 s) plus a `create_link` round trip were being spent *after* the picture
   had already frozen. The Activity stores the pre-resolved locator and, on a clean drop with a
-  **fresh** one in hand (`FRESH_MS` 30 s, ~1.5x the observed drain), loads it on the deciding tick:
+  **fresh** one in hand (`FRESH_MS` 30 s — it clears the observed ~21 s drain and `low`'s 25 s
+  ceiling, and deliberately not `max`'s 120 s, where a two-minute-old single-use token is the
+  likelier failure), loads it on the deciding tick:
   no threshold, no round trip. It is an **additional** path — no existing reconnect constant moves,
   and a stall, a forced error reconnect, an mpv fallback or a stale/absent locator all take
   today's path unchanged. Invariants: one locator at a time, **consumed or discarded by every
