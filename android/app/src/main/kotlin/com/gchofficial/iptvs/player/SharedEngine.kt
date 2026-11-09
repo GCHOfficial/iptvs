@@ -270,6 +270,12 @@ object SharedEngine {
         // hardware decode.
         target.onDiagnostic = previewDiagnostics
         target.onClaimedSurfaceFirstFrame = null
+        // The preview has no reconnect watchdog and no re-resolve channel of
+        // its own, so a source EOF is nothing it can act on — and leaving the
+        // Activity's closure here would have a finished fullscreen session
+        // pre-resolving (and spending a single-use `play_token`) for a stream
+        // that is back on the preview texture.
+        target.onSourceEof = null
     }
 
     /**
@@ -339,6 +345,7 @@ object SharedEngine {
         streamUrl: String,
         diagnostics: ((String) -> Unit)? = null,
         onClaimedSurfaceFirstFrame: (() -> Unit)? = null,
+        onSourceEof: ((Long) -> Unit)? = null,
     ): Pair<ExoPlayerEngine, PlayerUiState>? {
         val e = engine ?: return null
         val s = uiState ?: return null
@@ -358,6 +365,11 @@ object SharedEngine {
         // clears it again on the way back).
         e.onDiagnostic = diagnostics
         e.onClaimedSurfaceFirstFrame = onClaimedSurfaceFirstFrame
+        // An adopted engine is the Activity's for the duration, and the live
+        // stream's EOF is what arms its pre-resolve — without this an adopted
+        // fullscreen session (the user's own path in the report) would be the
+        // one session the fast reconnect never reached.
+        e.onSourceEof = onSourceEof
         e.claimViewSurface()
         Log.i(TAG, "fullscreen adopted the shared preview engine")
         return e to s

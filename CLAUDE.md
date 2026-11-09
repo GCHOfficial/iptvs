@@ -156,16 +156,13 @@ screens/  ──▶  LibraryRepository  ──▶  Source (Stalker | Xtream | M3
   dated/unlimited/unknown value (never collapse unlimited into unknown); shared parsing lives in
   `expiry.dart` — **read [docs/sources.md](docs/sources.md) before touching expiry or the
   M3U→Xtream upgrade.** Stalker also backfills adult ("censored") genres that
-  `get_all_channels` omits, via per-genre `get_ordered_list` (docs/sources.md). It also polls the
-  **portal watchdog** while something plays (`type=watchdog&action=get_events`, the MAG payload,
-  on the profile's `watchdog_timeout` clamped to the documented 30–300 s, else the STB client's own
-  30 s): the optional `PlaybackKeepAlive` capability, armed by a successful **live**
-  `LibraryRepository.resolve` and released through `PlaybackKeepAliveCoordinator`
-  (`lib/data/playback_keep_alive.dart`) — one armed source app-wide, token-checked so the preview's
-  teardown can't silence the fullscreen route that superseded it. **It is a deliberate, falsifiable
-  hypothesis test** for live sessions that end cleanly every ~30 s, not a known fix: the
-  open-source portal only writes `users.keep_alive` and kills nothing. Read docs/sources.md "The
-  portal watchdog (keep-alive)" — including what would falsify it — before changing or removing it.
+  `get_all_channels` omits, via per-genre `get_ordered_list` (docs/sources.md). The **portal
+  watchdog (keep-alive)** was a falsifiable hypothesis test in 0.1.80 and is **removed** — the next
+  export showed the provider closing the body at ~6 s behind a 21 s buffer (not a ~30 s session
+  timeout at all) and every `get_events` answering with a null `js`, which `_looksTokenInvalid`
+  read as a bad token, so each poll re-handshook mid-playback. Don't re-propose it without reading
+  docs/sources.md "The portal watchdog (keep-alive) — tried in 0.1.80 and removed"; the latency it
+  was really chasing is answered by the Android pre-resolved reconnect (docs/player.md).
   Invariants: Stalker **authorizes before asking** (`connect()`, i.e.
   handshake **+ `get_profile`**, before `account_info` — `_call` only guarantees the handshake, and
   the sources screen builds a fresh source per card, which is why the badge read unknown on every
@@ -1312,10 +1309,29 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   writes `stream source eof sinceLoadMs=… ahead=… played=… bytes=…` off media3's
   `AnalyticsListener.onLoadCompleted` on a **progressive** period (`StreamEofPolicy`: live only,
   `TRACK_TYPE_UNKNOWN` only — HLS/DASH dispatch one per segment — capped per load), with `ahead=`
-  now on Android's `live reconnect` line too. Diagnostics only: nothing reads either, and neither
-  changes a threshold. The reconnect log line carries `kind=ended|buffering|error` (Android's `stallKind`
+  now on Android's `live reconnect` line too. The mpv one is diagnostics-only and changes no
+  threshold; Android's is now also an input (below). The reconnect log line carries
+  `kind=ended|buffering|error` (Android's `stallKind`
   vocabulary) and `ahead=<ms>` buffered at the decision, so an export can tell a cushion never
   built from one built and drained.
+  **On Android that source EOF now does work: it pre-resolves the next locator while the picture
+  is still running** (`player/LiveFastReconnect.kt`, pinned by `LiveFastReconnectTest`). A provider
+  that sends a connect backlog closes the body ~6 s in and the buffer hides it for another ~20 s,
+  so by the time `kind=ended` fires there has been ample time to mint the next link — and
+  `ENDED_RECONNECT_MS` (2 s) plus a `create_link` round trip were being spent *after* the picture
+  had already frozen. The Activity stores the pre-resolved locator and, on a clean drop with a
+  **fresh** one in hand (`FRESH_MS` 30 s, ~1.5x the observed drain), loads it on the deciding tick:
+  no threshold, no round trip. It is an **additional** path — no existing reconnect constant moves,
+  and a stall, a forced error reconnect, an mpv fallback or a stale/absent locator all take
+  today's path unchanged. Invariants: one locator at a time, **consumed or discarded by every
+  reload** (`play_token`s are single-use), discarded on zap / Go-to-live / fallback / finish, only
+  ever requested *after* the body has closed (so no second connection is ever implied), and backed
+  off for the session after `MAX_CONSECUTIVE_FAILURES` (3) pre-resolved reconnects that each died
+  inside `FAILURE_WINDOW_MS` (8 s). Lines: `live pre-resolve requested sinceLoadMs=…`,
+  `live pre-resolve ready ageMs=… ok=…`, `path=preresolved|resolve ageMs=…` on the reconnect line,
+  and `live pre-resolve disabled failures=… playedMs=…`. The Dart/media_kit/mpv and Swift
+  watchdogs are deliberately **unchanged** — the evidence is Android-only, one variable at a time
+  (docs/player.md "The pre-resolved reconnect").
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
   (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
   `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF

@@ -346,6 +346,27 @@ class ExoPlayerEngine(
      */
     var onClaimedSurfaceFirstFrame: (() -> Unit)? = null
 
+    /**
+     * The **source** of a live stream reached end of input — the HTTP body
+     * closed — with the argument being ms since this engine's own `load()`.
+     *
+     * Same event [StreamEofPolicy] writes its line from, handed to the host as
+     * well because on a progressive live body it arrives *seconds before*
+     * anyone needs a new locator: the renderer keeps playing from the cushion
+     * until it runs dry. `HdrPlayerActivity` answers it by pre-resolving the
+     * next locator while the picture is still running
+     * ([LiveFastReconnectPolicy]), so the reconnect that eventually fires has
+     * neither a threshold nor a round trip in front of it.
+     *
+     * Fires on every qualifying load completion, not only the ones
+     * [StreamEofPolicy.shouldReport] still has log budget for — the cap bounds
+     * an exportable log, not a decision. Rebindable like the callbacks above,
+     * because the shared preview engine outlives its host: the preview nulls it
+     * on handback, so an engine that is back on the preview texture never
+     * pre-resolves for an Activity that has finished.
+     */
+    var onSourceEof: ((sinceLoadMs: Long) -> Unit)? = null
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -721,25 +742,36 @@ class ExoPlayerEngine(
             mediaLoadData: MediaLoadData,
         ) {
             if (released) return
-            if (!StreamEofPolicy.shouldReport(
+            if (!StreamEofPolicy.isSourceEof(
+                    trackType = mediaLoadData.trackType,
+                    trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
+                    isLive = state.isLive,
+                )
+            ) {
+                return
+            }
+            val since = if (loadedAtMs == 0L) -1L else SystemClock.elapsedRealtime() - loadedAtMs
+            if (StreamEofPolicy.shouldReport(
                     trackType = mediaLoadData.trackType,
                     trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
                     isLive = state.isLive,
                     linesSoFar = sourceEofLines,
                 )
             ) {
-                return
+                sourceEofLines++
+                onDiagnostic?.invoke(
+                    StreamEofPolicy.line(
+                        sinceLoadMs = since,
+                        aheadMs = bufferedAheadMs(),
+                        playedMs = mediaPositionMs(),
+                        bytes = loadEventInfo.bytesLoaded,
+                    ),
+                )
             }
-            sourceEofLines++
-            val since = if (loadedAtMs == 0L) -1L else SystemClock.elapsedRealtime() - loadedAtMs
-            onDiagnostic?.invoke(
-                StreamEofPolicy.line(
-                    sinceLoadMs = since,
-                    aheadMs = bufferedAheadMs(),
-                    playedMs = mediaPositionMs(),
-                    bytes = loadEventInfo.bytesLoaded,
-                ),
-            )
+            // After the line, so a host that reacts can't reorder the report of
+            // the event it reacted to. Delivered on whatever thread media3 uses
+            // for analytics; the host hops (see [onSourceEof]).
+            onSourceEof?.invoke(since)
         }
 
         override fun onAudioCodecError(

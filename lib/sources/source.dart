@@ -579,39 +579,3 @@ abstract interface class RefreshableSource {
   /// non-forced load.
   void invalidate();
 }
-
-/// Optional capability a [Source] can implement when the *provider session*
-/// has to be told that something is playing, for as long as it plays.
-///
-/// The case this exists for is Stalker/Ministra: a real MAG set-top box polls
-/// `type=watchdog&action=get_events` on a fixed cadence while the portal is
-/// open, and the portal records that poll as the box's `keep_alive`. A client
-/// that never polls looks permanently offline to the panel. See
-/// [docs/sources.md] "The portal watchdog (keep-alive)" for the sourced
-/// behaviour, and for the fact that this is a **hypothesis test** rather than
-/// a known fix.
-///
-/// A separate interface for the same reason as [RefreshableSource] and
-/// [BatchedEpgSource]: every [Source] here declares `implements Source`, and
-/// Dart does not inherit default method bodies through `implements`, so a
-/// defaulted member on [Source] would force every implementer to redeclare it.
-///
-/// Lifecycle is owned by `PlaybackKeepAliveCoordinator`
-/// (`lib/data/playback_keep_alive.dart`), which guarantees **one armed source
-/// at a time** app-wide; an implementation only has to guarantee one timer at
-/// a time for itself, and that nothing is in flight after [playbackStopped]
-/// or [Source.dispose].
-abstract interface class PlaybackKeepAlive {
-  /// Something started playing [channel] through this source. Called right
-  /// after a successful live [Source.resolve], and again on every later
-  /// resolve of the same session (a zap, a reconnect's re-resolve) — so an
-  /// implementation must treat a repeat call as "still playing", not as a
-  /// reason to restart its timer.
-  ///
-  /// Never log [channel]'s `extra`: at this point it is a *revealed* model and
-  /// carries the playback locator.
-  void playbackStarted(Channel channel);
-
-  /// Nothing is playing through this source any more. Idempotent.
-  void playbackStopped();
-}

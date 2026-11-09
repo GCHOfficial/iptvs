@@ -50,9 +50,24 @@ object StreamEofPolicy {
         trackTypeUnknown: Int,
         isLive: Boolean,
         linesSoFar: Int,
-    ): Boolean = isLive &&
-        trackType == trackTypeUnknown &&
+    ): Boolean = isSourceEof(trackType, trackTypeUnknown, isLive) &&
         linesSoFar < MAX_LINES_PER_LOAD
+
+    /**
+     * The same event without the log budget: whether this completed load *is*
+     * a live progressive source reaching end of stream.
+     *
+     * Split out because the cap is about an exportable log and nothing else.
+     * `HdrPlayerActivity` reacts to this event (it pre-resolves the next
+     * locator — [LiveFastReconnectPolicy]), and a reaction that stopped on the
+     * fourth EOF of a load while the first three were merely *reported* would
+     * be a recovery silently gated on a diagnostics quota.
+     */
+    fun isSourceEof(
+        trackType: Int,
+        trackTypeUnknown: Int,
+        isLive: Boolean,
+    ): Boolean = isLive && trackType == trackTypeUnknown
 
     /**
      * The line itself. Credential-free by construction: three durations and a

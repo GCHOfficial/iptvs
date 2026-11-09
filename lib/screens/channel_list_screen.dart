@@ -10,7 +10,6 @@ import '../data/device_class.dart';
 import '../data/diagnostics_log.dart';
 import '../data/library_repository.dart';
 import '../data/net.dart';
-import '../data/playback_keep_alive.dart';
 import '../data/source_store.dart';
 import '../sources/source.dart';
 import '../sources/source_config.dart';
@@ -1975,14 +1974,6 @@ class _ChannelListScreenState extends State<ChannelListScreen>
       _preview.adoptedByFullscreen = decision.adoptsEmbeddedPreview;
       opened = true;
       final hotSwapped = await navigator.push<bool>(route) ?? false;
-      // The fullscreen session is over, so the provider's playback keep-alive
-      // must come down before anything else runs. `stopAll`, not a token
-      // release: a zap moves the session to another channel and possibly to
-      // another *source*, each re-arming through its own resolve, so the
-      // arming this route started with is long superseded by the time it
-      // closes. Whatever the preview return leg below does next re-arms —
-      // a restart through `resolve`, a resume through `play()`.
-      PlaybackKeepAliveCoordinator.instance.stopAll();
       // The push (and whatever PlayerScreen did while up) completed — a
       // failure past this point isn't the stop-and-resolve-fresh setup
       // failing, so the catch block no longer needs to restart the preview.
