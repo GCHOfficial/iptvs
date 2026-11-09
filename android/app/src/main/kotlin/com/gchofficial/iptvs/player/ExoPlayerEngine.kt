@@ -21,7 +21,10 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.DecoderCounters
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -30,6 +33,7 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -753,6 +757,68 @@ class ExoPlayerEngine(
         }
     }
 
+    /**
+     * A **private, unshared** estimator for the playback line's `est=` field
+     * — deliberately not [player]'s own bandwidth meter (an unconfigured
+     * `ExoPlayer` defaults to `DefaultBandwidthMeter.getSingletonInstance`,
+     * the same instance `DefaultTrackSelector`'s default adaptive-track logic
+     * reads from: `ExoPlayerImpl` threads the *one* meter given to
+     * `ExoPlayer.Builder` straight into `ExoPlayerImplInternal` for track
+     * selection). Feeding that real meter would be the obvious move — it
+     * would also let `AnalyticsListener.onBandwidthEstimate` report it — but
+     * this app never wires a `TransferListener` into it today, so on any
+     * stream using adaptive rendition switching (an HLS/DASH multi-variant
+     * body; most IPTV channels are a single-rendition `.ts` and never see
+     * this at all) doing so would be the first time that selector ever saw a
+     * measured estimate instead of its constant default, which can change
+     * which rendition gets selected. A diagnostics-only change must not risk
+     * that, so this meter is fed by the exact same [transferListener] but
+     * never handed to [ExoPlayer.Builder.setBandwidthMeter] — `getBitrateEstimate()`
+     * is a plain, thread-safe getter (synchronized internally), so no
+     * `AnalyticsListener`/`onBandwidthEstimate` wiring is needed to read it.
+     */
+    private val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
+
+    /**
+     * The byte counter behind the playback line's `in=` field — see
+     * [ThroughputMeter]'s own doc for the window/cadence rules.
+     */
+    private val throughputMeter = ThroughputMeter()
+
+    /**
+     * Forwards every HTTP transfer to both [bandwidthMeter] (diagnostics-only,
+     * see its own doc) and [throughputMeter] (bytes actually arriving,
+     * independent of estimation). `DefaultHttpDataSource.Factory` accepts
+     * only one [TransferListener], so this is the single place both
+     * subscribers attach — not [AnalyticsListener.onLoadCompleted]: a live
+     * progressive `.ts` body has no chunk boundaries, so that only fires at
+     * EOF (see [StreamEofPolicy]), exactly the moment this instrumentation
+     * needs to see *through*, not at.
+     */
+    private val transferListener = object : TransferListener {
+        override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+            bandwidthMeter.onTransferInitializing(source, dataSpec, isNetwork)
+        }
+
+        override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+            bandwidthMeter.onTransferStart(source, dataSpec, isNetwork)
+        }
+
+        override fun onBytesTransferred(
+            source: DataSource,
+            dataSpec: DataSpec,
+            isNetwork: Boolean,
+            bytesTransferred: Int,
+        ) {
+            bandwidthMeter.onBytesTransferred(source, dataSpec, isNetwork, bytesTransferred)
+            throughputMeter.onBytesTransferred(bytesTransferred.toLong())
+        }
+
+        override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+            bandwidthMeter.onTransferEnd(source, dataSpec, isNetwork)
+        }
+    }
+
     /// Exception **type** only: a sink/codec message can echo the format and is
     /// not worth the audit surface in an exportable log.
     private fun reportAudioError(where: String, error: Exception) {
@@ -1050,6 +1116,7 @@ class ExoPlayerEngine(
         val httpFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(headers)
+            .setTransferListener(transferListener)
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
         renderersFactory = HdrRenderersFactory(
@@ -1459,6 +1526,38 @@ class ExoPlayerEngine(
             }
             null
         }.getOrNull()
+    }
+
+    /**
+     * The playback line's `in=` field: inbound kbps over [ThroughputMeter]'s
+     * own 5s window, or null while that window is still open. Read on the
+     * host's ticker — the same thread [transferListener] is *not* called on,
+     * which is exactly why [ThroughputMeter] locks around both sides.
+     */
+    fun sampleThroughputKbps(nowMs: Long): Long? = throughputMeter.sampleKbps(nowMs)
+
+    /**
+     * The playback line's `est=` field: the private [bandwidthMeter]'s current
+     * estimate, in kbps. Never null — `DefaultBandwidthMeter` always has a
+     * network-type-derived default even before the first sample — but it is
+     * only a *measurement* once bytes have actually flowed through
+     * [transferListener]; read next to `in=` rather than alone.
+     */
+    fun bandwidthEstimateKbps(): Long = bandwidthMeter.bitrateEstimate / 1_000L
+
+    /**
+     * The playback line's stream-bitrate field: the currently playing video
+     * [Format]'s own declared bitrate, in kbps, or null when the container
+     * doesn't carry one — the common case for a single-rendition IPTV `.ts`
+     * body. `Format.bitrate` is already "peak if known, else average, else
+     * [Format.NO_VALUE]" (see its own doc), so no separate `averageBitrate`
+     * fallback is needed on top of it.
+     */
+    fun currentVideoBitrateKbps(): Long? {
+        if (released) return null
+        val bitrate = runCatching { player.videoFormat?.bitrate }.getOrNull()
+        if (bitrate == null || bitrate == Format.NO_VALUE) return null
+        return bitrate / 1_000L
     }
 
     override fun applyAspect(mode: AspectMode) {
