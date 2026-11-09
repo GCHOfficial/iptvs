@@ -153,8 +153,10 @@ object LiveFastReconnectPolicy {
         playedMs < failureWindowMs
 
     /** Whether [consecutiveFailures] is enough to stand the fast path down. */
-    fun shouldBackOff(consecutiveFailures: Int): Boolean =
-        consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+    fun shouldBackOff(
+        consecutiveFailures: Int,
+        maxConsecutiveFailures: Int = MAX_CONSECUTIVE_FAILURES,
+    ): Boolean = consecutiveFailures >= maxConsecutiveFailures
 
     // ── Diagnostics lines ────────────────────────────────────────────────────
     //
@@ -338,7 +340,9 @@ class LiveFastReconnect(
             return FastReconnectOutcome.SURVIVED
         }
         consecutiveFailures++
-        if (consecutiveFailures < maxConsecutiveFailures) return FastReconnectOutcome.FAILED
+        if (!LiveFastReconnectPolicy.shouldBackOff(consecutiveFailures, maxConsecutiveFailures)) {
+            return FastReconnectOutcome.FAILED
+        }
         disabled = true
         discard()
         return FastReconnectOutcome.BACKED_OFF
