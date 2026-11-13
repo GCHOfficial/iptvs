@@ -50,6 +50,38 @@ class LiveFastReconnectTest {
     }
 
     @Test
+    fun `the request waits for the cushion, not for the EOF`() {
+        // The 0.1.81 shape: the body closes at ahead=27410, which is a locator
+        // minted 27 s before anything needs it — and on a deep preset, one that
+        // goes stale before the drain finishes (`path=resolve ageMs=32089` in
+        // the export). The request is now held back until the cushion is nearly
+        // spent.
+        assertFalse(LiveFastReconnectPolicy.isPreResolveDue(eofSeen = true, aheadMs = 27_410L))
+        assertFalse(
+            LiveFastReconnectPolicy.isPreResolveDue(
+                eofSeen = true,
+                aheadMs = LiveFastReconnectPolicy.PRE_RESOLVE_AHEAD_MS + 1,
+            ),
+        )
+        assertTrue(
+            LiveFastReconnectPolicy.isPreResolveDue(
+                eofSeen = true,
+                aheadMs = LiveFastReconnectPolicy.PRE_RESOLVE_AHEAD_MS,
+            ),
+        )
+        assertTrue(LiveFastReconnectPolicy.isPreResolveDue(eofSeen = true, aheadMs = 0L))
+        // **Never before the body has closed.** A `create_link` issued while a
+        // link is still open can kill it on a single-connection account; the
+        // EOF is what makes this path safe at all, and a shallow cushion is not
+        // a substitute for it.
+        assertFalse(LiveFastReconnectPolicy.isPreResolveDue(eofSeen = false, aheadMs = 0L))
+        assertFalse(LiveFastReconnectPolicy.isPreResolveDue(eofSeen = false, aheadMs = -1L))
+        // An engine that can't report its cushion must not be able to postpone
+        // the request for ever.
+        assertTrue(LiveFastReconnectPolicy.isPreResolveDue(eofSeen = true, aheadMs = -1L))
+    }
+
+    @Test
     fun `freshness spans the observed drain and stops at the bound`() {
         // The evidence: body closes at ~6 s, buffer runs dry at ~26 s, so the
         // locator is ~20 s old when it is used.
@@ -149,8 +181,8 @@ class LiveFastReconnectTest {
     @Test
     fun `the diagnostics lines read as specified and carry no locator`() {
         assertEquals(
-            "live pre-resolve requested sinceLoadMs=6032",
-            LiveFastReconnectPolicy.requestedLine(6032L),
+            "live pre-resolve requested sinceLoadMs=6032 ahead=9840",
+            LiveFastReconnectPolicy.requestedLine(6032L, 9_840L),
         )
         assertEquals(
             "live pre-resolve ready ageMs=412 ok=true",
@@ -180,7 +212,7 @@ class LiveFastReconnectTest {
             LiveFastReconnectPolicy.reconnectPath(usedPreResolved = false, ageMs = 41_000L),
         )
         val every = listOf(
-            LiveFastReconnectPolicy.requestedLine(1L),
+            LiveFastReconnectPolicy.requestedLine(1L, 1L),
             LiveFastReconnectPolicy.readyLine(1L, ok = true),
             LiveFastReconnectPolicy.backOffLine(1, 1L),
             LiveFastReconnectPolicy.reconnectPath(true, 1L),
