@@ -367,6 +367,61 @@ class ExoPlayerEngine(
      */
     var onSourceEof: ((sinceLoadMs: Long) -> Unit)? = null
 
+    /**
+     * The renderer reached `STATE_ENDED` on a **live** stream, i.e. the cushion
+     * behind a closed body finally ran dry.
+     *
+     * Exists purely to remove tick latency: `HdrPlayerActivity`'s 500 ms
+     * progress ticker already notices `uiState.ended`, so this just lets it
+     * notice on the event instead of up to half a second later. No threshold
+     * moves, and the watchdog's own rate limiting is what keeps the event and
+     * the tick from acting twice. Null on the preview (which has no watchdog at
+     * all) for the same reason [onSourceEof] is.
+     */
+    var onLiveEnded: (() -> Unit)? = null
+
+    /**
+     * A **stitched handover** committed: the live stream is now being fed by a
+     * different HTTP body through the same decoder, with no reload. The host
+     * rolls its per-link state (see `HdrPlayerActivity`); nothing about the
+     * reconnect watchdog's bookkeeping moves, because this was not a reconnect.
+     */
+    var onLiveLinkCommitted: (() -> Unit)? = null
+
+    /**
+     * A stitched handover gave up; end of input is about to reach the
+     * extractor and the ordinary reconnect will take the stream. The argument
+     * is a `LiveStitchPolicy` reason token, which the host prints on the
+     * reconnect line that follows.
+     */
+    var onLiveHandoverFallback: ((reason: String) -> Unit)? = null
+
+    /**
+     * Installed by a fullscreen `HdrPlayerActivity` session; null everywhere
+     * else, which is the whole of "the preview never stitches".
+     *
+     * Read at `DataSource.open` time rather than captured at construction,
+     * because an adopted engine is built by the preview and only learns about
+     * an Activity later. See [StitchingDataSource].
+     */
+    var stitchCoordinator: StitchCoordinator? = null
+
+    /**
+     * Latched (on the media3 loader thread) once [StitchingDataSource] has
+     * reported a link's end of input for this load.
+     *
+     * From that point media3's own `onLoadCompleted` must stay silent: a
+     * stitched load completes **once**, after however many links, so it would
+     * report the last link's EOF a second time with the whole load's byte
+     * total. Reset per [load], and never set at all on an unarmed stream —
+     * which is why the unstitched path's `stream source eof` line is
+     * byte-identical to the shipped one.
+     */
+    @Volatile
+    private var stitchOwnsEof = false
+
+    private var stitchLinksReported = 0
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -742,6 +797,10 @@ class ExoPlayerEngine(
             mediaLoadData: MediaLoadData,
         ) {
             if (released) return
+            // A stitched load's links report their own ends of input (each
+            // with its own byte count and age); this completion is the last of
+            // them arriving a second time, with the whole load's totals.
+            if (stitchOwnsEof) return
             if (!StreamEofPolicy.isSourceEof(
                     trackType = mediaLoadData.trackType,
                     trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
@@ -953,6 +1012,13 @@ class ExoPlayerEngine(
 
     override fun load(url: String, subtitles: List<SubtitleSpec>) {
         reportBufferPolicy()
+        // Before `player.stop()` below, which cancels the loader: the token
+        // bump is what releases a `StitchingDataSource` still parked waiting
+        // for a locator, and it is also what records the URI (and liveness)
+        // the *next* body has to match before it may stitch at all.
+        stitchCoordinator?.noteLoad(url, state.isLive)
+        stitchOwnsEof = false
+        stitchLinksReported = 0
         val item = MediaItem.Builder()
             .setUri(url)
             .setSubtitleConfigurations(
@@ -1058,6 +1124,10 @@ class ExoPlayerEngine(
                 updateStreamInfo()
             }
             syncProgress()
+            // Last, so the host's watchdog reads a fully updated state. It
+            // changes no threshold — it only saves the up-to-500 ms the
+            // progress ticker would have taken to notice the same flag.
+            if (playbackState == Player.STATE_ENDED && state.isLive) onLiveEnded?.invoke()
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -1144,13 +1214,140 @@ class ExoPlayerEngine(
         }
     }
 
-    init {
-        val httpFactory = DefaultHttpDataSource.Factory()
+    private val httpFactory = DefaultHttpDataSource.Factory()
+        .setAllowCrossProtocolRedirects(true)
+        .setDefaultRequestProperties(headers)
+        .setTransferListener(transferListener)
+
+    /**
+     * A candidate link for a stitched handover, built with the **re-resolved**
+     * locator's headers.
+     *
+     * Headers are baked into a `DefaultHttpDataSource.Factory` at construction,
+     * so a candidate cannot reuse [httpFactory] — a re-resolve is free to come
+     * back with different ones. Empty headers mean "preserve", the same
+     * never-blank rule [ResolveAgainReply] applies, because a MAG portal
+     * refuses a request without its `User-Agent`.
+     *
+     * The timeouts are short and deliberate — see
+     * [LiveStitchPolicy.CANDIDATE_CONNECT_TIMEOUT_MS]. The engine's own link
+     * keeps media3's defaults.
+     */
+    private fun candidateDataSource(candidateHeaders: Map<String, String>): DataSource =
+        DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(headers)
+            .setDefaultRequestProperties(candidateHeaders.ifEmpty { headers })
             .setTransferListener(transferListener)
+            .setConnectTimeoutMs(LiveStitchPolicy.CANDIDATE_CONNECT_TIMEOUT_MS)
+            .setReadTimeoutMs(LiveStitchPolicy.CANDIDATE_READ_TIMEOUT_MS)
+            .createDataSource()
+
+    /**
+     * What [StitchingDataSource] reports, turned into exportable lines and
+     * host callbacks. Every method arrives on the media3 loader thread, so
+     * anything that reads player state hops to main first.
+     */
+    private val stitchHost = object : StitchHost {
+        override fun onStitchArmed(link: Int, spliceable: String) {
+            onDiagnostic?.invoke(LiveStitchPolicy.armedLine(link, spliceable))
+        }
+
+        override fun onStitchSpliceable(link: Int, spliceable: Boolean, reason: String) {
+            onDiagnostic?.invoke(LiveStitchPolicy.spliceableLine(link, spliceable, reason))
+        }
+
+        override fun onStitchLinkEof(link: Int, bytes: Long, sinceLinkOpenMs: Long) {
+            // Latched here, on the loader thread, so the analytics thread's
+            // `onLoadCompleted` is already suppressed by the time it fires.
+            stitchOwnsEof = true
+            mainHandler.post {
+                if (released) return@post
+                val first = stitchLinksReported == 0
+                stitchLinksReported++
+                // The first link of a load keeps today's meaning exactly —
+                // measured from this engine's own `load()`. A link that
+                // arrived through a splice has no such origin, so it reports
+                // its own age.
+                val since = when {
+                    !first -> sinceLinkOpenMs
+                    loadedAtMs == 0L -> -1L
+                    else -> SystemClock.elapsedRealtime() - loadedAtMs
+                }
+                // Deliberately outside [StreamEofPolicy.MAX_LINES_PER_LOAD]:
+                // that cap bounds a *chunked* container writing a line per
+                // segment, where a stitched load writes one per ~30 s link and
+                // it is the single most important line the feature produces.
+                onDiagnostic?.invoke(
+                    StreamEofPolicy.line(
+                        sinceLoadMs = since,
+                        aheadMs = bufferedAheadMs(),
+                        playedMs = mediaPositionMs(),
+                        bytes = bytes,
+                    ),
+                )
+                onSourceEof?.invoke(since)
+            }
+        }
+
+        override fun onStitchCommitted(
+            link: Int,
+            newLink: Int,
+            info: SpliceInfo,
+            durationMs: Long,
+        ) {
+            mainHandler.post {
+                if (released) return@post
+                onDiagnostic?.invoke(
+                    LiveStitchPolicy.handoverLine(
+                        link = link,
+                        mechanism = LiveStitchPolicy.MECHANISM_SPLICE,
+                        reason = LiveStitchPolicy.REASON_NONE,
+                        durationMs = durationMs,
+                        // What survived the handover. Read here rather than at
+                        // the commit because `totalBufferedDuration` is an
+                        // application-thread getter.
+                        aheadAtCommitMs = bufferedAheadMs(),
+                        trimmedMs = info.overlapTrimmedMs,
+                        skippedMs = info.skippedMs,
+                        repeatedMs = info.repeatedMs,
+                        droppedBytes = info.droppedBytes,
+                    ),
+                )
+                onDiagnostic?.invoke(LiveStitchPolicy.armedLine(newLink, "true"))
+                onLiveLinkCommitted?.invoke()
+            }
+        }
+
+        override fun onStitchFallback(link: Int, reason: String, durationMs: Long) {
+            mainHandler.post {
+                if (released) return@post
+                onDiagnostic?.invoke(LiveStitchPolicy.fallbackLine(link, reason, durationMs))
+                onLiveHandoverFallback?.invoke(reason)
+            }
+        }
+    }
+
+    /**
+     * Wraps every data source this player opens.
+     *
+     * **It is a byte-for-byte delegate unless it arms**, and it can only arm on
+     * the live progressive body of a fullscreen session whose provider has been
+     * seen to rotate its locators — so a VOD load, a preview, an HLS segment, a
+     * subtitle sidecar and every stream on a stable-URL provider go through
+     * unchanged. See [StitchingDataSource].
+     */
+    private val stitchingDataSourceFactory = object : DataSource.Factory {
+        override fun createDataSource(): DataSource = StitchingDataSource(
+            upstream = httpFactory.createDataSource(),
+            candidateFactory = { candidateHeaders -> candidateDataSource(candidateHeaders) },
+            coordinatorOf = { stitchCoordinator },
+            host = stitchHost,
+        )
+    }
+
+    init {
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(httpFactory)
+            .setDataSourceFactory(stitchingDataSourceFactory)
         renderersFactory = HdrRenderersFactory(
             context,
             onDynamicRange = { label ->
@@ -1874,6 +2071,11 @@ class ExoPlayerEngine(
     override fun release() {
         if (released) return
         released = true
+        // Belt to `player.release()`'s braces: it cancels the loader (which
+        // interrupts a parked stitch), but a coordinator left holding this
+        // engine's session would still accept an offer for a stream that no
+        // longer exists.
+        stitchCoordinator?.cancel()
         cancelPreviewFrameWatch()
         cancelPendingClaim()
         cancelDetachProbe()

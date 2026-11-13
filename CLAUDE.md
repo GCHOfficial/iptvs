@@ -64,7 +64,11 @@ SurfaceTexture-finalizer level) runs on `google_apis;x86_64` with a TV screen pr
 the real `android-tv` image, plus a third leg re-running API 36 under the debug-only
 `--force-skia-gl` override so the non-default renderer is driven end to end; an emulator validates
 input/lifecycle, never decoders, HDR or
-passthrough (docs/validation-baseline.md "Android TV emulator CI").
+passthrough (docs/validation-baseline.md "Android TV emulator CI"). A fourth leg
+(`build-apk-livecut` + `drive-live-cut`) bakes in `--dart-define=IPTVS_LIVE_CUT_URL=…` to turn on
+two otherwise-nonexistent `DemoSource` channels and drives them against the synthetic
+burst/hold/close provider `tool/live_cut_server.py`, asserting the Android stitched-handover live
+splice end to end (same doc, same heading).
 Direct in-app updates fail closed unless an Ed25519-signed release manifest authenticates the
 exact platform filename, size, and SHA-256; GitHub-direct Linux updates replace a writable
 running AppImage via a detached helper. See `docs/updates.md` before changing release assets.
@@ -1314,26 +1318,46 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `kind=ended|buffering|error` (Android's `stallKind`
   vocabulary) and `ahead=<ms>` buffered at the decision, so an export can tell a cushion never
   built from one built and drained.
-  **On Android that source EOF now does work: it pre-resolves the next locator while the picture
-  is still running** (`player/LiveFastReconnect.kt`, pinned by `LiveFastReconnectTest`). A provider
-  that sends a connect backlog closes the body ~6 s in and the buffer hides it for another ~20 s,
-  so by the time `kind=ended` fires there has been ample time to mint the next link — and
-  `ENDED_RECONNECT_MS` (2 s) plus a `create_link` round trip were being spent *after* the picture
-  had already frozen. The Activity stores the pre-resolved locator and, on a clean drop with a
-  **fresh** one in hand (`FRESH_MS` 30 s — it clears the observed ~21 s drain and `low`'s 25 s
-  ceiling, and deliberately not `max`'s 120 s, where a two-minute-old single-use token is the
-  likelier failure), loads it on the deciding tick:
-  no threshold, no round trip. It is an **additional** path — no existing reconnect constant moves,
-  and a stall, a forced error reconnect, an mpv fallback or a stale/absent locator all take
-  today's path unchanged. Invariants: one locator at a time, **consumed or discarded by every
-  reload** (`play_token`s are single-use), discarded on zap / Go-to-live / fallback / finish, only
-  ever requested *after* the body has closed (so no second connection is ever implied), and backed
-  off for the session after `MAX_CONSECUTIVE_FAILURES` (3) pre-resolved reconnects that each died
-  inside `FAILURE_WINDOW_MS` (8 s). Lines: `live pre-resolve requested sinceLoadMs=…`,
-  `live pre-resolve ready ageMs=… ok=…`, `path=preresolved|resolve ageMs=…` on the reconnect line,
-  and `live pre-resolve disabled failures=… playedMs=…`. The Dart/media_kit/mpv and Swift
-  watchdogs are deliberately **unchanged** — the evidence is Android-only, one variable at a time
-  (docs/player.md "The pre-resolved reconnect").
+  **On Android that source EOF now does work: it *permits* a pre-resolve of the next locator,
+  requested once the remaining cushion is nearly spent rather than at the EOF itself**
+  (`PRE_RESOLVE_AHEAD_MS`, 10 s; `player/LiveFastReconnect.kt`, pinned by
+  `LiveFastReconnectTest`) — a request fired at the EOF of a provider whose backlog drains for
+  20+ s would otherwise go stale waiting for a reload that doesn't need it yet (`path=resolve
+  ageMs=32089` in a 0.1.81 export). A provider that sends a connect backlog closes the body ~6 s in
+  and the buffer hides it for another ~20 s, so by the time `kind=ended` fires there has been ample
+  time to mint the next link — and `ENDED_RECONNECT_MS` (2 s) plus a `create_link` round trip were
+  being spent *after* the picture had already frozen. The Activity stores the pre-resolved locator
+  — or, on a fullscreen session where a stitched handover (below) is already parked waiting for
+  one, hands it straight to the splice instead, never both — and, on a clean drop with a **fresh**
+  one in hand (`FRESH_MS` 30 s, now comfortable margin over the 10 s trigger rather than a tight
+  fit to backlog depth), loads it on the deciding tick: no threshold, no round trip. It is an
+  **additional** path — no existing reconnect constant moves, and a stall, a forced error
+  reconnect, an mpv fallback or a stale/absent locator all take today's path unchanged. Invariants:
+  one locator at a time, **consumed or discarded by every reload** (`play_token`s are single-use),
+  discarded on zap / Go-to-live / fallback / finish, only ever requested *after* the body has
+  closed (so no second connection is ever implied), and backed off for the session after
+  `MAX_CONSECUTIVE_FAILURES` (3) pre-resolved reconnects that each died inside `FAILURE_WINDOW_MS`
+  (8 s). Lines: `live pre-resolve requested sinceLoadMs=… ahead=…`, `live pre-resolve ready
+  ageMs=… ok=…`, `path=preresolved|resolve ageMs=…` on the reconnect line, and `live pre-resolve
+  disabled failures=… playedMs=…`. The Dart/media_kit/mpv and Swift watchdogs are deliberately
+  **unchanged** — the evidence is Android-only, one variable at a time (docs/player.md "The
+  pre-resolved reconnect").
+  **The stitched handover (Android) pre-empts auto-reconnect when armed**, so a provider's link
+  rotation costs nothing visible at all. `StitchingDataSource` wraps the engine's own live
+  `DataSource` and, when the body ends, splices the next pre-resolved link onto it instead of
+  letting ExoPlayer's load complete — one player, one decoder, one audio sink throughout, by
+  construction. Armed only when: the provider has been *proven*, this session, to rotate its
+  locators (never assumed from provider kind); the session is fullscreen (never the preview); and
+  the body is the live stream's own progressive content at position 0 of the item's own URL.
+  Unarmed, or a link `TsSplicer` can't handle, is a byte-for-byte delegate — the shipped path is
+  untouched. Every candidate is verified before one byte reaches the extractor; any rejection
+  closes the candidate and returns `END_OF_INPUT`, and today's reconnect takes over exactly as
+  before. The candidate opens only after the old body has closed and is closed again before
+  `END_OF_INPUT` is returned (never two connections); its deadline (2.5 s of remaining cushion) is
+  strictly above its own candidate socket timeouts (1.5 s each), which is what keeps that ordering
+  and still lands a failed handover's stream in `STATE_ENDED` rather than `STATE_BUFFERING`. Read
+  docs/player.md "The stitched handover (Android)" before touching `TsSplicer`, `StitchCoordinator`
+  or `StitchingDataSource`.
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
   (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
   `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF
@@ -1505,11 +1529,13 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   open); `persistence_test.dart` keeps the v1→current chain and the v7→8 `external_metadata`
   repair as regression tests. **Known gap:** the v3→7 ALTER/`media_page_state` rebuild branches
   are uncovered — dev-era paths outside the supported claim, worth tests only if they change.
-- Kotlin has a small plain-JUnit harness (`android/app/src/test/kotlin/` — `CrashScrubTest`, `CrashTestTest`, `PlayerBackPolicyTest`,
-  `ReconnectPolicyTest`, `LiveResolveTest`, `RendererPolicyTest`; run via
-  `./gradlew :app:testDevelopmentDebugUnitTest`)
-  for pure logic
-  extracted from the native player. CI's Android job runs it (after the first `flutter build apk`,
+- Kotlin has a plain-JUnit harness (`android/app/src/test/kotlin/` — over 20 files today, including
+  `CrashScrubTest`, `CrashTestTest`, `PlayerBackPolicyTest`, `ReconnectPolicyTest`,
+  `LiveResolveTest`, `RendererPolicyTest`, `StreamEofPolicyTest`, `LiveFastReconnectTest`,
+  `TsSplicerTest`, `StitchCoordinatorTest`, `LiveStitchPolicyTest`; run via
+  `./gradlew :app:testDevelopmentDebugUnitTest`) for pure logic
+  extracted from the native player — not an exhaustive list, check the directory rather than
+  assuming a class is uncovered. CI's Android job runs it (after the first `flutter build apk`,
   which generates the uncommitted `android/gradlew`); before that step existed nothing compiled
   these sources, so a broken Kotlin test could sit green. `integration_test/player_soak_test.dart` is owner-run on real
   hardware only (see docs/player.md) — plain `flutter test` doesn't collect it.

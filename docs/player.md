@@ -3132,6 +3132,17 @@ watchdogs** because the platforms play through different stacks:
   picture is still running on the buffer, so the reconnect skips both the 2 s ended threshold and
   the resolve — see "The pre-resolved reconnect" below.
 
+  **A live `STATE_ENDED` now reaches the watchdog on the event, not only on the next 500 ms tick.**
+  `ExoPlayerEngine.onLiveEnded` fires `pollLiveReconnect` directly the instant `playbackState ==
+  STATE_ENDED && isLive`; no threshold moves, and `reconnectLive`'s own rate limit is what keeps
+  that call and the ordinary tick from acting on the same drop twice. **On a stitched load (see
+  "The stitched handover" below) the `stream source eof` line is no longer `onLoadCompleted`'s
+  report** — `StitchingDataSource` writes one itself, per link, outside
+  `StreamEofPolicy.MAX_LINES_PER_LOAD`'s cap, because that cap bounds a *chunked* container writing
+  one line per segment, where a stitched load writes one line per ~30 s link and it is the single
+  most important line the feature produces. `StreamEofPolicy` itself is unchanged, and every
+  unstitched load still goes through `onLoadCompleted` exactly as before.
+
   **A decoder that is dropping frames is behind, not wedged, and must never be rebuilt.**
   `FrameLivenessWatch` originally judged liveness on `renderedOutputBufferCount` alone, which reads
   as *frozen* for a renderer that is decoding every frame and throwing some away to catch up. An
@@ -3485,12 +3496,17 @@ have been done twenty seconds earlier, while the picture was still running.
 session expiry — see docs/sources.md "The portal watchdog (keep-alive) — tried in 0.1.80 and
 removed", which is the hypothesis that `stream source eof` falsified.)
 
-**So the Activity resolves the next locator at the source's EOF and stores it.** When the buffer
-finally runs dry and the watchdog calls `kind=ended`, a stored locator that is still fresh is
-loaded on that very tick: no 2 s threshold, no round trip. The decisions are the pure
-`LiveFastReconnectPolicy` / `LiveFastReconnect` (`android/.../player/LiveFastReconnect.kt`,
-Android-free, pinned by the plain-JUnit `LiveFastReconnectTest` like `ReconnectPolicy` and
-`StreamEofPolicy`).
+**So the Activity resolves the next locator ahead of the reload and stores it.** The source's EOF
+no longer requests that resolve by itself — it only records that the body has closed and
+*permits* one (a `create_link` while the body was still open could kill it); the request itself
+goes out once the cushion behind that closed body is nearly spent, or immediately if it was
+already that low when the EOF arrived (`PRE_RESOLVE_AHEAD_MS`, below — and the one other place
+that locator can go is a stitched handover already parked waiting for it, see "The stitched
+handover" further down). When the buffer finally runs dry and the watchdog calls `kind=ended`, a
+stored locator that is still fresh is loaded on that very tick: no 2 s threshold, no round trip.
+The decisions are the pure `LiveFastReconnectPolicy` / `LiveFastReconnect`
+(`android/.../player/LiveFastReconnect.kt`, Android-free, pinned by the plain-JUnit
+`LiveFastReconnectTest` like `ReconnectPolicy` and `StreamEofPolicy`).
 
 **Why a resolve here is not "resolving ahead".** CLAUDE.md's rule is that streams resolve at play
 time, never ahead, because `create_link` URLs are short-lived. This one is issued *after the
@@ -3505,20 +3521,24 @@ EOF hook at all), a locator older than the freshness bound, and a provider whose
 change. `LiveFastReconnectTest` asserts the three constants are untouched, because the whole
 claim of this path rests on `path=resolve` meaning "unchanged".
 
-**The known cost of that conservatism**: a provider whose per-connection backlog outlasts
-`FRESH_MS` on a deep buffer preset will pre-resolve, go stale, and then re-resolve — one wasted
-`create_link` per cycle, with nothing else changed. Wasted rather than dangerous (a `create_link`
-mints a link; it opens no stream), and **visible**: `path=resolve ageMs=41000` on the reconnect
-line is exactly that case and nothing else. Raise the bound from an export, not from this
-paragraph. The refinement that would remove the waste entirely is to arm the pre-resolve off
-*remaining buffer* (`bufferedAheadMs` crossing ~10 s on the existing 500 ms ticker) instead of off
-the EOF — a second trigger to reason about, bought only once an export shows it is needed.
+**That gap is now closed, not merely bounded.** This path originally requested at the EOF itself,
+so the locator's age at reload was whatever the provider's own backlog happened to make it — fine
+on a shallow preset, but on a deep one the request could go stale before the drain finished and
+force a second, cold `create_link` right when the reconnect needed it most: `path=resolve
+ageMs=32089` in a 0.1.81 export is exactly that case, a wasted request *and* a cold reconnect. The
+fix is `PRE_RESOLVE_AHEAD_MS`: the EOF still has to happen first (nothing changes about *that*
+half), but the request now waits until the remaining cushion is down to 10 s, so its age at reload
+is bounded by the trigger rather than by how deep the backlog was. The same change is what makes a
+locator worth offering to a stitched handover at all (below) — one requested at the EOF, twenty
+seconds before anything needs it, would sit idle that whole time with no candidate link waiting to
+consume it.
 
 #### The numbers, and why they are those numbers
 
 | | | |
 | --- | --- | --- |
-| `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. Bounded **below** by the drain it has to survive: the body closes at ~6 s with `ahead=21011`, so the locator is ~20 s old when used — and that drain is the size of the **backlog the connection delivered**, which is itself capped by the preset's `maxBufferMs` (25 / 50 / 90 / 120 s). 30 s clears the observed case and the whole of `low`, with margin, and still leaves 20 s of life to a round trip that only settled at `ResolveGate.TIMEOUT_MS`. Bounded **above** by what a portal-minted link plausibly outlives: stretching it to cover `max`'s 120 s ceiling would mean loading a two-minute-old single-use token — precisely where it is likeliest to be dead — to save a round trip. |
+| `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. No longer bounded **below** by the backlog's depth — with the request itself held back to `PRE_RESOLVE_AHEAD_MS`, the locator is at most ~10 s old at the reload plus one round trip (backstopped at `ResolveGate.TIMEOUT_MS`), so 30 s is comfortable margin rather than a tight fit to how deep a preset's buffer runs. Left at 30 s anyway: shrinking it buys nothing now that the real trigger is the 10 s cushion bound below, and a deep preset's request can still land a few seconds later than `low`'s. Bounded **above** by what a portal-minted link plausibly outlives: stretching it to cover `max`'s 120 s ceiling would mean loading a two-minute-old single-use token — precisely where it is likeliest to be dead — to save a round trip. |
+| `PRE_RESOLVE_AHEAD_MS` | 10 s | How much cushion may remain before the request itself goes out — the EOF only *permits* it (see above). Sized from what has to fit inside it afterward: the resolve round trip (~0.4 s observed, backstopped at `ResolveGate.TIMEOUT_MS`), and, when a stitched handover is armed, the candidate evaluation that follows it, which must still reach a verdict with `LiveStitchPolicy.STITCH_ABORT_AHEAD_MS` (2.5 s) of cushion to spare. |
 | `FAILURE_WINDOW_MS` | 8 s | A pre-resolved reconnect whose own connection ends again inside this much playback was not a working connection. The healthy cycle is ~26 s, so 8 s cannot be confused with a short-but-working one; it is also the existing policy's own notion of a connection that isn't working (`STALL_RECONNECT_MS`), kept as a separate constant so the two agree by reasoning rather than by dependency. |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | One is noise the ordinary path would also have hit; two can still be a flaky link; three in a row with no intervening connection that survived the window is a portal that won't honour a link minted before the previous one drained. The asymmetry favours patience — a wrong fast path costs one wasted load and one wasted `create_link`, while disabling too eagerly gives up the whole fix on a blip. |
 
@@ -3527,9 +3547,17 @@ the EOF — a second trigger to reason about, bought only once an export shows i
 - **One locator, spent at most once.** `play_token`s are single-use, so the store holds exactly one
   and **every** reload consumes *or discards* it (`takeForReload`). A locator left behind by a
   stall or a forced reconnect would only age toward being loaded dead later.
+- **Handed to a stitched handover or stored — never both.** A reply is offered to the coordinator
+  first (`offer`), which only succeeds when a `StitchingDataSource` is actually parked waiting on
+  this exact session; everything else — no waiter, one already evaluating a candidate, a session
+  the handover has moved past — falls through to the store exactly as before. A `play_token`
+  consumed by a splice must not also sit in the store for a later reload to spend a second time.
 - **Requested only after the body has closed**, never speculatively, and never while a resolve is
   already in flight — the single `ResolveGate` still bounds a single-connection account to one
-  `create_link` at a time, and a pre-resolve goes through it like every other resolve.
+  `create_link` at a time, and a pre-resolve goes through it like every other resolve. The EOF
+  alone no longer fires it: the request waits until the remaining cushion falls to
+  `PRE_RESOLVE_AHEAD_MS`, or goes out on the same tick if the cushion was already that low when the
+  body closed.
 - **One request per connection.** `holdsLocator` refuses a second: media3 can complete a
   progressive load more than once, and each extra request would spend another token on a reload
   that needs one.
@@ -3541,7 +3569,9 @@ the EOF — a second trigger to reason about, bought only once an export shows i
   unreadable reply and a genuine same-URL answer into "the locator we already hold", and storing
   that would make the fast path skip both the wait and the round trip in order to reload a URL
   already known to be spent. The side effect is deliberate scoping: the path only ever engages for
-  providers that mint a per-connection locator, which is exactly the failure it exists for.
+  providers that mint a per-connection locator, which is exactly the failure it exists for. A
+  stitched handover waiting on this same reply is told the same way — `REASON_SAME_URL` or
+  `REASON_RESOLVE_FAILED` — rather than left to find out only at its own deadline.
 - **A clean drop only.** A buffering or frozen-renderer stall means the connection is still open
   and the server closed nothing; a locator minted at an earlier EOF is not what that failure needs.
 - **The age clock is the request, and `noteRequested` is its only writer.** `store` takes no clock
@@ -3564,20 +3594,28 @@ the EOF — a second trigger to reason about, bought only once an export shows i
 Every field is a number or a boolean; the locator never appears, in any of them.
 
 ```
-native live pre-resolve requested sinceLoadMs=6032 ms=…
+native live pre-resolve requested sinceLoadMs=6032 ahead=9840 ms=…
 native live pre-resolve ready ageMs=412 ok=true ms=…
-native live reconnect attempt=1 force=false kind=ended path=preresolved ageMs=20183 ahead=0 … ms=…
+native live reconnect attempt=1 force=false kind=ended mechanism=reconnect path=preresolved ageMs=20183 ahead=0 … ms=…
 native live latency reset reason=reconnect drift=… ms=…
 native live pre-resolve disabled failures=3 playedMs=1204 ms=…
 ```
 
+- `requested`'s `ahead=` is the cushion that triggered the request — the direct read-out of
+  `PRE_RESOLVE_AHEAD_MS` — and `sinceLoadMs=` still describes the EOF that merely permitted it; the
+  gap between the two numbers is how long the request deliberately waited after the body closed.
 - `ready`'s `ageMs` is measured from the **request**, i.e. the age the locator already has when it
-  lands — the head start the round trip cost. `ok=false` means nothing is held (a timeout, a reply
-  with no new URL, or a request the session has since moved past).
+  lands — the head start the round trip cost. `ok=false` means nothing usable arrived (a timeout, a
+  reply with no new URL, or a request the session has since moved past); **`ok=true` now covers two
+  outcomes** — the locator was stored for the reload, or it was handed straight to a stitched
+  handover already parked waiting for it — either way a usable fresh locator arrived, and the
+  handover's own line (see "The stitched handover" below) says which one happened.
 - `path=preresolved|resolve` says which path a reconnect took, and `ageMs` on a `path=resolve`
   line says how old the locator it *declined* was (`-1` = none was held). That distinction is the
   whole point of the field: it separates "no pre-resolve happened" from "one happened and the
-  freshness bound refused it".
+  freshness bound refused it". `mechanism=reconnect` on the same line reads as a pair with a
+  committed splice's own line — see below — and becomes `mechanism=reconnect
+  after=fallback:<reason>` when a stitched handover tried this link and lost.
 - **`live latency reset reason=reconnect drift=…` is the success metric** and is deliberately
   unchanged. The drift it reports is the lag the session banked across the frozen gap, so on the
   export above it should fall from ~2.4 s to well under 1 s once `path=preresolved` appears.
@@ -3607,6 +3645,192 @@ The equivalent elsewhere is well-defined when that time comes, and it is the sam
 
 On every one of those surfaces the storage, freshness and back-off rules would be a port of
 `LiveFastReconnectPolicy`'s, not a second set of numbers.
+
+### The stitched handover (Android)
+
+**The reload itself was still visible.** The pre-resolved reconnect above removes the round trip
+and the 2 s `ended` threshold, but it is still a *reload*: a new `MediaSource`, a new extractor, a
+new decoder and a new wait for an IDR, and none of that is something a pre-resolved locator can
+shorten. A representative 0.1.81 export still reads, per cycle:
+
+```
+native stream source eof sinceLoadMs=9446 ahead=27410
+… ~27 s of steady playback, drawn entirely from the buffer …
+native live pre-resolve requested sinceLoadMs=9446
+native live reconnect attempt=1 force=false kind=ended path=preresolved ageMs=… ahead=0 … stalled=2043ms
+```
+
+~2 s frozen per cycle even with the round trip and the threshold gone, and roughly one cycle in
+five still paid the old cold path in full (`path=resolve ageMs=32089` — a request fired at the EOF
+of a deep-preset session had gone stale by the time it was needed; see "The pre-resolved
+reconnect" above for the trigger change that closes that half). Zero is reachable only one way:
+the player must never learn the link closed at all.
+
+**The mechanism.** `StitchingDataSource` wraps the engine's own `DefaultHttpDataSource` inside
+`DefaultMediaSourceFactory`. When the link it is reading reaches end of input *and it is armed*,
+it opens the next (already pre-resolved) link as a **candidate** and hands both byte streams to
+`TsSplicer`, which looks for the point where the candidate can be spliced onto the one that just
+ended — never emitting a candidate byte to the extractor until it finds one. Found or not, there
+is exactly one `MediaItem`, one `MediaSource`, one extractor, one decoder and one audio sink for
+the whole session: ExoPlayer's own `onLoadCompleted` is suppressed for a stitched load (the source
+reports its own per-link EOF instead), so there is no reload to be frozen through, no second
+decoder and no doubled audio — by construction, not by coordination between two engines.
+
+**Where the splice goes.** At end of input the extractor is mid-PES on every PID — a live TS video
+PES has no declared length, so `TsExtractor`'s reader only finishes a unit when the *next* PUSI
+arrives, and the old link's last one never gets one. `TsSplicer` freezes two anchors from the old
+link: `L`, the last video PUSI's PTS (the last media the old link actually delivered), and
+`lastShown`, the one before it (the last frame the viewer actually sees, since the forced
+discontinuity below throws the frame at `L` away). The candidate is scanned for an **IDR** —
+H.264 `nal_unit_type` 5, or HEVC `IDR_W_RADL`/`IDR_N_LP` (19/20) only; HEVC's CRA/BLA and a bare
+`random_access_indicator` are refused, because an open GOP's leading pictures reference frames
+from the link that just ended, which the decoder no longer has — and the splice commits at the
+first one found inside the random-access scan.
+
+**Why the continuity counter, not the discontinuity flag.** media3's `TsExtractor` (1.11.x,
+outside HLS mode) reads a PID's continuity counter and does one of three things: the same value as
+last time is a **duplicate** and is silently dropped; `+1` **appends** to the unit in progress;
+anything else is a **discontinuity**, which makes the PES reader throw away whatever it was
+holding and start fresh. `discontinuity_indicator` in the adaptation field is not read for this
+purpose and can require resizing the packet, so the splice is made legible the other way: the
+first packet of each PID emitted after the splice point is rewritten to `(last forwarded CC + 2) &
+0xF` — never equal (would be eaten as a duplicate), never `+1` (would be glued onto the old link's
+truncated PES).
+
+**The bounds**, every one a rejection rather than a best-effort: the candidate's layout must match
+the old link's exactly (sorted `(pid, streamType)` pairs — which also pins the codec); its first
+video PTS must land within `maxGapMs` (1 s) forward or `maxOverlapMs` (120 s) back of `L`, on a
+wrap-aware 33-bit comparison (a provider reconnecting across the ~26.5 h PTS wrap is not a 26-hour
+jump backward, and the same signed arithmetic that forgives the wrap is what catches a candidate
+whose timestamps were simply renumbered); the IDR found must land within `maxSkipMs` (2 s) of
+`lastShown`, or the search is given up as having no usable random access point in budget; and the
+whole search aborts at `maxCandidateBytes` (64 MiB) regardless. Any rejection, at any of these, is
+one of a fixed `SpliceRejectReason` vocabulary, and the link degrades to a byte-exact pipe — the
+same stream the player reads today.
+
+**The arming rule is deliberately hard to satisfy.** `StitchCoordinator.arm` grants it only when:
+the kill switch is on; the session hasn't stood itself down; the stream is live; and a pre-resolve
+*for this session* has already come back with a **different** URL (`rotationProven`) — the one
+piece of evidence that scopes this to a provider that rotates locators, without the native side
+ever asking what kind of provider it is. An Xtream or M3U source re-resolves to the same URL
+forever and is never armed, so its links take today's path with no kind-specific branch anywhere.
+The cost is that a rotating provider's **first** link doesn't stitch either, which is the right way
+round — the first link has nothing stored to splice from yet. Arming also requires the body to be
+opened at position 0 (not a resumed range) and media3's own content-type inference to call it one
+unbounded progressive stream (not HLS/DASH, not a subtitle sidecar) of the item's **own** URL. Miss
+any one and `StitchingDataSource` is a direct, byte-for-byte delegate: same bytes, same timings,
+same `onLoadCompleted`, same `stream source eof` line — which is most of the safety argument. **The
+preview never stitches**: `stitchCoordinator` is null on every engine until a fullscreen
+`HdrPlayerActivity` session installs one, and `SharedEngine.bindPreviewCallbacks` clears it (along
+with the live-link hooks) on handback — the preview has no re-resolve channel, so a handover parked
+on its behalf could only wait out its deadline with the picture quietly running down behind it.
+
+**The fail-safe is verified before it can do any damage.** `TsSplicer.offerCandidate` emits nothing
+to the extractor until it returns `Committed` — a rejection, a candidate that never opens, one
+that ends before a splice point, or the deadline below, and not one candidate byte has reached the
+decoder. The candidate is closed, `StitchingDataSource` returns `END_OF_INPUT`, and the stream ends
+exactly as it does today: today's reconnect takes it from there. The one thing that *is*
+different is what that reconnect gets to work with — a handover failure immediately asks for a
+fresh pre-resolve (the body is closed either way, so this is exactly as safe as the first ask was),
+so the ordinary reconnect that follows still gets the fast `path=preresolved` treatment rather
+than a cold `path=resolve`.
+
+**The deadline does three jobs at once.** `STITCH_ABORT_AHEAD_MS` (2.5 s of remaining cushion) is
+checked on the same 500 ms ticker that drives everything else. It is the latest a fallback may be
+decided, because everything after it is frozen picture 0.1.81 would not have had; it is the margin
+that keeps the never-two-connections rule, since the candidate's own socket timeouts
+(`CANDIDATE_CONNECT_TIMEOUT_MS`/`CANDIDATE_READ_TIMEOUT_MS`, 1.5 s each) bound how long a wedged
+candidate can still hold a connection open after the abort fires, and both are strictly smaller
+than the margin; and it is what keeps the stream's own failure mode unchanged — a player that runs
+dry while a handover is still parked on a held socket read has not completed its load, so it
+reaches `STATE_BUFFERING`, not `STATE_ENDED`, which is a different watchdog path entirely
+(`STALL_RECONNECT_MS`, 8 s) without the fast lane this feature depends on. The margin is sized so
+end of input still reaches the extractor with cushion to spare, so a failed handover's stream
+still ends the way every other version of it ends.
+
+**Never two connections, in order.** The candidate is opened only *after* the old body has
+returned end of input and been closed (`closeCurrent()` runs before the handover is ever awaited),
+and it is closed again before end of input is ever handed to the extractor (`giveUp` closes it,
+then returns `END_OF_INPUT`). The one window this can't police structurally is a candidate wedged
+inside a blocking socket read — exactly what the short candidate timeouts, bounded by the deadline
+above, exist to cap.
+
+**A commit is not a reconnect.** No attempt counter moves, no `resetLiveLatency(RECONNECT)` fires,
+and the reconnect watchdog's own bookkeeping is untouched — the media timeline simply jumps forward
+by the splice's `skippedMs`, which `LiveLatencyTracker` already treats as a discontinuity to
+re-anchor past and credit nothing for. `FrameLivenessWatch` sees nothing happen, because nothing
+did: frames never stopped arriving.
+
+**The session's own patience is two failure classes, counted separately.** Every
+`SpliceRejectReason` is structural — a statement about the *shape* of the stream, which does not
+change between one of a provider's links and the next — and two of them in a row, with no commit
+between, stands stitching down for the rest of the session (`MAX_CONSECUTIVE_STRUCTURAL_FAILURES`).
+`open-failed` and `candidate-eof` are transient — the same network/portal condition the ordinary
+reconnect would have hit anyway — and get four (`MAX_CONSECUTIVE_TRANSIENT_FAILURES`), because
+disabling a working feature on two bad minutes of Wi-Fi would be worse than the timing it exists to
+fix. A deadline miss and the three locator-supply reasons (`same-url`, `resolve-failed`,
+`disabled`) count against neither streak — they say nothing about whether the stream *can* be
+spliced — and a commit resets both counters to zero.
+
+**The kill switch.** `LiveStitchPolicy.ENABLED` is a compile-time `const val`, not a setting: a
+user cannot tell a stitched handover from a healthy stream, which is the point, so there is
+nothing for a user-facing switch to control. Flipping it to `false` strips every branch below it.
+
+#### Log vocabulary
+
+```
+live stitch armed link=2 spliceable=pending
+live stitch link=2 spliceable=true reason=none
+live handover link=2 mechanism=splice reason=none durationMs=180 aheadAtCommitMs=24180 trimmedMs=40 skippedMs=160 repeatedMs=0 droppedBytes=512
+live stitch armed link=3 spliceable=true
+live handover link=4 mechanism=fallback reason=no-rap durationMs=1340 aheadAtCommitMs=-1 trimmedMs=0 skippedMs=0 repeatedMs=0 droppedBytes=0
+live stitch disabled failures=2 reason=no-rap
+live reconnect attempt=1 force=false kind=ended mechanism=reconnect after=fallback:no-rap path=preresolved ageMs=612 ahead=0 …
+live pre-resolve requested sinceLoadMs=9446 ahead=9840
+```
+
+`spliceable=pending` is written once per link at arming, before the splicer has read enough to
+have an opinion; `spliceable=true|false reason=…` is the verdict once it does (`reason=none` once
+committed, since the shape is already known by then). The handover line's field set is fixed —
+unused fields read `-1`/`0` rather than being omitted, because an export is grepped by column —
+and a committed splice writes **no** `live reconnect` line at all: reading `mechanism=` across both
+lines counts every link rotation in the session, splice or not.
+
+#### What an export of success looks like
+
+A link rotating cleanly under this feature prints a `live handover … mechanism=splice …` line at
+roughly the provider's own link cadence (every ~26–30 s for the shape this targets) and **nothing
+else** — no `live reconnect` line in between, `repeatedMs=0` on every line (nothing is ever sent to
+the decoder twice, by construction), `skippedMs` under one broadcast GOP, and no bump in
+`stalls=`/`stalled=` on the live-latency line, because nothing discontinuous happened from the
+tracker's point of view.
+
+A session where the provider's stream can't be spliced reads differently but just as legibly:
+every link gets a `spliceable=false reason=…` verdict and a `mechanism=fallback` handover line, two
+of them (the same structural reason, or any two) produce one `live stitch disabled failures=2
+reason=…` line, and every link after that takes today's path with no further stitch lines at all.
+The stable-URL control case the CI leg below exercises never even gets that far: `rotationProven`
+never becomes true, so no `armed` line is ever written.
+
+#### What's unproven
+
+- **The forced-discontinuity rewrite has only been exercised through ExoPlayer's software
+  decoding path.** Nothing here has been run against the Realtek RTD2875P or any other hardware
+  decoder this project has had reason to distrust (see "The Flutter renderer" above). The splice is
+  legible to media3's own parser; whether a given hardware decoder tolerates the resulting
+  bitstream discontinuity as cleanly as a real broadcast splice is not something an emulator, or
+  this reasoning, can answer.
+- **Whether a given provider's live TS is actually the shape this assumes** — one video PID, H.264
+  or HEVC, with IDRs reliably inside the 2 s skip budget — is a per-provider question this code
+  answers defensively (reject, don't guess) but has not yet been checked against a representative
+  sample of real Stalker portals in the field.
+- **Two media3 behaviours are reasoned from its source, not exercised under adversarial load**:
+  that `Loader` always interrupts its own thread on cancellation (which is what turns a blocked
+  `awaitLocator` into the `InterruptedIOException` the extractor loop expects), and that
+  `ProgressiveMediaPeriod` holds exactly one `DataSource` per period, reopened fresh on every retry
+  (which is what makes `resetForOpen()` sufficient and rules out state carrying over from a body
+  that just ended). Both match the 1.11.x source read during this work; neither has broken a test
+  here, but neither has been forced to prove itself against a genuinely adversarial retry either.
 
 ## Live latency
 

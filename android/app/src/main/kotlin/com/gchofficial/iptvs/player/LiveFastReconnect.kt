@@ -62,14 +62,35 @@ object LiveFastReconnectPolicy {
      * precisely where a single-use link is most likely already dead — to save
      * a round trip, which is the wrong trade.
      *
-     * So the deliberate gap: a provider that sends a backlog larger than this
-     * **on a deep preset** drains for longer than 30 s, the stored locator is
-     * dropped, and the unchanged path takes over. That costs one wasted
-     * `create_link` per cycle and is visible in an export as
-     * `path=resolve ageMs=41000` — the field that would justify moving this
-     * number, rather than a guess that it should move.
+     * The gap this used to leave — a backlog deeper than 30 s draining for
+     * longer than the bound, so the stored locator went stale and was
+     * re-resolved — is closed by [PRE_RESOLVE_AHEAD_MS]: the request is no
+     * longer made at the EOF but when the cushion behind it is nearly spent,
+     * so the locator's age at the reload is bounded by *that* and not by the
+     * backlog's size. 30 s now has margin over a 10 s trigger on every preset.
      */
     const val FRESH_MS = 30_000L
+
+    /**
+     * How much cushion may remain when the pre-resolve is finally requested.
+     *
+     * **The trigger is the remaining buffer, not the EOF.** The EOF is still
+     * the thing that *permits* a request — a `create_link` while the body is
+     * open could kill it on a single-connection account, which is the whole
+     * reason [shouldPreResolve] exists — but on this provider the body closes
+     * ~27 s before anyone needs the next locator, and a token minted at the
+     * EOF spends all of that age before it is used. On a deep preset it could
+     * outlive [FRESH_MS] entirely and be thrown away, which is the
+     * `path=resolve ageMs=32089` line in the 0.1.81 export: a wasted
+     * `create_link` *and* a cold reconnect.
+     *
+     * 10 s is sized from the two things that have to fit inside it: the
+     * re-resolve round trip (~0.4 s observed, backstopped at
+     * [ResolveGate.TIMEOUT_MS]) and, when a stitched handover is armed, the
+     * candidate evaluation that follows it — which must still reach a verdict
+     * with [LiveStitchPolicy.STITCH_ABORT_AHEAD_MS] of cushion to spare.
+     */
+    const val PRE_RESOLVE_AHEAD_MS = 10_000L
 
     /**
      * A pre-resolved reconnect that ends again within this much playback was
@@ -116,6 +137,29 @@ object LiveFastReconnectPolicy {
         resolveInFlight: Boolean,
         zapSettling: Boolean,
     ): Boolean = isLive && enabled && !holdsLocator && !resolveInFlight && !zapSettling
+
+    /**
+     * Whether the request is **due yet**, given that the body has closed
+     * ([eofSeen]) and [aheadMs] is still buffered ahead of the playhead.
+     *
+     * Separate from [shouldPreResolve] rather than folded into it because the
+     * two answer different questions and are read at different moments:
+     * `shouldPreResolve` is the standing eligibility of the *session* (checked
+     * once, at the request), while this is the trigger the 500 ms ticker
+     * re-asks every tick. Keeping them apart is also what lets the EOF itself
+     * call both — a body that closes with the cushion already below the bound
+     * must request immediately rather than wait a tick.
+     *
+     * A negative [aheadMs] is "the engine can't say" ([PlaybackEngine.bufferedAheadMs]),
+     * and it is treated as **due**: the body has demonstrably closed, and an
+     * engine that cannot report its cushion must not be able to postpone the
+     * request forever.
+     */
+    fun isPreResolveDue(
+        eofSeen: Boolean,
+        aheadMs: Long,
+        aheadLimitMs: Long = PRE_RESOLVE_AHEAD_MS,
+    ): Boolean = eofSeen && (aheadMs < 0L || aheadMs <= aheadLimitMs)
 
     /** Whether a locator of [ageMs] is still worth loading without re-resolving. */
     fun isFresh(ageMs: Long, freshMs: Long = FRESH_MS): Boolean = ageMs in 0L..freshMs
@@ -165,9 +209,15 @@ object LiveFastReconnectPolicy {
     // Formatted here, beside the decisions, so the exported vocabulary is
     // pinned by the same plain-JUnit test.
 
-    /** Written when a source-EOF is answered with a pre-resolve request. */
-    fun requestedLine(sinceLoadMs: Long): String =
-        "live pre-resolve requested sinceLoadMs=$sinceLoadMs"
+    /**
+     * Written when the request is issued. [sinceLoadMs] describes the *EOF*
+     * that permitted it (the field 0.1.81 printed); `ahead=` is the cushion
+     * that triggered it, i.e. the direct read-out of [isPreResolveDue] — the
+     * gap between the two is how long the request deliberately waited after
+     * the body closed.
+     */
+    fun requestedLine(sinceLoadMs: Long, aheadMs: Long): String =
+        "live pre-resolve requested sinceLoadMs=$sinceLoadMs ahead=$aheadMs"
 
     /**
      * Written when the request settles. [ageMs] is measured from the request,

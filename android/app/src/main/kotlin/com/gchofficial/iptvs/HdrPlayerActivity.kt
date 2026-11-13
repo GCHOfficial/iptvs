@@ -37,6 +37,7 @@ import com.gchofficial.iptvs.player.LiveFastReconnectPolicy
 import com.gchofficial.iptvs.player.LiveLatencyReset
 import com.gchofficial.iptvs.player.LiveLatencyTracker
 import com.gchofficial.iptvs.player.LiveLocator
+import com.gchofficial.iptvs.player.LiveStitchPolicy
 import com.gchofficial.iptvs.player.MpvEngine
 import com.gchofficial.iptvs.player.PlaybackEngine
 import com.gchofficial.iptvs.player.PlaybackStatsSampler
@@ -51,6 +52,7 @@ import com.gchofficial.iptvs.player.ReconnectPolicy
 import com.gchofficial.iptvs.player.ResolveAgainReply
 import com.gchofficial.iptvs.player.ResolveGate
 import com.gchofficial.iptvs.player.SharedEngine
+import com.gchofficial.iptvs.player.StitchCoordinator
 import com.gchofficial.iptvs.player.SubtitleSpec
 import com.gchofficial.iptvs.player.ZapKeyPolicy
 import com.gchofficial.iptvs.player.ZapKeyAction
@@ -126,6 +128,36 @@ class HdrPlayerActivity : ComponentActivity() {
     // streak that can switch the whole path off for the session. Holds no timer
     // of its own — the 500 ms progress ticker supplies every clock reading.
     private val fastReconnect = LiveFastReconnect()
+
+    // The **stitched handover**: when the provider closes a live link, the
+    // wrapping `StitchingDataSource` splices the next one into the same byte
+    // stream rather than letting the load end, so ExoPlayer never learns the
+    // link closed and there is no reload to be frozen through. This object is
+    // the rendezvous between that (media3 loader) thread and this one, and
+    // installing it on the engine is what *permits* stitching at all — the
+    // preview never gets one. Holds no timer: the 500 ms ticker supplies the
+    // deadline, exactly as it supplies `fastReconnect`'s clock.
+    private val stitch = StitchCoordinator { note -> diagnosticSink(note) }
+
+    // Whether the live source's HTTP body has closed for the link currently
+    // playing. **The pre-resolve is triggered by the remaining cushion, not by
+    // this** ([LiveFastReconnectPolicy.isPreResolveDue]); the EOF is only what
+    // makes a `create_link` safe to issue, because the body it would have
+    // disturbed is already gone. Cleared when the request is issued (one per
+    // connection) and re-armed by a handover fallback, whose body has also
+    // closed and whose locator was spent on the splice.
+    private var liveSourceEofSeen = false
+
+    // `sinceLoadMs` from that EOF, held so the `requested` line can still
+    // describe the event that permitted it even though the request happens
+    // seconds later.
+    private var lastSourceEofSinceLoadMs = -1L
+
+    // Set when a stitched handover gave up, printed on the reconnect that
+    // follows it, then cleared. It is the difference between "stitching never
+    // ran" and "stitching ran and lost", which are otherwise identical in an
+    // export.
+    private var lastHandoverFallbackReason: String? = null
 
     // The buffering preset the current engine was built with. Read from the
     // launch Intent and then **kept in a field**, because an in-player zap can
@@ -627,7 +659,7 @@ class HdrPlayerActivity : ComponentActivity() {
                 // the one that most needs the fast reconnect. Cleared again by
                 // `bindPreviewCallbacks` when the engine goes back.
                 onSourceEof = { sinceLoadMs ->
-                    runOnUiThread { preResolveAfterSourceEof(sinceLoadMs) }
+                    runOnUiThread { noteLiveSourceEof(sinceLoadMs) }
                 },
             )
         } else {
@@ -696,6 +728,10 @@ class HdrPlayerActivity : ComponentActivity() {
             }
             sharedEngine.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
             sharedEngine.onVideoSizeChanged = null
+            // The adopted session is the one the reports come from, so it is
+            // the one that most needs the handover — and `bindPreviewCallbacks`
+            // takes all of this back off the engine when it returns.
+            bindLiveLinkCallbacks(sharedEngine)
             setEngine(sharedEngine)
             // Fullscreen always plays unmuted, and resumes a paused preview.
             sharedEngine.setVolume(1f)
@@ -769,8 +805,9 @@ class HdrPlayerActivity : ComponentActivity() {
         exo.onRecoverableError = { runOnUiThread { reconnectLive(force = true) } }
         exo.onDiagnostic = diagnosticSink
         exo.onSourceEof = { sinceLoadMs ->
-            runOnUiThread { preResolveAfterSourceEof(sinceLoadMs) }
+            runOnUiThread { noteLiveSourceEof(sinceLoadMs) }
         }
+        bindLiveLinkCallbacks(exo)
         setEngine(exo)
         exo.load(url, subtitles)
     }
@@ -796,6 +833,11 @@ class HdrPlayerActivity : ComponentActivity() {
         // The new engine loads `url` as it stands, and mpv wires no source-EOF
         // hook, so nothing would ever restock or spend a held locator.
         fastReconnect.discard()
+        // mpv has no `DataSource` to stitch with either, and the ExoPlayer one
+        // is about to be released out from under any handover it was parked in.
+        stitch.cancel()
+        resetLiveLinkState()
+        lastHandoverFallbackReason = null
         // A different engine means a different playhead: mpv's `time-pos`
         // starts from the new stream, so the old reference is meaningless.
         resetLiveLatency(LiveLatencyReset.ENGINE)
@@ -967,8 +1009,9 @@ class HdrPlayerActivity : ComponentActivity() {
      *
      * …unless one was **already** resolved, at the instant the live source's
      * HTTP body closed, while the picture was still running on the buffer
-     * ([preResolveAfterSourceEof]). Then this reconnect has neither a
-     * threshold nor a round trip in front of it and loads on this tick. That is
+     * ([noteLiveSourceEof] / [maybePreResolve]). Then this reconnect has
+     * neither a threshold nor a round trip in front of it and loads on this
+     * tick. That is
      * the only difference; every reconnect without a usable stored locator
      * behaves exactly as before, on exactly the same constants
      * ([LiveFastReconnectPolicy]).
@@ -1015,6 +1058,12 @@ class HdrPlayerActivity : ComponentActivity() {
         logNative(
             "live reconnect attempt=$reconnectAttempt force=$force " +
                 "kind=${if (force) "error" else stallKind} " +
+                // How this link was replaced, in the vocabulary a committed
+                // splice uses on its own line — and, when a handover tried and
+                // lost, which failure sent the stream here. Without it an
+                // export cannot tell stitching being off from stitching
+                // running and falling back.
+                LiveStitchPolicy.reconnectMechanism(lastHandoverFallbackReason) + " " +
                 // Which path this reconnect took and, when it did not take the
                 // fast one, how old the locator it declined was (-1 = none was
                 // held). Read next to `live latency reset reason=reconnect
@@ -1033,6 +1082,10 @@ class HdrPlayerActivity : ComponentActivity() {
                 // health flag the engine exposes.
                 (engine?.videoFrameCounters?.let { " $it" } ?: ""),
         )
+        // Attributed to exactly one reconnect — the one it caused.
+        lastHandoverFallbackReason = null
+        // Whatever the old link's EOF armed belongs to the old link.
+        resetLiveLinkState()
         frameLiveness.reset()
         if (preResolved != null) {
             // Nothing to wait for: the locator was resolved while the picture
@@ -1097,9 +1150,10 @@ class HdrPlayerActivity : ComponentActivity() {
      *
      * [onSettled] receives the parsed locator, whether it differs from the one
      * held now, and whether the backstop won the race. [withFreshLiveLocator]
-     * applies it in place and reloads; [preResolveAfterSourceEof] stores it for
-     * later and changes nothing. Both go through the one [ResolveGate], which is
-     * what keeps a single-connection account to one `create_link` at a time.
+     * applies it in place and reloads; [maybePreResolve] either hands it to a
+     * stitched handover or stores it for later, and changes nothing. Both go
+     * through the one [ResolveGate], which is what keeps a single-connection
+     * account to one `create_link` at a time.
      */
     private fun resolveLiveLocator(
         onSettled: (next: LiveLocator, refreshed: Boolean, timedOut: Boolean) -> Unit,
@@ -1141,17 +1195,49 @@ class HdrPlayerActivity : ComponentActivity() {
     }
 
     /**
-     * The live source reached end of input: ask for the next locator **now**,
-     * while the picture is still running on the buffer, and store it.
+     * The live source reached end of input. **Records it; asks for nothing.**
      *
-     * This is the whole fast path's forward half. Nothing is loaded here and no
-     * timing changes — see [LiveFastReconnectPolicy] for why a `create_link`
-     * issued at this instant disturbs nothing (the body has already closed) and
-     * for the freshness bound that decides whether the reconnect may use it.
+     * The EOF is what makes a `create_link` safe — the body it could have
+     * disturbed is already closed, which is the whole of why this path does
+     * not break CLAUDE.md's "resolve at play time, never ahead" rule. It is
+     * not, any more, what makes one *due*: on the provider this exists for the
+     * body closes ~27 s before anything needs the next locator, and a token
+     * minted here spends all of that age before it is used (`path=resolve
+     * ageMs=32089` in the 0.1.81 export — a wasted `create_link` *and* a cold
+     * reconnect). [maybePreResolve] asks when the cushion is nearly spent.
      */
-    private fun preResolveAfterSourceEof(sinceLoadMs: Long) {
+    private fun noteLiveSourceEof(sinceLoadMs: Long) {
         if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        if (!uiState.isLive) return
+        liveSourceEofSeen = true
+        lastSourceEofSinceLoadMs = sinceLoadMs
+        // A body that closes with the cushion *already* below the bound must
+        // not wait a tick for the ticker to notice.
+        maybePreResolve()
+    }
+
+    /**
+     * Asks for the next locator when the cushion behind the closed body is
+     * nearly spent — on the existing 500 ms ticker, and from [noteLiveSourceEof]
+     * when the EOF itself is already late enough.
+     *
+     * Where the locator *goes* is the one thing that changed with the stitched
+     * handover: a `StitchingDataSource` parked at a link's end of input has the
+     * first claim on it, because it can splice the next body onto the one that
+     * ended with no reload at all. Only when there is no such waiter is the
+     * locator stored for the pre-resolved reconnect, exactly as 0.1.81 does.
+     *
+     * **One request per connection** still holds: [liveSourceEofSeen] is
+     * cleared the moment a request is issued, and only a new link's EOF — or a
+     * handover fallback, whose body has also closed and whose locator the
+     * splice has already spent — re-arms it.
+     */
+    private fun maybePreResolve() {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        if (!liveSourceEofSeen) return
         val requestedAt = System.currentTimeMillis()
+        val aheadMs = engine?.bufferedAheadMs() ?: -1L
+        if (!LiveFastReconnectPolicy.isPreResolveDue(eofSeen = true, aheadMs = aheadMs)) return
         if (!LiveFastReconnectPolicy.shouldPreResolve(
                 isLive = uiState.isLive,
                 enabled = fastReconnect.enabled,
@@ -1160,13 +1246,22 @@ class HdrPlayerActivity : ComponentActivity() {
                 zapSettling = zapSettlingNow(requestedAt),
             )
         ) {
+            // A handover waiting on a locator this session has stopped asking
+            // for is told now rather than left to burn the cushion down to its
+            // deadline — the ordinary reconnect then runs on ordinary timing.
+            // Only for the *permanent* refusals: an in-flight resolve or a
+            // settling zap is answered by the next tick.
+            if (stitch.pendingHandover && !fastReconnect.enabled) {
+                stitch.abort(LiveStitchPolicy.REASON_DISABLED)
+            }
             return
         }
+        liveSourceEofSeen = false
         val token = fastReconnect.noteRequested(requestedAt)
         // Logged before the call, because a host-less settle runs the
         // continuation synchronously and an export reading `ready` before
         // `requested` would be unreadable.
-        logNative(LiveFastReconnectPolicy.requestedLine(sinceLoadMs))
+        logNative(LiveFastReconnectPolicy.requestedLine(lastSourceEofSinceLoadMs, aheadMs))
         val started = resolveLiveLocator { next, refreshed, timedOut ->
             val settledAt = System.currentTimeMillis()
             // A reply that carries no *new* URL is not a pre-resolve: storing
@@ -1181,11 +1276,37 @@ class HdrPlayerActivity : ComponentActivity() {
             // it keeps today's unchanged path rather than being given a fast
             // reload of a URL that may already be dead.
             val fresh = if (refreshed && !timedOut) next else null
-            val ok = fastReconnect.store(token, fresh)
+            // The same observation is the stitched handover's arming evidence:
+            // a provider seen to rotate a locator is the only kind whose links
+            // can be spliced onto each other, and this is the only place the
+            // native side ever learns it.
+            if (fresh != null) stitch.noteRotationProven()
+            // Handed to the splice *or* stored — never both. A `play_token` is
+            // single-use, so a locator the handover consumed must leave nothing
+            // behind for a later reload to spend again.
+            val handedOver = fresh != null && stitch.offer(fresh)
+            val ok = if (handedOver) {
+                fastReconnect.discard()
+                true
+            } else {
+                fastReconnect.store(token, fresh)
+            }
             // Measured from the request, not from here: the round trip is age
             // the portal's token has already spent, and the store deliberately
             // holds no clock of its own ([LiveFastReconnect.store]).
             logNative(LiveFastReconnectPolicy.readyLine(settledAt - requestedAt, ok))
+            if (!handedOver && stitch.pendingHandover) {
+                // A handover is parked and this reply cannot serve it. Saying so
+                // now costs it nothing it would not have lost at the deadline,
+                // and gives the ordinary reconnect its full cushion back.
+                stitch.abort(
+                    if (timedOut) {
+                        LiveStitchPolicy.REASON_RESOLVE_FAILED
+                    } else {
+                        LiveStitchPolicy.REASON_SAME_URL
+                    },
+                )
+            }
         }
         if (!started) {
             // The gate refused after all (nothing should reach here, since
@@ -1193,6 +1314,79 @@ class HdrPlayerActivity : ComponentActivity() {
             // round trip that never happened would age toward being used).
             fastReconnect.discard()
         }
+    }
+
+    // ── The stitched handover ────────────────────────────────────────────────
+
+    /**
+     * Installs everything a fullscreen session adds on top of the preview's
+     * own callbacks. [SharedEngine.bindPreviewCallbacks] takes all of it back
+     * off on the handback, which is what keeps the preview — which has no
+     * watchdog and no re-resolve channel — out of every path below.
+     */
+    private fun bindLiveLinkCallbacks(exo: ExoPlayerEngine) {
+        exo.stitchCoordinator = stitch
+        // Removes tick latency only; every threshold is unchanged, and
+        // `reconnectLive`'s own rate limit is what keeps this and the 500 ms
+        // tick from acting on the same drop twice.
+        exo.onLiveEnded = { runOnUiThread { pollLiveReconnect() } }
+        exo.onLiveLinkCommitted = { runOnUiThread { onLiveLinkCommitted() } }
+        exo.onLiveHandoverFallback = { reason ->
+            runOnUiThread { onLiveHandoverFallback(reason) }
+        }
+    }
+
+    /**
+     * A splice committed: the stream is being fed by a different HTTP body
+     * through the same decoder.
+     *
+     * **This is not a reconnect**, and nothing that describes one moves: no
+     * `reconnectLive`, no attempt counter, no `resetLiveLatency(RECONNECT)` —
+     * the media timeline simply jumps forward by the splice's `skippedMs`, and
+     * [LiveLatencyTracker] already treats a media jump as re-anchor-and-add-
+     * nothing. [FrameLivenessWatch] is likewise untouched: frames never stopped
+     * flowing, which is the whole point. Only the *per-link* state rolls over.
+     */
+    private fun onLiveLinkCommitted() {
+        liveSourceEofSeen = false
+        lastSourceEofSinceLoadMs = -1L
+        lastHandoverFallbackReason = null
+    }
+
+    /**
+     * A handover gave up. The ordinary reconnect owns the stream from here, so
+     * the only work is to give it the best start it can have: the locator this
+     * handover consumed is gone, which would leave the imminent `kind=ended`
+     * reconnect taking a cold `path=resolve`. The body has closed, so a fresh
+     * request is as safe as the first one was — and if the cushion is already
+     * below the trigger it goes out on this call rather than the next tick.
+     */
+    private fun onLiveHandoverFallback(reason: String) {
+        if (!::uiState.isInitialized || isFinishing || isDestroyed) return
+        lastHandoverFallbackReason = reason
+        liveSourceEofSeen = true
+        maybePreResolve()
+    }
+
+    /**
+     * The handover's deadline, on the same ticker as everything else.
+     *
+     * Runs ahead of [pollLiveReconnect] and outside its early exits on
+     * purpose: a resolve in flight is exactly when a handover can be waiting,
+     * and a handover that outlives its cushion must be abandoned whether or
+     * not the watchdog is standing down for something else.
+     */
+    private fun pollStitchHandover() {
+        if (!stitch.pendingHandover) return
+        if (LiveStitchPolicy.shouldAbortHandover(engine?.bufferedAheadMs() ?: -1L)) {
+            stitch.abort(LiveStitchPolicy.REASON_DEADLINE)
+        }
+    }
+
+    /** The link under the player is being replaced; nothing about it carries over. */
+    private fun resetLiveLinkState() {
+        liveSourceEofSeen = false
+        lastSourceEofSinceLoadMs = -1L
     }
 
     // ── Live zapping: applying what Dart decided ─────────────────────────────
@@ -1283,6 +1477,14 @@ class HdrPlayerActivity : ComponentActivity() {
         // the channel being left, and loading it on a reconnect after the zap
         // would put the previous channel back on screen.
         fastReconnect.discard()
+        // And one further still: a handover parked at the old channel's end of
+        // input must not be handed the new channel's locator. The proof goes
+        // with it, because a zap can cross sources — what this session learned
+        // about the old provider's locators says nothing about the new one's.
+        stitch.cancel()
+        stitch.resetRotationProof()
+        resetLiveLinkState()
+        lastHandoverFallbackReason = null
 
         // Both are build-time arguments (the HTTP data-source factory and
         // `LoadControl`), so neither can be changed on a running engine — the
@@ -1463,6 +1665,10 @@ class HdrPlayerActivity : ComponentActivity() {
                 // This press reloads with a locator of its own, so a stored one
                 // is spent on nothing — and a reload supersedes it in any case.
                 fastReconnect.discard()
+                // Likewise a handover: the reload below replaces the stream it
+                // was about to splice onto.
+                stitch.cancel()
+                resetLiveLinkState()
                 val started = withFreshLiveLocator { engine?.load(url, subtitles) }
                 // The reset moves with `liveSynced`, and both only on a press
                 // that actually started a reload. They cannot be split: leaving
@@ -1503,6 +1709,12 @@ class HdrPlayerActivity : ComponentActivity() {
         progressTicker = lifecycleScope.launch {
             while (isActive) {
                 engine?.syncProgress()
+                // Both ahead of the watchdog, and both outside its early
+                // exits: a handover can only be waiting while a resolve is in
+                // flight, which is one of the things `pollLiveReconnect`
+                // returns on.
+                pollStitchHandover()
+                maybePreResolve()
                 pollLiveReconnect()
                 samplePlaybackStats()
                 sampleLiveLatency()
@@ -1664,8 +1876,11 @@ class HdrPlayerActivity : ComponentActivity() {
         // preview's frozen last frame until it closed.
         // Nothing left to reconnect: drop the held locator (and cancel the
         // bookkeeping of any pre-resolve still in flight) before the engine
-        // goes back to the preview, which has no use for either.
+        // goes back to the preview, which has no use for either — nor for a
+        // handover parked waiting for a locator this session will never ask
+        // for again.
         fastReconnect.discard()
+        stitch.cancel()
         handBackSharedEngine()
         if (enteredPip) restoreMainTaskAfterPip()
         super.finish()
@@ -1683,6 +1898,12 @@ class HdrPlayerActivity : ComponentActivity() {
         // Real time first, while the engine is still reachable: the preview
         // about to resume on it must never inherit this session's catch-up.
         resetCatchUp()
+        // Same instant, same reason: the preview has no re-resolve channel, so
+        // a handover still parked on this engine could only wait out its
+        // deadline behind a picture nobody is watching for. (SharedEngine's
+        // `bindPreviewCallbacks` also clears the coordinator off the engine;
+        // this releases the loader thread before the engine changes hands.)
+        stitch.cancel()
         adoptedShared = false
         engine = null
         SharedEngine.fullscreenDetached()
@@ -1717,6 +1938,7 @@ class HdrPlayerActivity : ComponentActivity() {
         resolveTimeoutJob = null
         // Idempotent, and this covers any exit that never went through finish().
         fastReconnect.discard()
+        stitch.cancel()
         if (adoptedShared) {
             // Not ours to release: hand the video output back to the preview
             // surface; the engine keeps playing across the return.

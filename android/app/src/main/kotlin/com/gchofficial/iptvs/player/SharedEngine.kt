@@ -276,6 +276,18 @@ object SharedEngine {
         // pre-resolving (and spending a single-use `play_token`) for a stream
         // that is back on the preview texture.
         target.onSourceEof = null
+        // Same rule, same reason, for everything the fullscreen session added
+        // on top of it. **The coordinator is the load-bearing one**: it is what
+        // `StitchingDataSource` reads to decide whether it may stitch at all,
+        // so clearing it here is the whole of "the preview never stitches" —
+        // the preview has no re-resolve channel, so a handover started on its
+        // behalf could only ever wait out its deadline with the picture
+        // running down behind it.
+        target.onLiveEnded = null
+        target.onLiveLinkCommitted = null
+        target.onLiveHandoverFallback = null
+        target.stitchCoordinator?.cancel()
+        target.stitchCoordinator = null
     }
 
     /**
