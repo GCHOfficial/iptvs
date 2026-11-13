@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import '../data/net.dart' show redactUrl;
+import '../data/net.dart' show HttpOperation, HttpWorkloadPolicy, redactUrl;
 import 'source.dart';
 
 /// Compile-time opt-in for the synthetic "live cut" test provider
@@ -514,36 +514,33 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
     return StreamInfo(url: url, isLive: channel.extra['isLive'] == true);
   }
 
-  // Small, deliberately not sharing kProviderJsonWorkload/HttpOperation: the
-  // body is one short plaintext URL, not a provider payload.
-  static const _liveCutResolveTimeout = Duration(seconds: 10);
-  static const _liveCutResolveMaxBytes = 4 * 1024;
+  // Small compared to the provider workloads in net.dart (the body is one
+  // short plaintext URL, not a catalog/guide payload), but the same
+  // HttpWorkloadPolicy/HttpOperation pattern every other [Source] uses for
+  // its HTTP calls (see M3uSource._open/_download) — bounded size, a total
+  // deadline, and `readBytes` doing the gzip-aware, size-checked read.
+  static const _liveCutResolveWorkload = HttpWorkloadPolicy(
+    name: 'live cut resolve',
+    maximumBodyBytes: 4 * 1024,
+    maximumDecodedBytes: 4 * 1024,
+    totalTimeout: Duration(seconds: 10),
+  );
 
   Future<String> _fetchLiveCutResolveUrl() async {
     final uri = Uri.parse('$_liveCutBaseUrl/resolve');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 5);
     try {
-      final req = await client
-          .getUrl(uri)
-          .timeout(_liveCutResolveTimeout);
-      final resp = await req.close().timeout(_liveCutResolveTimeout);
+      final operation = HttpOperation(_liveCutResolveWorkload);
+      final req = await operation.wait(client.getUrl(uri));
+      final resp = await operation.wait(req.close());
       if (resp.statusCode != 200) {
+        // Drain before throwing: an unread body never returns its socket to
+        // the pool (see M3uSource._open).
         await resp.drain<void>();
         throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
       }
-      final bytes = await resp
-          .fold<List<int>>(<int>[], (acc, chunk) {
-            if (acc.length + chunk.length > _liveCutResolveMaxBytes) {
-              throw StateError(
-                'resolve response from ${redactUrl(uri)} exceeded '
-                '$_liveCutResolveMaxBytes bytes',
-              );
-            }
-            acc.addAll(chunk);
-            return acc;
-          })
-          .timeout(_liveCutResolveTimeout);
+      final bytes = await operation.readBytes(resp);
       final url = utf8.decode(bytes).trim();
       if (url.isEmpty) {
         throw StateError('empty resolve response from ${redactUrl(uri)}');

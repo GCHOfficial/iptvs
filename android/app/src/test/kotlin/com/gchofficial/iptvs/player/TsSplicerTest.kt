@@ -222,7 +222,10 @@ class TsSplicerTest {
         val l = one.frames.last().pts
         val two = buildLink(startPts = l - 25_000 * 90, frames = 700, audioLag = 3)
         val r = splice(one.bytes, two.bytes)
-        assertTrue(r.decision is SpliceDecision.Committed)
+        val decision = r.decision as SpliceDecision.Committed
+        // Audio behind the picture was never delivered past S, so the per-PID
+        // gate collapses to S and nothing is held back.
+        assertEquals(0L, decision.info.audioHeldMs)
 
         val after = parse(r.after)
         val s = after.first { it.pid == VIDEO_PID && it.pusi }.pts!!
@@ -246,6 +249,134 @@ class TsSplicerTest {
                 assertTrue("stale audio pts=${p.pts}", TsSplicer.ptsDiff(p.pts, s) >= 0)
             }
         }
+    }
+
+    @Test
+    fun `audio the old link ran ahead of video is never re-delivered`() {
+        // The failure this pins needs the two links to interleave *differently*,
+        // which is the realistic shape: each link is a separate response and the
+        // provider's remux need not resume at the same A/V offset. Here link one
+        // runs audio 480 ms ahead of the picture and the candidate runs it level,
+        // so the old link already played audio well past the video splice point.
+        // Cutting candidate audio at S would hand the sink ~440 ms of audio it
+        // has already rendered — a PTS step *backwards* over a discontinuity.
+        val one = buildLink(startPts = 900_000, frames = 650, audioLag = -12)
+        val l = one.frames.last().pts
+        // Place the candidate's IDR grid so the splice point is one frame past
+        // L: a close landing just before an IDR is the common case, and it is
+        // what makes a mere 480 ms lead reach past S.
+        val two = buildLink(
+            startPts = (l + 3600 - 25L * 90_000) and PTS_MASK,
+            frames = 700,
+            audioLag = 0,
+        )
+        val r = splice(one.bytes, two.bytes)
+        val decision = r.decision as SpliceDecision.Committed
+
+        val before = parse(r.before)
+        val after = parse(r.after)
+        val deliveredAudio = before.last { it.pid == AUDIO_PID && it.pts != null }.pts!!
+        val s = after.first { it.pid == VIDEO_PID && it.pusi }.pts!!
+        assertEquals(l + 3600, s)
+        assertTrue("fixture must run audio past S", TsSplicer.ptsDiff(deliveredAudio, s) > 0)
+        assertEquals(440L, decision.info.audioHeldMs)
+
+        // The fixture really does offer stale audio after S's packet — without
+        // this the rule under test would be unreachable.
+        val offered = parse(two.bytes)
+            .dropWhile { !(it.pid == VIDEO_PID && it.pusi && it.pts == s) }
+            .filter { it.pid == AUDIO_PID && it.pts != null }
+        assertTrue(
+            "fixture must offer already-delivered audio after S",
+            offered.any { TsSplicer.ptsDiff(it.pts!!, deliveredAudio) <= 0 },
+        )
+
+        // And none of it crosses the seam.
+        for (p in after) {
+            if (p.pid == AUDIO_PID && p.pts != null) {
+                assertTrue(
+                    "re-delivered audio pts=${p.pts} (already played to $deliveredAudio)",
+                    TsSplicer.ptsDiff(p.pts, deliveredAudio) > 0,
+                )
+            }
+        }
+        // The whole session's audio timeline only ever moves forwards.
+        var prev: Long? = null
+        for (p in before + after) {
+            if (p.pid != AUDIO_PID || p.pts == null) continue
+            prev?.let { assertTrue("audio went backwards at ${p.pts}", TsSplicer.ptsDiff(p.pts, it) > 0) }
+            prev = p.pts
+        }
+    }
+
+    @Test
+    fun `the per-PID gate is wrap-aware too`() {
+        // The seam is placed so the splice point sits just *below* the 33-bit
+        // wrap while the audio the old link already delivered sits just above
+        // it. A plain subtraction reads that as audio 26 hours behind the
+        // picture, takes the "nothing to hold back" branch, and re-delivers it.
+        val l = (PTS_MODULUS - 10_000)
+        val one = buildLink(
+            startPts = (l - 649 * 3600) and PTS_MASK,
+            frames = 650,
+            audioLag = -12,
+        )
+        assertEquals(l, one.frames.last().pts)
+        val two = buildLink(
+            startPts = (l + 3600 - 25L * 90_000) and PTS_MASK,
+            frames = 700,
+            audioLag = 0,
+        )
+        val r = splice(one.bytes, two.bytes)
+        val decision = r.decision as SpliceDecision.Committed
+
+        val before = parse(r.before)
+        val after = parse(r.after)
+        val delivered = before.last { it.pid == AUDIO_PID && it.pts != null }.pts!!
+        val s = after.first { it.pid == VIDEO_PID && it.pusi }.pts!!
+        // The fixture really does straddle the wrap, in the direction that bites.
+        assertTrue("S must sit below the wrap", s > PTS_MODULUS - 90_000)
+        assertTrue("delivered audio must sit above it", delivered < 90_000)
+        assertTrue(TsSplicer.ptsDiff(delivered, s) > 0)
+        assertEquals(440L, decision.info.audioHeldMs)
+        for (p in after) {
+            if (p.pid == AUDIO_PID && p.pts != null) {
+                assertTrue(
+                    "re-delivered audio pts=${p.pts} across the wrap",
+                    TsSplicer.ptsDiff(p.pts, delivered) > 0,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `a PID the old link never carried resumes at the splice point`() {
+        // Declared in both PMTs so the layouts match, but silent on link one:
+        // there is nothing it could repeat, so the gate is S alone. It also has
+        // no continuity counter to be discontinuous from, which must not stop it
+        // being emitted.
+        val extra = 300 to 0x06
+        val one = buildLink(startPts = 900_000, frames = 650, extraStream = extra)
+        val l = one.frames.last().pts
+        val two = buildLink(
+            startPts = l - 25_000 * 90,
+            frames = 700,
+            extraStream = extra,
+            writeExtraPes = true,
+        )
+        assertTrue(
+            "fixture PID must be silent on link one",
+            parse(one.bytes).none { it.pid == extra.first },
+        )
+        val r = splice(one.bytes, two.bytes)
+        val decision = r.decision as SpliceDecision.Committed
+        assertEquals(0L, decision.info.audioHeldMs)
+
+        val after = parse(r.after)
+        val s = after.first { it.pid == VIDEO_PID && it.pusi }.pts!!
+        val first = after.firstOrNull { it.pid == extra.first }
+        assertNotNull("the silent PID must resume, not drop forever", first)
+        assertTrue(TsSplicer.ptsDiff(first!!.pts!!, s) >= 0)
     }
 
     @Test
@@ -714,10 +845,13 @@ private fun buildLink(
     videoType: Int = 0x1B,
     rapKind: Int = RAP_IDR,
     extraStream: Pair<Int, Int>? = null,
+    /** Frames the audio PES trails the video by; **negative runs audio ahead**. */
     audioLag: Int = 0,
     programInfo: ByteArray = ByteArray(0),
     esInfo: ByteArray = ByteArray(0),
     rapPadBytes: Int = 0,
+    /** Whether [extraStream] actually carries PES packets, or is only declared. */
+    writeExtraPes: Boolean = false,
 ): Built {
     val w = TsWriter()
     val streams = mutableListOf(VIDEO_PID to videoType, AUDIO_PID to 0x03)
@@ -735,6 +869,9 @@ private fun buildLink(
         if (f >= audioLag) {
             val audioPts = (startPts + (f - audioLag) * frameTicks) and PTS_MASK
             w.pes(AUDIO_PID, 0xC0, audioPts, ByteArray(20) { 0x11 }, unbounded = false)
+        }
+        if (writeExtraPes && extraStream != null) {
+            w.pes(extraStream.first, 0xBD, pts, ByteArray(16) { 0x22 }, unbounded = false)
         }
     }
     return Built(w.bytes(), list)

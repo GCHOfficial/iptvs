@@ -42,10 +42,9 @@ object LiveStitchPolicy {
      * Two things are bounded by this number and they pull the same way. It is
      * the *latest* a fallback may be decided, because everything after it is
      * frozen picture that 0.1.81 would not have had; and it is the margin that
-     * keeps the "never two connections" promise, because the candidate's own
-     * socket timeouts ([CANDIDATE_READ_TIMEOUT_MS], [CANDIDATE_CONNECT_TIMEOUT_MS])
-     * are how long a wedged candidate can still be holding its connection open
-     * after the abort is raised. Both of those are strictly smaller, so the
+     * keeps the "never two connections" promise, because [MAX_BLOCKING_CALL_MS]
+     * is how long a wedged candidate can still be holding its connection open
+     * after the abort is raised. That bound is strictly smaller, so the
      * candidate is closed before the drained player's reload opens its own —
      * asserted in `LiveStitchPolicyTest`.
      *
@@ -59,26 +58,94 @@ object LiveStitchPolicy {
      * with cushion to spare, so the stream still ends the way every other
      * version of it ends.
      */
-    const val STITCH_ABORT_AHEAD_MS = 2_500L
+    const val STITCH_ABORT_AHEAD_MS = 3_000L
 
     /**
-     * Socket timeouts for a **candidate** link only. The link the player is
-     * already reading keeps media3's defaults; nothing about the ordinary path
-     * moves.
+     * Socket timeouts a candidate link carries **while it is a candidate**. The
+     * link the player is already reading keeps media3's defaults, and so does a
+     * candidate once it has been committed — see [POST_COMMIT_READ_TIMEOUT_MS],
+     * which is the whole of how a promoted link stops being short-fused.
      *
      * Deliberately far below the defaults (8 s each). A candidate is opened
      * against a portal that answered a `create_link` moments ago and is about
      * to dump a backlog faster than real time — if its first bytes have not
-     * arrived in 1.5 s, waiting longer only eats the cushion that the fallback
-     * needs in order to still be invisible. And see [STITCH_ABORT_AHEAD_MS]:
-     * a blocking read is the one thing an abort cannot interrupt, so its
-     * ceiling is what bounds how long a wedged candidate can overlap the
-     * reload that follows.
+     * arrived in a second, waiting longer only eats the cushion that the
+     * fallback needs in order to still be invisible. And a blocking call is the
+     * one thing an abort cannot interrupt, so these two are what bound
+     * [MAX_BLOCKING_CALL_MS].
      */
-    const val CANDIDATE_CONNECT_TIMEOUT_MS = 1_500
+    const val CANDIDATE_CONNECT_TIMEOUT_MS = 1_000
 
-    /** See [CANDIDATE_CONNECT_TIMEOUT_MS]. */
-    const val CANDIDATE_READ_TIMEOUT_MS = 1_500
+    /**
+     * The socket read timeout in force while a link is a candidate — which
+     * covers `DefaultHttpDataSource.open`'s wait for the response head as well
+     * as each pre-commit read. See [CANDIDATE_CONNECT_TIMEOUT_MS].
+     */
+    const val CANDIDATE_RESPONSE_TIMEOUT_MS = 1_000
+
+    /**
+     * The longest a single blocking call on a candidate can run past an abort.
+     *
+     * `open()` is the worst case: a connect followed by the wait for the
+     * response head, i.e. both timeouts back to back. It must stay below
+     * [STITCH_ABORT_AHEAD_MS] — that is the inequality that keeps a wedged
+     * candidate from still holding a connection when the drained player's
+     * reload opens the next one, and that keeps end of input reaching the
+     * extractor while cushion remains.
+     *
+     * **Two things are outside it and deliberately stated rather than
+     * pretended away**: hostname resolution, which `setConnectTimeoutMs` does
+     * not bound on Android, and a redirect chain, which `DefaultHttpDataSource`
+     * walks inside one `open()` call (up to its own fixed limit of 20 hops).
+     * Either can overrun the margin; the consequence is bounded and ugly rather
+     * than unsafe — the reconnect's connection may briefly overlap the
+     * abandoned candidate's, and the player may reach `STATE_BUFFERING` instead
+     * of `STATE_ENDED` and take the 8 s stall path for that one rotation. Both
+     * are also failures the candidate's *provider* is having, which the
+     * ordinary reconnect would be about to hit anyway.
+     */
+    const val MAX_BLOCKING_CALL_MS =
+        CANDIDATE_CONNECT_TIMEOUT_MS.toLong() + CANDIDATE_RESPONSE_TIMEOUT_MS.toLong()
+
+    /**
+     * Wall clock from the moment a locator is handed over to the moment a
+     * splice must have committed, enforced by the loader thread itself.
+     *
+     * The host's cushion-based deadline is the authority on *when the stream
+     * needs its reconnect*, and it is always right; this is the second half of
+     * the same promise, for the case where the cushion is deep enough that the
+     * deadline would not fire for a long time. A candidate that has had four
+     * seconds of a provider dumping a backlog at 6x real time and still has not
+     * produced a spliceable IDR is not going to.
+     *
+     * Checked immediately after `open()` returns and before every candidate
+     * read, so it bounds the whole pre-commit phase — the open included — to
+     * itself plus at most one [MAX_BLOCKING_CALL_MS].
+     */
+    const val PRE_COMMIT_BUDGET_MS = 4_000L
+
+    /**
+     * How long a **committed** link may stall before the read fails, i.e. the
+     * timeout a promoted candidate behaves as though it had.
+     *
+     * It is media3's own `DefaultHttpDataSource.DEFAULT_READ_TIMEOUT_MILLIS`,
+     * and that is the point: once a candidate is the link the player is
+     * reading, it must ride out exactly what an unstitched link rides out. A
+     * two-second Wi-Fi hiccup that the ordinary path absorbs silently must not
+     * become a load error — which is what it would be if the promoted link kept
+     * [CANDIDATE_RESPONSE_TIMEOUT_MS].
+     *
+     * **A socket's timeout cannot be changed once its stream is open**, and
+     * closing a `DefaultHttpDataSource` from another thread to work around that
+     * is not something its implementation documents as safe (its `inputStream`
+     * and `opened` fields are plain, and `close()` can itself read from the
+     * stream). So the long timeout is rebuilt out of short ones instead: a read
+     * that fails with a `SocketTimeoutException` leaves the socket valid by
+     * contract, so `StitchingDataSource` simply reads again until this much has
+     * elapsed with nothing arriving, and only then lets the exception out. The
+     * extractor sees exactly what it would have seen from an 8 s socket.
+     */
+    const val POST_COMMIT_READ_TIMEOUT_MS = 8_000L
 
     /**
      * Consecutive **structural** fallbacks before stitching stands down for
@@ -185,6 +252,40 @@ object LiveStitchPolicy {
     /** Whether a handover still without a commit must be abandoned now. */
     fun shouldAbortHandover(aheadMs: Long): Boolean = aheadMs <= STITCH_ABORT_AHEAD_MS
 
+    /** The loader's own half of the same promise — see [PRE_COMMIT_BUDGET_MS]. */
+    fun preCommitBudgetSpent(elapsedMs: Long): Boolean = elapsedMs >= PRE_COMMIT_BUDGET_MS
+
+    /**
+     * Whether a **committed** link's stalled read should be tried again rather
+     * than failed. [stalledMs] is measured from the first timeout in an
+     * unbroken run of them; any byte that arrives restarts it.
+     * See [POST_COMMIT_READ_TIMEOUT_MS].
+     */
+    fun shouldRetryStalledRead(stalledMs: Long): Boolean = stalledMs < POST_COMMIT_READ_TIMEOUT_MS
+
+    /**
+     * Whether a handover fallback should be answered with an immediate fresh
+     * pre-resolve, so the `kind=ended` reconnect a few seconds later still gets
+     * `path=preresolved` instead of a cold round trip.
+     *
+     * **Only when the handover actually consumed a locator.** The failures that
+     * happen while it is still *parked* — the portal answered with the same URL,
+     * the round trip timed out, the pre-resolve path has backed off — are
+     * failures of the locator supply itself, and asking the same portal again
+     * within milliseconds achieves nothing except holding [ResolveGate] in
+     * flight across the drain, which is exactly what stops the ended reconnect
+     * from firing. A cancellation is the session deliberately replacing the
+     * stream and must re-arm nothing at all: the body of the link that replaced
+     * it is **open**, and the EOF gate exists because a `create_link` issued
+     * against an open body can kill it on a single-connection account.
+     */
+    fun shouldRequestFailsafePreResolve(reason: String, consumedLocator: Boolean): Boolean =
+        consumedLocator &&
+            reason != REASON_CANCELLED &&
+            reason != REASON_RESOLVE_FAILED &&
+            reason != REASON_SAME_URL &&
+            reason != REASON_DISABLED
+
     // ── Diagnostics lines ────────────────────────────────────────────────────
     //
     // Credential-free by construction: every field is a number, a boolean or a
@@ -208,10 +309,11 @@ object LiveStitchPolicy {
         skippedMs: Long,
         repeatedMs: Long,
         droppedBytes: Long,
+        audioHeldMs: Long,
     ): String = String.format(
         Locale.US,
         "live handover link=%d mechanism=%s reason=%s durationMs=%d aheadAtCommitMs=%d " +
-            "trimmedMs=%d skippedMs=%d repeatedMs=%d droppedBytes=%d",
+            "trimmedMs=%d skippedMs=%d repeatedMs=%d droppedBytes=%d audioHeldMs=%d",
         link,
         mechanism,
         reason,
@@ -221,6 +323,10 @@ object LiveStitchPolicy {
         skippedMs,
         repeatedMs,
         droppedBytes,
+        // Appended rather than slotted beside `skippedMs`, where it belongs by
+        // meaning: the field set is read by column, and an export spanning two
+        // builds must keep the columns it already had where they were.
+        audioHeldMs,
     )
 
     /** The fallback shape of [handoverLine], where no splice figures exist. */
@@ -234,6 +340,7 @@ object LiveStitchPolicy {
         skippedMs = 0L,
         repeatedMs = 0L,
         droppedBytes = 0L,
+        audioHeldMs = 0L,
     )
 
     /**
@@ -389,12 +496,38 @@ class StitchCoordinator(
     }
 
     /**
-     * A zap can cross sources, so whatever this session proved about the
-     * previous channel's provider says nothing about the next one's.
+     * A zap can cross sources, so **everything this session learned about the
+     * previous channel's provider says nothing about the next one's** — not
+     * only the rotation proof, but the failure streaks and the stand-down they
+     * can latch. A session disabled because provider X's stream has no IDR
+     * inside the skip budget would otherwise carry that verdict onto provider
+     * Y for the rest of the Activity's life, and nothing would ever log why.
+     *
+     * The stand-down's line stays once *per disablement*: clearing the latch
+     * means a later one is a genuinely new verdict and says so.
      */
-    fun resetRotationProof() {
-        synchronized(lock) { rotationProven = false }
+    fun resetForZap() {
+        synchronized(lock) {
+            rotationProven = false
+            disabled = false
+            structuralFailures = 0
+            transientFailures = 0
+        }
     }
+
+    /**
+     * Whether [session] is still the one in play — the guard every callback
+     * delivered from the loader thread to the main thread must pass.
+     *
+     * A reload, a zap, "Go to live", an mpv fallback or a finish bumps the
+     * token, but the loader thread can be several seconds behind: it may be
+     * parked in a socket read, and its fallback or commit then lands on a
+     * stream that has nothing to do with the one it is describing. Acting on
+     * that is not cosmetic — re-arming the EOF gate from a stale fallback would
+     * fire a `create_link` against a body that is **open**, which is the one
+     * thing the gate exists to prevent.
+     */
+    fun isCurrent(session: Long): Boolean = synchronized(lock) { session == this.session }
 
     /**
      * The session moved on under any outstanding handover: a reload, a zap,
@@ -528,7 +661,7 @@ class StitchCoordinator(
      * evaluated — the deadline, a zap, a reload. Polled between candidate
      * reads rather than delivered, because the loader thread is inside a
      * socket read for most of that window and nothing can preempt it there
-     * (which is what [LiveStitchPolicy.CANDIDATE_READ_TIMEOUT_MS] bounds).
+     * (which is what [LiveStitchPolicy.MAX_BLOCKING_CALL_MS] bounds).
      */
     fun pollAbort(session: Long): String? = synchronized(lock) {
         if (session != this.session) return LiveStitchPolicy.REASON_CANCELLED

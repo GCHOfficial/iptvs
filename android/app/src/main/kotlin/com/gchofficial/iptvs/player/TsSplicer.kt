@@ -93,12 +93,29 @@ data class SpliceInfo(
     val overlapTrimmedMs: Long,
     /** Programme content no surface ever shows: `S - lastShown`. */
     val skippedMs: Long,
-    /** Always 0 by construction — carried so the log line can state it. */
+    /**
+     * Always 0 by construction, and that is a claim about **every** PID, not
+     * just the video one: each non-video elementary stream resumes strictly
+     * after what it had already delivered (see `promote`), so no packet crosses
+     * the seam carrying media a renderer has already been handed.
+     */
     val repeatedMs: Long,
     /** Candidate bytes discarded before the splice point. */
     val droppedBytes: Long,
     /** `"h264"` or `"hevc"`. */
     val codec: String,
+    /**
+     * How far the furthest-ahead non-video elementary stream had already been
+     * delivered *past* the video splice point, i.e. how much candidate audio
+     * had to be held back to avoid re-delivering it.
+     *
+     * Zero on a mux that does not run a PID ahead of the picture, which is the
+     * ordinary case — so a non-zero value in an export is the signal that this
+     * provider interleaves the two links differently and that the per-PID gate
+     * is doing real work. Defaulted so a caller built against the original
+     * shape compiles unchanged.
+     */
+    val audioHeldMs: Long = 0,
 )
 
 /** The verdict on the bytes offered so far. */
@@ -770,14 +787,21 @@ class TsSplicer(
     private fun commit(sink: (ByteArray, Int, Int) -> Unit): SpliceDecision {
         if (holdSkipTooLarge) return SpliceDecision.Rejected(SpliceRejectReason.SKIP_TOO_LARGE)
         val s = holdPts
+        // Read everything the candidate still owns before promote() hands the
+        // link over and clears it.
+        val overlapTrimmedMs = maxOf(0L, ptsDiff(anchorL, candF)) / TICKS_PER_MS
+        val skippedMs = maxOf(0L, ptsDiff(s, anchorLastShown)) / TICKS_PER_MS
+        val codec = cand.codec
+        val droppedBytes = holdDropped
+        val heldTicks = promote(s)
         val info = SpliceInfo(
-            overlapTrimmedMs = maxOf(0L, ptsDiff(anchorL, candF)) / TICKS_PER_MS,
-            skippedMs = maxOf(0L, ptsDiff(s, anchorLastShown)) / TICKS_PER_MS,
+            overlapTrimmedMs = overlapTrimmedMs,
+            skippedMs = skippedMs,
             repeatedMs = 0L,
-            droppedBytes = holdDropped,
-            codec = cand.codec,
+            droppedBytes = droppedBytes,
+            codec = codec,
+            audioHeldMs = heldTicks / TICKS_PER_MS,
         )
-        promote(s)
         val packets = holdCount
         for (i in 0 until packets) {
             if (passthrough) {
@@ -795,26 +819,67 @@ class TsSplicer(
     }
 
     /**
-     * The candidate becomes the current link.
+     * The candidate becomes the current link. Returns how far, in ticks, the
+     * furthest-ahead non-video stream had already been delivered past [s] — the
+     * repeat this splice avoided, and zero on an ordinary mux.
      *
      * The forced-discontinuity targets are taken from the **old** link's last
-     * forwarded counters before they are cleared, and every elementary stream
-     * except the video one gets a "drop until you reach the splice point"
-     * filter: the old link already delivered their media up to roughly `L`, and
-     * re-delivering it would make the extractor emit samples the renderer has
-     * already played. Non-elementary PIDs (PAT, PMT, SI, null) carry no PTS and
-     * resume at the commit point.
+     * forwarded counters before they are cleared.
+     *
+     * ### Where each non-video elementary stream resumes
+     *
+     * Not at [s]. The splice point is a *video* timestamp, and audio is not
+     * delivered in step with video: a muxer is free to run a PID ahead of the
+     * picture, and the two links need not agree on by how much. If the old link
+     * ran audio 500 ms ahead and the candidate runs it level, cutting candidate
+     * audio at [s] re-delivers every audio frame between [s] and what the old
+     * link already played — the PTS steps *backwards* across the seam, which is
+     * the one thing `repeatedMs = 0` claims cannot happen. Cutting only at the
+     * PID's own last delivered PES start has the opposite failure (it would
+     * re-deliver whenever the candidate's audio sits behind [s]), so the gate is
+     * **both**: the first PES start at or after [s] **and** strictly after what
+     * this PID already carried. [Link.lastPesPts] exists for exactly this.
+     *
+     * ### Which anchor, and what it costs
+     *
+     * The anchor is the PID's last PES *start* — what was delivered — not the
+     * one before it, which is the anchor the video side uses. The two differ on
+     * purpose. A video PES in TS is unbounded, so media3's `PesReader` only
+     * finishes one when the next PUSI arrives and the final one is always
+     * discarded at the forced discontinuity. An audio PES carries a real
+     * `PES_packet_length`, so the reader emits it as soon as it has that many
+     * bytes: a *complete* final audio PES did play, and anchoring one PES
+     * earlier would re-deliver it. The cost of this choice is the truncated
+     * case — if the close cut the final audio PES mid-way the extractor drops
+     * it and we skip it too, losing **at most one audio frame** (~24 ms). That
+     * asymmetry is deliberate: a missing audio frame is a gap the sink absorbs,
+     * while a repeated one is a backwards timestamp across a discontinuity.
+     *
+     * A PID the old link never carried has nothing to repeat, so it resumes at
+     * [s]. Non-elementary PIDs (PAT, PMT, SI, null) carry no PTS and resume at
+     * the commit point.
      */
-    private fun promote(s: Long) {
+    private fun promote(s: Long): Long {
         ccTarget.clear()
         ccOffset.clear()
         dropUntil.clear()
         for ((pid, cc) in current.lastCc) ccTarget[pid] = (cc + 2) and 0x0F
+        var heldTicks = 0L
         val layout = cand.layout
         if (layout != null) {
             for (entry in layout) {
                 val pid = entry shr 8
-                if (pid != cand.videoPid) dropUntil[pid] = s
+                if (pid == cand.videoPid) continue
+                val delivered = current.lastPesPts[pid]
+                if (delivered == null) {
+                    dropUntil[pid] = s
+                    continue
+                }
+                val ahead = ptsDiff(delivered, s)
+                // `delivered + 1` is "strictly after", exactly: a PES start at
+                // the same PTS is the same frame.
+                dropUntil[pid] = if (ahead >= 0) (delivered + 1) and PTS_MASK else s
+                if (ahead > heldTicks) heldTicks = ahead
             }
         }
         current.adopt(cand)
@@ -827,6 +892,7 @@ class TsSplicer(
         ended = false
         anchorL = NO_PTS
         anchorLastShown = NO_PTS
+        return heldTicks
     }
 
     private fun rejectCandidate(reason: SpliceRejectReason): SpliceDecision.Rejected {
