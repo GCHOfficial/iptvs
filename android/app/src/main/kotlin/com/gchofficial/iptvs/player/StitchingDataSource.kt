@@ -332,7 +332,15 @@ class StitchingDataSource(
         when (handover) {
             is StitchHandover.Aborted ->
                 giveUp(state, handover.reason, startedAtMs, consumedLocator = false)
-            is StitchHandover.Offered -> evaluate(state, handover.locator, startedAtMs)
+            // The pre-commit budget (and the logged duration) start at the
+            // **offer**, not at the park. Parking is the normal state of a
+            // handover: the link closes with ~25 s of cushion and the host
+            // only resolves once ~10 s remain, so timing the budget from the
+            // park spent it before the locator ever arrived — every handover
+            // fell back with `reason=deadline durationMs≈15000` (the first
+            // live-cut emulator run that reached its channel).
+            is StitchHandover.Offered ->
+                evaluate(state, handover.locator, SystemClock.elapsedRealtime())
         }
     }
 
