@@ -427,6 +427,20 @@ class ExoPlayerEngine(
 
     private var stitchLinksReported = 0
 
+    /**
+     * Whether the item this engine last loaded is one unbounded progressive
+     * body, rather than a playlist or manifest media3 will read in chunks.
+     *
+     * Computed once per [load] from the **same** `Util.inferContentType` test
+     * `StitchCoordinator.arm` uses — which is also how `DefaultMediaSourceFactory`
+     * chose the `MediaSource`, so the three cannot disagree about what kind of
+     * stream this is. It exists because an HLS playlist load completes with
+     * `TRACK_TYPE_UNKNOWN` and used to read as the live body closing; see
+     * [StreamEofPolicy.isSourceEof]. Defaults false, so an engine that has not
+     * loaded anything reports no source EOF at all.
+     */
+    private var loadedItemProgressive = false
+
     private val playerView = PlayerView(context).apply {
         useController = false
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -809,18 +823,24 @@ class ExoPlayerEngine(
             // from silencing this one.
             if (stitchEofSession != 0L && stitchCurrent(stitchEofSession)) return
             if (!StreamEofPolicy.isSourceEof(
+                    dataType = mediaLoadData.dataType,
+                    dataTypeMedia = C.DATA_TYPE_MEDIA,
                     trackType = mediaLoadData.trackType,
                     trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
                     isLive = state.isLive,
+                    progressiveItem = loadedItemProgressive,
                 )
             ) {
                 return
             }
             val since = if (loadedAtMs == 0L) -1L else SystemClock.elapsedRealtime() - loadedAtMs
             if (StreamEofPolicy.shouldReport(
+                    dataType = mediaLoadData.dataType,
+                    dataTypeMedia = C.DATA_TYPE_MEDIA,
                     trackType = mediaLoadData.trackType,
                     trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
                     isLive = state.isLive,
+                    progressiveItem = loadedItemProgressive,
                     linesSoFar = sourceEofLines,
                 )
             ) {
@@ -1026,6 +1046,11 @@ class ExoPlayerEngine(
         stitchCoordinator?.noteLoad(url, state.isLive)
         stitchEofSession = 0L
         stitchLinksReported = 0
+        // Decided here rather than per load-completion: it is a property of the
+        // item, media3 decides the same way, and an `onLoadCompleted` that
+        // re-derived it would be asking about a URI it was not given.
+        loadedItemProgressive =
+            Util.inferContentType(Uri.parse(url)) == C.CONTENT_TYPE_OTHER
         val item = MediaItem.Builder()
             .setUri(url)
             .setSubtitleConfigurations(

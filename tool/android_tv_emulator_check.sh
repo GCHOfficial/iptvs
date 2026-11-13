@@ -416,28 +416,91 @@ leave_player() {
   ! in_player
 }
 
-# Navigate the category sidebar to "Live cut test" (DemoSource adds it only
-# when IPTVS_LIVE_CUT_URL was baked in) and apply it. Per docs/tv-navigation.md
-# "Movement rules": Left peels the per-row favorite column back to the row
-# body before a *second* Left actually crosses panes, so two Lefts cross
-# whichever column the cursor was left on. Two Downs then reach the third
-# category (index 2) — exact only from category index 0, which is where the
-# sidebar cursor still sits here: nothing earlier in this script (Scenarios
-# 1-3) ever touches the sidebar, only the channel pane. Applying the category
-# (OK) lands on its first channel, "Live cut (rotating)" — channel number 201,
-# listed before "Live cut (stable URL)" (202).
+# Navigates to one of the two "Live cut test" channels, opens the fullscreen
+# player on it, and proves from logcat that it's actually the channel
+# playing — HARD-failing (via `fail`, never `soft_fail`) if the logcat line
+# never says so. A run that silently measured the wrong channel (which is
+# exactly what happened the first time this leg ran: it landed on "Apple
+# BipBop · HEVC" in the unrelated "Playback lab" category and the splice
+# checks below just soft-warned "0 splices", going green) must be red, not a
+# quiet warning — see docs/validation-baseline.md "Android TV emulator CI".
 #
-# Call this at most once per run. A second category re-navigation couldn't
-# reuse this same fixed Down count without first knowing how many the
-# previous call already consumed, so Scenario 4b deliberately does not call
-# this again — it stays inside the category 4a already applied instead.
-open_live_cut_category() {
+# $1 = exact channel name as DemoSource logs it in
+#      "[iptvs.library] preview live source=... channel=<name> id=...".
+# $2 = Down presses in the category sidebar to reach "Live cut test" from
+#      wherever the cursor starts. Always 1 at every call site below:
+#      nothing earlier in this script ever touches the sidebar, so it is
+#      still on its default "All channels" entry (index 0), and DemoSource
+#      lists "Live cut test" *first* among its real categories (index 1)
+#      precisely so this doesn't have to track how many ordinary demo
+#      categories exist.
+# $3 = Down presses inside that category's channel pane, after applying it,
+#      to reach the row for $1 (0 for "Live cut (rotating)", its first
+#      channel; 1 for "Live cut (stable URL)", its second).
+#
+# Re-navigates from scratch every call (no "4b reuses what 4a already
+# applied" assumption) — self-contained and no more expensive than trusting
+# carried-over state, and it means the hard assertion below is the only
+# thing either scenario depends on.
+open_live_cut_channel() {
+  local expected="$1" category_downs="$2" channel_downs="$3"
+  local settle off attempt crossed=0 i seen
+
   leave_player || true
-  key KEYCODE_DPAD_LEFT
-  key KEYCODE_DPAD_LEFT
-  key KEYCODE_DPAD_DOWN
-  key KEYCODE_DPAD_DOWN
-  key KEYCODE_DPAD_CENTER 1
+
+  # Leaving the player restarts the channel list's preview on whichever
+  # channel the session ended on, and that restart finishes *asynchronously*
+  # — "preview native engine open" can land up to ~1s later and silently
+  # request focus back onto the channel list, even after a Left has already
+  # crossed to the category sidebar. Observed directly the first time this
+  # leg ran: that line landed between two blind Left presses, and the
+  # *second* Left's own focus trace read `focus=live.channels` again rather
+  # than `live.categories` — a steal that happened strictly after a Left had
+  # already (correctly) crossed, so retrying Left alone cannot catch it if
+  # the retry loop below stops the moment it first sees `live.categories`.
+  # Settling on this line (or giving up waiting for it) before sending any
+  # navigation key at all is what actually closes the race.
+  settle=$(mark)
+  wait_log "$settle" 'preview native engine open' 5 || true
+  sleep 1
+
+  # Per live_focus_coordinator.dart's handleChannelsKey, a single Left from
+  # the channel pane's resting ("body") column crosses straight to the
+  # category sidebar — this retry is defense in depth for any remaining
+  # timing wobble, not the primary fix above.
+  for attempt in 1 2 3 4 5 6; do
+    off=$(mark)
+    key KEYCODE_DPAD_LEFT
+    if since "$off" | grep -q 'focus=live\.categories'; then
+      crossed=1
+      break
+    fi
+  done
+  if [ "$crossed" != "1" ]; then
+    fail "live-cut: never reached the category sidebar for \"$expected\" (stuck on focus=live.channels)"
+    return 1
+  fi
+
+  for ((i = 0; i < category_downs; i++)); do
+    key KEYCODE_DPAD_DOWN
+  done
+  key KEYCODE_DPAD_CENTER 1 # apply the category; lands on its first channel
+  for ((i = 0; i < channel_downs; i++)); do
+    key KEYCODE_DPAD_DOWN
+  done
+
+  off=$(mark)
+  if ! open_fullscreen "$off"; then
+    fail "live-cut: fullscreen player never opened while navigating to \"$expected\""
+    return 1
+  fi
+  seen=$(first_match "$off" '\[iptvs\.library\] preview live source=')
+  if ! printf '%s' "$seen" | grep -qF "channel=$expected "; then
+    fail "live-cut: expected \"preview live source=... channel=$expected ...\" but got: ${seen:-<no preview line at all>}"
+    return 1
+  fi
+  pass "live-cut: confirmed \"$expected\" is the channel playing"
+  return 0
 }
 
 # ── Launch + first run ───────────────────────────────────────────────────────
@@ -724,10 +787,8 @@ fi
 # changes, even though the server still cuts its connection the same way.
 if [ "$LIVE_CUT" = "1" ]; then
   step "Scenario 4a: live-cut splice (rotating URL, ${LIVE_CUT_SECONDS}s)"
-  M=$(mark)
-  open_live_cut_category
-  if open_fullscreen "$M"; then
-    pass "live-cut (rotating) fullscreen player opened"
+  if open_live_cut_channel "Live cut (rotating)" 1 0; then
+    M=$(mark)
     note "playing ${LIVE_CUT_SECONDS}s, watching for stitched handovers"
     sleep "$LIVE_CUT_SECONDS"
     shot "live-cut-rotating"
@@ -764,24 +825,15 @@ if [ "$LIVE_CUT" = "1" ]; then
       note "no splice line to measure post-splice reconnects against"
     fi
     rm -f "$WINDOW"
-  else
-    soft_fail "could not open the fullscreen player for the live-cut (rotating) scenario"
+    scan_health "$M" "live-cut rotating scenario" || true
   fi
-  scan_health "$M" "live-cut rotating scenario" || true
+  # No `else`: open_live_cut_channel already called `fail` (hard) with the
+  # reason when it returns non-zero — confirming the right channel is itself
+  # part of what this leg exists to prove, unlike the splice behaviour above.
 
   step "Scenario 4b: live-cut control (stable URL, ${LIVE_CUT_STABLE_SECONDS}s, must never splice)"
-  M=$(mark)
-  # No sidebar re-navigation here: 4a already applied "Live cut test" and
-  # left the channel-pane cursor on its first row ("Live cut (rotating)"),
-  # exactly as every other fullscreen round trip in this script assumes
-  # Back restores the same category/row it came from (Scenario 1b above).
-  # Re-deriving the category index here would have to know how many Downs
-  # 4a already consumed from an unknown starting index — one Down within
-  # the still-selected category's channel list is both simpler and exact.
-  leave_player || true
-  key KEYCODE_DPAD_DOWN     # from "Live cut (rotating)" to "Live cut (stable URL)"
-  if open_fullscreen "$M"; then
-    pass "live-cut (stable URL) fullscreen player opened"
+  if open_live_cut_channel "Live cut (stable URL)" 1 1; then
+    M=$(mark)
     sleep "$LIVE_CUT_STABLE_SECONDS"
     shot "live-cut-stable"
 
@@ -797,10 +849,8 @@ if [ "$LIVE_CUT" = "1" ]; then
     else
       soft_fail "no reconnect observed for the stable-URL control in ${LIVE_CUT_STABLE_SECONDS}s (expected the server's close to trigger one)"
     fi
-  else
-    soft_fail "could not open the fullscreen player for the live-cut (stable URL) control"
+    scan_health "$M" "live-cut stable control scenario" || true
   fi
-  scan_health "$M" "live-cut stable control scenario" || true
 fi
 
 # ── Teardown ─────────────────────────────────────────────────────────────────

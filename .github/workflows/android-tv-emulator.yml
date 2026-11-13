@@ -357,6 +357,40 @@ jobs:
       - name: Fetch the live-cut server's /stats
         if: always()
         run: curl -s http://127.0.0.1:8765/stats -o "$RUNNER_TEMP/live_cut_stats.json" || true
+      # The one check that must be hard regardless of what the driver script
+      # itself reported: on PR #299's first run the driver navigated to the
+      # wrong channel entirely (an unrelated "Playback lab" test stream), the
+      # behavioural splice checks just soft-warned "0 splices", and the job
+      # went green having tested nothing against this server at all. A green
+      # run must mean the server was actually in the loop.
+      - name: Verify the live-cut server actually saw traffic
+        if: always()
+        env:
+          STATS_PATH: ${{ runner.temp }}/live_cut_stats.json
+        run: |
+          python3 -c "
+          import json, os, sys
+
+          path = os.environ['STATS_PATH']
+          try:
+              with open(path) as f:
+                  data = json.load(f)
+          except (FileNotFoundError, json.JSONDecodeError) as e:
+              print(f'live-cut: could not read/parse {path}: {e}', file=sys.stderr)
+              sys.exit(1)
+
+          opened = data.get('connectionsOpened', 0)
+          minted = data.get('tokensMinted', 0)
+          print(f'connectionsOpened={opened} tokensMinted={minted}')
+          if opened == 0 or minted == 0:
+              print(
+                  'live-cut: the server saw no real connection/token this '
+                  'run -- the leg tested nothing, whatever the driver '
+                  'script itself reported',
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          "
       - name: Stop the live-cut server
         if: always()
         run: kill "$(cat "$RUNNER_TEMP/live_cut_server.pid")" 2>/dev/null || true
