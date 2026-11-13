@@ -202,6 +202,29 @@ things an "Android TV emulator" was wanted for:
 | API 36 | `system-images;android-36;android-tv;x86_64` | A genuine TV image: `UiModeManager`/leanback detection (`device class television=true`), the TV layout and the leanback launcher category. |
 | API 36, Skia GL | `system-images;android-36;android-tv;x86_64`, launched with `--force-skia-gl` | The **non-default renderer**. The app ships Impeller except on a one-entry SoC denylist (docs/player.md "The Flutter renderer"); this leg forces Skia OpenGL with the debug-only `--ez iptvsForceSkiaGl true` extra, hard-fails unless the app reports `renderer=skia-gl reason=forced-debug`, and then drives the whole TV flow on it. A renderer dimension on one level, not on both: the cost is one extra emulator boot on a non-required job, and API 36 is the leg worth doubling because it is the genuine TV image. No emulator carries the denylisted SoC, so this proves the mechanism, never the match. |
 
+### Live-cut stitched handover (opt-in)
+
+A fourth, separate leg (`build-apk-livecut` + `drive-live-cut`, API 36 android-tv x86_64 only)
+exercises the Android "stitched handover" live splice (docs/player.md "The stitched handover
+(Android)") against a synthetic burst/hold/close provider, `tool/live_cut_server.py` — a
+stdlib-only Python server that reproduces the Stalker shape this feature targets: single-use
+`play_token`s, single-connection accounts, a 20–30s backlog burst at several times real time,
+6–18s of real-time delivery, then a clean close. The APK for this leg alone is built with
+`--dart-define=IPTVS_LIVE_CUT_URL=http://10.0.2.2:8765`, which turns on two otherwise-nonexistent
+`DemoSource` channels ("Live cut (rotating)" — a fresh single-use URL every resolve, exactly like
+a Stalker `create_link`; "Live cut (stable URL)" — a static URL, the control case).
+`tool/android_tv_emulator_check.sh --live-cut` plays the rotating channel and asserts ≥3 `native
+live handover … mechanism=splice` lines with `repeatedMs=0` and no `native live reconnect` after
+the first splice, then plays the stable-URL control and asserts the inverse: zero splices (the
+mechanism must never arm for a static URL) but ≥1 reconnect (proving the connection really was
+cut). Like the other behavioural checks, these are reported but non-fatal outside `--strict`. The
+server's own `--self-test` (a synthetic in-process TS fixture, no ffmpeg) gates the job before the
+real 900s ffmpeg-generated fixture is built and served.
+
+Note: an emulator proves ExoPlayer/`TsExtractor`/software-decoder acceptance of the spliced
+stream, never the Realtek hardware decoder — see docs/player.md "The stitched handover (Android)"
+"What's unproven".
+
 ### What the run actually asserts
 
 Everything is observed through logcat; the app already prints each of these in a debug build
