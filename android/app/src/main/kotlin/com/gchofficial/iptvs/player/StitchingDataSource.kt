@@ -10,33 +10,63 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import java.io.IOException
 import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
 
 /**
  * What a stitching `DataSource` tells the engine about the link it is reading.
  *
  * Every method is called on the **media3 loader thread**, so the implementation
  * owns the hop to wherever it reads player state or writes the exportable log.
+ *
+ * Every method also carries the coordinator [session] it belongs to, and the
+ * implementation **must drop anything stale**. The loader thread can be
+ * seconds behind the main one — parked in a socket read, or inside a handover
+ * the session has already cancelled — so a report can arrive describing a link
+ * that a zap, a reload or an mpv fallback replaced long ago.
  */
 @UnstableApi
 interface StitchHost {
     /** A link armed for stitching. [spliceable] is `pending` or `true`. */
-    fun onStitchArmed(link: Int, spliceable: String)
+    fun onStitchArmed(session: Long, link: Int, spliceable: String)
 
     /** The splicer reached a verdict on [link]'s shape. */
-    fun onStitchSpliceable(link: Int, spliceable: Boolean, reason: String)
+    fun onStitchSpliceable(session: Long, link: Int, spliceable: Boolean, reason: String)
 
     /**
      * An armed link's HTTP body ended, and this source — not media3's
      * `onLoadCompleted` — owns reporting it from here on. The host writes the
      * `stream source eof` line and starts the pre-resolve.
      */
-    fun onStitchLinkEof(link: Int, bytes: Long, sinceLinkOpenMs: Long)
+    fun onStitchLinkEof(session: Long, link: Int, bytes: Long, sinceLinkOpenMs: Long)
 
-    /** A splice committed: [link] closed and [newLink] is now feeding the same decoder. */
-    fun onStitchCommitted(link: Int, newLink: Int, info: SpliceInfo, durationMs: Long)
+    /**
+     * A splice committed: [link] closed and [newLink] is now feeding the same
+     * decoder, from [locator] — which is the stream the session is **playing**
+     * from here on, and so is the locator every later re-resolve, mpv fallback
+     * and `refreshed` comparison has to be measured against.
+     */
+    fun onStitchCommitted(
+        session: Long,
+        link: Int,
+        newLink: Int,
+        locator: LiveLocator,
+        info: SpliceInfo,
+        durationMs: Long,
+    )
 
-    /** The handover gave up on [link]; end of input follows immediately. */
-    fun onStitchFallback(link: Int, reason: String, durationMs: Long)
+    /**
+     * The handover gave up on [link]; end of input follows immediately.
+     * [consumedLocator] says whether a locator was actually handed over and
+     * spent — the host's fail-safe re-ask turns on it
+     * ([LiveStitchPolicy.shouldRequestFailsafePreResolve]).
+     */
+    fun onStitchFallback(
+        session: Long,
+        link: Int,
+        reason: String,
+        durationMs: Long,
+        consumedLocator: Boolean,
+    )
 }
 
 /**
@@ -58,9 +88,11 @@ interface StitchHost {
  * container media3 reads as one unbounded progressive body, and a provider
  * this session has *seen* rotate a locator. Miss any of them and every call
  * below is a direct delegate: same bytes, same timings, same `onLoadCompleted`,
- * same `stream source eof` line. That is the whole safety argument, and it is
- * why the unarmed path has no buffer, no parsing and no branch past the first
- * line of [read].
+ * same `stream source eof` line, and **not one byte of buffer allocated** —
+ * [ArmedLink] is the only thing that holds any, and it is built in `open()`
+ * only once arming has been granted. That matters because most of the data
+ * sources this factory makes are never the live progressive body at all:
+ * preview opens, VOD, HLS segments, subtitle sidecars and load retries.
  *
  * ### Never two connections
  *
@@ -68,9 +100,22 @@ interface StitchHost {
  * around. The candidate link is opened **after** the current body has returned
  * end of input *and* been closed, and it is closed again before end of input is
  * ever returned to the extractor. The one window this cannot police from here
- * is a candidate wedged inside a blocking socket read, which is why a candidate
- * carries its own short timeouts ([LiveStitchPolicy.CANDIDATE_READ_TIMEOUT_MS])
- * bounded by the deadline's cushion ([LiveStitchPolicy.STITCH_ABORT_AHEAD_MS]).
+ * is a candidate wedged inside a blocking call, which is why the pre-commit
+ * phase carries short socket timeouts ([LiveStitchPolicy.MAX_BLOCKING_CALL_MS])
+ * bounded by the deadline's cushion ([LiveStitchPolicy.STITCH_ABORT_AHEAD_MS]),
+ * and why it also has a wall clock of its own
+ * ([LiveStitchPolicy.PRE_COMMIT_BUDGET_MS]) checked across every blocking call
+ * including the open.
+ *
+ * ### A committed link is an ordinary link
+ *
+ * Those short timeouts are a property of being a *candidate*, not of the
+ * connection. Once a candidate is promoted it must ride out exactly what any
+ * other live link rides out, so a stalled read is retried until
+ * [LiveStitchPolicy.POST_COMMIT_READ_TIMEOUT_MS] has passed with nothing
+ * arriving — rebuilding media3's own 8 s read timeout out of 1 s ones, because
+ * a `SocketTimeoutException` leaves the socket valid by contract and an open
+ * socket's timeout cannot be changed.
  *
  * ### Threading
  *
@@ -91,18 +136,45 @@ class StitchingDataSource(
     private val host: StitchHost,
 ) : DataSource {
 
+    /**
+     * Everything a stitching link needs and an unarmed one must not pay for:
+     * the splicer, the 32 KiB read scratch, the output queue between them, and
+     * the per-link bookkeeping. One allocation, made only once
+     * [StitchCoordinator.arm] has said yes.
+     */
+    private class ArmedLink(val session: Long, var link: Int) {
+        val splicer = TsSplicer()
+        val out = OutputBuffer()
+        val scratch = ByteArray(SCRATCH_BYTES)
+        val sink: (ByteArray, Int, Int) -> Unit = { array, offset, length ->
+            out.write(array, offset, length)
+        }
+
+        var verdictReported = false
+
+        /**
+         * Latched the first time this source reports a link EOF itself. From
+         * then on the engine's `onLoadCompleted` path is suppressed for this
+         * load and **every** later link's EOF is reported here — including one
+         * that turns out not to be spliceable, which would otherwise lose its
+         * line entirely.
+         */
+        var reportsEof = false
+
+        var openedAtMs = 0L
+        var bytes = 0L
+
+        /**
+         * When an unbroken run of read timeouts on a **committed** link began,
+         * or 0. See [LiveStitchPolicy.POST_COMMIT_READ_TIMEOUT_MS].
+         */
+        var stalledSinceMs = 0L
+    }
+
     private val listeners = ArrayList<TransferListener>(2)
 
     private var coordinator: StitchCoordinator? = null
-    private var arming: StitchArming? = null
-    private var link = 0
-
-    private var splicer: TsSplicer? = null
-    private val out = OutputBuffer()
-    private val scratch = ByteArray(SCRATCH_BYTES)
-    private val sink: (ByteArray, Int, Int) -> Unit = { array, offset, length ->
-        out.write(array, offset, length)
-    }
+    private var armed: ArmedLink? = null
 
     /** The body currently being read. [upstream] until a splice promotes a candidate. */
     private var current: DataSource = upstream
@@ -111,18 +183,6 @@ class StitchingDataSource(
 
     private var atLinkEnd = false
     private var finished = false
-    private var verdictReported = false
-
-    /**
-     * Latched the first time this source reports a link EOF itself. From then
-     * on the engine's `onLoadCompleted` path is suppressed for this load and
-     * **every** later link's EOF is reported here — including one that turns
-     * out not to be spliceable, which would otherwise lose its line entirely.
-     */
-    private var reportsEof = false
-
-    private var linkOpenedAtMs = 0L
-    private var linkBytes = 0L
 
     override fun addTransferListener(transferListener: TransferListener) {
         listeners.add(transferListener)
@@ -136,7 +196,7 @@ class StitchingDataSource(
         resetForOpen()
         val co = coordinatorOf()
         coordinator = co
-        arming = co?.arm(
+        val arming = co?.arm(
             uri = dataSpec.uri.toString(),
             position = dataSpec.position,
             // A playlist or manifest is read in chunks, so there is no single
@@ -147,36 +207,34 @@ class StitchingDataSource(
         )
         val length = upstream.open(dataSpec)
         currentOpen = true
-        val armed = arming ?: return length
-        link = armed.link
-        splicer = TsSplicer()
-        linkOpenedAtMs = SystemClock.elapsedRealtime()
-        linkBytes = 0L
-        host.onStitchArmed(link, SPLICEABLE_PENDING)
+        if (arming == null) return length
+        val state = ArmedLink(arming.session, arming.link)
+        state.openedAtMs = SystemClock.elapsedRealtime()
+        armed = state
+        host.onStitchArmed(state.session, state.link, SPLICEABLE_PENDING)
         return length
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         // The unarmed path, and the only thing that runs on a stream this
         // feature has no business touching.
-        if (arming == null) return current.read(buffer, offset, length)
+        val state = armed ?: return current.read(buffer, offset, length)
         if (length == 0) return 0
-        val splicer = this.splicer ?: return current.read(buffer, offset, length)
         while (true) {
-            if (out.available > 0) return out.drainTo(buffer, offset, length)
+            if (state.out.available > 0) return state.out.drainTo(buffer, offset, length)
             if (finished) return C.RESULT_END_OF_INPUT
             if (!atLinkEnd) {
-                val read = current.read(scratch, 0, scratch.size)
+                val read = readCurrent(state)
                 if (read == C.RESULT_END_OF_INPUT) {
                     atLinkEnd = true
                 } else if (read > 0) {
-                    linkBytes += read
-                    splicer.forwardCurrent(scratch, 0, read, sink)
-                    reportVerdict(splicer)
+                    state.bytes += read
+                    state.splicer.forwardCurrent(state.scratch, 0, read, state.sink)
+                    reportVerdict(state)
                 }
                 continue
             }
-            handleLinkEnd(splicer)
+            handleLinkEnd(state)
         }
     }
 
@@ -185,11 +243,10 @@ class StitchingDataSource(
     override fun getResponseHeaders(): Map<String, List<String>> = current.responseHeaders
 
     override fun close() {
-        arming?.let { coordinator?.finishHandover(it.session) }
+        armed?.let { coordinator?.finishHandover(it.session) }
         closeCandidate()
         if (current !== upstream) {
             runCatching { if (currentOpen) current.close() }
-            currentOpen = false
         }
         // Always, even when never opened: media3 calls close() after a failed
         // open, and `DefaultHttpDataSource` is a no-op when it holds nothing.
@@ -198,20 +255,45 @@ class StitchingDataSource(
     }
 
     private fun resetForOpen() {
-        arming = null
+        armed = null
         coordinator = null
-        splicer = null
-        link = 0
-        out.clear()
         candidate = null
         current = upstream
         currentOpen = false
         atLinkEnd = false
         finished = false
-        verdictReported = false
-        reportsEof = false
-        linkBytes = 0L
-        linkOpenedAtMs = 0L
+    }
+
+    // ── Reading the current link ─────────────────────────────────────────────
+
+    /**
+     * One read of the link being played, with the **committed link's** stall
+     * budget layered over its short candidate timeout.
+     *
+     * A promoted candidate still holds the socket it was opened with, and a
+     * socket's read timeout cannot be changed once its stream exists. So the
+     * long timeout is rebuilt here: a `SocketTimeoutException` leaves the
+     * socket valid by contract, so the read is simply issued again until
+     * [LiveStitchPolicy.POST_COMMIT_READ_TIMEOUT_MS] has elapsed with nothing
+     * arriving. Without it an ordinary two-second network hiccup — which an
+     * unstitched link absorbs in silence — would surface as a load error, and
+     * media3 would retry the *item's* URI, i.e. a spent single-use token.
+     *
+     * [upstream] is excluded because it already carries media3's own default.
+     */
+    private fun readCurrent(state: ArmedLink): Int {
+        while (true) {
+            try {
+                val read = current.read(state.scratch, 0, state.scratch.size)
+                state.stalledSinceMs = 0L
+                return read
+            } catch (e: IOException) {
+                if (current === upstream || !isReadTimeout(e)) throw e
+                val now = SystemClock.elapsedRealtime()
+                if (state.stalledSinceMs == 0L) state.stalledSinceMs = now
+                if (!LiveStitchPolicy.shouldRetryStalledRead(now - state.stalledSinceMs)) throw e
+            }
+        }
     }
 
     // ── The handover ─────────────────────────────────────────────────────────
@@ -223,25 +305,24 @@ class StitchingDataSource(
      * Leaves the source in exactly one of two states: [finished] (end of input
      * follows), or reading a freshly promoted link.
      */
-    private fun handleLinkEnd(splicer: TsSplicer) {
+    private fun handleLinkEnd(state: ArmedLink) {
         // Before anything else can open a connection.
         closeCurrent()
-        splicer.endCurrent()
-        val blocked = blockedReason(splicer)
+        state.splicer.endCurrent()
+        val blocked = blockedReason(state)
         if (blocked != null) {
             // Nothing to splice here. When this source already owns the EOF
             // reporting for the load, the line is still ours to write —
             // otherwise media3's own `onLoadCompleted` writes it, exactly as it
             // does on every unarmed stream today.
-            if (reportsEof) reportLinkEof()
-            giveUp(blocked, SystemClock.elapsedRealtime())
+            if (state.reportsEof) reportLinkEof(state)
+            giveUp(state, blocked, SystemClock.elapsedRealtime(), consumedLocator = false)
             return
         }
-        reportLinkEof()
-        val session = arming!!.session
+        reportLinkEof(state)
         val startedAtMs = SystemClock.elapsedRealtime()
         val handover = try {
-            coordinator!!.awaitLocator(session)
+            coordinator!!.awaitLocator(state.session)
         } catch (e: InterruptedException) {
             // media3's Loader interrupts this thread on cancel. Restore the
             // flag and hand the extractor loop the exception it expects.
@@ -249,8 +330,9 @@ class StitchingDataSource(
             throw InterruptedIOException("stitch handover interrupted")
         }
         when (handover) {
-            is StitchHandover.Aborted -> giveUp(handover.reason, startedAtMs)
-            is StitchHandover.Offered -> evaluate(splicer, handover.locator, startedAtMs)
+            is StitchHandover.Aborted ->
+                giveUp(state, handover.reason, startedAtMs, consumedLocator = false)
+            is StitchHandover.Offered -> evaluate(state, handover.locator, startedAtMs)
         }
     }
 
@@ -263,11 +345,12 @@ class StitchingDataSource(
      * could never be spliced costs no candidate connection and no waiting —
      * the ordinary path runs with its ordinary timing.
      */
-    private fun blockedReason(splicer: TsSplicer): String? {
+    private fun blockedReason(state: ArmedLink): String? {
+        val splicer = state.splicer
         if (!splicer.spliceable) {
             return splicer.unsupportedReason?.token ?: SpliceRejectReason.UNSUPPORTED.token
         }
-        val probe = splicer.offerCandidate(EMPTY, 0, 0, sink)
+        val probe = splicer.offerCandidate(EMPTY, 0, 0, state.sink)
         if (probe is SpliceDecision.Rejected) {
             splicer.abandonCandidate()
             return probe.reason.token
@@ -275,47 +358,71 @@ class StitchingDataSource(
         return null
     }
 
-    private fun evaluate(splicer: TsSplicer, locator: LiveLocator, startedAtMs: Long) {
+    private fun evaluate(state: ArmedLink, locator: LiveLocator, startedAtMs: Long) {
         val source = try {
             val built = candidateFactory(locator.headers)
             for (listener in listeners) built.addTransferListener(listener)
             built.open(DataSpec.Builder().setUri(Uri.parse(locator.url)).build())
             built
         } catch (e: IOException) {
-            giveUp(LiveStitchPolicy.REASON_OPEN_FAILED, startedAtMs)
+            giveUp(state, LiveStitchPolicy.REASON_OPEN_FAILED, startedAtMs, consumedLocator = true)
             return
         }
         candidate = source
         var candidateBytes = 0L
         while (true) {
-            coordinator!!.pollAbort(arming!!.session)?.let { reason ->
-                giveUp(reason, startedAtMs)
+            // Both halves of the pre-commit bound, re-asked around every
+            // blocking call: the host's cushion deadline, and the loader's own
+            // wall clock — which is what covers the open above, since nothing
+            // could be polled while it was running.
+            coordinator!!.pollAbort(state.session)?.let { reason ->
+                giveUp(state, reason, startedAtMs, consumedLocator = true)
+                return
+            }
+            val elapsed = SystemClock.elapsedRealtime() - startedAtMs
+            if (LiveStitchPolicy.preCommitBudgetSpent(elapsed)) {
+                giveUp(state, LiveStitchPolicy.REASON_DEADLINE, startedAtMs, consumedLocator = true)
                 return
             }
             val read = try {
-                source.read(scratch, 0, scratch.size)
+                source.read(state.scratch, 0, state.scratch.size)
             } catch (e: IOException) {
                 // A candidate that stalled past its own read timeout is a
                 // candidate that never delivered; the same answer as an early
                 // end of body, and the same (transient) weight against the
-                // session.
-                giveUp(LiveStitchPolicy.REASON_CANDIDATE_EOF, startedAtMs)
+                // session. **Not** retried the way a committed link's read is:
+                // a candidate is on a budget, and one that has gone quiet has
+                // already failed the only thing it was asked to do.
+                giveUp(
+                    state,
+                    LiveStitchPolicy.REASON_CANDIDATE_EOF,
+                    startedAtMs,
+                    consumedLocator = true,
+                )
                 return
             }
             if (read == C.RESULT_END_OF_INPUT) {
-                giveUp(LiveStitchPolicy.REASON_CANDIDATE_EOF, startedAtMs)
+                giveUp(
+                    state,
+                    LiveStitchPolicy.REASON_CANDIDATE_EOF,
+                    startedAtMs,
+                    consumedLocator = true,
+                )
                 return
             }
             if (read <= 0) continue
             candidateBytes += read
-            when (val decision = splicer.offerCandidate(scratch, 0, read, sink)) {
+            when (
+                val decision =
+                    state.splicer.offerCandidate(state.scratch, 0, read, state.sink)
+            ) {
                 is SpliceDecision.NeedMore -> Unit
                 is SpliceDecision.Rejected -> {
-                    giveUp(decision.reason.token, startedAtMs)
+                    giveUp(state, decision.reason.token, startedAtMs, consumedLocator = true)
                     return
                 }
                 is SpliceDecision.Committed -> {
-                    commit(decision.info, source, candidateBytes, startedAtMs)
+                    commit(state, decision.info, source, locator, candidateBytes, startedAtMs)
                     return
                 }
             }
@@ -324,13 +431,14 @@ class StitchingDataSource(
 
     /** The candidate becomes the link being read; the stream never noticed. */
     private fun commit(
+        state: ArmedLink,
         info: SpliceInfo,
         source: DataSource,
+        locator: LiveLocator,
         candidateBytes: Long,
         startedAtMs: Long,
     ) {
-        val closed = link
-        val session = arming!!.session
+        val closed = state.link
         candidate = null
         current = source
         currentOpen = true
@@ -339,53 +447,78 @@ class StitchingDataSource(
         // but the bytes were still delivered by *this* body — so the next
         // `stream source eof` line counts them, as an honest "what this HTTP
         // connection carried".
-        linkBytes = candidateBytes
-        linkOpenedAtMs = SystemClock.elapsedRealtime()
+        state.bytes = candidateBytes
+        state.openedAtMs = SystemClock.elapsedRealtime()
+        state.stalledSinceMs = 0L
         val promoted = coordinator!!.nextLink()
-        link = promoted
+        state.link = promoted
         // Established by the commit itself: the candidate's layout had to match
         // the link it replaced, which was spliceable by definition.
-        verdictReported = true
-        coordinator!!.finishHandover(session)
+        state.verdictReported = true
+        coordinator!!.finishHandover(state.session)
         coordinator!!.noteCommit()
         host.onStitchCommitted(
+            session = state.session,
             link = closed,
             newLink = promoted,
+            // The session is now **playing** this locator, not the one it was
+            // launched with. Everything downstream measures against it: the mpv
+            // fallback loads it, `ResolveAgainReply` preserves it, and the
+            // `refreshed` comparison that arms the next handover is made
+            // against it.
+            locator = locator,
             info = info,
             durationMs = SystemClock.elapsedRealtime() - startedAtMs,
         )
     }
 
     /** Abandon the handover and let the ordinary reconnect take the stream. */
-    private fun giveUp(reason: String, startedAtMs: Long) {
-        splicer?.abandonCandidate()
+    private fun giveUp(
+        state: ArmedLink,
+        reason: String,
+        startedAtMs: Long,
+        consumedLocator: Boolean,
+    ) {
+        state.splicer.abandonCandidate()
         closeCandidate()
-        arming?.let { coordinator?.finishHandover(it.session) }
+        coordinator?.finishHandover(state.session)
         finished = true
-        host.onStitchFallback(link, reason, SystemClock.elapsedRealtime() - startedAtMs)
+        host.onStitchFallback(
+            session = state.session,
+            link = state.link,
+            reason = reason,
+            durationMs = SystemClock.elapsedRealtime() - startedAtMs,
+            consumedLocator = consumedLocator,
+        )
         coordinator?.noteFallback(reason)
     }
 
     // ── Bookkeeping ──────────────────────────────────────────────────────────
 
-    private fun reportVerdict(splicer: TsSplicer) {
-        if (verdictReported) return
-        val unsupported = splicer.unsupportedReason
+    private fun reportVerdict(state: ArmedLink) {
+        if (state.verdictReported) return
+        val unsupported = state.splicer.unsupportedReason
         if (unsupported != null) {
-            verdictReported = true
-            host.onStitchSpliceable(link, false, unsupported.token)
-        } else if (splicer.spliceable) {
-            verdictReported = true
-            host.onStitchSpliceable(link, true, LiveStitchPolicy.REASON_NONE)
+            state.verdictReported = true
+            host.onStitchSpliceable(state.session, state.link, false, unsupported.token)
+        } else if (state.splicer.spliceable) {
+            state.verdictReported = true
+            host.onStitchSpliceable(
+                state.session,
+                state.link,
+                true,
+                LiveStitchPolicy.REASON_NONE,
+            )
         }
     }
 
-    private fun reportLinkEof() {
-        reportsEof = true
+    private fun reportLinkEof(state: ArmedLink) {
+        state.reportsEof = true
         host.onStitchLinkEof(
-            link = link,
-            bytes = linkBytes,
-            sinceLinkOpenMs = SystemClock.elapsedRealtime() - linkOpenedAtMs,
+            session = state.session,
+            link = state.link,
+            bytes = state.bytes,
+            sinceLinkOpenMs = SystemClock.elapsedRealtime() - state.openedAtMs,
         )
     }
 
@@ -414,6 +547,22 @@ class StitchingDataSource(
         const val SPLICEABLE_PENDING = "pending"
 
         val EMPTY = ByteArray(0)
+
+        /**
+         * media3 wraps a socket timeout in an `HttpDataSourceException`, so the
+         * cause chain is what identifies one. Walked rather than unwrapped once
+         * because a cache or a redirect layer can add a frame.
+         */
+        fun isReadTimeout(error: Throwable): Boolean {
+            var cause: Throwable? = error
+            var depth = 0
+            while (cause != null && depth < 4) {
+                if (cause is SocketTimeoutException) return true
+                cause = cause.cause
+                depth++
+            }
+            return false
+        }
     }
 }
 
@@ -424,9 +573,9 @@ class StitchingDataSource(
  * It exists because [TsSplicer.forwardCurrent]'s contract is "consume these
  * bytes before you return" — the arrays it hands over are reused — while
  * `DataSource.read` must fill the *caller's* buffer with at most what it asked
- * for. Bounded in practice by one [StitchingDataSource.SCRATCH_BYTES] chunk
- * plus the splicer's hold buffer, because `read` always drains before it fetches
- * more.
+ * for. Bounded in practice by one 32 KiB read plus the splicer's hold buffer,
+ * because `read` always drains before it fetches more — and allocated only for
+ * a link that actually armed.
  */
 private class OutputBuffer {
     private var data = ByteArray(64 * 1024)
@@ -434,11 +583,6 @@ private class OutputBuffer {
     private var tail = 0
 
     val available: Int get() = tail - head
-
-    fun clear() {
-        head = 0
-        tail = 0
-    }
 
     fun write(src: ByteArray, offset: Int, length: Int) {
         if (length <= 0) return

@@ -1084,7 +1084,12 @@ class HdrPlayerActivity : ComponentActivity() {
         )
         // Attributed to exactly one reconnect — the one it caused.
         lastHandoverFallbackReason = null
-        // Whatever the old link's EOF armed belongs to the old link.
+        // Whatever the old link's EOF armed belongs to the old link. The
+        // cancel is what keeps a loader still unwinding the old link's
+        // handover from reporting onto the stream this reload is about to
+        // start: `ExoPlayerEngine.load` bumps the same token, but the reload
+        // here can be a whole re-resolve round trip away.
+        stitch.cancel()
         resetLiveLinkState()
         frameLiveness.reset()
         if (preResolved != null) {
@@ -1330,9 +1335,9 @@ class HdrPlayerActivity : ComponentActivity() {
         // `reconnectLive`'s own rate limit is what keeps this and the 500 ms
         // tick from acting on the same drop twice.
         exo.onLiveEnded = { runOnUiThread { pollLiveReconnect() } }
-        exo.onLiveLinkCommitted = { runOnUiThread { onLiveLinkCommitted() } }
-        exo.onLiveHandoverFallback = { reason ->
-            runOnUiThread { onLiveHandoverFallback(reason) }
+        exo.onLiveLinkCommitted = { locator -> runOnUiThread { onLiveLinkCommitted(locator) } }
+        exo.onLiveHandoverFallback = { reason, consumedLocator ->
+            runOnUiThread { onLiveHandoverFallback(reason, consumedLocator) }
         }
     }
 
@@ -1346,8 +1351,19 @@ class HdrPlayerActivity : ComponentActivity() {
      * [LiveLatencyTracker] already treats a media jump as re-anchor-and-add-
      * nothing. [FrameLivenessWatch] is likewise untouched: frames never stopped
      * flowing, which is the whole point. Only the *per-link* state rolls over.
+     *
+     * **And the session's locator, which is the load-bearing half.** From here
+     * on the stream being played is [locator], not the one this Activity was
+     * launched with. Everything downstream reads those two fields: an mpv
+     * fallback builds its engine on `url`, `ResolveAgainReply` preserves them
+     * when a reply is unreadable, and `resolveLiveLocator`'s `refreshed`
+     * comparison — which is what proves rotation and so arms the *next*
+     * handover — is made against `url`. Left stale, every one of them would be
+     * working from a single-use token several rotations spent.
      */
-    private fun onLiveLinkCommitted() {
+    private fun onLiveLinkCommitted(locator: LiveLocator) {
+        url = locator.url
+        headers = locator.headers
         liveSourceEofSeen = false
         lastSourceEofSinceLoadMs = -1L
         lastHandoverFallbackReason = null
@@ -1355,15 +1371,30 @@ class HdrPlayerActivity : ComponentActivity() {
 
     /**
      * A handover gave up. The ordinary reconnect owns the stream from here, so
-     * the only work is to give it the best start it can have: the locator this
-     * handover consumed is gone, which would leave the imminent `kind=ended`
-     * reconnect taking a cold `path=resolve`. The body has closed, so a fresh
-     * request is as safe as the first one was — and if the cushion is already
-     * below the trigger it goes out on this call rather than the next tick.
+     * the only work is to give it the best start it can have: when the attempt
+     * **spent** a locator, the imminent `kind=ended` reconnect would otherwise
+     * take a cold `path=resolve`, so the EOF gate is re-armed (that link's body
+     * is closed either way, which is the whole of why asking again is as safe
+     * as the first ask was) and the request goes out on this call rather than
+     * the next tick.
+     *
+     * [LiveStitchPolicy.shouldRequestFailsafePreResolve] is what decides, and
+     * the cases it refuses are the ones that would do harm. A failure that
+     * happened while the handover was still *parked* — the portal answered with
+     * the same URL, the round trip timed out, the path has backed off — is a
+     * failure of the locator supply, and re-asking the same portal milliseconds
+     * later only holds [ResolveGate] in flight across the drain, which is
+     * precisely what stops the ended reconnect from firing. A **cancellation**
+     * is worse than useless: the session has already replaced this stream, so
+     * the link now playing has an *open* body, and the EOF gate exists because
+     * a `create_link` issued against one can kill it on a single-connection
+     * account. (The engine drops stale callbacks by session token before they
+     * reach here; this is the second lock on the same door.)
      */
-    private fun onLiveHandoverFallback(reason: String) {
+    private fun onLiveHandoverFallback(reason: String, consumedLocator: Boolean) {
         if (!::uiState.isInitialized || isFinishing || isDestroyed) return
         lastHandoverFallbackReason = reason
+        if (!LiveStitchPolicy.shouldRequestFailsafePreResolve(reason, consumedLocator)) return
         liveSourceEofSeen = true
         maybePreResolve()
     }
@@ -1482,7 +1513,7 @@ class HdrPlayerActivity : ComponentActivity() {
         // with it, because a zap can cross sources — what this session learned
         // about the old provider's locators says nothing about the new one's.
         stitch.cancel()
-        stitch.resetRotationProof()
+        stitch.resetForZap()
         resetLiveLinkState()
         lastHandoverFallbackReason = null
 

@@ -1353,11 +1353,25 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   untouched. Every candidate is verified before one byte reaches the extractor; any rejection
   closes the candidate and returns `END_OF_INPUT`, and today's reconnect takes over exactly as
   before. The candidate opens only after the old body has closed and is closed again before
-  `END_OF_INPUT` is returned (never two connections); its deadline (2.5 s of remaining cushion) is
-  strictly above its own candidate socket timeouts (1.5 s each), which is what keeps that ordering
-  and still lands a failed handover's stream in `STATE_ENDED` rather than `STATE_BUFFERING`. Read
-  docs/player.md "The stitched handover (Android)" before touching `TsSplicer`, `StitchCoordinator`
-  or `StitchingDataSource`.
+  `END_OF_INPUT` is returned (never two connections); its deadline (`STITCH_ABORT_AHEAD_MS`, 3 s of
+  remaining cushion) is strictly above `MAX_BLOCKING_CALL_MS` — a connect plus the wait for the
+  response head, 1 s each — which is what keeps that ordering and still lands a failed handover's
+  stream in `STATE_ENDED` rather than `STATE_BUFFERING`, and the loader carries
+  `PRE_COMMIT_BUDGET_MS` (4 s) of its own so the whole pre-commit phase, **open included**, is
+  bounded (nothing can poll a blocking call). **Short timeouts are a property of being a
+  *candidate*, never of a committed link**: a promoted one rebuilds media3's 8 s read timeout by
+  retrying (`POST_COMMIT_READ_TIMEOUT_MS`), or an ordinary Wi-Fi hiccup the shipped path absorbs
+  would become a load error retrying a spent token. A commit also **adopts the spliced locator as
+  the session's `url`/`headers`** — the mpv fallback, `ResolveAgainReply` and the `refreshed`
+  comparison all read them. Every loader→main report carries its coordinator session and is
+  dropped when stale (`StitchCoordinator.isCurrent`); the fail-safe re-ask runs only after a
+  fallback that actually **spent** a locator, never for
+  `cancelled`/`same-url`/`resolve-failed`/`disabled` — a cancelled handover's replacement stream
+  has an *open* body, and the EOF gate exists precisely because a `create_link` against one can
+  kill it. A zap clears the rotation proof, both failure streaks and the stand-down latch
+  (`resetForZap`): a verdict about provider X says nothing about Y. Read docs/player.md "The
+  stitched handover (Android)" before touching `TsSplicer`, `StitchCoordinator` or
+  `StitchingDataSource`.
   **One engine must never carry two live watchdogs.** The embedded seamless handoff
   (`decision.adoptsEmbeddedPreview`) builds the route with `existingPlayer: _preview.player`, so
   `LivePreviewController.adoptedByFullscreen` is set around the push and makes the preview's EOF

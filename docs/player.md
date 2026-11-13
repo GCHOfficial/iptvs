@@ -3538,7 +3538,7 @@ consume it.
 | | | |
 | --- | --- | --- |
 | `FRESH_MS` | 30 s | How old a stored locator may be when the reload needs it. No longer bounded **below** by the backlog's depth — with the request itself held back to `PRE_RESOLVE_AHEAD_MS`, the locator is at most ~10 s old at the reload plus one round trip (backstopped at `ResolveGate.TIMEOUT_MS`), so 30 s is comfortable margin rather than a tight fit to how deep a preset's buffer runs. Left at 30 s anyway: shrinking it buys nothing now that the real trigger is the 10 s cushion bound below, and a deep preset's request can still land a few seconds later than `low`'s. Bounded **above** by what a portal-minted link plausibly outlives: stretching it to cover `max`'s 120 s ceiling would mean loading a two-minute-old single-use token — precisely where it is likeliest to be dead — to save a round trip. |
-| `PRE_RESOLVE_AHEAD_MS` | 10 s | How much cushion may remain before the request itself goes out — the EOF only *permits* it (see above). Sized from what has to fit inside it afterward: the resolve round trip (~0.4 s observed, backstopped at `ResolveGate.TIMEOUT_MS`), and, when a stitched handover is armed, the candidate evaluation that follows it, which must still reach a verdict with `LiveStitchPolicy.STITCH_ABORT_AHEAD_MS` (2.5 s) of cushion to spare. |
+| `PRE_RESOLVE_AHEAD_MS` | 10 s | How much cushion may remain before the request itself goes out — the EOF only *permits* it (see above). Sized from what has to fit inside it afterward: the resolve round trip (~0.4 s observed, backstopped at `ResolveGate.TIMEOUT_MS`), and, when a stitched handover is armed, the candidate evaluation that follows it, which must still reach a verdict with `LiveStitchPolicy.STITCH_ABORT_AHEAD_MS` (3 s) of cushion to spare — `LiveStitchPolicyTest` asserts the whole pre-commit phase (`PRE_COMMIT_BUDGET_MS` plus one `MAX_BLOCKING_CALL_MS`) fits inside it. |
 | `FAILURE_WINDOW_MS` | 8 s | A pre-resolved reconnect whose own connection ends again inside this much playback was not a working connection. The healthy cycle is ~26 s, so 8 s cannot be confused with a short-but-working one; it is also the existing policy's own notion of a connection that isn't working (`STALL_RECONNECT_MS`), kept as a separate constant so the two agree by reasoning rather than by dependency. |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | One is noise the ordinary path would also have hit; two can still be a flaky link; three in a row with no intervening connection that survived the window is a portal that won't honour a link minted before the previous one drained. The asymmetry favours patience — a wrong fast path costs one wasted load and one wasted `create_link`, while disabling too eagerly gives up the whole fix on a blip. |
 
@@ -3730,36 +3730,99 @@ to the extractor until it returns `Committed` — a rejection, a candidate that 
 that ends before a splice point, or the deadline below, and not one candidate byte has reached the
 decoder. The candidate is closed, `StitchingDataSource` returns `END_OF_INPUT`, and the stream ends
 exactly as it does today: today's reconnect takes it from there. The one thing that *is*
-different is what that reconnect gets to work with — a handover failure immediately asks for a
-fresh pre-resolve (the body is closed either way, so this is exactly as safe as the first ask was),
-so the ordinary reconnect that follows still gets the fast `path=preresolved` treatment rather
-than a cold `path=resolve`.
+different is what that reconnect gets to work with — a handover that **spent a locator** immediately
+asks for a fresh pre-resolve (that link's body is closed either way, so this is exactly as safe as
+the first ask was), so the ordinary reconnect that follows still gets the fast `path=preresolved`
+treatment rather than a cold `path=resolve`.
 
-**The deadline does three jobs at once.** `STITCH_ABORT_AHEAD_MS` (2.5 s of remaining cushion) is
+**That re-ask is scoped to the failures it can actually help**
+(`LiveStitchPolicy.shouldRequestFailsafePreResolve`), and the cases it refuses would each do harm.
+A failure raised while the handover was still *parked* — the portal answered with the same URL,
+the round trip timed out, the pre-resolved path has backed off — is a failure of the **locator
+supply**, and re-asking the same portal milliseconds later only holds `ResolveGate` in flight
+across the drain, which is precisely what stops the ended reconnect from firing at all. A
+**cancellation** is worse than useless: the session has already replaced this stream, so the link
+now playing has an *open* body, and the EOF gate exists because a `create_link` issued against an
+open body can kill it on a single-connection account. That is also why **every** report from the
+loader thread carries its coordinator session and is dropped when stale
+(`StitchCoordinator.isCurrent`, checked on arrival *and* again inside the posted block): a zap, a
+reload or an mpv fallback bumps the token while the loader may still be seconds behind, parked in
+a socket read.
+
+**The deadline does three jobs at once.** `STITCH_ABORT_AHEAD_MS` (3 s of remaining cushion) is
 checked on the same 500 ms ticker that drives everything else. It is the latest a fallback may be
 decided, because everything after it is frozen picture 0.1.81 would not have had; it is the margin
-that keeps the never-two-connections rule, since the candidate's own socket timeouts
-(`CANDIDATE_CONNECT_TIMEOUT_MS`/`CANDIDATE_READ_TIMEOUT_MS`, 1.5 s each) bound how long a wedged
-candidate can still hold a connection open after the abort fires, and both are strictly smaller
-than the margin; and it is what keeps the stream's own failure mode unchanged — a player that runs
-dry while a handover is still parked on a held socket read has not completed its load, so it
-reaches `STATE_BUFFERING`, not `STATE_ENDED`, which is a different watchdog path entirely
-(`STALL_RECONNECT_MS`, 8 s) without the fast lane this feature depends on. The margin is sized so
-end of input still reaches the extractor with cushion to spare, so a failed handover's stream
-still ends the way every other version of it ends.
+that keeps the never-two-connections rule, since `MAX_BLOCKING_CALL_MS` — a connect plus the wait
+for the response head, `CANDIDATE_CONNECT_TIMEOUT_MS` + `CANDIDATE_RESPONSE_TIMEOUT_MS`, 1 s
+each — bounds how long a wedged candidate can still hold a connection open after the abort fires,
+and is strictly smaller than the margin; and it is what keeps the stream's own failure mode
+unchanged — a player that runs dry while a handover is still parked on a held socket read has not
+completed its load, so it reaches `STATE_BUFFERING`, not `STATE_ENDED`, which is a different
+watchdog path entirely (`STALL_RECONNECT_MS`, 8 s) without the fast lane this feature depends on.
+The margin is sized so end of input still reaches the extractor with cushion to spare, so a failed
+handover's stream still ends the way every other version of it ends.
+
+**The deadline has a second half, because a blocking call cannot be polled.** The host's cushion
+check is the authority on *when the stream needs its reconnect*, but nothing can ask it while the
+loader is inside `open()`. So the loader carries a wall clock of its own, `PRE_COMMIT_BUDGET_MS`
+(4 s from the hand-over), checked immediately after the open returns and before every candidate
+read: the whole pre-commit phase, open included, is bounded by that plus at most one
+`MAX_BLOCKING_CALL_MS`, and `LiveStitchPolicyTest` asserts that sum fits inside
+`PRE_RESOLVE_AHEAD_MS` and that one blocking call fits inside the abort margin. Two things sit
+outside it and are stated rather than pretended away: hostname resolution, which
+`setConnectTimeoutMs` does not bound on Android, and a redirect chain, which `DefaultHttpDataSource`
+walks inside a single `open()` up to its own fixed 20 hops. Either can overrun the margin; the
+consequence is bounded and ugly rather than unsafe (the reconnect's connection may briefly overlap
+the abandoned candidate's, and that one rotation may take the 8 s buffering path), and both are
+failures the candidate's provider is having, which the ordinary reconnect would be about to hit
+anyway.
 
 **Never two connections, in order.** The candidate is opened only *after* the old body has
 returned end of input and been closed (`closeCurrent()` runs before the handover is ever awaited),
 and it is closed again before end of input is ever handed to the extractor (`giveUp` closes it,
 then returns `END_OF_INPUT`). The one window this can't police structurally is a candidate wedged
-inside a blocking socket read — exactly what the short candidate timeouts, bounded by the deadline
-above, exist to cap.
+inside a blocking call — exactly what the short candidate timeouts and the loader's own budget,
+both bounded by the deadline above, exist to cap.
+
+**A committed link is an ordinary link, and the short timeouts do not follow it.** Those 1 s
+timeouts are a property of being a *candidate*; once one is promoted it has to ride out exactly
+what any other live link rides out, or an ordinary two-second Wi-Fi hiccup — which the shipped path
+absorbs in silence — would surface as a load error and send media3 off to retry the **item's** URI,
+i.e. a single-use token spent several rotations ago. A socket's read timeout cannot be changed once
+its stream exists, and closing a `DefaultHttpDataSource` from another thread to work around that is
+not something its implementation documents as safe (its `inputStream` and `opened` fields are
+plain, and `close()` can itself read from the stream — on the main thread, which is an ANR waiting
+to happen). So the long timeout is **rebuilt out of the short one**: a `SocketTimeoutException`
+leaves the socket valid by contract, so `StitchingDataSource.readCurrent` simply issues the read
+again until `POST_COMMIT_READ_TIMEOUT_MS` (8 s — media3's own
+`DefaultHttpDataSource.DEFAULT_READ_TIMEOUT_MILLIS`) has elapsed with nothing arriving, and only
+then lets the exception out. The extractor sees exactly what it would have seen from an 8 s socket.
+The upstream link is excluded, because it already has one.
 
 **A commit is not a reconnect.** No attempt counter moves, no `resetLiveLatency(RECONNECT)` fires,
 and the reconnect watchdog's own bookkeeping is untouched — the media timeline simply jumps forward
 by the splice's `skippedMs`, which `LiveLatencyTracker` already treats as a discontinuity to
 re-anchor past and credit nothing for. `FrameLivenessWatch` sees nothing happen, because nothing
-did: frames never stopped arriving.
+did: frames never stopped arriving. **The one thing that does move is the session's locator**: the
+commit carries the candidate's `LiveLocator` back to `HdrPlayerActivity`, which adopts it as `url`
+/ `headers`. Everything downstream reads those two fields — an mpv fallback builds its engine on
+`url`, `ResolveAgainReply` preserves them when a reply is unreadable, and the `refreshed`
+comparison that proves rotation (and so arms the *next* handover) is made against `url` — so
+leaving them pointing at the launch locator would have every one of them working from a spent
+token. If media3 does retry a load (an error on the promoted link), it reopens the **item's** URI
+at a non-zero position: unarmed by construction, and a spent Stalker token, so it fails fast and
+lands in the existing recoverable-error path (`onPlayerError` → `onRecoverableError` →
+`reconnectLive(force = true)`), which re-resolves from the now-current `url`. A clean fast failure
+into a path that already exists is the intended outcome there; nothing further is needed.
+
+**`repeatedMs=0` is a claim about every PID, and `audioHeldMs` is what it costs.** The splice point
+is chosen on the video PID, but every other elementary stream had already been delivered up to its
+own point past it, so each non-video PID resumes at the first PUSI that is both at or after the
+splice point `S` **and** strictly after that PID's own last delivered PES-start PTS (wrap-aware).
+Without that second clause a renderer would be handed audio it has already played. The cost is at
+most one audio frame (~24 ms) skipped, and only when the old link truncated its last audio PES
+mid-way; `audioHeldMs` on the handover line is how far the furthest-ahead non-video PID had run
+past `S`, i.e. exactly how much candidate audio was held back.
 
 **The session's own patience is two failure classes, counted separately.** Every
 `SpliceRejectReason` is structural — a statement about the *shape* of the stream, which does not
@@ -3772,6 +3835,13 @@ fix. A deadline miss and the three locator-supply reasons (`same-url`, `resolve-
 `disabled`) count against neither streak — they say nothing about whether the stream *can* be
 spliced — and a commit resets both counters to zero.
 
+**A zap clears all of it** (`StitchCoordinator.resetForZap`): the rotation proof, both streaks, and
+the stand-down latch. A zap can cross sources, so a verdict reached about provider X's stream —
+"no IDR inside the skip budget", say — says nothing whatever about provider Y's, and carrying the
+latch across would silently give up the feature for the rest of the Activity's life with nothing in
+an export to explain it. The `live stitch disabled` line stays once *per disablement*, so a later
+stand-down on a different channel is a genuinely new verdict and prints as one.
+
 **The kill switch.** `LiveStitchPolicy.ENABLED` is a compile-time `const val`, not a setting: a
 user cannot tell a stitched handover from a healthy stream, which is the point, so there is
 nothing for a user-facing switch to control. Flipping it to `false` strips every branch below it.
@@ -3781,9 +3851,9 @@ nothing for a user-facing switch to control. Flipping it to `false` strips every
 ```
 live stitch armed link=2 spliceable=pending
 live stitch link=2 spliceable=true reason=none
-live handover link=2 mechanism=splice reason=none durationMs=180 aheadAtCommitMs=24180 trimmedMs=40 skippedMs=160 repeatedMs=0 droppedBytes=512
+live handover link=2 mechanism=splice reason=none durationMs=180 aheadAtCommitMs=24180 trimmedMs=40 skippedMs=160 repeatedMs=0 droppedBytes=512 audioHeldMs=24
 live stitch armed link=3 spliceable=true
-live handover link=4 mechanism=fallback reason=no-rap durationMs=1340 aheadAtCommitMs=-1 trimmedMs=0 skippedMs=0 repeatedMs=0 droppedBytes=0
+live handover link=4 mechanism=fallback reason=no-rap durationMs=1340 aheadAtCommitMs=-1 trimmedMs=0 skippedMs=0 repeatedMs=0 droppedBytes=0 audioHeldMs=0
 live stitch disabled failures=2 reason=no-rap
 live reconnect attempt=1 force=false kind=ended mechanism=reconnect after=fallback:no-rap path=preresolved ageMs=612 ahead=0 …
 live pre-resolve requested sinceLoadMs=9446 ahead=9840
@@ -3794,14 +3864,19 @@ have an opinion; `spliceable=true|false reason=…` is the verdict once it does 
 committed, since the shape is already known by then). The handover line's field set is fixed —
 unused fields read `-1`/`0` rather than being omitted, because an export is grepped by column —
 and a committed splice writes **no** `live reconnect` line at all: reading `mechanism=` across both
-lines counts every link rotation in the session, splice or not.
+lines counts every link rotation in the session, splice or not. `audioHeldMs` is appended at the
+end rather than slotted beside `skippedMs` where it belongs by meaning, for the same
+read-by-column reason: an export spanning two builds must keep the columns it already had where
+they were. It is how much candidate audio the per-PID resume rule held back (above), `0` on a
+fallback like every other splice figure.
 
 #### What an export of success looks like
 
 A link rotating cleanly under this feature prints a `live handover … mechanism=splice …` line at
 roughly the provider's own link cadence (every ~26–30 s for the shape this targets) and **nothing
 else** — no `live reconnect` line in between, `repeatedMs=0` on every line (nothing is ever sent to
-the decoder twice, by construction), `skippedMs` under one broadcast GOP, and no bump in
+the decoder twice, on *any* PID — see the per-PID resume rule above, whose cost shows up as a
+small `audioHeldMs`), `skippedMs` under one broadcast GOP, and no bump in
 `stalls=`/`stalled=` on the live-latency line, because nothing discontinuous happened from the
 tracker's point of view.
 

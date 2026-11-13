@@ -386,15 +386,17 @@ class ExoPlayerEngine(
      * rolls its per-link state (see `HdrPlayerActivity`); nothing about the
      * reconnect watchdog's bookkeeping moves, because this was not a reconnect.
      */
-    var onLiveLinkCommitted: (() -> Unit)? = null
+    var onLiveLinkCommitted: ((locator: LiveLocator) -> Unit)? = null
 
     /**
      * A stitched handover gave up; end of input is about to reach the
-     * extractor and the ordinary reconnect will take the stream. The argument
-     * is a `LiveStitchPolicy` reason token, which the host prints on the
-     * reconnect line that follows.
+     * extractor and the ordinary reconnect will take the stream. The arguments
+     * are a `LiveStitchPolicy` reason token, which the host prints on the
+     * reconnect line that follows, and whether a locator was actually consumed
+     * by the attempt (which decides the host's fail-safe re-ask —
+     * [LiveStitchPolicy.shouldRequestFailsafePreResolve]).
      */
-    var onLiveHandoverFallback: ((reason: String) -> Unit)? = null
+    var onLiveHandoverFallback: ((reason: String, consumedLocator: Boolean) -> Unit)? = null
 
     /**
      * Installed by a fullscreen `HdrPlayerActivity` session; null everywhere
@@ -407,18 +409,21 @@ class ExoPlayerEngine(
     var stitchCoordinator: StitchCoordinator? = null
 
     /**
-     * Latched (on the media3 loader thread) once [StitchingDataSource] has
-     * reported a link's end of input for this load.
+     * The coordinator session for which [StitchingDataSource] has reported a
+     * link's end of input, or 0.
      *
      * From that point media3's own `onLoadCompleted` must stay silent: a
      * stitched load completes **once**, after however many links, so it would
      * report the last link's EOF a second time with the whole load's byte
-     * total. Reset per [load], and never set at all on an unarmed stream —
-     * which is why the unstitched path's `stream source eof` line is
-     * byte-identical to the shipped one.
+     * total. **It is a session rather than a boolean** because the loader
+     * thread that sets it can be running several seconds behind the main one —
+     * a flag set by a superseded load's late report would silence the *new*
+     * load's end-of-stream line and, with it, the pre-resolve that line starts.
+     * Never set at all on an unarmed stream, which is why the unstitched path's
+     * `stream source eof` line is byte-identical to the shipped one.
      */
     @Volatile
-    private var stitchOwnsEof = false
+    private var stitchEofSession = 0L
 
     private var stitchLinksReported = 0
 
@@ -799,8 +804,10 @@ class ExoPlayerEngine(
             if (released) return
             // A stitched load's links report their own ends of input (each
             // with its own byte count and age); this completion is the last of
-            // them arriving a second time, with the whole load's totals.
-            if (stitchOwnsEof) return
+            // them arriving a second time, with the whole load's totals. The
+            // session check is what keeps a *superseded* load's late report
+            // from silencing this one.
+            if (stitchEofSession != 0L && stitchCurrent(stitchEofSession)) return
             if (!StreamEofPolicy.isSourceEof(
                     trackType = mediaLoadData.trackType,
                     trackTypeUnknown = C.TRACK_TYPE_UNKNOWN,
@@ -1017,7 +1024,7 @@ class ExoPlayerEngine(
         // for a locator, and it is also what records the URI (and liveness)
         // the *next* body has to match before it may stitch at all.
         stitchCoordinator?.noteLoad(url, state.isLive)
-        stitchOwnsEof = false
+        stitchEofSession = 0L
         stitchLinksReported = 0
         val item = MediaItem.Builder()
             .setUri(url)
@@ -1239,29 +1246,61 @@ class ExoPlayerEngine(
             .setDefaultRequestProperties(candidateHeaders.ifEmpty { headers })
             .setTransferListener(transferListener)
             .setConnectTimeoutMs(LiveStitchPolicy.CANDIDATE_CONNECT_TIMEOUT_MS)
-            .setReadTimeoutMs(LiveStitchPolicy.CANDIDATE_READ_TIMEOUT_MS)
+            .setReadTimeoutMs(LiveStitchPolicy.CANDIDATE_RESPONSE_TIMEOUT_MS)
             .createDataSource()
+
+    /**
+     * Whether a report from the loader thread still describes the load this
+     * engine is playing.
+     *
+     * The coordinator's session token is bumped by `load()` (through
+     * [StitchCoordinator.noteLoad]) and by every cancel the Activity issues,
+     * while the loader thread can be seconds behind — parked in a socket read,
+     * or unwinding a handover that a zap already cancelled. Acting on a stale
+     * report is not cosmetic: it would suppress the *new* load's end-of-stream
+     * line and pre-resolve, or re-arm the EOF gate against a body that is
+     * **open**.
+     */
+    private fun stitchCurrent(session: Long): Boolean =
+        stitchCoordinator?.isCurrent(session) == true
 
     /**
      * What [StitchingDataSource] reports, turned into exportable lines and
      * host callbacks. Every method arrives on the media3 loader thread, so
-     * anything that reads player state hops to main first.
+     * anything that reads player state hops to main first — and everything is
+     * checked against [stitchCurrent] twice: once on arrival, and once inside
+     * the posted block, because the session can move on in between.
      */
     private val stitchHost = object : StitchHost {
-        override fun onStitchArmed(link: Int, spliceable: String) {
+        override fun onStitchArmed(session: Long, link: Int, spliceable: String) {
+            if (!stitchCurrent(session)) return
             onDiagnostic?.invoke(LiveStitchPolicy.armedLine(link, spliceable))
         }
 
-        override fun onStitchSpliceable(link: Int, spliceable: Boolean, reason: String) {
+        override fun onStitchSpliceable(
+            session: Long,
+            link: Int,
+            spliceable: Boolean,
+            reason: String,
+        ) {
+            if (!stitchCurrent(session)) return
             onDiagnostic?.invoke(LiveStitchPolicy.spliceableLine(link, spliceable, reason))
         }
 
-        override fun onStitchLinkEof(link: Int, bytes: Long, sinceLinkOpenMs: Long) {
+        override fun onStitchLinkEof(
+            session: Long,
+            link: Int,
+            bytes: Long,
+            sinceLinkOpenMs: Long,
+        ) {
+            if (!stitchCurrent(session)) return
             // Latched here, on the loader thread, so the analytics thread's
-            // `onLoadCompleted` is already suppressed by the time it fires.
-            stitchOwnsEof = true
+            // `onLoadCompleted` is already suppressed by the time it fires —
+            // and latched **as a session**, so a superseded load's late report
+            // cannot silence the EOF line of the load that replaced it.
+            stitchEofSession = session
             mainHandler.post {
-                if (released) return@post
+                if (released || !stitchCurrent(session)) return@post
                 val first = stitchLinksReported == 0
                 stitchLinksReported++
                 // The first link of a load keeps today's meaning exactly —
@@ -1290,13 +1329,16 @@ class ExoPlayerEngine(
         }
 
         override fun onStitchCommitted(
+            session: Long,
             link: Int,
             newLink: Int,
+            locator: LiveLocator,
             info: SpliceInfo,
             durationMs: Long,
         ) {
+            if (!stitchCurrent(session)) return
             mainHandler.post {
-                if (released) return@post
+                if (released || !stitchCurrent(session)) return@post
                 onDiagnostic?.invoke(
                     LiveStitchPolicy.handoverLine(
                         link = link,
@@ -1311,18 +1353,26 @@ class ExoPlayerEngine(
                         skippedMs = info.skippedMs,
                         repeatedMs = info.repeatedMs,
                         droppedBytes = info.droppedBytes,
+                        audioHeldMs = info.audioHeldMs,
                     ),
                 )
                 onDiagnostic?.invoke(LiveStitchPolicy.armedLine(newLink, "true"))
-                onLiveLinkCommitted?.invoke()
+                onLiveLinkCommitted?.invoke(locator)
             }
         }
 
-        override fun onStitchFallback(link: Int, reason: String, durationMs: Long) {
+        override fun onStitchFallback(
+            session: Long,
+            link: Int,
+            reason: String,
+            durationMs: Long,
+            consumedLocator: Boolean,
+        ) {
+            if (!stitchCurrent(session)) return
             mainHandler.post {
-                if (released) return@post
+                if (released || !stitchCurrent(session)) return@post
                 onDiagnostic?.invoke(LiveStitchPolicy.fallbackLine(link, reason, durationMs))
-                onLiveHandoverFallback?.invoke(reason)
+                onLiveHandoverFallback?.invoke(reason, consumedLocator)
             }
         }
     }

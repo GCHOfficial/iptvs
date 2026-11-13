@@ -69,9 +69,33 @@ class StitchCoordinatorTest {
     fun `a zap withdraws the rotation proof`() {
         coordinator.noteLoad(url, isLive = true)
         coordinator.noteRotationProven()
-        coordinator.resetRotationProof()
+        coordinator.resetForZap()
         coordinator.noteLoad(url, isLive = true)
         assertNull(coordinator.arm(url, 0L, true))
+    }
+
+    @Test
+    fun `a zap also withdraws the stand-down and the streaks`() {
+        // A zap can cross sources. A session disabled because provider X's
+        // stream has no IDR inside the skip budget would otherwise carry that
+        // verdict onto provider Y for the rest of the Activity's life, with
+        // nothing in an export to say why Y never stitched.
+        armedForTest()
+        coordinator.noteFallback(SpliceRejectReason.PMT_CHANGED.token)
+        assertTrue(coordinator.noteFallback(SpliceRejectReason.NO_RAP.token))
+        assertFalse(coordinator.enabled)
+
+        coordinator.resetForZap()
+        assertTrue(coordinator.enabled)
+        assertEquals(0 to 0, coordinator.failureStreaks())
+        coordinator.noteLoad(url, isLive = true)
+        coordinator.noteRotationProven()
+        assertNotNull(coordinator.arm(url, 0L, true))
+        // The stand-down line stays once *per disablement*: a later one is a
+        // genuinely new verdict about a different provider, and says so.
+        assertFalse(coordinator.noteFallback(SpliceRejectReason.PMT_CHANGED.token))
+        assertTrue(coordinator.noteFallback(SpliceRejectReason.PMT_CHANGED.token))
+        assertEquals(2, lines.size)
     }
 
     // ── The rendezvous ───────────────────────────────────────────────────────
@@ -249,6 +273,22 @@ class StitchCoordinatorTest {
         assertEquals(0 to 0, coordinator.failureStreaks())
         assertFalse(coordinator.noteFallback(SpliceRejectReason.PMT_CHANGED.token))
         assertTrue(coordinator.enabled)
+    }
+
+    @Test
+    fun `a report from a superseded load is not current`() {
+        // The guard every loader-to-main callback passes. The loader thread can
+        // be seconds behind — parked in a socket read, or unwinding a handover
+        // a zap already cancelled — and a stale fallback that re-armed the EOF
+        // gate would fire a `create_link` against a body that is **open**.
+        val stale = armedForTest()
+        assertTrue(coordinator.isCurrent(stale.session))
+        coordinator.cancel()
+        assertFalse(coordinator.isCurrent(stale.session))
+        val fresh = coordinator.arm(url, 0L, true)!!
+        assertTrue(coordinator.isCurrent(fresh.session))
+        coordinator.noteLoad(url, isLive = true)
+        assertFalse(coordinator.isCurrent(fresh.session))
     }
 
     @Test
