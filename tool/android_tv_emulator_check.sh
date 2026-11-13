@@ -832,7 +832,11 @@ if [ "$LIVE_CUT" = "1" ]; then
   # part of what this leg exists to prove, unlike the splice behaviour above.
 
   step "Scenario 4b: live-cut control (stable URL, ${LIVE_CUT_STABLE_SECONDS}s, must never splice)"
-  if open_live_cut_channel "Live cut (stable URL)" 1 1; then
+  # 0 category Downs, not 1: the sidebar's cursor opens on the *selected*
+  # category, and Scenario 4a already selected "Live cut test" — one more
+  # Down walked past it into the next category (first CI run that reached
+  # 4a: the control then played "Tears of Steel" and failed the hard check).
+  if open_live_cut_channel "Live cut (stable URL)" 0 1; then
     M=$(mark)
     sleep "$LIVE_CUT_STABLE_SECONDS"
     shot "live-cut-stable"
