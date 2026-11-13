@@ -3388,10 +3388,26 @@ watchdogs** because the platforms play through different stacks:
   time to drain, and `sinceLoadMs` at the close against `ahead` at the reconnect separates them.
   The decision is the pure `StreamEofPolicy` (`player/StreamEofPolicy.kt`, pinned by
   `StreamEofPolicyTest`): **live only** — liveness is provider metadata, read off
-  `PlayerUiState.isLive`, never inferred — the `TRACK_TYPE_UNKNOWN` filter, which is what keeps
-  chunked containers out (HLS and DASH dispatch one completed load *per segment*, and reporting
-  those would write a line every few seconds and evict the log this was added to fill), and a cap
-  of three lines per load. On mpv it changes no timing and no policy: nothing reads it, it is
+  `PlayerUiState.isLive`, never inferred — **`DATA_TYPE_MEDIA` *and* `TRACK_TYPE_UNKNOWN` *and*
+  an item `Util.inferContentType` calls progressive**, and a cap of three lines per load.
+
+  **All three conditions are load-bearing, and until 0.1.82 only one of them was there.** The
+  original filter was the track type alone, on the reading that chunked containers dispatch one
+  completed load *per segment* with a real track type. That is true of HLS/DASH **segments** and
+  false of their **manifests**: a master playlist, a media playlist, and every live playlist
+  *refresh* completes as `DATA_TYPE_MANIFEST` with `TRACK_TYPE_UNKNOWN`, because there is no track
+  for a playlist to belong to. So on an HLS live channel every playlist load read as "the live
+  body closed". An emulator run shows it plainly — three `live pre-resolve requested
+  sinceLoadMs=114 ahead=0` lines inside 200 ms of opening the stream, each answered `ok=false`.
+  On a stable-URL provider that is a wasted resolve per refresh; on a **Stalker** HLS channel it is
+  a `create_link` issued while the stream is wide open, which is exactly what the end-of-body gate
+  exists to prevent on a single-connection account. 0.1.81's pre-resolved reconnect shipped with
+  this, and the 10 s cushion trigger does not mask it: at startup `ahead=0`, so the request is due
+  immediately. `dataType` is the condition that actually separates a body from a playlist;
+  `progressiveItem` — the same `inferContentType` test `StitchCoordinator.arm` uses, and the same
+  one `DefaultMediaSourceFactory` used to pick the `MediaSource`, so the three cannot disagree —
+  is the belt to its braces, and means an HLS or DASH item cannot report a source EOF at all
+  whatever its loads are labelled. On mpv it changes no timing and no policy: nothing reads it, it is
   written to the exportable relay and to nothing else. **On Android it is now also an input** —
   `ExoPlayerEngine.onSourceEof` hands the same event to `HdrPlayerActivity`, which pre-resolves
   the next locator from it ("The pre-resolved reconnect" below). The log cap and the reaction are

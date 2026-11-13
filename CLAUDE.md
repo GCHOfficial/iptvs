@@ -1312,7 +1312,10 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `live upstream ended ahead=…ms` off `demuxer-cache-state.eof` (`upstream_eof.dart`) and Android
   writes `stream source eof sinceLoadMs=… ahead=… played=… bytes=…` off media3's
   `AnalyticsListener.onLoadCompleted` on a **progressive** period (`StreamEofPolicy`: live only,
-  `TRACK_TYPE_UNKNOWN` only — HLS/DASH dispatch one per segment — capped per load), with `ahead=`
+  **`DATA_TYPE_MEDIA` + `TRACK_TYPE_UNKNOWN` + an item `Util.inferContentType` calls progressive**,
+  capped per load — the track type alone was wrong, because an HLS/DASH *manifest* and every live
+  *playlist refresh* also complete as `TRACK_TYPE_UNKNOWN`, so 0.1.81 read each one as the body
+  closing and pre-resolved against an **open** stream), with `ahead=`
   now on Android's `live reconnect` line too. The mpv one is diagnostics-only and changes no
   threshold; Android's is now also an input (below). The reconnect log line carries
   `kind=ended|buffering|error` (Android's `stallKind`

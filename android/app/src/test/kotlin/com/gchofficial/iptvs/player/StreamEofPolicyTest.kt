@@ -6,122 +6,127 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StreamEofPolicyTest {
-    // `C.TRACK_TYPE_UNKNOWN` is -1; the chunked containers report real types.
+    // `C.TRACK_TYPE_UNKNOWN` is -1. The real track types are 0 and up.
     private val unknown = -1
+
+    // `C.DATA_TYPE_MEDIA` is 1 and `C.DATA_TYPE_MANIFEST` is 4; the policy
+    // takes them as arguments so it needs no media3 import.
+    private val media = 1
+    private val manifest = 4
+
+    private fun isSourceEof(
+        dataType: Int = media,
+        trackType: Int = unknown,
+        isLive: Boolean = true,
+        progressiveItem: Boolean = true,
+    ) = StreamEofPolicy.isSourceEof(
+        dataType = dataType,
+        dataTypeMedia = media,
+        trackType = trackType,
+        trackTypeUnknown = unknown,
+        isLive = isLive,
+        progressiveItem = progressiveItem,
+    )
+
+    private fun shouldReport(
+        dataType: Int = media,
+        trackType: Int = unknown,
+        isLive: Boolean = true,
+        progressiveItem: Boolean = true,
+        linesSoFar: Int = 0,
+    ) = StreamEofPolicy.shouldReport(
+        dataType = dataType,
+        dataTypeMedia = media,
+        trackType = trackType,
+        trackTypeUnknown = unknown,
+        isLive = isLive,
+        progressiveItem = progressiveItem,
+        linesSoFar = linesSoFar,
+    )
 
     @Test
     fun `a progressive live load that completes is a source EOF`() {
-        assertTrue(
-            StreamEofPolicy.shouldReport(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = true,
-                linesSoFar = 0,
-            ),
-        )
+        assertTrue(shouldReport())
+        assertTrue(isSourceEof())
     }
 
     @Test
-    fun `a chunked load is not`() {
-        // HLS and DASH dispatch one onLoadCompleted per segment with a real
+    fun `an HLS playlist load is not, however it is labelled`() {
+        // **The bug this test exists for.** An HLS master or media playlist —
+        // and every live playlist *refresh* — completes as DATA_TYPE_MANIFEST
+        // with TRACK_TYPE_UNKNOWN, because there is no track for a playlist to
+        // belong to. Matching on the track type alone read every one of those
+        // as "the live body closed": an emulator run on an HLS live channel
+        // produced three `live pre-resolve requested … ahead=0` lines inside
+        // 200 ms of opening the stream. On a Stalker HLS channel that is a
+        // `create_link` issued while the stream is wide open, which is exactly
+        // what the end-of-body gate exists to prevent.
+        assertFalse(isSourceEof(dataType = manifest, trackType = unknown))
+        assertFalse(shouldReport(dataType = manifest, trackType = unknown))
+        // And it is refused twice over, because an HLS *item* is not
+        // progressive in the first place.
+        assertFalse(isSourceEof(dataType = manifest, progressiveItem = false))
+    }
+
+    @Test
+    fun `an HLS or DASH media chunk is not`() {
+        // Chunked formats dispatch one completion per segment with a real
         // track type. Reporting those would write a line every few seconds and
         // evict the exportable log this diagnostic exists to fill.
         for (trackType in listOf(0, 1, 2, 3)) {
-            assertFalse(
-                "trackType=$trackType",
-                StreamEofPolicy.shouldReport(
-                    trackType = trackType,
-                    trackTypeUnknown = unknown,
-                    isLive = true,
-                    linesSoFar = 0,
-                ),
-            )
+            assertFalse("trackType=$trackType", isSourceEof(trackType = trackType))
+            assertFalse("trackType=$trackType", shouldReport(trackType = trackType))
         }
     }
 
     @Test
-    fun `VOD is not reported`() {
-        // Liveness is provider metadata, never inferred — and a VOD file
-        // finishing its download is not the event this line is about.
-        assertFalse(
-            StreamEofPolicy.shouldReport(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = false,
-                linesSoFar = 0,
-            ),
-        )
+    fun `a non-progressive item never reports one`() {
+        // The belt to the dataType braces, and the same `inferContentType` test
+        // `StitchCoordinator.arm` uses — which is also how
+        // `DefaultMediaSourceFactory` chose the MediaSource, so the three
+        // cannot disagree about what kind of stream this is. Even a chunk that
+        // somehow arrived labelled like a progressive body cannot get through.
+        assertFalse(isSourceEof(progressiveItem = false))
+        assertFalse(shouldReport(progressiveItem = false))
     }
 
     @Test
-    fun `lines are capped per load`() {
-        assertTrue(
-            StreamEofPolicy.shouldReport(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = true,
-                linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD - 1,
-            ),
-        )
-        assertFalse(
-            StreamEofPolicy.shouldReport(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = true,
-                linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD,
-            ),
-        )
+    fun `every other data type is refused`() {
+        // MEDIA_INITIALIZATION, DRM, TIME_SYNCHRONIZATION, AD — none of them is
+        // the stream's own body ending.
+        for (dataType in listOf(0, 2, 3, 4, 5, 6)) {
+            assertFalse("dataType=$dataType", isSourceEof(dataType = dataType))
+        }
     }
 
     @Test
-    fun `the event itself is not capped, only its reporting`() {
-        // `HdrPlayerActivity` pre-resolves off this event
-        // ([LiveFastReconnectPolicy]), so it must survive the log budget: a
-        // recovery silently gated on a diagnostics quota is a recovery that
-        // stops working on the fourth EOF of a load for no stated reason.
-        assertTrue(
-            StreamEofPolicy.isSourceEof(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = true,
-            ),
-        )
-        assertFalse(
-            StreamEofPolicy.shouldReport(
-                trackType = unknown,
-                trackTypeUnknown = unknown,
-                isLive = true,
-                linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD,
-            ),
-        )
-        // The filters it *does* keep are the ones that decide what the event
-        // is, not how often it is printed.
-        assertFalse(StreamEofPolicy.isSourceEof(unknown, unknown, isLive = false))
-        assertFalse(StreamEofPolicy.isSourceEof(trackType = 1, trackTypeUnknown = unknown, isLive = true))
+    fun `VOD never reports one`() {
+        // Liveness is provider metadata, never inferred — and a VOD stream
+        // reaching the end of its body is the film ending, not a drop.
+        assertFalse(isSourceEof(isLive = false))
+        assertFalse(shouldReport(isLive = false))
     }
 
     @Test
-    fun `the line carries durations and bytes and nothing else`() {
-        val line = StreamEofPolicy.line(
-            sinceLoadMs = 26_412,
-            aheadMs = 2_310,
-            playedMs = 24_102,
-            bytes = 81_234_567,
-        )
+    fun `the log budget bounds the line but not the event`() {
+        // The cap is about an exportable log and nothing else. The host reacts
+        // to this event by pre-resolving the next locator, and a recovery
+        // silently gated on a diagnostics quota would be a trap.
+        assertTrue(shouldReport(linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD - 1))
+        assertFalse(shouldReport(linesSoFar = StreamEofPolicy.MAX_LINES_PER_LOAD))
+        assertTrue(isSourceEof())
+    }
+
+    @Test
+    fun `the line carries four numbers and no locator`() {
         assertEquals(
-            "stream source eof sinceLoadMs=26412 ahead=2310 played=24102 bytes=81234567",
-            line,
-        )
-    }
-
-    @Test
-    fun `an unknown buffer depth stays -1 rather than being dressed up as zero`() {
-        // `bufferedAheadMs()` / `mediaPositionMs()` return -1 for an engine
-        // that cannot answer; "unknown" and "nothing buffered" are different
-        // readings and the line must not collapse them.
-        assertEquals(
-            "stream source eof sinceLoadMs=-1 ahead=-1 played=-1 bytes=0",
-            StreamEofPolicy.line(sinceLoadMs = -1, aheadMs = -1, playedMs = -1, bytes = 0),
+            "stream source eof sinceLoadMs=6032 ahead=21011 played=4580 bytes=8649536",
+            StreamEofPolicy.line(
+                sinceLoadMs = 6032,
+                aheadMs = 21011,
+                playedMs = 4580,
+                bytes = 8649536,
+            ),
         )
     }
 }

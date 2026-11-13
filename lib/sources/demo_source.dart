@@ -482,8 +482,17 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
   Future<void> connect() async {}
 
   @override
+  // Listed *first* when live-cut is enabled — deliberately, so the emulator
+  // driver (tool/android_tv_emulator_check.sh) reaches it with exactly one
+  // Down from the category sidebar's default "All channels" entry, rather
+  // than counting past however many ordinary categories happen to exist.
+  // Safe for every other scenario the driver runs against this same build:
+  // nothing before the live-cut scenario ever touches the category sidebar
+  // (the channel pane's default "All channels" view lists channels in
+  // [_allChannels]'s own order, which still puts "Big Buck Bunny" first),
+  // and `channels(categoryId:)` filtering is unaffected by list order.
   Future<List<Category>> categories() async => _liveCutEnabled
-      ? const [_openLiveCategory, _labLiveCategory, _liveCutCategory]
+      ? const [_liveCutCategory, _openLiveCategory, _labLiveCategory]
       : const [_openLiveCategory, _labLiveCategory];
 
   List<Channel> get _allChannels => _liveCutEnabled
