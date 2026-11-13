@@ -26,6 +26,7 @@ on:
       - 'lib/player/**'
       - 'lib/screens/**'
       - 'tool/android_tv_emulator_check.sh'
+      - 'tool/live_cut_server.py'
       - '.github/workflows/android-tv-emulator.yml'
   workflow_dispatch:
     inputs:
@@ -228,5 +229,145 @@ jobs:
         with:
           name: tv-emulator-${{ matrix.slug }}
           path: ${{ runner.temp }}/tv-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+  # A second, separate development debug APK — identical to `build-apk`'s
+  # except for one extra compile-time define — built only for the opt-in
+  # live-cut leg below (`drive-live-cut`). Its own job rather than another
+  # dimension on `build-apk`'s matrix: every *other* leg must keep running
+  # the exact APK it always has, so baking the live-cut URL into the shared
+  # APK would give every leg a "Live cut test" channel and a provider it
+  # never otherwise speaks to.
+  build-apk-livecut:
+    name: Build development debug APK (live-cut)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          lfs: true
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - run: flutter pub get
+      # Same debug / no-Supabase rationale as `build-apk`, plus the one
+      # define that turns on DemoSource's "Live cut test" category
+      # (lib/sources/demo_source.dart `kLiveCutServerUrl`). 10.0.2.2 is the
+      # emulator's alias for the host loopback `drive-live-cut` starts the
+      # server on, before this APK is ever installed.
+      - name: Build development debug APK with the live-cut server URL baked in
+        run: >-
+          flutter build apk --debug --flavor development
+          --build-number ${{ github.run_number }}
+          --dart-define=DISTRIBUTION_CHANNEL=development
+          --dart-define=IPTVS_LIVE_CUT_URL=http://10.0.2.2:8765
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-emulator-apk-livecut
+          path: build/app/outputs/flutter-apk/app-development-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  # Opt-in: the Android "stitched handover" live splice against the synthetic
+  # cut-every-connection provider in `tool/live_cut_server.py`. One API 36
+  # android-tv leg, not a matrix dimension — this is about the splice
+  # mechanism itself, not the decoder/input-level coverage the three legs
+  # above already own, and an emulator boot plus a real ffmpeg-generated
+  # fixture is already the cost of a job most PRs touching android/**
+  # won't exercise either side of.
+  drive-live-cut:
+    name: Live-cut stitched handover (API 36 android-tv x86_64)
+    needs: build-apk-livecut
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tv-emulator-apk-livecut
+          path: apk
+      - name: Install ffmpeg (for the live-cut TS fixture)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Needs no ffmpeg and no fixture file — a tiny in-process fake TS. Runs
+      # before anything else in this job touches the real server, same as a
+      # unit test gating a job that only then does the expensive thing.
+      - name: Self-test the live-cut server
+        run: python3 tool/live_cut_server.py --self-test
+      - name: Generate the live-cut TS fixture
+        run: >-
+          python3 tool/live_cut_server.py
+          --make-ts "$RUNNER_TEMP/live_cut_fixture.ts" --seconds 900
+      # Started well before the emulator step reaches Scenario 4 (which runs
+      # last, after Scenarios 1-3), so this long-lived background process —
+      # left running across steps in the same job, same as any other
+      # start-a-local-service-then-use-it job — has no startup race with the
+      # app's first /resolve call. 10.0.2.2 from inside the emulator reaches
+      # this port on the host.
+      - name: Start the live-cut server
+        run: |
+          python3 tool/live_cut_server.py \
+            --ts "$RUNNER_TEMP/live_cut_fixture.ts" --port 8765 \
+            >"$RUNNER_TEMP/live_cut_server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/live_cut_server.pid"
+          sleep 1
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Run the live-cut TV flow check
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: android-tv
+          arch: x86_64
+          profile: tv_1080p
+          cores: 2
+          ram-size: 2048M
+          disk-size: 6G
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: bash tool/android_tv_emulator_check.sh --apk apk/app-development-debug.apk --out "$RUNNER_TEMP/tv-artifacts" --label live-cut --live-cut ${{ (github.event_name == 'workflow_dispatch' && inputs.strict) && '--strict' || '' }}
+      - name: Fetch the live-cut server's /stats
+        if: always()
+        run: curl -s http://127.0.0.1:8765/stats -o "$RUNNER_TEMP/live_cut_stats.json" || true
+      - name: Stop the live-cut server
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/live_cut_server.pid")" 2>/dev/null || true
+      - name: Collect artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-emulator-live-cut
+          path: |
+            ${{ runner.temp }}/tv-artifacts
+            ${{ runner.temp }}/live_cut_server.log
+            ${{ runner.temp }}/live_cut_stats.json
           if-no-files-found: warn
           retention-days: 14

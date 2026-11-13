@@ -14,7 +14,9 @@
 #   D-pad navigation, the first-run path to a playable catalogue, the live
 #   preview → fullscreen handoff, the Back ladder out of the player, the live
 #   latency "Go to live" chip and its focus hand-back, in-player zapping, and
-#   process health across Home/relaunch and open/close cycles.
+#   process health across Home/relaunch and open/close cycles. Opt-in
+#   (`--live-cut`): the Android "stitched handover" live splice against the
+#   synthetic provider in `tool/live_cut_server.py` — see Scenario 4 below.
 #
 # WHAT IT CANNOT VALIDATE (see docs/validation-baseline.md)
 #   An emulator has no hardware HEVC/DV decoders, no vendor codecs, no HDR
@@ -44,6 +46,9 @@
 #     [iptvs.player]  zap play source=.. channel=.. id=..
 #     iptvs.shared: fullscreen adopted the shared preview engine
 #     iptvs.focus:  overlay focus=<control name>      (debug-only, Compose)
+#     [iptvs.player] native live handover link=.. mechanism=splice|fallback ..
+#                                                      (--live-cut only)
+#     [iptvs.player] native live reconnect ..           (--live-cut only)
 #   None of them carries a URL, header or credential.
 
 set -euo pipefail
@@ -66,6 +71,14 @@ KEEP_INSTALLED=0
 # gated on BuildConfig.DEBUG, so on a release APK this flag silently does
 # nothing — which is exactly what the assertion below would then catch.
 FORCE_SKIA_GL="${IPTVS_TVEMU_FORCE_SKIA_GL:-0}"
+# Opt-in: drive the synthetic "live cut" channels (tool/live_cut_server.py)
+# and assert on the Android stitched-handover splice. Needs an APK built with
+# --dart-define=IPTVS_LIVE_CUT_URL=... (lib/sources/demo_source.dart) and the
+# server already listening at that URL — neither is this script's job; see
+# .github/workflows/android-tv-emulator.yml's live-cut job.
+LIVE_CUT="${IPTVS_TVEMU_LIVE_CUT:-0}"
+LIVE_CUT_SECONDS="${IPTVS_TVEMU_LIVE_CUT_SECONDS:-180}"
+LIVE_CUT_STABLE_SECONDS="${IPTVS_TVEMU_LIVE_CUT_STABLE_SECONDS:-90}"
 
 usage() {
   cat <<'EOF'
@@ -87,6 +100,10 @@ Usage: tool/android_tv_emulator_check.sh [options]
   --force-skia-gl      launch with the debug-only renderer override so the
                        whole run exercises Flutter's Skia OpenGL renderer, and
                        assert the app reports it (debug builds only)
+  --live-cut           also drive the synthetic "live cut" channels and
+                       assert on the stitched-handover splice (needs an APK
+                       built with --dart-define=IPTVS_LIVE_CUT_URL=... and
+                       tool/live_cut_server.py already listening there)
   -h, --help           this text
 EOF
 }
@@ -103,6 +120,7 @@ while [ $# -gt 0 ]; do
     --keep-installed) KEEP_INSTALLED=1; shift ;;
     --strict) STRICT=1; shift ;;
     --force-skia-gl) FORCE_SKIA_GL=1; shift ;;
+    --live-cut) LIVE_CUT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -398,6 +416,30 @@ leave_player() {
   ! in_player
 }
 
+# Navigate the category sidebar to "Live cut test" (DemoSource adds it only
+# when IPTVS_LIVE_CUT_URL was baked in) and apply it. Per docs/tv-navigation.md
+# "Movement rules": Left peels the per-row favorite column back to the row
+# body before a *second* Left actually crosses panes, so two Lefts cross
+# whichever column the cursor was left on. Two Downs then reach the third
+# category (index 2) — exact only from category index 0, which is where the
+# sidebar cursor still sits here: nothing earlier in this script (Scenarios
+# 1-3) ever touches the sidebar, only the channel pane. Applying the category
+# (OK) lands on its first channel, "Live cut (rotating)" — channel number 201,
+# listed before "Live cut (stable URL)" (202).
+#
+# Call this at most once per run. A second category re-navigation couldn't
+# reuse this same fixed Down count without first knowing how many the
+# previous call already consumed, so Scenario 4b deliberately does not call
+# this again — it stays inside the category 4a already applied instead.
+open_live_cut_category() {
+  leave_player || true
+  key KEYCODE_DPAD_LEFT
+  key KEYCODE_DPAD_LEFT
+  key KEYCODE_DPAD_DOWN
+  key KEYCODE_DPAD_DOWN
+  key KEYCODE_DPAD_CENTER 1
+}
+
 # ── Launch + first run ───────────────────────────────────────────────────────
 
 step "Launch and reach the channel list"
@@ -669,6 +711,96 @@ else
     soft_fail "only $ZAPS 'zap play' lines after four channel keys"
   fi
   scan_health "$M" "zap scenario" || true
+fi
+
+# ── Scenario 4: live-cut stitched handover (opt-in, --live-cut) ─────────────
+#
+# Needs an APK built with --dart-define=IPTVS_LIVE_CUT_URL=... and
+# tool/live_cut_server.py already reachable there — neither is this script's
+# job (see .github/workflows/android-tv-emulator.yml). Two parts: the
+# rotating-URL channel, where the stitched handover should *splice* across
+# every server-side cut with no visible reconnect; then the stable-URL
+# control, which proves the splice never arms for a source whose URL never
+# changes, even though the server still cuts its connection the same way.
+if [ "$LIVE_CUT" = "1" ]; then
+  step "Scenario 4a: live-cut splice (rotating URL, ${LIVE_CUT_SECONDS}s)"
+  M=$(mark)
+  open_live_cut_category
+  if open_fullscreen "$M"; then
+    pass "live-cut (rotating) fullscreen player opened"
+    note "playing ${LIVE_CUT_SECONDS}s, watching for stitched handovers"
+    sleep "$LIVE_CUT_SECONDS"
+    shot "live-cut-rotating"
+
+    WINDOW="$OUT/.live_cut_rotating_window"
+    since "$M" >"$WINDOW"
+    SPLICES=$(grep -c -E '\[iptvs\.player\] native live handover .*mechanism=splice' "$WINDOW" || true)
+    if [ "$SPLICES" -ge 3 ]; then
+      pass "$SPLICES splice handovers observed in ${LIVE_CUT_SECONDS}s"
+    else
+      soft_fail "only $SPLICES splice handovers observed in ${LIVE_CUT_SECONDS}s (expected >= 3)"
+    fi
+
+    BAD_REPEATED=$(grep -E '\[iptvs\.player\] native live handover' "$WINDOW" | grep -vc -E 'repeatedMs=0( |$)' || true)
+    if [ "$BAD_REPEATED" -eq 0 ]; then
+      pass "every handover line has repeatedMs=0"
+    else
+      soft_fail "$BAD_REPEATED handover line(s) have a nonzero repeatedMs"
+    fi
+
+    # Reconnect fallbacks are expected *before* the mechanism proves itself
+    # out (no splice candidate yet, e.g. the very first cut), but once a
+    # splice has been observed a later reconnect means the splice gave up and
+    # fell back, which is the regression this run exists to catch.
+    FIRST_SPLICE_LINE=$(grep -n -m1 -E 'mechanism=splice' "$WINDOW" | cut -d: -f1 || true)
+    if [ -n "$FIRST_SPLICE_LINE" ]; then
+      RECONNECTS_AFTER=$(tail -n "+$((FIRST_SPLICE_LINE + 1))" "$WINDOW" | grep -c -E '\[iptvs\.player\] native live reconnect ' || true)
+      if [ "$RECONNECTS_AFTER" -eq 0 ]; then
+        pass "no reconnect fallback after the first splice"
+      else
+        soft_fail "$RECONNECTS_AFTER 'native live reconnect' line(s) after the first splice (expected 0)"
+      fi
+    else
+      note "no splice line to measure post-splice reconnects against"
+    fi
+    rm -f "$WINDOW"
+  else
+    soft_fail "could not open the fullscreen player for the live-cut (rotating) scenario"
+  fi
+  scan_health "$M" "live-cut rotating scenario" || true
+
+  step "Scenario 4b: live-cut control (stable URL, ${LIVE_CUT_STABLE_SECONDS}s, must never splice)"
+  M=$(mark)
+  # No sidebar re-navigation here: 4a already applied "Live cut test" and
+  # left the channel-pane cursor on its first row ("Live cut (rotating)"),
+  # exactly as every other fullscreen round trip in this script assumes
+  # Back restores the same category/row it came from (Scenario 1b above).
+  # Re-deriving the category index here would have to know how many Downs
+  # 4a already consumed from an unknown starting index — one Down within
+  # the still-selected category's channel list is both simpler and exact.
+  leave_player || true
+  key KEYCODE_DPAD_DOWN     # from "Live cut (rotating)" to "Live cut (stable URL)"
+  if open_fullscreen "$M"; then
+    pass "live-cut (stable URL) fullscreen player opened"
+    sleep "$LIVE_CUT_STABLE_SECONDS"
+    shot "live-cut-stable"
+
+    STABLE_SPLICES=$(count_since "$M" '\[iptvs\.player\] native live handover .*mechanism=splice')
+    STABLE_RECONNECTS=$(count_since "$M" '\[iptvs\.player\] native live reconnect ')
+    if [ "$STABLE_SPLICES" -eq 0 ]; then
+      pass "no splice handovers for the stable-URL control"
+    else
+      soft_fail "$STABLE_SPLICES splice handover(s) armed for a source whose URL never changes (stable-URL control)"
+    fi
+    if [ "$STABLE_RECONNECTS" -ge 1 ]; then
+      pass "$STABLE_RECONNECTS reconnect(s) observed for the stable-URL control (proves the cut itself still happened)"
+    else
+      soft_fail "no reconnect observed for the stable-URL control in ${LIVE_CUT_STABLE_SECONDS}s (expected the server's close to trigger one)"
+    fi
+  else
+    soft_fail "could not open the fullscreen player for the live-cut (stable URL) control"
+  fi
+  scan_health "$M" "live-cut stable control scenario" || true
 fi
 
 # ── Teardown ─────────────────────────────────────────────────────────────────

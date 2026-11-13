@@ -1,4 +1,17 @@
+import 'dart:convert';
+import 'dart:io';
+
+import '../data/net.dart' show redactUrl;
 import 'source.dart';
+
+/// Compile-time opt-in for the synthetic "live cut" test provider
+/// (`tool/live_cut_server.py`), used only by the Android TV emulator CI leg
+/// that exercises the Android "stitched handover" live splice. A
+/// `String.fromEnvironment`, so this is a `const ''` in every shipped build —
+/// the two channels below do not exist and the base URL is never reached —
+/// and only the CI job that builds specifically for that leg passes
+/// `--dart-define=IPTVS_LIVE_CUT_URL=http://10.0.2.2:8765`.
+const String kLiveCutServerUrl = String.fromEnvironment('IPTVS_LIVE_CUT_URL');
 
 /// A built-in catalogue of public test streams and freely licensed films.
 ///
@@ -12,12 +25,20 @@ import 'source.dart';
 /// Remote fixtures can occasionally be unavailable, so callers should still
 /// handle ordinary playback/network errors.
 class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
-  DemoSource({this.sourceId = 'demo', this.displayName});
+  DemoSource({this.sourceId = 'demo', this.displayName, String? liveCutBaseUrl})
+    : _liveCutBaseUrl = liveCutBaseUrl ?? kLiveCutServerUrl;
 
   final String sourceId;
 
   /// User-assigned label (from SourceConfig); preferred over the derived name.
   final String? displayName;
+
+  /// Test seam for [kLiveCutServerUrl]: lets a unit test point the "live cut"
+  /// channels at a local `HttpServer` without a compile-time define. Empty in
+  /// production, where the define alone decides.
+  final String _liveCutBaseUrl;
+
+  bool get _liveCutEnabled => _liveCutBaseUrl.isNotEmpty;
 
   @override
   String get id => sourceId;
@@ -50,6 +71,29 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
   static const _labLiveCategory = Category(
     id: 'playback-lab',
     title: 'Playback lab',
+  );
+
+  // Only ever added to the category/channel lists when [_liveCutEnabled] —
+  // see [_allCategories]/[_allChannels]. `live_cut_rotating`'s URL changes on
+  // every resolve ([_fetchLiveCutResolveUrl]); `live_cut_stable`'s never does
+  // — the control case the Android splice must never arm for.
+  static const _liveCutCategory = Category(
+    id: 'live-cut-test',
+    title: 'Live cut test',
+  );
+  static const _liveCutRotatingChannel = Channel(
+    id: 'live_cut_rotating',
+    name: 'Live cut (rotating)',
+    categoryId: 'live-cut-test',
+    number: 201,
+    extra: {'urlKey': 'live_cut_rotating', 'isLive': true},
+  );
+  static const _liveCutStableChannel = Channel(
+    id: 'live_cut_stable',
+    name: 'Live cut (stable URL)',
+    categoryId: 'live-cut-test',
+    number: 202,
+    extra: {'urlKey': 'live_cut_stable', 'isLive': true},
   );
 
   static const _openAnimation = MediaCategory(
@@ -438,13 +482,16 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
   Future<void> connect() async {}
 
   @override
-  Future<List<Category>> categories() async => const [
-    _openLiveCategory,
-    _labLiveCategory,
-  ];
+  Future<List<Category>> categories() async => _liveCutEnabled
+      ? const [_openLiveCategory, _labLiveCategory, _liveCutCategory]
+      : const [_openLiveCategory, _labLiveCategory];
+
+  List<Channel> get _allChannels => _liveCutEnabled
+      ? const [..._channels, _liveCutRotatingChannel, _liveCutStableChannel]
+      : _channels;
 
   @override
-  Future<List<Channel>> channels({String? categoryId}) async => _channels
+  Future<List<Channel>> channels({String? categoryId}) async => _allChannels
       .where(
         (channel) => categoryId == null || channel.categoryId == categoryId,
       )
@@ -452,8 +499,59 @@ class DemoSource implements Source, CatchupSource, SourceCapabilityReporter {
 
   @override
   Future<StreamInfo> resolve(Channel channel) async {
-    final url = _urlFor(channel.extra['urlKey']?.toString() ?? channel.id);
+    final urlKey = channel.extra['urlKey']?.toString() ?? channel.id;
+    // Every call hits the server fresh — never cached — exactly like a
+    // Stalker `create_link`/`play_token`: the whole point of the rotating
+    // channel is that each resolve (including the handoff's own re-resolve)
+    // yields a brand-new, single-use URL for the Android splice to join.
+    if (urlKey == 'live_cut_rotating') {
+      return StreamInfo(url: await _fetchLiveCutResolveUrl(), isLive: true);
+    }
+    if (urlKey == 'live_cut_stable') {
+      return StreamInfo(url: '$_liveCutBaseUrl/stable.ts', isLive: true);
+    }
+    final url = _urlFor(urlKey);
     return StreamInfo(url: url, isLive: channel.extra['isLive'] == true);
+  }
+
+  // Small, deliberately not sharing kProviderJsonWorkload/HttpOperation: the
+  // body is one short plaintext URL, not a provider payload.
+  static const _liveCutResolveTimeout = Duration(seconds: 10);
+  static const _liveCutResolveMaxBytes = 4 * 1024;
+
+  Future<String> _fetchLiveCutResolveUrl() async {
+    final uri = Uri.parse('$_liveCutBaseUrl/resolve');
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final req = await client
+          .getUrl(uri)
+          .timeout(_liveCutResolveTimeout);
+      final resp = await req.close().timeout(_liveCutResolveTimeout);
+      if (resp.statusCode != 200) {
+        await resp.drain<void>();
+        throw StateError('HTTP ${resp.statusCode} fetching ${redactUrl(uri)}');
+      }
+      final bytes = await resp
+          .fold<List<int>>(<int>[], (acc, chunk) {
+            if (acc.length + chunk.length > _liveCutResolveMaxBytes) {
+              throw StateError(
+                'resolve response from ${redactUrl(uri)} exceeded '
+                '$_liveCutResolveMaxBytes bytes',
+              );
+            }
+            acc.addAll(chunk);
+            return acc;
+          })
+          .timeout(_liveCutResolveTimeout);
+      final url = utf8.decode(bytes).trim();
+      if (url.isEmpty) {
+        throw StateError('empty resolve response from ${redactUrl(uri)}');
+      }
+      return url;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   @override
