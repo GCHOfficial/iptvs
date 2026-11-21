@@ -129,7 +129,7 @@ information is uploaded. That is a decision, not an omission:
     empty value would ship an unresolvable empty-UUID image on every event. A set-but-malformed UUID
     fails the build (only a broken workflow edit can cause it); unset is the ordinary local case.
   - **The manifest alone does nothing, because the Dart init overwrites it.** `sentry_flutter`
-    10.3.0 starts the Android SDK from Dart, and its `configureAndroidOptions`
+    10.6.0 (re-checked on the bump from 10.3.0) starts the Android SDK from Dart, and its `configureAndroidOptions`
     (`sentry_native_java_init.dart:237`) runs inside `SentryAndroid.init`'s options callback —
     *after* the manifest has been read — and assigns `androidOptions.proguardUuid =
     options.proguardUuid`. Left null on the Dart side, that nulls the manifest value, and every
@@ -248,7 +248,7 @@ two crash sites behind the identical framework prefix.
 the single include is the one `AndroidOptionsInitializer.readDefaultOptionValues` adds: the
 **applicationId**, `com.gchofficial.iptvs.player[.dev|.direct]`. This app's classes live under the
 **namespace** `com.gchofficial.iptvs`, which is not a prefix of it, so `isInApp` comes back `null`
-for app and framework frames alike. `sentry_flutter` 10.3.0 configures neither list
+for app and framework frames alike. `sentry_flutter` 10.6.0 configures neither list
 (`configureAndroidOptions` never touches them). Widening the include would not fix it either: R8
 renames app classes, and the shipped frame really is `f5.run`. Dart events are unaffected —
 sentry-dart marks `package:iptvs` frames in-app — but they get the same innermost-first rule, since

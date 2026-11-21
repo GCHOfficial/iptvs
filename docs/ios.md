@@ -1028,8 +1028,8 @@ separately, and no `v1`/`v2` split left in this design.
 ## Other work required
 
 - **Crash reporting is on for iOS too, and one option carries the whole URL defence.**
-  `sentry_flutter` 10.3.0's Darwin half is **SwiftPM-only** (`darwin/sentry_flutter/Package.swift`,
-  no podspec), pinning `sentry-cocoa` 9.32.0 at iOS 15.0 — which works only because
+  `sentry_flutter` 10.6.0's Darwin half is **SwiftPM-only** (`darwin/sentry_flutter/Package.swift`,
+  no podspec), pinning `sentry-cocoa` 9.35.0 at iOS 15.0 — which works only because
   `ios/Runner.xcodeproj` already carries the `FlutterGeneratedPluginSwiftPackage` local package
   reference and Flutter 3.47 enables SPM by default on stable. If that reference is ever removed,
   the iOS build loses the plugin rather than failing loudly, so check it alongside any Xcode
