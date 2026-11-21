@@ -197,6 +197,18 @@ It is set **twice, on purpose**, because the Dart `beforeSend` is not the whole 
   the only place Java/Kotlin exceptions, NDK crashes and Android 12+ tombstones all pass through —
   the same reason the redaction lives there. It fills the tag **only when nothing has set it**, so
   an envelope replayed from a previous launch's outbox keeps the renderer it actually crashed on.
+- **A report about an earlier process is never stamped with the current one's renderer.**
+  Tombstones (`Tombstone`/`TombstoneMerged`), ApplicationExitInfo ANRs (`AppExitInfo`) and
+  sentry-native envelopes (`signalhandler`) are all sent by the *next* launch, so "fill when unset"
+  used to write the **uploader's** renderer onto them: IPTVS-C, a crash on 0.1.78 — a build with no
+  renderer tag at all — arrived as `renderer=skia-gl` because a later build sent it. Each process
+  now records `pid renderer` at startup (`renderer_history`, beside the crash budget, last 8
+  processes; `crash/RendererHistory.kt`, pinned by `RendererHistoryTest`), and such a report is
+  tagged with the renderer recorded for the `pid = N` in its message, or **left untagged** when
+  there is none (an ANR exit record carries no pid in its message, so it is always untagged unless
+  its envelope brought a scope tag). An untagged native report therefore means "unknown", not
+  "Impeller". The same applies to `release` on a plain `Tombstone` event, which is the uploader's
+  too — only a `TombstoneMerged` event carries the crashing process's own scope.
 
 The value is not PII and is one of two fixed words plus, in the diagnostics log only, a reason
 (`default` / `manifest` / `forced-debug` / `soc:<MODEL>`).
