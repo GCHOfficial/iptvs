@@ -683,4 +683,84 @@ void main() {
       expect(counts.aggregate(), 3);
     });
   });
+
+  // IPTVS-D/E: with the platform's "remove animations" on, `_reveal` passed a
+  // zero duration to `animateTo`, which does not short-circuit it — the
+  // resulting `DrivenScrollActivity` ticked synchronously before its
+  // `late _controller` was assigned (in release; in debug its
+  // `duration > 0` assert fires instead). Either way the reveal threw.
+  group('reveal honours "remove animations"', () {
+    Future<(LiveFocusCoordinator, ScrollController)> mount(
+      WidgetTester tester, {
+      required bool reduceMotion,
+    }) async {
+      final scroll = ScrollController();
+      final rows = channels([for (var i = 0; i < 50; i++) 'c$i']);
+      final focus = LiveFocusCoordinator(
+        scrollController: scroll,
+        categoryScrollController: ScrollController(),
+        visibleChannels: () => rows,
+        orderedCategoryIds: () => const [null],
+        channelRowExtent: () => 100,
+        categoryRowExtent: () => 48,
+        isWide: () => true,
+        isMounted: () => true,
+        onChannelSelectionChanged: (_, _) {},
+        onCategoryActivated: (_) {},
+        onPlayChannel: (_) {},
+        onToggleFavorite: (_) {},
+        onFocusTabs: () {},
+        reduceMotion: () => reduceMotion,
+      );
+      addTearDown(focus.dispose);
+      addTearDown(scroll.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 200,
+              height: 300,
+              child: ListView.builder(
+                controller: scroll,
+                itemExtent: 100,
+                itemCount: rows.length,
+                itemBuilder: (_, i) => Text(rows[i].name),
+              ),
+            ),
+          ),
+        ),
+      );
+      return (focus, scroll);
+    }
+
+    testWidgets('jumps straight to the row, synchronously and without '
+        'throwing', (tester) async {
+      final (focus, scroll) = await mount(tester, reduceMotion: true);
+
+      focus.selectChannel(20);
+
+      expect(tester.takeException(), isNull);
+      // Row 20 spans 2000..2100; a 300 px viewport reveals it at 1800 — with
+      // no frame pumped, i.e. a jump rather than the first tick of an
+      // animation.
+      expect(scroll.offset, 1800);
+
+      // And back up: the top edge aligns.
+      focus.selectChannel(3);
+      expect(tester.takeException(), isNull);
+      expect(scroll.offset, 300);
+    });
+
+    testWidgets('still animates when motion is allowed', (tester) async {
+      final (focus, scroll) = await mount(tester, reduceMotion: false);
+
+      focus.selectChannel(20);
+      expect(scroll.offset, 0, reason: 'animated, so nothing moved yet');
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(scroll.offset, 1800);
+    });
+  });
 }
