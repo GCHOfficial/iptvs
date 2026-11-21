@@ -22,9 +22,21 @@ function starlightInlineScriptHashes() {
       if (entry.isDirectory()) visit(path);
       else if (entry.name.endsWith('.astro')) {
         const source = readFileSync(path, 'utf8');
-        for (const [, body] of source.matchAll(
-          /<script\b[^>]*\bis:inline\b[^>]*>([\s\S]*?)<\/script>/g,
+        // Attributes are parsed one by one rather than with `[^>]*`, because
+        // Starlight 0.43 writes an inline script's body as an attribute —
+        // `<script is:inline set:html={`(() => {…})();`}>` (ThemeSelect) —
+        // and the `>` of its arrow functions ended the old `[^>]*` match
+        // early, so the theme script went unhashed and the CSP blocked it.
+        for (const [, attrs, inner] of source.matchAll(
+          /<script\b((?:\s+[\w:.-]+(?:=(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^{}]*\}))?)*)\s*>([\s\S]*?)<\/script>/g,
         )) {
+          if (!/(?:^|\s)is:inline(?:\s|=|$)/.test(attrs)) continue;
+          const setHtml = attrs.match(/\sset:html=\{`([^`]*)`\}/);
+          // A template literal is only its own value when it has no
+          // interpolation or escapes; anything else cannot be hashed from
+          // source, and scripts/verify-csp.mjs fails the build on it.
+          if (setHtml && (setHtml[1].includes('${') || setHtml[1].includes('\\'))) continue;
+          const body = setHtml ? setHtml[1] : inner;
           hashes.add(`sha256-${createHash('sha256').update(body).digest('base64')}`);
         }
       }
@@ -60,6 +72,12 @@ export default defineConfig({
   build: {
     inlineStylesheets: 'never',
   },
+  // Starlight forced the zero-specificity "where" strategy up to 0.42; 0.43
+  // stopped forcing it and falls back to Astro's "attribute" default, whose
+  // selectors outrank brand.css and the Footer wrapper's overrides. Pinned so
+  // the site renders exactly as it did — moving to "attribute" is a styling
+  // change to make on its own, with eyes on the result.
+  scopedStyleStrategy: 'where',
   security: {
     // Astro emits a per-build <meta> CSP, hashing every inline script it and
     // Starlight ship (a docs page carries ~16 of them — the theme selector,
