@@ -124,4 +124,60 @@ void main() {
       expect(relabeled.hiddenCategoryIds(ContentKind.series), {'s1'});
     });
   });
+
+  // IPTVS-K/M/N: `build()` null-asserts credential fields, and the boot path
+  // used to call it on the active source — a config that lost its secrets (a
+  // cloud pull on an E2EE-locked device) crashed every launch. `tryBuild` is
+  // what the boot path uses now.
+  group('tryBuild refuses a credential-less config instead of throwing', () {
+    SourceConfig of(SourceKind kind, Map<String, String> fields) =>
+        SourceConfig(id: 'id1', kind: kind, label: 'L', fields: fields);
+
+    final cases = <String, SourceConfig>{
+      'm3u without playlistUrl': of(SourceKind.m3u, const {
+        'epgUrl': 'http://guide.invalid/x.xml',
+      }),
+      'm3u with a blank playlistUrl': of(SourceKind.m3u, const {
+        'playlistUrl': '  ',
+      }),
+      'stalker without mac': of(SourceKind.stalker, const {
+        'portal': 'http://portal.invalid/c/',
+      }),
+      'stalker without portal': of(SourceKind.stalker, const {
+        'mac': '00:1A:79:00:00:00',
+      }),
+      'xtream without password': of(SourceKind.xtream, const {
+        'host': 'http://h:80',
+        'username': 'u',
+      }),
+      'xtream without host': of(SourceKind.xtream, const {
+        'username': 'u',
+        'password': 'p',
+      }),
+    };
+    cases.forEach((name, config) {
+      test(name, () {
+        expect(config.tryBuild(), isNull);
+      });
+    });
+
+    test('the bare build() still throws there, which is why boot must not '
+        'call it', () {
+      expect(
+        () => of(SourceKind.m3u, const {}).build(),
+        throwsA(isA<TypeError>()),
+      );
+    });
+
+    test('a complete config builds exactly as build() does', () {
+      expect(base.tryBuild()?.id, base.build().id);
+      expect(
+        of(SourceKind.m3u, const {
+          'playlistUrl': 'http://list.invalid/get.m3u',
+        }).tryBuild(),
+        isNotNull,
+      );
+      expect(of(SourceKind.demo, const {}).tryBuild(), isNotNull);
+    });
+  });
 }
