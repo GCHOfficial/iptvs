@@ -995,11 +995,16 @@ crypto does *not* cover. The two CSPs measure the same conclusion: a built Starl
 carries ~16 inline `<script>` blocks and ~80 inline `style=` attributes (Shiki), so it needs
 per-build script hashes plus an `'unsafe-inline'` exemption scoped to `style-src-attr` (a style
 *attribute* has no hash form). Astro hashes only what it bundles: Starlight's `<script is:inline>`
-blocks are hashed in `kb/astro.config.mjs` from the installed Starlight's sources, and component CSS
+blocks are hashed in `kb/astro.config.mjs` from the installed Starlight's sources (both the
+between-the-tags body and, since Starlight 0.43's ThemeSelect, a `set:html={`…`}` template-literal
+body — which is why that parser reads attributes one by one rather than up to the first `>`), and
+component CSS
 is never inlined (`inlineStylesheets: 'never'`) because Astro's style hashing failed to follow its own
 inlining after a Starlight bump and silently blocked the landing page's card styles.
 `kb/scripts/verify-csp.mjs` runs as part of `npm run build` and fails the build if any inline script
 or style is not allowed by its page's policy. A blocked block is never a build error otherwise.
+`scopedStyleStrategy: 'where'` is pinned because Starlight forced it up to 0.42 and 0.43 stopped:
+the "attribute" default would quietly outrank `brand.css`, so switching is a deliberate styling change.
 The panel is a flat `script-src 'self'` with nothing inline. One
 origin means one policy, and it would have been the looser one.
 
