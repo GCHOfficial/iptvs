@@ -10,16 +10,16 @@
     "verify-csp": "node scripts/verify-csp.mjs"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.42.10",
-    "astro": "^7.4.8",
+    "@astrojs/starlight": "^0.42.11",
+    "astro": "^7.4.13",
     "sharp": "^0.35.5"
   },
   "devDependencies": {
-    "wrangler": "^4.160.0"
+    "wrangler": "^4.166.0"
   },
   "overrides": {
-    "postcss-selector-parser": "^7.1.7",
-    "undici@^7.0.0": "^7.30.1",
-    "ws@^8.21.0": "^8.22.1"
+    "postcss-selector-parser": "^7.2.1",
+    "undici@^7.0.0": "^7.30.2",
+    "ws@^8.21.0": "^8.23.0"
   }
 }
