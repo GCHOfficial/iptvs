@@ -153,8 +153,17 @@ android {
     // behaviour is `targetSdk` (still Flutter's) and device reach is `minSdk` —
     // neither moves here. Flutter lists API 37 as supported for deployment
     // (CI-tested only to 36), so this is supported-but-less-travelled, not
-    // unsupported. Drop the override once flutter.compileSdkVersion reaches 37.
-    compileSdk = 37
+    // unsupported. Drop the override once flutter.compileSdkVersion reaches 37.1.
+    //
+    // 37.1, not 37: Compose UI/foundation 1.13 (compose-bom 2026.11.01) declare
+    // `minCompileSdk=37` *and* `minCompileMinorSdk=1` in their AAR metadata, so
+    // `checkAarMetadata` refuses a plain 37. Same reasoning as above: it picks
+    // the android.jar we compile against, and moves neither targetSdk nor minSdk.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -318,7 +327,7 @@ dependencies {
     // from resting on someone else's transitive graph.
     //
     // 1.19.0+ requires consumers to compile against API 37, which is why
-    // `compileSdk` above is pinned to 37 rather than inherited. If that override
+    // `compileSdk` above is pinned to 37(.1) rather than inherited. If that override
     // is ever reverted, this must go back to 1.18.0 or the build fails
     // `checkAarMetadata`. `androidx.core:core-ktx` is version-aligned with this
     // and follows automatically — it appears in that failure alongside `core`.
@@ -366,7 +375,7 @@ dependencies {
 
     // Jetpack Compose for the native HDR player's control overlay. The BOM keeps
     // the androidx.compose.* artifacts on a single, mutually-compatible version.
-    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.11.01")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
