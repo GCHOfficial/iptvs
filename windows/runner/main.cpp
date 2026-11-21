@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "flutter_window.h"
+#include "single_instance.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
@@ -11,6 +12,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // new console when running with a debugger.
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
     CreateAndAttachConsole();
+  }
+
+  // Before anything else touches the app's data folder: a second process on
+  // the same SQLite file and image-cache index is what IPTVS-F/P/Q/R were.
+  // Exit 0 on hand-off — the updater reads a non-zero early exit of the
+  // process it relaunched as a failed update (single_instance.h).
+  if (single_instance::Claim() == single_instance::Outcome::kHandedOff) {
+    return EXIT_SUCCESS;
   }
 
   // Initialize COM, so that it is available for use in the library and/or
@@ -31,6 +40,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
+  single_instance::MarkMainWindow(window.GetHandle());
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {
