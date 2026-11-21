@@ -176,9 +176,13 @@ void main() {
       expect(
         script,
         contains(
-          r'Expand-Archive -LiteralPath $zipPath -DestinationPath $stageDir',
+          r'[System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $stageDir)',
         ),
       );
+      // Expand-Archive resolves its module through PSModulePath, which a
+      // PowerShell 7 parent can point at an Archive module Windows PowerShell
+      // cannot run (MethodCountCouldNotFindBest on the CI runner image).
+      expect(script, isNot(contains('Expand-Archive')));
       expect(script, isNot(contains(r'-DestinationPath $installDir -Force')));
       expect(
         script,

@@ -466,7 +466,15 @@ try {
     \$archive.Dispose()
   }
 
-  Expand-Archive -LiteralPath \$zipPath -DestinationPath \$stageDir -Force
+  # ZipFile.ExtractToDirectory(source, dest): the two-argument overload, which
+  # .NET Framework 4.5+ and .NET (Core) both have, instead of the Archive
+  # module's cmdlet. That cmdlet resolves Microsoft.PowerShell.Archive through
+  # PSModulePath, and a Windows PowerShell started from a PowerShell 7 parent
+  # inherits PowerShell 7's module directory first, whose Archive module can
+  # call a .NET-only three-argument overload (MethodCountCouldNotFindBest on
+  # the 2026-11-16 windows-2025 runner image). The staging directory was just
+  # created empty, so the no-overwrite overload is the right one anyway.
+  [System.IO.Compression.ZipFile]::ExtractToDirectory(\$zipPath, \$stageDir)
   \$stagedExe = Join-Path \$stageDir \$exeName
   if (-not (Test-Path -LiteralPath \$stagedExe -PathType Leaf)) {
     throw 'Update archive is missing the expected executable.'
