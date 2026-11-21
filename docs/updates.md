@@ -442,7 +442,9 @@ the final install step is the only platform-specific part.
   length, and SHA-256 before native package/signer verification runs again; **Windows**
   (no native C++) writes a PowerShell helper (`windowsUpdateScript`) that waits for our
   PID, rejects absolute/escaping/link archive entries, extracts into a new sibling staging
-  directory, checks the expected executable, moves the old installation to a backup, swaps the
+  directory (`[ZipFile]::ExtractToDirectory`, never `Expand-Archive`: the cmdlet resolves its
+  module through `PSModulePath`, which a PowerShell 7 parent can point at an Archive module that
+  Windows PowerShell cannot run — the 2026-11-16 runner image did exactly that), checks the expected executable, moves the old installation to a backup, swaps the
   staged directory into place, and restores/relaunches the backup when the replacement cannot
   start. The app then `exit(0)`s so `iptvs.exe` unlocks. **The helper is spawned via `cmd /c
   start` (`windowsUpdaterLaunch`), not a bare detached `powershell.exe`.** Its first act is
