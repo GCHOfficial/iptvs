@@ -56,7 +56,7 @@ jobs:
       # CI, including on the PRs that changed them.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.23.4' # exact: astro 7.4.2 requires >=22.23.4, '22' resolved to the runner's stale 22.23.3
+          node-version: '22.23.5' # exact: astro 7.4 requires >=22.23.4 and '22' once resolved to a stale runner copy; bumped by hand (Dependabot never touches it)
           cache: npm
           cache-dependency-path: |
             panel/package-lock.json
@@ -147,7 +147,7 @@ jobs:
           persist-credentials: false
           # Pull the libdovi libmpv AAR (android/app/libs/libmpv-dovi.aar).
           lfs: true
-      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '21'
