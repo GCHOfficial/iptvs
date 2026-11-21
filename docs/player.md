@@ -525,7 +525,9 @@ the Sentry **`renderer` tag**, on both sides: the Dart scope (`CrashReporter._ta
 is left at its default `true`, *and* in `NativeCrashScrubber`'s Java `beforeSend`, which is the
 only callback Java exceptions, NDK crashes and Android 12+ tombstones all pass through. The native
 one only fills the tag when nothing has set it, so a replayed outbox envelope keeps the renderer
-it actually crashed on.
+it actually crashed on — and a report about an *earlier* process (tombstone, ANR exit record,
+cached NDK envelope) is filled from that process's recorded renderer, looked up by pid, or left
+empty, never from the uploader's (docs/updates.md "The `renderer` tag").
 
 **Flutter-upgrade caveat — re-check this on every Flutter bump.** The opt-out is deprecated;
 Flutter 3.47.9 already warns it "is going to go away in an upcoming Flutter release". When it
