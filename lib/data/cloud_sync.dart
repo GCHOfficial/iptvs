@@ -9,6 +9,7 @@ import '../sources/source_config.dart';
 import '../sources/source_identity.dart';
 import 'app_database.dart';
 import 'cloud_crypto.dart';
+import 'diagnostics_log.dart';
 import 'local_profile_store.dart';
 import 'device_label.dart';
 import 'metadata_config.dart';
@@ -625,14 +626,38 @@ class CloudSync {
 
   /// The profile this device currently syncs (from its `devices` row, falling
   /// back to the cached value), or null if unset.
+  ///
+  /// **An unreachable server falls back to the cache rather than throwing.**
+  /// `HomeShell` calls this fire-and-forget from every `_loadActive`, so a DNS
+  /// or connection failure on an offline device surfaced as an *unhandled*
+  /// async error (IPTVS-H: `ClientException` / failed host lookup) — for a
+  /// question the cached value answers. Only transport failures take that
+  /// path: a [PostgrestException] means the server *did* answer and is
+  /// rethrown for the caller to judge, and an [Error] (a bad cast, say) is a
+  /// bug, not a network condition, so neither is caught. The transport
+  /// exception is matched as "any other [Exception]" because package:http's
+  /// `ClientException`, which wraps the socket error, is not a dependency of
+  /// this app and its type name does not survive an obfuscated build.
   Future<String?> activeProfileId() async {
     final id = deviceId;
     if (id != null) {
-      final row = await _client
-          .from('devices')
-          .select('active_profile_id')
-          .eq('device_uid', id)
-          .maybeSingle();
+      final Map<String, dynamic>? row;
+      try {
+        row = await _client
+            .from('devices')
+            .select('active_profile_id')
+            .eq('device_uid', id)
+            .maybeSingle();
+      } on PostgrestException {
+        rethrow;
+      } on Exception catch (e) {
+        DiagnosticsLog.instance.add(
+          'cloud',
+          'active profile lookup unreachable, using cached id: '
+              '${e.runtimeType} detail=${redactText(e.toString())}',
+        );
+        return _storage.read(key: _kProfileId);
+      }
       final pid = row?['active_profile_id'] as String?;
       if (pid != null) {
         await _storage.write(key: _kProfileId, value: pid);
