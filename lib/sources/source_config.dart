@@ -110,6 +110,19 @@ class SourceConfig {
     }
   }
 
+  /// [build], or null when [sourceCredentialsMissing] says this config cannot
+  /// produce a working source.
+  ///
+  /// [build] null-asserts each kind's credential fields, so a config whose
+  /// secrets are absent — a cloud pull on an E2EE-locked device, or secrets
+  /// that were never provisioned — throws from inside it. On the boot path
+  /// (`HomeShell._loadActive`) that throw is uncaught and the *active* source is
+  /// read again on every launch, so one such config is a crash loop the user
+  /// cannot leave (IPTVS-K/M/N). Callers that can show a needs-attention state
+  /// instead use this; the predicate is the same one `SourcesScreen._activate`
+  /// already refuses activation on, so the two can never disagree.
+  Source? tryBuild() => sourceCredentialsMissing(this) ? null : build();
+
   /// Cache namespace used by releases before PR4. Read only during the atomic
   /// migration to [id]; never use this as a new persisted identity.
   String get legacyCacheId => switch (kind) {

@@ -7,6 +7,7 @@ import '../data/app_database.dart';
 import '../data/cloud_auto_sync.dart';
 import '../data/cloud_config.dart';
 import '../data/cloud_sync.dart';
+import '../data/diagnostics_log.dart';
 import '../data/distribution_channel.dart';
 import '../data/library_repository.dart';
 import '../data/local_profile_store.dart';
@@ -237,7 +238,18 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     debugPrint(
       '[iptvs.metadata] providers=${providers.map((p) => '${p.provider}:${p.authMode}').join(',')}',
     );
-    final src = cfg?.build();
+    // Never `cfg.build()` here: it null-asserts credential fields, and this
+    // runs on every launch against the same active source, so a config that
+    // lost its secrets was a crash loop (IPTVS-K/M/N). A credential-less source
+    // falls into the needs-attention body instead (see [build]).
+    final src = cfg?.tryBuild();
+    if (cfg != null && src == null) {
+      DiagnosticsLog.instance.addAndPrint(
+        'source',
+        'active source "${cfg.label}" kind=${cfg.kind.name} is missing '
+            'credentials; not loaded (needs attention)',
+      );
+    }
     if (!mounted || gen != _loadActiveGeneration) {
       await src?.dispose();
       for (final provider in providers) {
@@ -433,6 +445,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     await _loadActive();
   }
 
+  static String _displayLabel(SourceConfig config) =>
+      config.label.trim().isEmpty ? 'This source' : config.label.trim();
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -441,6 +456,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
     final repo = _repo;
     if (repo == null) {
+      // A config with no repository is one `tryBuild` refused: the active
+      // source exists but is missing its credentials. Say so, and offer the
+      // sources screen (where it carries the same needs-attention chip and can
+      // be edited, or another source activated) rather than the first-run
+      // "add a source" copy, which would read as if the source were gone.
+      final unusable = _config;
       return Scaffold(
         appBar: AppBar(
           title: const Text('IPTV Player'),
@@ -465,24 +486,33 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
-                      'No source configured',
-                      style: TextStyle(fontSize: 18),
+                    Text(
+                      unusable == null
+                          ? 'No source configured'
+                          : '${_displayLabel(unusable)} needs attention',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 18),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Bring your own IPTV provider — a Stalker portal, an Xtream '
-                      'account, or an M3U playlist. No account is needed to try '
-                      'the Demo.',
+                    Text(
+                      unusable == null
+                          ? 'Bring your own IPTV provider — a Stalker portal, '
+                                'an Xtream account, or an M3U playlist. No '
+                                'account is needed to try the Demo.'
+                          : 'This source is missing its credentials. Unlock '
+                                'this profile in the panel, edit the source, or '
+                                'choose another one.',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: AppColors.textLo),
+                      style: const TextStyle(color: AppColors.textLo),
                     ),
                     const SizedBox(height: 20),
                     FilledButton.icon(
                       autofocus: true,
                       onPressed: _manageSources,
-                      icon: const Icon(Icons.add),
-                      label: const Text('Add a source'),
+                      icon: Icon(unusable == null ? Icons.add : Icons.tune),
+                      label: Text(
+                        unusable == null ? 'Add a source' : 'Manage sources',
+                      ),
                     ),
                     const SizedBox(height: 8),
                     TextButton(
