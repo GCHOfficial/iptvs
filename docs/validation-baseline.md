@@ -606,7 +606,15 @@ Google Play workflow's run number (vc10 = v0.1.61, vc12 = v0.1.70).
       `renderer=… reason=…` in the exportable log, so one Diagnostics export settles it;
     - that the runtime shell argument produces the same engine the manifest-opt-out build did;
     - that the crashes stay gone on an ordinary (non-dispatch) build. Watch IPTVS-5…-B and this
-      Play cluster on 0.1.79+; a recurrence on an event tagged `renderer=skia-gl` means the
+      Play cluster on 0.1.79+. **Read the tag with care:** until the per-process renderer record
+      landed (after 0.1.82), a tombstone carried the renderer of the build that *uploaded* it, not
+      the one that crashed — IPTVS-C (0.1.78, crash 2026-11-05 15:44Z) reads `skia-gl` for exactly
+      that reason, and is an Impeller-era crash. It is not a recurrence. It does show, indirectly,
+      that a `.direct` 0.1.79+ build later started on that TV and resolved `skia-gl` (the
+      renderer-test APK is the `.dev` package and cannot send `.direct` tombstones), i.e. the
+      `RTD2875P` match very likely works on the real hardware. From the record onward an
+      earlier-process report is tagged from its own pid or not at all, so a recurrence on an event
+      tagged `renderer=skia-gl` means the
       renderer is ruled out after all and this entry reverts to "not app-fixable".
     An emulator leg (API 36 `android-tv`, `--force-skia-gl`) proves the override mechanism and
     that the TV flow runs on Skia GL — no emulator carries this SoC, so it proves nothing about

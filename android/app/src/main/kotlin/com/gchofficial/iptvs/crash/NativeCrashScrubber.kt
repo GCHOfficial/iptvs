@@ -50,22 +50,31 @@ object NativeCrashScrubber {
     /** Tag naming the Flutter renderer this process runs (`RendererPolicy`). */
     private const val RENDERER_TAG = "renderer"
 
+    /** Beside the crash budget file, in the app's private files. */
+    private const val RENDERER_HISTORY_FILE = "renderer_history"
+
     @Volatile
     private var installed = false
 
     @Volatile
     private var renderer: String? = null
 
+    /** `pid renderer` lines for recent processes, this one included ([RendererHistory]). */
+    @Volatile
+    private var rendererHistory: List<String> = emptyList()
+
     /**
      * Installs the callbacks. Idempotent; returns false only if the Sentry
      * Android SDK is not running, in which case there is nothing to guard.
      *
      * [renderer] is the Flutter renderer this process resolved
-     * (`impeller`/`skia-gl`). It is tagged onto every event here, not only on
-     * the Dart scope, because the three Android event sources this callback
-     * exists for — Java/Kotlin uncaught exceptions, NDK signal crashes and
-     * Android 12+ tombstones — are captured by the *Java* SDK and are exactly
-     * the crashes the renderer denylist is about.
+     * (`impeller`/`skia-gl`). It is tagged here, not only on the Dart scope,
+     * because the three Android event sources this callback exists for —
+     * Java/Kotlin uncaught exceptions, NDK signal crashes and Android 12+
+     * tombstones — are captured by the *Java* SDK and are exactly the crashes
+     * the renderer denylist is about. Only *this* process's events get it,
+     * though: a tombstone, ANR exit record or cached NDK envelope describes an
+     * earlier process and is tagged from [RendererHistory], or not at all.
      */
     @Synchronized
     fun install(budgetPath: String, renderer: String? = null): Boolean {
@@ -75,6 +84,7 @@ object NativeCrashScrubber {
         if (options.dsn.isNullOrEmpty()) return false
 
         val budget = CrashBudgetFile(File(budgetPath))
+        rendererHistory = recordRenderer(File(File(budgetPath).parentFile, RENDERER_HISTORY_FILE))
 
         options.beforeBreadcrumb =
             SentryOptions.BeforeBreadcrumbCallback { crumb, _ -> scrub(crumb) }
@@ -180,12 +190,45 @@ object NativeCrashScrubber {
         // After the tag-redaction pass above, and only when nothing has
         // already said otherwise: a cached outbox envelope from a previous
         // launch carries that launch's scope, and the renderer it crashed on
-        // is the one worth keeping.
-        renderer?.let {
-            if (event.tags?.containsKey(RENDERER_TAG) != true) event.setTag(RENDERER_TAG, it)
+        // is the one worth keeping. A report about an *earlier* process with no
+        // tag of its own gets that process's recorded renderer, or none — never
+        // this process's, which is how IPTVS-C (0.1.78) came to read skia-gl.
+        if (event.tags?.containsKey(RENDERER_TAG) != true) {
+            val mechanism = event.exceptions?.firstOrNull()?.mechanism?.type
+            val value =
+                if (mechanism in RendererHistory.EARLIER_PROCESS_MECHANISMS) {
+                    RendererHistory.pidOf(event.message?.formatted ?: event.message?.message)
+                        ?.let { RendererHistory.lookup(rendererHistory, it) }
+                } else {
+                    renderer
+                }
+            value?.let { event.setTag(RENDERER_TAG, it) }
         }
         return event
     }
+
+    /**
+     * Appends this process to the on-disk history and returns the result.
+     * Best-effort: an unreadable or unwritable file only means earlier-process
+     * reports go untagged, which is the safe direction.
+     */
+    private fun recordRenderer(file: File): List<String> {
+        val current = renderer ?: return readLines(file)
+        val updated = RendererHistory.recorded(readLines(file), android.os.Process.myPid(), current)
+        try {
+            file.writeText(updated.joinToString("\n", postfix = "\n"))
+        } catch (_: Exception) {
+            // Still usable in memory for this process's own lookups.
+        }
+        return updated
+    }
+
+    private fun readLines(file: File): List<String> =
+        try {
+            if (file.isFile) file.readLines().filter { it.isNotBlank() } else emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
 
     private fun scrub(crumb: Breadcrumb): Breadcrumb {
         crumb.message = crumb.message?.let(CrashScrub::redactText)

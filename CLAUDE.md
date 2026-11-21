@@ -1003,8 +1003,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `FlutterShellArgs`), then the debug-only `--ez iptvsForceSkiaGl true`, then the denylist, then
   Impeller. The decision is read back at boot over `iptvs/device` (`renderer`), logged once as
   `renderer=… reason=…`, and set as the Sentry `renderer` tag on **both** the Dart scope (synced
-  to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`, which is what puts
-  it on tombstones. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
+  to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`. **A report about an
+  earlier process** (tombstone, ANR exit record, cached NDK envelope — all sent by the *next*
+  launch) is tagged from that process's own `pid renderer` record (`crash/RendererHistory.kt`), or
+  left untagged — never with the uploader's renderer, which is how 0.1.78's IPTVS-C read
+  `skia-gl`. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
   go away — when it does this silently stops working while still reporting `skia-gl`, so re-check
   `FlutterEngineFlags.ENABLE_IMPELLER` (still present, still `allowedInRelease`) and the matcher
   test on **every Flutter bump**. Detail + the on-device confirmation still owed:
