@@ -414,13 +414,22 @@ class LiveFocusCoordinator extends ChangeNotifier {
       target = bottom - viewport;
     }
     if (target == null) return;
+    final to = target.clamp(0.0, position.maxScrollExtent);
+    // "Remove animations" must be a `jumpTo`, never `animateTo` with a zero
+    // duration. `animateTo` does *not* short-circuit a zero duration (only a
+    // distance already within tolerance): it builds a `DrivenScrollActivity`,
+    // whose `duration > 0` assert is stripped in release, and a zero-duration
+    // `AnimationController.animateTo` completes *synchronously* — ticking the
+    // activity's listener inside the cascade that is still constructing it,
+    // before its `late _controller` is assigned. That is the
+    // `LateInitializationError: _controller` of IPTVS-D/E.
+    if (reduceMotion()) {
+      controller.jumpTo(to);
+      return;
+    }
     controller.animateTo(
-      target.clamp(0.0, position.maxScrollExtent),
-      // `animateTo` short-circuits a zero duration into a `jumpTo`, so this is
-      // the reveal's own honouring of "remove animations".
-      duration: reduceMotion()
-          ? Duration.zero
-          : const Duration(milliseconds: 140),
+      to,
+      duration: const Duration(milliseconds: 140),
       curve: Curves.easeOutCubic,
     );
   }
