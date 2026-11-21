@@ -1003,8 +1003,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   `FlutterShellArgs`), then the debug-only `--ez iptvsForceSkiaGl true`, then the denylist, then
   Impeller. The decision is read back at boot over `iptvs/device` (`renderer`), logged once as
   `renderer=… reason=…`, and set as the Sentry `renderer` tag on **both** the Dart scope (synced
-  to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`, which is what puts
-  it on tombstones. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
+  to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`. **A report about an
+  earlier process** (tombstone, ANR exit record, cached NDK envelope — all sent by the *next*
+  launch) is tagged from that process's own `pid renderer` record (`crash/RendererHistory.kt`), or
+  left untagged — never with the uploader's renderer, which is how 0.1.78's IPTVS-C read
+  `skia-gl`. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
   go away — when it does this silently stops working while still reporting `skia-gl`, so re-check
   `FlutterEngineFlags.ENABLE_IMPELLER` (still present, still `allowedInRelease`) and the matcher
   test on **every Flutter bump**. Detail + the on-device confirmation still owed:
@@ -1513,7 +1516,11 @@ Self-updates from GitHub Releases (`GCHOfficial/iptvs`): shared Dart service
 + per-platform installer (`update_installer.dart`: Android system installer via FileProvider;
 Windows PowerShell swap + `exit(0)`, spawned via `cmd /c start` — `windowsUpdaterLaunch` — not a
 bare detached `powershell.exe`, which a GUI parent's exit killed mid-`Wait-Process` before any
-work, silently no-opping the update). `update_flow.dart` drives prompt → download →
+work, silently no-opping the update). The Windows runner is **single-instance**
+(`windows/runner/single_instance.cpp`, a named mutex before the engine starts — two processes on
+one SQLite file were IPTVS-F/P/Q/R); it waits out a departing instance so the updater's relaunch
+takes over, and a hand-off to a live window exits **0**, since the helper rolls back on a non-zero
+early exit (docs/updates.md). `update_flow.dart` drives prompt → download →
 install; Android persists a verified pending APK, retries it after unknown-source settings, and
 offers to resume it after OEM installer/settings detours with repeat cache hash + native
 package/signer checks. Dialogs are D-pad-safe (primary action autofocuses; the update dialog traps focus).

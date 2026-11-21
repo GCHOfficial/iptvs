@@ -197,6 +197,18 @@ It is set **twice, on purpose**, because the Dart `beforeSend` is not the whole 
   the only place Java/Kotlin exceptions, NDK crashes and Android 12+ tombstones all pass through —
   the same reason the redaction lives there. It fills the tag **only when nothing has set it**, so
   an envelope replayed from a previous launch's outbox keeps the renderer it actually crashed on.
+- **A report about an earlier process is never stamped with the current one's renderer.**
+  Tombstones (`Tombstone`/`TombstoneMerged`), ApplicationExitInfo ANRs (`AppExitInfo`) and
+  sentry-native envelopes (`signalhandler`) are all sent by the *next* launch, so "fill when unset"
+  used to write the **uploader's** renderer onto them: IPTVS-C, a crash on 0.1.78 — a build with no
+  renderer tag at all — arrived as `renderer=skia-gl` because a later build sent it. Each process
+  now records `pid renderer` at startup (`renderer_history`, beside the crash budget, last 8
+  processes; `crash/RendererHistory.kt`, pinned by `RendererHistoryTest`), and such a report is
+  tagged with the renderer recorded for the `pid = N` in its message, or **left untagged** when
+  there is none (an ANR exit record carries no pid in its message, so it is always untagged unless
+  its envelope brought a scope tag). An untagged native report therefore means "unknown", not
+  "Impeller". The same applies to `release` on a plain `Tombstone` event, which is the uploader's
+  too — only a `TombstoneMerged` event carries the crashing process's own scope.
 
 The value is not PII and is one of two fixed words plus, in the diagnostics log only, a reason
 (`default` / `manifest` / `forced-debug` / `soc:<MODEL>`).
@@ -463,7 +475,15 @@ the final install step is the only platform-specific part.
   Explorer; and the helper `Set-Location`s to the parent first, because it inherits its working
   directory from the app it is replacing and a directory that is a live process's CWD cannot be
   deleted — which would strand the backup beside the install permanently. Backup/stage removal
-  retries briefly rather than making one silent attempt. The success path (swap, un-hide, relaunch,
+  retries briefly rather than making one silent attempt. **The relaunch passes through the
+  runner's single-instance guard** (`windows/runner/single_instance.cpp`, a session-local named
+  mutex taken before the engine starts — two processes on one SQLite file were Sentry
+  IPTVS-F/P/Q/R). The guard is shaped around this helper: a launch that finds the mutex held but
+  no *responsive* tagged window keeps waiting (up to 90 s, above the helper's 60 s
+  `Wait-Process`) and takes over the moment the old process exits, so the relaunch wins a slow
+  exit instead of handing off to a dying window; and a launch that does hand off to a live window
+  exits **0**, because this helper reads a non-zero exit within 5 s as a failed update and rolls
+  back. Keep both if either side changes. The success path (swap, un-hide, relaunch,
   cleanup) is covered by `test/windows_update_script_test.dart`, which runs the generated script for
   real against a launchable payload. This can only
   be executed end to end against a **packaged Release folder** on Windows, not `flutter run`; it

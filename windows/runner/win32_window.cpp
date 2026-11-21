@@ -4,6 +4,7 @@
 #include <flutter_windows.h>
 
 #include "resource.h"
+#include "single_instance.h"
 
 namespace {
 
@@ -180,6 +181,10 @@ Win32Window::MessageHandler(HWND hwnd,
                             LPARAM const lparam) noexcept {
   switch (message) {
     case WM_DESTROY:
+      // Untag before teardown, so a launch racing this exit waits for the
+      // single-instance mutex rather than handing off to a window that is
+      // going away. A no-op on any window that was never tagged.
+      single_instance::UnmarkMainWindow(hwnd);
       window_handle_ = nullptr;
       Destroy();
       if (quit_on_close_) {
