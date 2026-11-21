@@ -32,7 +32,7 @@ on:
 # the bundle a candidate SHA actually ships before pinning it:
 #   gh api repos/github/codeql-action/contents/src/defaults.json?ref=<sha> \
 #     --jq '.content' | base64 -d
-# The current pin (v4.39.1) ships codeql-bundle-v2.27.3. Kotlin 2.4.0 -> 2.4.10
+# The current pin (v4.39.4) ships codeql-bundle-v2.27.5. Kotlin 2.4.0 -> 2.4.10
 # (deps#155) and then 2.4.10 -> 2.4.20 (deps#220) are each exactly the kind of
 # upgrade that required moving the pin.
 #
@@ -75,7 +75,7 @@ jobs:
           # (android/app/libs/libmpv-dovi.aar); other languages don't need it.
           lfs: ${{ matrix.language == 'java-kotlin' }}
 
-      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -92,7 +92,7 @@ jobs:
 
       - name: Set up JDK
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '21'
@@ -134,6 +134,6 @@ jobs:
           flutter pub get
           flutter build apk --debug --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 
-      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           category: "/language:${{ matrix.language }}"
