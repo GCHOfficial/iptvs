@@ -24,6 +24,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FontLoader;
 import 'package:flutter_test/flutter_test.dart';

@@ -19,12 +19,17 @@ package com.gchofficial.iptvs.player
  * rule itself is pinned by `RendererPolicyTest` without an instrumented
  * device.
  *
- * **Flutter-upgrade caveat.** The opt-out is deprecated: Flutter 3.47.9 warns
- * it "is going to go away in an upcoming Flutter release", and when it does,
+ * **Flutter-upgrade caveat.** The opt-out is deprecated: Flutter warns it "is
+ * going to go away in an upcoming Flutter release", and when it does,
  * `--enable-impeller=false` silently becomes a no-op — the app would keep
- * reporting `renderer=skia-gl` while running Impeller. Nothing here can detect
- * that. Re-check `FlutterEngineFlags.ENABLE_IMPELLER` (and that it is still
- * `allowedInRelease`) on every Flutter bump.
+ * reporting `renderer=skia-gl` while running Impeller. Nothing in the app can
+ * detect that; the engine's own logcat line can (an honoured opt-out prints
+ * `[Action Required]: Impeller opt-out deprecated.`, Impeller prints `Using the
+ * Impeller rendering backend`). On every Flutter bump re-check
+ * `FlutterEngineFlags.ENABLE_IMPELLER` (since 3.50 in
+ * `io.flutter.embedding.engine.flags`) is still `allowedInRelease`, and that
+ * the Activity hook it rides on is still the one the delegate calls (3.50
+ * moved it from `getFlutterShellArgs()` to `getFlutterEngineFlags()`).
  */
 object RendererPolicy {
     /** The wire/diagnostics name of Flutter's default renderer. */
@@ -65,7 +70,7 @@ object RendererPolicy {
 
     /**
      * The resolved renderer, why, and the engine argument (if any) that has to
-     * ride on `FlutterActivity.getFlutterShellArgs()` to make it so.
+     * ride on `FlutterActivity.getFlutterEngineFlags()` to make it so.
      *
      * [shellArg] is null whenever the renderer needs no argument from us —
      * either because Impeller is simply the default, or because the *manifest*

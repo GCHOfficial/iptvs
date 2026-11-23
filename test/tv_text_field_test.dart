@@ -2,6 +2,7 @@
 // that it builds under a plain Navigator (it must not use Router-only APIs like
 // BackButtonListener, which threw "context does not include a Router").
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

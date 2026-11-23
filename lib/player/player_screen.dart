@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';

@@ -488,16 +488,19 @@ switched to the **Skia OpenGL** renderer at runtime, by exact SoC model:
   so. The denylist is `["RTD2875P"]` and the match is **exact**, case-insensitive after trim —
   `RTD2873` and `RTD2875` are different parts, and a prefix match would silently take Impeller
   away from chips nobody has evidence about. null, blank and everything else keep Impeller.
-- **`MainActivity.getFlutterShellArgs()`** is the single override that applies it: it adds
+- **`MainActivity.getFlutterEngineFlags()`** is the single override that applies it: it adds
   `--enable-impeller=false` to what `super` returns. That is the hook that reaches the engine —
-  in Flutter 3.47.9 `FlutterActivityAndFragmentDelegate.setUpFlutterEngine` builds the engine as
-  `new FlutterEngineGroup(context, host.getFlutterShellArgs().toArray())`, whose constructor calls
+  in Flutter 3.50.1 `FlutterActivityAndFragmentDelegate.setUpFlutterEngine` builds the engine as
+  `new FlutterEngineGroup(context, host.getFlutterEngineFlags().toArray(...))` (up to 3.47.9 it
+  was `host.getFlutterShellArgs()`, which 3.50 still honours with a deprecation warning and says
+  it removes in the next stable — hence the move), whose constructor calls
   `FlutterLoader.ensureInitializationComplete(context, dartVmArgs)` **only when the loader is not
   already initialised**. Nothing in this app initialises it earlier: `MainActivity` overrides
   neither `getCachedEngineId` nor `provideFlutterEngine`, there is no `FlutterEngineCache` use, no
   custom `Application` (Flutter's `applicationName` placeholder resolves to `android.app.Application`),
-  and `HdrPlayerActivity` hosts no Flutter engine. `FlutterEngineFlags.ENABLE_IMPELLER` is
-  constructed with `allowedInRelease = true` and is not in `DISABLED_FLAGS`, which is why the
+  and `HdrPlayerActivity` hosts no Flutter engine. `FlutterEngineFlags.ENABLE_IMPELLER`
+  (`io.flutter.embedding.engine.flags` since 3.50) is constructed with `allowedInRelease = true`,
+  and in release mode `FlutterLoader` keeps exactly the `allowedInRelease` flags, which is why the
   switch works on a shipped build rather than only under `flutter run`.
 - `Build.SOC_MODEL` is API 31+; below that the caller passes null and the denylist cannot fire.
   The TCL G10 class runs Android 12, so it is covered.
@@ -513,8 +516,8 @@ switched to the **Skia OpenGL** renderer at runtime, by exact SoC model:
 
 The manifest is first because it is a deliberate build-time statement, and because a build that
 pins Impeller *on* to A/B against this denylist must not be defeated by it. It also means the two
-mechanisms never both emit an `--enable-impeller=` — `FlutterShellArgs` is set-backed, so two
-contradictory values would leave the outcome to an unordered iteration.
+mechanisms never both emit an `--enable-impeller=`, so two contradictory values can never leave
+the outcome to whichever one the loader happens to read last.
 
 **It is visible in a report, both ways.** At boot Dart reads the decision back over the existing
 `iptvs/device` channel (`renderer`, beside `isTelevision`) — un-awaited, so nothing on the
@@ -530,12 +533,17 @@ cached NDK envelope) is filled from that process's recorded renderer, looked up 
 empty, never from the uploader's (docs/updates.md "The `renderer` tag").
 
 **Flutter-upgrade caveat — re-check this on every Flutter bump.** The opt-out is deprecated;
-Flutter 3.47.9 already warns it "is going to go away in an upcoming Flutter release". When it
-does, `--enable-impeller=false` becomes a silent no-op and the app will keep reporting
-`renderer=skia-gl` while running Impeller. Nothing detects that at runtime: confirm
-`FlutterEngineFlags.ENABLE_IMPELLER` still exists and is still `allowedInRelease` (it is readable
-straight out of `bin/cache/artifacts/engine/android-arm-release/flutter.jar`) whenever the pinned
-Flutter version moves.
+Flutter already warns it "is going to go away in an upcoming Flutter release". When it does,
+`--enable-impeller=false` becomes a silent no-op and the app will keep reporting
+`renderer=skia-gl` while running Impeller. The app cannot detect that, but the engine's own
+logcat can: an honoured opt-out prints `[Action Required]: Impeller opt-out deprecated.`, and
+Impeller prints `Using the Impeller rendering backend (…)`. Whenever the pinned Flutter version
+moves, confirm `FlutterEngineFlags.ENABLE_IMPELLER` still exists and is still
+`allowedInRelease`, and that the Activity hook above is still the one the delegate calls. Both
+live in the embedding jar, `io.flutter:flutter_embedding_release:1.0.0-<engine revision>` on
+`download.flutter.io` (not in `bin/cache`'s `flutter.jar`, which carries only the native engine).
+The 3.50 bump also moved the hook (`getFlutterShellArgs` → `getFlutterEngineFlags`) and the flags
+class (`…engine.flags`).
 
 **Not verified on hardware.** The evidence for the denylist is the renderer-test APK
 (`renderer-test-apk.yml`, the manifest opt-out) stopping the crashes on the owner's TCL TV. The

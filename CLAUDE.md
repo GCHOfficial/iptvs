@@ -41,7 +41,7 @@ flutter run -d windows
 flutter run -d android --flavor development --dart-define=DISTRIBUTION_CHANNEL=development
 ```
 
-Lints: `package:flutter_lints`. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
+Lints: `package:flutter_lints`. **Every `import 'package:flutter/material.dart'` carries a `// ignore: deprecated_member_use` on the line above** — Flutter 3.50 deprecates that library for `package:material_ui`, which is a separate *copy*, not a re-export. Switching our imports while media_kit_video (its `MaterialVideoControls`), sentry_flutter, flutter_localizations, qr_flutter and cached_network_image's `octo_image` still use Flutter's copy would split Theme/Material/Localizations ancestors at runtime; it is an interim until they move. A new file importing material needs the same line or `flutter analyze` fails. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)):
 analyze + test + the Lua OSD gate (`luac5.1 -p` and `linux/mpv/overlay_layout_test.lua` — the only
 thing that executes the Linux native overlay outside a Wayland+HDR session) + the panel's
 `npm test` (`pages.yml` is deploy-only and post-merge, so this job is the panel suite's only
@@ -995,12 +995,12 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
 - **Renderer: Impeller everywhere except a runtime SoC denylist (RTD2875P → Skia GL).**
   `player/RendererPolicy.kt` (pure, `RendererPolicyTest`) matches `Build.SOC_MODEL` **exactly**
   (case-insensitive after trim; API 31+, null below) against a one-entry denylist and
-  `MainActivity.getFlutterShellArgs()` — the single override, and the only hook that reaches
-  `FlutterLoader.ensureInitializationComplete` for how this app starts its engine — adds
+  `MainActivity.getFlutterEngineFlags()` — the single override, and the only hook that reaches
+  `FlutterLoader.ensureInitializationComplete` for how this app starts its engine (Flutter 3.50
+  moved it there from the deprecated `getFlutterShellArgs()`) — adds
   `--enable-impeller=false`. Precedence: an `EnableImpeller` **manifest** entry wins and this
   contributes nothing (so `renderer-test-apk.yml` and a future Impeller-pinned A/B aren't
-  defeated, and two contradictory `--enable-impeller=` values can never meet in the set-backed
-  `FlutterShellArgs`), then the debug-only `--ez iptvsForceSkiaGl true`, then the denylist, then
+  defeated, and two contradictory `--enable-impeller=` values can never meet), then the debug-only `--ez iptvsForceSkiaGl true`, then the denylist, then
   Impeller. The decision is read back at boot over `iptvs/device` (`renderer`), logged once as
   `renderer=… reason=…`, and set as the Sentry `renderer` tag on **both** the Dart scope (synced
   to Java by `enableNdkScopeSync`) and in `NativeCrashScrubber`'s `beforeSend`. **A report about an
@@ -1009,8 +1009,11 @@ embedded `media_kit_video`, HDR tone-mapped to SDR.
   left untagged — never with the uploader's renderer, which is how 0.1.78's IPTVS-C read
   `skia-gl`. **Flutter-upgrade caveat:** the opt-out is deprecated and Flutter says it will
   go away — when it does this silently stops working while still reporting `skia-gl`, so re-check
-  `FlutterEngineFlags.ENABLE_IMPELLER` (still present, still `allowedInRelease`) and the matcher
-  test on **every Flutter bump**. Detail + the on-device confirmation still owed:
+  `FlutterEngineFlags.ENABLE_IMPELLER` (`io.flutter.embedding.engine.flags` since 3.50; still
+  present, still `allowedInRelease`), that the hook is still the one the delegate calls, and the
+  matcher test on **every Flutter bump**. The engine's own logcat says which renderer won: an
+  honoured opt-out prints `[Action Required]: Impeller opt-out deprecated.`, Impeller prints
+  `Using the Impeller rendering backend`. Detail + the on-device confirmation still owed:
   docs/player.md "The Flutter renderer".
 - **Windows handoff: set `wid` before `vo`** in `_configureNativePlayer`, or mpv flashes a stray
   top-level window.
@@ -1571,8 +1574,8 @@ rendered by `ReleaseNotesView`. Detail: docs/updates.md.
   zap banner (`draw_zap_banner`/`draw_channel_identity_row`) and the key policy
   (`zap_key_command`) and the quick list (`draw_quick_list`, its 40-row slice), exercised through a test-only seam the module exports rather than by
   simulating real mpv key dispatch.
-- **Reading Android ANR traces: Dart runs on the Android main thread** (Flutter 3.47 merges the
-  UI thread into it, and the raster thread too while a hybrid-composition platform view, e.g. the
+- **Reading Android ANR traces: Dart runs on the Android main thread** (since Flutter 3.47 the
+  UI thread is merged into it, and the raster thread too while a hybrid-composition platform view, e.g. the
   preview, is mounted). Microtasks run inside the looper's native callback, so the *Java* frame of
   nearly every ANR reads `MessageQueue.nativePollOnce` and Play groups unrelated stalls under one
   "main thread idle" issue. Read main's **native** frames. Version codes are the Google Play

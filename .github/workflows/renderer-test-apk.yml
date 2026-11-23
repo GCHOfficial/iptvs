@@ -8,7 +8,7 @@ name: Renderer-test APK
 #
 # The build switches Flutter's Impeller renderer **off**, so the engine runs its
 # Skia OpenGL renderer instead (`io.flutter.embedding.android.EnableImpeller =
-# false`, still honoured by Flutter 3.47.9's Android engine, and deprecated).
+# false`, still honoured by Flutter 3.50.1's Android engine, and deprecated).
 # Not `ImpellerBackend=opengles`: that TV's tombstones carry none of Impeller's
 # Vulkan worker threads (`IplrVkFenceWait`, `IplrVkResMgr`), so it is most likely
 # already on Impeller's OpenGLES backend, and forcing that would change nothing.
@@ -19,7 +19,7 @@ name: Renderer-test APK
 # **Outcome: they stopped.** The fix shipped in 0.1.79 as a *targeted* runtime
 # denylist instead of an app-wide opt-out — `player/RendererPolicy.kt` switches
 # only `Build.SOC_MODEL == "RTD2875P"` to Skia GL, via
-# `MainActivity.getFlutterShellArgs()`. This workflow stays for the next
+# `MainActivity.getFlutterEngineFlags()`. This workflow stays for the next
 # renderer question, and its manifest entry deliberately **outranks** the
 # denylist (`RendererPolicy.decide`'s `manifest` branch), so a build from here
 # can still pin either renderer for an A/B without the matcher fighting it.
@@ -45,7 +45,7 @@ permissions:
   contents: read
 
 env:
-  FLUTTER_VERSION: 3.47.9
+  FLUTTER_VERSION: 3.50.1
 
 jobs:
   build:

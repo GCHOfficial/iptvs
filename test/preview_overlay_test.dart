@@ -16,6 +16,7 @@
 // this file is what keeps it one — a later "show a spinner while it rebuffers"
 // would otherwise silently reintroduce the cost with nothing failing.
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
