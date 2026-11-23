@@ -19,7 +19,6 @@ import com.gchofficial.iptvs.player.RendererPolicy
 import com.gchofficial.iptvs.player.SharedEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.embedding.engine.FlutterShellArgs
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
@@ -116,30 +115,38 @@ class MainActivity : FlutterActivity() {
      * Adds `--enable-impeller=false` when this device is on the renderer
      * denylist (see [RendererPolicy]).
      *
-     * **This is the one hook that reaches the engine.** In Flutter 3.47.9
+     * **This is the one hook that reaches the engine.** In Flutter 3.50.1
      * `FlutterActivityAndFragmentDelegate.setUpFlutterEngine` builds the engine
-     * with `new FlutterEngineGroup(context, host.getFlutterShellArgs()
-     * .toArray())`, whose constructor calls `FlutterLoader
-     * .ensureInitializationComplete(context, dartVmArgs)` — and `EnableImpeller`
-     * is `allowedInRelease`, so the flag is honoured on a shipped build and not
-     * just under `flutter run`. That path is only taken because this app
-     * overrides neither `getCachedEngineId` nor `provideFlutterEngine` and runs
-     * no custom `Application`, so no FlutterLoader exists before this call.
+     * with `new FlutterEngineGroup(context, host.getFlutterEngineFlags()
+     * .toArray(...))`, whose constructor calls `FlutterLoader
+     * .ensureInitializationComplete(context, dartVmArgs)`. In release mode that
+     * keeps only flags marked `allowedInRelease`, and `ENABLE_IMPELLER`
+     * (`io.flutter.embedding.engine.flags.FlutterEngineFlags`) still is, so the
+     * flag is honoured on a shipped build and not just under `flutter run`. That
+     * path is only taken because this app overrides neither `getCachedEngineId`
+     * nor `provideFlutterEngine` and runs no custom `Application`, so no
+     * FlutterLoader exists before this call.
      *
-     * The args are only consulted on the *first* initialisation in a process;
+     * Up to Flutter 3.47.9 the hook was `getFlutterShellArgs()`. 3.50 still
+     * honours an override of it (with a deprecation warning) but says it goes
+     * away in the next stable, which would silently drop the RTD2875P opt-out
+     * while [rendererDecision] still read `skia-gl`, hence the move. The engine
+     * itself confirms an honoured opt-out with its
+     * `[Action Required]: Impeller opt-out deprecated.` log line.
+     *
+     * The flags are only consulted on the *first* initialisation in a process;
      * a later Activity recreation re-computes the same decision and it is
      * ignored, which is harmless because the decision is deterministic.
      */
-    override fun getFlutterShellArgs(): FlutterShellArgs {
+    override fun getFlutterEngineFlags(): List<String> {
         val decision = RendererPolicy.decide(
             socModel = socModel(),
             manifestEnableImpeller = manifestEnableImpeller(),
             forceSkiaGl = forceSkiaGlRequested(),
         )
         rendererDecision = decision
-        val args = super.getFlutterShellArgs()
-        decision.shellArg?.let { args.add(it) }
-        return args
+        val flags = super.getFlutterEngineFlags()
+        return decision.shellArg?.let { flags + it } ?: flags
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -778,7 +785,7 @@ class MainActivity : FlutterActivity() {
         const val EXTRA_FORCE_SKIA_GL = "iptvsForceSkiaGl"
 
         /**
-         * The renderer this process resolved, set by [getFlutterShellArgs]
+         * The renderer this process resolved, set by [getFlutterEngineFlags]
          * before the engine exists and read afterwards by the `iptvs/device`
          * channel and by the native crash scrubber.
          *

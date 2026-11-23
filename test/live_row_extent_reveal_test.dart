@@ -13,6 +13,7 @@
 // These use a real attached `ScrollController`, unlike the pure coordinator
 // harness: `_reveal` no-ops on a controller with no clients, so a detached one
 // cannot show the bug or the fix.
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/screens/live_focus_coordinator.dart';

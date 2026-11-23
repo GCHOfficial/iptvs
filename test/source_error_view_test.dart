@@ -7,6 +7,7 @@
 // pressed: the first OK went nowhere and there was nothing to arrow towards.
 // A source that fails to load is exactly the moment a user cannot route around
 // the problem, so this is pinned rather than left to the widget's own default.
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

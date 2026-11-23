@@ -597,7 +597,7 @@ Google Play workflow's run number (vc10 = v0.1.61, vc12 = v0.1.70).
     - same signatures continue → the renderer is ruled out and "not app-fixable" stands.
   - **Outcome: the renderer-test APK stopped them**, across several sources and streams. **Fixed
     by targeted Skia GL in 0.1.79, pending on-device confirmation**: `player/RendererPolicy.kt`
-    denylists the SoC model `RTD2875P` and `MainActivity.getFlutterShellArgs()` adds
+    denylists the SoC model `RTD2875P` and `MainActivity.getFlutterEngineFlags()` (before Flutter 3.50, `getFlutterShellArgs()`) adds
     `--enable-impeller=false` for that model alone, so every other device keeps Impeller
     (docs/player.md "The Flutter renderer"). Still owed on the TV itself:
     - that `Build.SOC_MODEL` really reads `RTD2875P` there. Sentry reports the *chipset* as

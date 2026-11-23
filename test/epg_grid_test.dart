@@ -17,6 +17,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show Tristate;
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart' show SemanticsAction;
 import 'package:flutter/services.dart';

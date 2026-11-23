@@ -1,6 +1,7 @@
 // Pins that the changelog renders as tidy formatted text, not raw markdown —
 // the reported "display the markdown so it looks better" for the update dialog.
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/widgets/release_notes_view.dart';

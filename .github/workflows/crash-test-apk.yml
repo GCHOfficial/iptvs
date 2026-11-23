@@ -46,11 +46,13 @@ permissions:
 env:
   # Must match the version the uploaded engine debug files were built from, or
   # the `libflutter.so` frames in the SIGSEGV event arrive as bare addresses.
-  # 3.47.9 is engine revision 89c39edfdfae2949f6806e4a315c0c08522238b7, whose
-  # symbols are already on Sentry (`tool/sentry_upload_engine_symbols.sh`), so
-  # this workflow needs no upload step of its own. Keep it in step with
+  # 3.50.1 is engine revision 4d35714800b9266b6693a58e1225ecd7e9e45ed7. Its
+  # symbols reach Sentry with the first release built on it (`release.yml` and
+  # `google-play.yml` run `tool/sentry_upload_engine_symbols.sh`), so this
+  # workflow needs no upload step of its own; a crash-test run made *before*
+  # that release gets bare `libflutter.so` addresses. Keep it in step with
   # `build.yml`'s `FLUTTER_VERSION`.
-  FLUTTER_VERSION: 3.47.9
+  FLUTTER_VERSION: 3.50.1
 
 jobs:
   build:

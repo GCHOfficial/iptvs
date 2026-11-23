@@ -13,6 +13,7 @@
 //     row's star, Left peels back to the body before crossing panes, OK acts on
 //     the column, and vertical moves always land back on the body.
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

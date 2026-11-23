@@ -1,6 +1,7 @@
 // AppBar actions name themselves on the wide layout (every TV, wide windows),
 // where a remote can't hover a tooltip, and stay icon-only on a phone.
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/theme.dart';

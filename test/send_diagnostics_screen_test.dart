@@ -9,6 +9,7 @@
 // must not publish anything. If this test starts failing because someone moved
 // `autofocus: true` onto the Send button, the test is right.
 
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:iptvs/screens/send_diagnostics_screen.dart';
