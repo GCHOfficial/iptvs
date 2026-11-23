@@ -220,6 +220,56 @@ void main() {
     },
   );
 
+  // The flake behind red "Analyze & test" runs on #300 and #310: load() fires
+  // an unawaited loadContinueWatching(), whose DB read can still be queued
+  // when the database closes (tearDown here; a source switch or shutdown in
+  // the app). It threw into nothing - an uncaught async error, which fails a
+  // test after it has completed and is a crash report in production.
+  // Deterministic version: close the database before the read runs.
+  group('continue watching outliving its database', () {
+    late Directory dir;
+    late AppDatabase closingDb;
+
+    setUp(() async {
+      dir = Directory.systemTemp.createTempSync('iptvs_media_tab_cw_test');
+      closingDb = await AppDatabase.openAt('${dir.path}/iptv.db');
+    });
+
+    tearDown(() {
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    });
+
+    test(
+      'an unawaited rail read on a closed database raises nothing',
+      () async {
+        final closingRepo = _GatedRepo(source: DemoSource(), db: closingDb);
+        final c = MediaTabController(
+          kind: ContentKind.movie,
+          repo: closingRepo,
+        );
+        await closingDb.close();
+
+        unawaited(c.load()); // fires the unawaited loadContinueWatching()
+        await _flush();
+        closingRepo.loadGate('<all>').complete(_snapshot([_item('x1')]));
+        await _flush();
+        c.dispose();
+        await _flush();
+
+        expect(c.continueWatching, isEmpty);
+      },
+    );
+
+    test('a direct reload after dispose completes normally', () async {
+      final closingRepo = _GatedRepo(source: DemoSource(), db: closingDb);
+      final c = MediaTabController(kind: ContentKind.movie, repo: closingRepo);
+      c.dispose();
+      await closingDb.close();
+
+      await expectLater(c.loadContinueWatching(), completes);
+    });
+  });
+
   test('old enrichment cannot mutate a newer category\'s result', () async {
     controller.dispose(); // swap in a repo with auto-enrichment enabled
     repo = _GatedRepo(source: DemoSource(), db: db, autoEnrichMetadata: true);
