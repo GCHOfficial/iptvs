@@ -127,8 +127,30 @@ class MediaTabController extends ChangeNotifier {
   /// Rebuild [continueWatching] from the saved positions, resolving ids
   /// against the cached media items (unknown ids — e.g. items whose category
   /// was never cached — are skipped rather than shown title-less).
+  ///
+  /// **Never throws.** [load] and the screen start this *unawaited*, so a
+  /// failed read had nowhere to go but the zone's uncaught-error handler — a
+  /// Sentry event in the app, and a test failed "after test completion" in CI
+  /// whenever the database closed under a still-queued read. The rail is a
+  /// display nicety: a failure keeps what is on screen, is silent once this
+  /// controller is disposed (its database going away is then expected), and
+  /// is logged otherwise.
   Future<void> loadContinueWatching() async {
+    try {
+      await _loadContinueWatching();
+    } catch (error) {
+      if (_disposed) return;
+      DiagnosticsLog.instance.add(
+        'library',
+        'continue-watching unavailable source=${repo.source.name} '
+            'error=${error.runtimeType} detail=${redactText('$error')}',
+      );
+    }
+  }
+
+  Future<void> _loadContinueWatching() async {
     final positions = await repo.db.readRecentPositions(repo.source.id);
+    if (_disposed) return;
     final wanted = positions.where((p) => p.kind == _resumeKind).toList();
     if (wanted.isEmpty) {
       if (continueWatching.isNotEmpty) {
